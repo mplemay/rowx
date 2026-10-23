@@ -7,7 +7,7 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
 
 # Rust
 target/
@@ -16,3 +16,7 @@ target/
 .ruff_cache/
 .pytest_cache/
 *.so
+
+# Local test DSN
+/.rowx-test-dsn
+.rumdl_cache/

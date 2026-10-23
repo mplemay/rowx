@@ -106,3 +106,60 @@
 - Tests live under `src/rowx/__tests__/` with `unit/` and `integration/` subdirectories. Group tests by domain in
   subfolders.
 - Integration tests are marked with `@pytest.mark.integration`
+
+## Project
+
+rowx is typesafe raw SQL for Python 3.14+ with no ORM. Queries are PEP 750 t-strings with an explicit row type,
+`query[tuple[int, str]](t"...")`, run by a Rust driver built on tokio-postgres. A static checker, `rowx check`,
+validates every query against a live Postgres 18 database by preparing and describing it.
+
+- [Design](docs/design.md) is the contract. Never edit it in a feature PR.
+- [Tasks](docs/tasks.md) lists the 48 implementation tasks (T00-T47) and their acceptance checks.
+- [Decisions](docs/decisions.md) logs spec gaps and deviations. If the spec is ambiguous, add an entry instead of
+  guessing silently.
+
+## Commands (`just`)
+
+| Command | What it does |
+|---|---|
+| `just check` | All gates through `uv run prek run --all-files` |
+| `just fmt` | Format rust and python through the prek hooks |
+| `just test-rust` | `cargo test --workspace` (DB tests run if `ROWX_TEST_DSN` is set) |
+| `just test-py` | `uv run pytest` |
+| `just db-up` / `just db-down` | Start or stop `postgres:18` (lands in T03) |
+| `just bench` | Release build plus `bench/fetch_100k.py` (lands in T24) |
+
+- Never run a plain `cargo build` of the cdylib, because it doesn't link on macOS. Use `uv run ...` or
+  `uv run maturin develop`, and add `--release` for benchmarks.
+- DB tests skip when `ROWX_TEST_DSN` is unset; with `ROWX_REQUIRE_DB=1`, as CI sets, they fail instead.
+
+## Definition of done
+
+1. The task's acceptance check passes locally and CI is green.
+2. New tests are named in the PR description. Behaviour without a test is not done.
+3. Changes stay inside the task's **Files** list. Small wiring edits (`mod` lines, `__init__` exports, `.pyi`
+   additions) are fine and must be called out in the PR.
+4. Errors use `thiserror` in `rowx-pg` and are mapped to Python exceptions only in `crates/rowx-py/src/errors.rs`.
+5. Public Python is fully typed, and `_core.pyi` is updated with any new binding.
+
+## Architecture conventions
+
+- `rowx-pg` has no pyo3 dependency. Wire codecs in `rowx-pg/src/wire/` are pure functions over bytes with unit tests.
+- The GIL is released around all IO (`Python::detach`), and IO runs on the shared tokio runtime in
+  `rowx-py/src/runtime.rs`.
+- Python has no runtime dependencies. The checker never imports or executes user code.
+- DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked
+  `@pytest.mark.timing` and synchronise by polling `pg_stat_activity`, never with `sleep`.
+
+## File ownership
+
+| Area | Paths |
+|---|---|
+| Type-table metadata | `crates/rowx-pg/src/types.rs` (append-only after T05) |
+| Wire codecs (pure) | `crates/rowx-pg/src/wire/<family>.rs` |
+| PyObject codecs | `crates/rowx-py/src/codec/<family>.rs`; `codec/mod.rs` is dispatch only |
+| Driver | `crates/rowx-pg/src/{dsn,tls,conn,state,cancel,stmt_cache,exec}.rs` |
+| Describe | `crates/rowx-pg/src/{describe,explain}.rs`, `crates/rowx-py/src/describe.rs` |
+| Bindings | `crates/rowx-py/src/{lib,conn,exec,errors,runtime,types}.rs` |
+| Python runtime | `src/rowx/{__init__,_query,errors,_template,_rowplan,_types}.py` |
+| Checker | `src/rowx/check/<module>.py`, one module each |
