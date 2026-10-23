@@ -1,0 +1,25 @@
+[project]
+name = "rowx"
+version = "0.1.0"
+description = "Typesafe SQL queries for python without an ORM"
+readme = "README.md"
+authors = [
+    { name = "Matt LeMay", email = "mplemay@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+rowx = "rowx:main"
+
+[tool.maturin]
+module-name = "rowx._core"
+python-packages = ["rowx"]
+python-source = "src"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
