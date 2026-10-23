@@ -1,3 +1,4 @@
+from rowx._core import ping
 from rowx.errors import (
     ConnectionBusyError,
     DatabaseError,
@@ -18,4 +19,5 @@ __all__ = [
     "InterfaceError",
     "RowNotFound",
     "RowShapeError",
+    "ping",
 ]
