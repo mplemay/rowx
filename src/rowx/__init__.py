@@ -1,5 +1,23 @@
-from rowx._core import hello_from_bin
+from rowx._core import ping
+from rowx.errors import (
+    ConnectionBusyError,
+    DatabaseError,
+    DecodeError,
+    EncodeError,
+    Error,
+    InterfaceError,
+    RowNotFound,
+    RowShapeError,
+)
 
-
-def main() -> None:
-    print(hello_from_bin())
+__all__ = [
+    "ConnectionBusyError",
+    "DatabaseError",
+    "DecodeError",
+    "EncodeError",
+    "Error",
+    "InterfaceError",
+    "RowNotFound",
+    "RowShapeError",
+    "ping",
+]
