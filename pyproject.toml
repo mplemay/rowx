@@ -23,3 +23,72 @@ cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "C
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
+
+[dependency-groups]
+dev = [
+    "prek>=0.5.7",
+    "pytest>=9.1.1",
+    "ruff>=0.17.2",
+    "rumdl>=0.3.0",
+    "ty>=0.0.91",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+include = ["pyproject.toml"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",   # pydocstyle (project uses inline comments instead of docstrings)
+    "CPY", # flake8-copyright (project does not use copyright headers)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = [
+    "T201", # print is intentional in CLI entry points
+]
+"**/__tests__/**/*" = [
+    "ANN001",  # missing type annotation for function argument
+    "ANN201",  # missing return type annotation for public function
+    "ANN202",  # missing return type annotation for private function
+    "INP001",  # implicit namespace package (tests dir may not need __init__.py)
+    "PLR2004", # magic value used in comparison (fine in test cases)
+    "S101",    # use of assert (tests typically use assert directly)
+    "SLF001",  # private member accessed
+]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "double"
+multiline-quotes = "double"
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.ruff.format]
+docstring-code-format = true
+quote-style = "double"
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.rules]
+all = "error"
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
+testpaths = ["src/rowx/__tests__"]
+norecursedirs = ["target", "dist", "build", ".venv"]
+markers = [
+    "integration: marks tests that hit the database or external services",
+]
+filterwarnings = ["error"]
+
+[tool.rumdl]
+line_length = 120
+
+[tool.rumdl.MD013]
+reflow = true
+code_blocks = false
+tables = false
