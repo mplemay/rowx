@@ -1,5 +1,3 @@
-from rowx._core import hello_from_bin
+from rowx._core import ping
 
-
-def main() -> None:
-    print(hello_from_bin())
+__all__ = ["ping"]
