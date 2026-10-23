@@ -13,13 +13,14 @@ test-rust:
 test-py:
     uv run pytest
 
-# start postgres:18 and print the DSN (stub until T03)
+# start postgres:18 and print the DSN
 db-up:
-    @echo "TODO: lands in T03"
+    @scripts/pg.sh up
+    @echo "export ROWX_TEST_DSN=$(scripts/pg.sh dsn)"
 
-# stop the test postgres (stub until T03)
+# stop the test postgres
 db-down:
-    @echo "TODO: lands in T03"
+    @scripts/pg.sh down
 
 # release build plus bench/fetch_100k.py (stub until T24)
 bench:

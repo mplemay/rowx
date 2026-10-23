@@ -6,5 +6,9 @@ rust-version.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
+tokio-postgres = "0.7"
+
 [lints]
 workspace = true
