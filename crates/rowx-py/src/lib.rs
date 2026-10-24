@@ -31,6 +31,11 @@ mod _core {
     }
 
     #[pyfunction]
+    fn _catalog_queries() -> u64 {
+        rowx_pg::describe::catalog_queries()
+    }
+
+    #[pyfunction]
     const fn ping() -> &'static str {
         "pong"
     }
