@@ -24,7 +24,7 @@ async fn connect_then_close() -> TestResult {
     let Some(dsn) = common::test_dsn()? else {
         return Ok(());
     };
-    let mut conn = Connection::connect(&dsn, &Handle::current()).await?;
+    let mut conn = Connection::connect(&dsn, &Handle::current(), 256).await?;
     let row = conn.client()?.query_one("SELECT 1::int4", &[]).await?;
     assert_eq!(row.get::<_, i32>(0), 1);
     conn.close().await;
@@ -37,7 +37,7 @@ async fn query_after_close_is_closed() -> TestResult {
     let Some(dsn) = common::test_dsn()? else {
         return Ok(());
     };
-    let mut conn = Connection::connect(&dsn, &Handle::current()).await?;
+    let mut conn = Connection::connect(&dsn, &Handle::current(), 256).await?;
     conn.close().await;
     assert!(matches!(conn.client(), Err(Error::Closed)));
     Ok(())
@@ -50,7 +50,7 @@ async fn bad_password_is_28p01_and_never_leaks() -> TestResult {
     };
     let secret = "wrong-secret-pw";
     let bad = with_password(&dsn, secret)?;
-    let Err(err) = Connection::connect(&bad, &Handle::current()).await else {
+    let Err(err) = Connection::connect(&bad, &Handle::current(), 256).await else {
         return Err("connect unexpectedly succeeded".into());
     };
     assert!(
@@ -66,7 +66,7 @@ async fn bad_password_is_28p01_and_never_leaks() -> TestResult {
 async fn refused_port_is_interface_error() -> TestResult {
     let secret = "refused-secret-pw";
     let dsn = format!("postgres://u:{secret}@127.0.0.1:1/db");
-    let Err(err) = Connection::connect(&dsn, &Handle::current()).await else {
+    let Err(err) = Connection::connect(&dsn, &Handle::current(), 256).await else {
         return Err("connect unexpectedly succeeded".into());
     };
     assert!(matches!(err, Error::Interface(_)), "{err:?}");
@@ -77,7 +77,7 @@ async fn refused_port_is_interface_error() -> TestResult {
 #[tokio::test]
 async fn unsupported_sslmode_is_interface_error() -> TestResult {
     let Err(err) =
-        Connection::connect("postgres://u@h/db?sslmode=require", &Handle::current()).await
+        Connection::connect("postgres://u@h/db?sslmode=require", &Handle::current(), 256).await
     else {
         return Err("connect unexpectedly succeeded".into());
     };

@@ -18,7 +18,6 @@ use crate::runtime;
 pub struct Connection {
     inner: Arc<Mutex<PgConnection>>,
     state: Arc<State>,
-    // stored for the statement cache (T20); it has no effect yet
     #[pyo3(get)]
     statement_cache_size: usize,
 }
@@ -96,7 +95,7 @@ pub fn connect(
         .transpose()?;
     let handle = runtime::handle()?;
     future_into_py(py, async move {
-        let connecting = PgConnection::connect(&dsn, &handle);
+        let connecting = PgConnection::connect(&dsn, &handle, statement_cache_size);
         let result = match timeout {
             Some(limit) => tokio::time::timeout(limit, connecting)
                 .await
