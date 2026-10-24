@@ -5,6 +5,9 @@ use rowx_pg::error::Error;
 
 static INTERFACE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DATABASE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static BUSY_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static ROW_SHAPE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static DECODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 fn class<'py>(
     py: Python<'py>,
@@ -29,6 +32,9 @@ fn class<'py>(
 pub fn init(py: Python<'_>) -> PyResult<()> {
     class(py, &INTERFACE_ERROR, "InterfaceError")?;
     class(py, &DATABASE_ERROR, "DatabaseError")?;
+    class(py, &BUSY_ERROR, "ConnectionBusyError")?;
+    class(py, &ROW_SHAPE_ERROR, "RowShapeError")?;
+    class(py, &DECODE_ERROR, "DecodeError")?;
     Ok(())
 }
 
@@ -59,6 +65,11 @@ fn map(py: Python<'_>, err: &Error) -> PyResult<PyErr> {
         Error::Interface(_) | Error::Closed | Error::Broken => {
             class(py, &INTERFACE_ERROR, "InterfaceError")?.call1((err.to_string(),))?
         }
+        Error::Busy => class(py, &BUSY_ERROR, "ConnectionBusyError")?.call1((err.to_string(),))?,
+        Error::RowShape(_) => {
+            class(py, &ROW_SHAPE_ERROR, "RowShapeError")?.call1((err.to_string(),))?
+        }
+        Error::Decode(_) => class(py, &DECODE_ERROR, "DecodeError")?.call1((err.to_string(),))?,
     };
     Ok(PyErr::from_value(instance))
 }
@@ -82,4 +93,9 @@ impl From<PgError> for PyErr {
 #[must_use]
 pub fn interface_error(py: Python<'_>, message: &str) -> PyErr {
     to_py_err(py, &Error::Interface(message.to_owned()))
+}
+
+#[must_use]
+pub fn decode_error(py: Python<'_>, message: &str) -> PyErr {
+    to_py_err(py, &Error::Decode(message.to_owned()))
 }

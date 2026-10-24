@@ -1,5 +1,7 @@
+pub mod codec;
 pub mod conn;
 pub mod errors;
+pub mod exec;
 pub mod runtime;
 pub mod types;
 
