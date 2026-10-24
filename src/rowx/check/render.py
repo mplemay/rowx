@@ -105,13 +105,22 @@ def _snippet(report: Report, source: str, gutter: int) -> list[str]:
     return rows
 
 
-def _block(report: Report, source: str | None, width: int) -> list[str]:
+def _relative(path: Path, root: Path | None) -> str:
+    if root is not None:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            return path.as_posix()
+    return path.as_posix()
+
+
+def _block(report: Report, source: str | None, width: int, root: Path | None) -> list[str]:
     diagnostic = report.diagnostic
     span = diagnostic.span
     pad = " " * width
     out = [
         f"error[{diagnostic.rule}]: {diagnostic.message}",
-        f"{pad}--> {diagnostic.path.as_posix()}:{span.line}:{span.col}",
+        f"{pad}--> {_relative(diagnostic.path, root)}:{span.line}:{span.col}",
     ]
     if source is not None and 1 <= span.line <= len(_source_lines(source)):
         out.append(f"{pad} |")
@@ -131,22 +140,13 @@ def _gutter(report: Report, source: str | None) -> int:
     return len(str(max(span.line, shown)))
 
 
-def render_text(reports: Iterable[Report], sources: Mapping[Path, str]) -> str:
+def render_text(reports: Iterable[Report], sources: Mapping[Path, str], root: Path | None = None) -> str:
     blocks: list[str] = []
     for report in sort_reports(reports):
         source = sources.get(report.diagnostic.path)
-        lines = _block(report, source, _gutter(report, source))
+        lines = _block(report, source, _gutter(report, source), root)
         blocks.append("\n".join(lines) + "\n")
     return "\n".join(blocks)
-
-
-def _relative(path: Path, root: Path | None) -> str:
-    if root is not None:
-        try:
-            return path.relative_to(root).as_posix()
-        except ValueError:
-            return path.as_posix()
-    return path.as_posix()
 
 
 def render_json(reports: Iterable[Report], root: Path | None = None) -> str:

@@ -76,6 +76,8 @@ pub struct ColumnInfo {
     pub oid: u32,
     pub type_name: String,
     pub type_key: TypeKey,
+    // the table key of an array column's element, `None` for any other column or an unsupported element
+    pub element_key: Option<&'static str>,
     pub table_oid: Option<u32>,
     pub attnum: Option<i16>,
     pub nullable: bool,
@@ -127,6 +129,15 @@ fn resolve(ty: &Type, sends: &HashMap<u32, String>) -> TypeKey {
         _ => table_key(ty).ok_or_else(|| Unsupported {
             typsend: sends.get(&ty.oid()).cloned(),
         }),
+    }
+}
+
+// the key of the element type behind an array (looking through domains), if there is one
+fn element_key(ty: &Type, sends: &HashMap<u32, String>) -> Option<&'static str> {
+    match ty.kind() {
+        Kind::Array(inner) => resolve(inner, sends).ok(),
+        Kind::Domain(base) => element_key(base, sends),
+        _ => None,
     }
 }
 
@@ -273,6 +284,7 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
                 oid: col.type_().oid(),
                 type_name: col.type_().name().to_owned(),
                 type_key: resolve(col.type_(), &sends),
+                element_key: element_key(col.type_(), &sends),
                 table_oid,
                 attnum: table_oid.and_then(|_| col.column_id()),
                 // the catalog and plan passes below refine this

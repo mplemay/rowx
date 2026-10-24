@@ -19,6 +19,7 @@ type Rule = Literal[
     "unsupported-type",
     "type-mismatch",
     "nullability-mismatch",
+    "invalid-override",
 ]
 type QueryKind = Literal["query", "query_unchecked"]
 
@@ -62,3 +63,5 @@ class FileResult:
     unchecked_count: int = 0
     # None when the file could not be decoded or parsed
     tree: ast.Module | None = None
+    # the decoded text the tree was parsed from, so offsets and snippets agree with it
+    source: str | None = None
