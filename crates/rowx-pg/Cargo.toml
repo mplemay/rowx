@@ -5,10 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+thiserror = "2"
+tokio = { workspace = true }
+tokio-postgres = "0.7"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }
-tokio-postgres = "0.7"
 
 [lints]
 workspace = true
