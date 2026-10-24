@@ -1,6 +1,8 @@
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString};
+use pyo3::types::{
+    PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
+};
 
 use crate::codec::numeric::decimal_class;
 use crate::codec::temporal::{date_class, datetime_class, time_class, timedelta_class};
@@ -39,6 +41,8 @@ pub enum PyParam {
         days: i64,
         micros: i64,
     },
+    // a list or tuple, with the original object kept for json and its Python type name
+    Seq(Vec<Self>, Py<PyAny>, String),
     // anything without a dedicated variant yet, with its Python type name
     Other(Py<PyAny>, String),
 }
@@ -64,7 +68,7 @@ impl PyParam {
             Self::Time { .. } => "time",
             Self::DateTime { .. } => "datetime",
             Self::Timedelta { .. } => "timedelta",
-            Self::Bytes(_, name) | Self::Other(_, name) => name,
+            Self::Bytes(_, name) | Self::Seq(_, _, name) | Self::Other(_, name) => name,
         }
     }
 }
@@ -104,7 +108,11 @@ fn time_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     Ok(((hour * 60 + minute) * 60 + second) * MICROS_PER_SECOND + micro)
 }
 
-fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<PyParam> {
+// postgres arrays have at most 6 dimensions; deeper nesting is left opaque, which also bounds
+// the recursion for a self-referential list
+const MAX_SEQ_DEPTH: usize = 16;
+
+fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> PyResult<PyParam> {
     if obj.is_none() {
         return Ok(PyParam::Null);
     }
@@ -175,6 +183,14 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<PyParam
             });
     }
     let name = obj.get_type().name()?.to_string();
+    if depth < MAX_SEQ_DEPTH && (obj.is_instance_of::<PyList>() || obj.is_instance_of::<PyTuple>())
+    {
+        let items = obj
+            .try_iter()?
+            .map(|item| one(py, index, &item?, depth + 1))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(PyParam::Seq(items, obj.clone().unbind(), name));
+    }
     Ok(PyParam::Other(obj.clone().unbind(), name))
 }
 
@@ -184,6 +200,6 @@ pub fn extract(py: Python<'_>, params: &Bound<'_, PyList>) -> PyResult<Vec<PyPar
     params
         .iter()
         .enumerate()
-        .map(|(index, obj)| one(py, index, &obj))
+        .map(|(index, obj)| one(py, index, &obj, 0))
         .collect()
 }

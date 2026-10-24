@@ -58,6 +58,16 @@ impl Param {
             format: tokio_postgres::types::Format::Text,
         }
     }
+
+    #[must_use]
+    pub const fn is_text(&self) -> bool {
+        matches!(self.format, tokio_postgres::types::Format::Text)
+    }
+
+    #[must_use]
+    pub fn value(&self) -> Option<&[u8]> {
+        self.value.as_deref()
+    }
 }
 
 impl std::fmt::Debug for Param {

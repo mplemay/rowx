@@ -55,7 +55,7 @@ fn to_object<'py>(py: Python<'py>, param: &PyParam) -> Result<Bound<'py, PyAny>,
         PyParam::Float(f) => Ok(PyFloat::new(py, *f).into_any()),
         PyParam::Decimal(text) => decimal_class(py).and_then(|cls| cls.call1((text.as_str(),))),
         PyParam::Str(s) => Ok(PyString::new(py, s).into_any()),
-        PyParam::Other(obj, _) => Ok(obj.bind(py).clone()),
+        PyParam::Seq(_, obj, _) | PyParam::Other(obj, _) => Ok(obj.bind(py).clone()),
         PyParam::Null
         | PyParam::Bytes(..)
         | PyParam::Uuid(_)
