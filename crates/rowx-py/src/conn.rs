@@ -1,21 +1,23 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_pg::conn::Connection as PgConnection;
 use rowx_pg::error::Error;
+use rowx_pg::state::State;
 use tokio::sync::Mutex;
 
 use crate::errors::{PgError, interface_error};
+use crate::exec::{self, FetchArgs};
 use crate::runtime;
 
 #[pyclass(frozen, module = "rowx._core", name = "Connection")]
 #[derive(Debug)]
 pub struct Connection {
     inner: Arc<Mutex<PgConnection>>,
-    closed: Arc<AtomicBool>,
+    state: Arc<State>,
     // stored for the statement cache (T20); it has no effect yet
     #[pyo3(get)]
     statement_cache_size: usize,
@@ -25,17 +27,50 @@ pub struct Connection {
 impl Connection {
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        let closed = Arc::clone(&self.closed);
+        let state = Arc::clone(&self.state);
         future_into_py(py, async move {
-            closed.store(true, Ordering::Release);
+            state.close();
             inner.lock().await.close().await;
             Ok(())
         })
     }
 
+    // the argument list is fixed by the binding contract in design §7.2
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(name = "_fetch")]
+    fn fetch<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: &Bound<'py, PyList>,
+        mask: Option<Vec<bool>>,
+        scalar: bool,
+        limit_one: bool,
+        arity: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let args = FetchArgs {
+            sql,
+            mask,
+            scalar,
+            limit_one,
+            arity,
+        };
+        exec::fetch(py, &self.inner, &self.state, params, args)
+    }
+
+    #[pyo3(name = "_execute")]
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: &Bound<'py, PyList>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        exec::execute(py, &self.inner, &self.state, params, sql)
+    }
+
     #[getter]
     fn closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
+        self.state.is_closed()
     }
 }
 
@@ -71,7 +106,7 @@ pub fn connect(
         let conn = result.map_err(PgError)?;
         Ok(Connection {
             inner: Arc::new(Mutex::new(conn)),
-            closed: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(State::default()),
             statement_cache_size,
         })
     })

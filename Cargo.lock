@@ -522,6 +522,7 @@ dependencies = [
 name = "rowx-pg"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "thiserror",
  "tokio",
  "tokio-postgres",

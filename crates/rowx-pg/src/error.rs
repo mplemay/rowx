@@ -19,6 +19,12 @@ pub enum Error {
     Closed,
     #[error("connection is broken")]
     Broken,
+    #[error("another operation is already running on this connection")]
+    Busy,
+    #[error("{0}")]
+    RowShape(String),
+    #[error("{0}")]
+    Decode(String),
 }
 
 impl From<tokio_postgres::Error> for Error {
