@@ -1,4 +1,5 @@
 pub mod array;
+pub mod array_enc;
 pub mod bytes;
 pub mod extract;
 pub mod float;
@@ -32,7 +33,7 @@ fn is_citext(ty: &Type) -> bool {
     matches!(ty.kind(), Kind::Simple) && ty.name() == "citext"
 }
 
-/// One arm per type family; T18 adds array encode.
+/// One arm per type family.
 ///
 /// # Errors
 /// `DecodeError` for an unsupported type or a malformed value.
@@ -67,19 +68,21 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: Option<&[u8]>) -> PyResult<B
     }
 }
 
-fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
+pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
     if matches!(param, PyParam::Null) {
         return Ok(Param::null());
     }
     let ty = resolve(ty);
     let is_enum = matches!(ty.kind(), Kind::Enum(_));
+    let is_array = matches!(ty.kind(), Kind::Array(_));
     let accepted = TYPE_TABLE
         .iter()
         .find(|info| match info.matcher {
             Matcher::Oid(oid) => oid == ty.oid(),
             Matcher::EnumKind => is_enum,
+            Matcher::ArrayKind => is_array,
             Matcher::NamedSimple(name) => is_citext(ty) && name == ty.name(),
-            _ => false,
+            Matcher::DomainKind => false,
         })
         // json takes any value; json.dumps is the arbiter
         .is_some_and(|info| {
@@ -118,6 +121,7 @@ fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         // an enum label is sent as text so the server resolves it
         _ if is_enum => text::encode(ty, param).map(Param::text),
         _ if is_citext(ty) => text::encode(ty, param).map(Param::binary),
+        _ if is_array => array_enc::encode(ty, param),
         _ => Err(format!("no encoder for the postgres type {}", ty.name())),
     }
 }
