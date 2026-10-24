@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 ROWX_MODULE: Final[str] = "rowx"
 TYPE_CHECK_FUNCTIONS: Final[frozenset[str]] = frozenset({"isinstance", "issubclass"})
+TYPE_PARAMS: Final = (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
 LINE_PATTERN: Final = re_compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
 type Tag = Literal["query", "query_unchecked", "module", "other"]
@@ -42,7 +43,7 @@ class _Lines:
 
 @dataclass(slots=True)
 class _Scope:
-    kind: Literal["module", "function", "class", "comprehension"]
+    kind: Literal["module", "function", "class", "comprehension", "annotation"]
     bindings: dict[str, list[Tag]] = field(default_factory=dict)
 
     def bind(self, name: str, tag: Tag = "other") -> None:
@@ -113,6 +114,20 @@ def _declared_names(node: ast.AST) -> tuple[str, ...]:
     return ()
 
 
+def _enclosing_expressions(node: ast.AST) -> list[ast.AST]:
+    # the parts of a definition that are evaluated in the scope that contains it
+    match node:
+        case ast.FunctionDef() | ast.AsyncFunctionDef():
+            found = [*node.decorator_list, *node.args.defaults, *node.args.kw_defaults]
+        case ast.ClassDef():
+            found = [*node.decorator_list, *node.bases, *node.keywords]
+        case ast.Lambda():
+            found = [*node.args.defaults, *node.args.kw_defaults]
+        case _:
+            found = []
+    return [item for item in found if item is not None]
+
+
 def _collect(scope: _Scope, nodes: Iterable[ast.AST], *, in_comprehension: bool = False) -> None:
     for node in nodes:
         match node:
@@ -125,6 +140,7 @@ def _collect(scope: _Scope, nodes: Iterable[ast.AST], *, in_comprehension: bool 
                 | ast.Nonlocal()
             ):
                 scope.bind_all(_declared_names(node))
+                _collect(scope, _enclosing_expressions(node), in_comprehension=in_comprehension)
             case ast.ListComp() | ast.SetComp() | ast.GeneratorExp() | ast.DictComp():
                 # only a walrus inside a comprehension binds in the enclosing scope
                 _collect(scope, ast.iter_child_nodes(node), in_comprehension=True)
@@ -162,12 +178,15 @@ class _Finder(ast.NodeVisitor):
         )
 
     def _lookup(self, name: str) -> list[Tag] | None:
-        # a class body is only visible from its own scope, not from functions nested in it
-        for depth, scope in enumerate(reversed(self._scopes)):
-            if scope.kind == "class" and depth > 0:
+        # a class body is only visible to code directly in it (including its annotations), not to
+        # functions or comprehensions nested in it
+        in_code = False
+        for scope in reversed(self._scopes):
+            if scope.kind == "class" and in_code:
                 continue
             if name in scope.bindings:
                 return scope.bindings[name]
+            in_code = in_code or scope.kind in {"function", "comprehension"}
         return None
 
     def _tags(self, name: str) -> tuple[Tag | None, bool]:
@@ -209,6 +228,15 @@ class _Finder(ast.NodeVisitor):
             self._annotating += 1
             self.visit(node)
             self._annotating -= 1
+
+    def _type_params(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.TypeAlias) -> int:
+        # PEP 695 type parameters live in their own scope between the definition and its parts
+        if not node.type_params:
+            return 0
+        scope = _Scope("annotation")
+        scope.bind_all(param.name for param in node.type_params if isinstance(param, TYPE_PARAMS))
+        self._scopes.append(scope)
+        return 1
 
     def _scoped(self, node: Scoped | Comprehension, body: Iterable[ast.AST | None]) -> None:
         self._scopes.append(_Scope.build(node))
@@ -313,12 +341,14 @@ class _Finder(ast.NodeVisitor):
     @override
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self._visit_all(node.decorator_list)
+        pushed = self._type_params(node)
         self._visit_all((*node.args.defaults, *node.args.kw_defaults))
         for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs, node.args.vararg, node.args.kwarg):
             if arg is not None:
                 self._annotation(arg.annotation)
         self._annotation(node.returns)
         self._scoped(node, node.body)
+        del self._scopes[len(self._scopes) - pushed :]
 
     visit_AsyncFunctionDef = visit_FunctionDef  # noqa: N815
 
@@ -329,8 +359,11 @@ class _Finder(ast.NodeVisitor):
 
     @override
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self._visit_all((*node.decorator_list, *node.bases, *node.keywords))
+        self._visit_all(node.decorator_list)
+        pushed = self._type_params(node)
+        self._visit_all((*node.bases, *node.keywords))
         self._scoped(node, node.body)
+        del self._scopes[len(self._scopes) - pushed :]
 
     @override
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -339,7 +372,9 @@ class _Finder(ast.NodeVisitor):
 
     @override
     def visit_TypeAlias(self, node: ast.TypeAlias) -> None:
+        pushed = self._type_params(node)
         self._annotation(node.value)
+        del self._scopes[len(self._scopes) - pushed :]
 
     def _visit_comprehension(self, node: Comprehension) -> None:
         # the first iterable is evaluated in the enclosing scope
@@ -362,15 +397,18 @@ def _syntax_error(path: Path, message: str, span: Span) -> FileResult:
 def _decode(path: Path, data: bytes) -> str | FileResult:
     try:
         encoding, _ = detect_encoding(BytesIO(data).readline)
+        return data.decode(encoding)
     except SyntaxError as error:
         line = error.lineno or 1
         return _syntax_error(path, error.msg, Span(line=line, col=1, end_line=line, end_col=2))
-    try:
-        return data.decode(encoding)
+    except LookupError as error:
+        # a recognised codec that isn't a text encoding, such as `base64_codec`
+        message = f"cannot decode file: {error}"
+        return _syntax_error(path, message, Span(line=1, col=1, end_line=1, end_col=2))
     except UnicodeDecodeError as error:
         line = data.count(b"\n", 0, error.start) + 1
         col = error.start - (data.rfind(b"\n", 0, error.start) + 1) + 1
-        message = f"cannot decode file as {encoding}: {error.reason}"
+        message = f"cannot decode file as {error.encoding}: {error.reason}"
         return _syntax_error(path, message, Span(line=line, col=col, end_line=line, end_col=col + 1))
 
 

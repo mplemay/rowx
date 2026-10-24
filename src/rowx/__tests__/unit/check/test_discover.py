@@ -368,3 +368,50 @@ def test_discover_file(tmp_path: Path) -> None:
     file = tmp_path / "a.py"
     file.write_text('from rowx import query\nquery[int](t"select 1")\n', encoding="utf-8")
     assert len(discover_file(file).calls) == 1
+
+
+def test_type_parameter_shadows_import() -> None:
+    result = run(
+        """
+        from rowx import query as Q
+
+        def f[Q]() -> Q:
+            return Q
+
+        class C[Q]:
+            x: Q
+
+        type Alias[Q] = Q
+        """,
+    )
+    assert not result.diagnostics
+
+
+def test_class_names_are_visible_to_method_annotations() -> None:
+    result = run(
+        """
+        from rowx import query
+
+        class C:
+            query = 1
+
+            def m[T](self, x: query[T]) -> None: ...
+        """,
+    )
+    assert not result.diagnostics
+
+
+def test_walrus_in_definition_expressions_rebinds() -> None:
+    for definition in (
+        "def f(x=(query := other)): pass",
+        "@(query := other)\ndef f(): pass",
+        "class C((query := other)): pass",
+    ):
+        result = run(f'from rowx import query\n{definition}\nquery[int](t"select 1")\n')
+        assert rules(result) == ["indirect-query"], definition
+        assert not result.calls
+
+
+def test_non_text_codec_is_syntax_error() -> None:
+    result = discover_source(PATH, b"# coding: base64_codec\nx = 1\n")
+    assert rules(result) == ["syntax-error"]
