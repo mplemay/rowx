@@ -1,0 +1,36 @@
+[
+  {
+    "Plan": {
+      "Alias": "users",
+      "Async Capable": false,
+      "Conflict Arbiter Indexes": [
+        "users_pkey"
+      ],
+      "Conflict Resolution": "UPDATE",
+      "Disabled": false,
+      "Node Type": "ModifyTable",
+      "Operation": "Insert",
+      "Output": [
+        "old.name",
+        "new.name"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Result",
+          "Output": [
+            "$1",
+            "$2",
+            "NULL::text"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer"
+        }
+      ],
+      "Relation Name": "users",
+      "Schema": "public"
+    }
+  }
+]

@@ -1,0 +1,56 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Group Key": [
+        "users.name"
+      ],
+      "Node Type": "Aggregate",
+      "Output": [
+        "users.name"
+      ],
+      "Parallel Aware": false,
+      "Partial Mode": "Simple",
+      "Plans": [
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Append",
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Plans": [
+            {
+              "Alias": "users",
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Seq Scan",
+              "Output": [
+                "users.name"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Member",
+              "Relation Name": "users",
+              "Schema": "public"
+            },
+            {
+              "Alias": "posts",
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Seq Scan",
+              "Output": [
+                "posts.title"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Member",
+              "Relation Name": "posts",
+              "Schema": "public"
+            }
+          ],
+          "Subplans Removed": 0
+        }
+      ],
+      "Strategy": "Hashed"
+    }
+  }
+]

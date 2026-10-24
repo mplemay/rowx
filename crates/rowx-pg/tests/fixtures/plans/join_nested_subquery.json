@@ -1,0 +1,107 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Hash Cond": "(u.id = posts.user_id)",
+      "Inner Unique": true,
+      "Join Type": "Inner",
+      "Node Type": "Hash Join",
+      "Output": [
+        "u.name",
+        "(SubPlan 1)"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Alias": "u",
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Seq Scan",
+          "Output": [
+            "u.id",
+            "u.name",
+            "u.email"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Relation Name": "users",
+          "Schema": "public"
+        },
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Hash",
+          "Output": [
+            "posts.user_id"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Inner",
+          "Plans": [
+            {
+              "Async Capable": false,
+              "Disabled": false,
+              "Group Key": [
+                "posts.user_id"
+              ],
+              "Node Type": "Aggregate",
+              "Output": [
+                "posts.user_id"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer",
+              "Partial Mode": "Simple",
+              "Plans": [
+                {
+                  "Alias": "posts",
+                  "Async Capable": false,
+                  "Disabled": false,
+                  "Node Type": "Seq Scan",
+                  "Output": [
+                    "posts.user_id"
+                  ],
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Relation Name": "posts",
+                  "Schema": "public"
+                }
+              ],
+              "Strategy": "Hashed"
+            }
+          ]
+        },
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Aggregate",
+          "Output": [
+            "max(p.title)"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "SubPlan",
+          "Partial Mode": "Simple",
+          "Plans": [
+            {
+              "Alias": "p",
+              "Async Capable": false,
+              "Disabled": false,
+              "Filter": "(p.user_id = u.id)",
+              "Node Type": "Seq Scan",
+              "Output": [
+                "p.id",
+                "p.user_id",
+                "p.title"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer",
+              "Relation Name": "posts",
+              "Schema": "public"
+            }
+          ],
+          "Strategy": "Plain",
+          "Subplan Name": "SubPlan 1"
+        }
+      ]
+    }
+  }
+]

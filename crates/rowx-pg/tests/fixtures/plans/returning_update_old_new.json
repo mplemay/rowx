@@ -1,0 +1,37 @@
+[
+  {
+    "Plan": {
+      "Alias": "users",
+      "Async Capable": false,
+      "Disabled": false,
+      "Node Type": "ModifyTable",
+      "Operation": "Update",
+      "Output": [
+        "old.name",
+        "new.name"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Alias": "users",
+          "Async Capable": false,
+          "Disabled": false,
+          "Index Cond": "(users.id = $1)",
+          "Index Name": "users_pkey",
+          "Node Type": "Index Scan",
+          "Output": [
+            "$2",
+            "ctid"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Relation Name": "users",
+          "Scan Direction": "Forward",
+          "Schema": "public"
+        }
+      ],
+      "Relation Name": "users",
+      "Schema": "public"
+    }
+  }
+]

@@ -1,0 +1,58 @@
+[
+  {
+    "Plan": {
+      "Alias": "u",
+      "Async Capable": false,
+      "Disabled": false,
+      "Node Type": "ModifyTable",
+      "Operation": "Merge",
+      "Output": [
+        "MERGE_ACTION()",
+        "old.name",
+        "new.name"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Inner Unique": false,
+          "Join Type": "Left",
+          "Node Type": "Nested Loop",
+          "Output": [
+            "u.ctid"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Plans": [
+            {
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Result",
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer"
+            },
+            {
+              "Alias": "u",
+              "Async Capable": false,
+              "Disabled": false,
+              "Index Cond": "(u.id = $1)",
+              "Index Name": "users_pkey",
+              "Node Type": "Index Scan",
+              "Output": [
+                "u.ctid"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Inner",
+              "Relation Name": "users",
+              "Scan Direction": "Forward",
+              "Schema": "public"
+            }
+          ]
+        }
+      ],
+      "Relation Name": "users",
+      "Schema": "public"
+    }
+  }
+]

@@ -1,0 +1,17 @@
+[
+  {
+    "Plan": {
+      "Alias": "nv",
+      "Async Capable": false,
+      "Disabled": false,
+      "Node Type": "Seq Scan",
+      "Output": [
+        "id",
+        "x"
+      ],
+      "Parallel Aware": false,
+      "Relation Name": "nv",
+      "Schema": "public"
+    }
+  }
+]

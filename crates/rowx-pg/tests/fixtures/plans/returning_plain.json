@@ -1,0 +1,33 @@
+[
+  {
+    "Plan": {
+      "Alias": "users",
+      "Async Capable": false,
+      "Disabled": false,
+      "Node Type": "ModifyTable",
+      "Operation": "Insert",
+      "Output": [
+        "users.id",
+        "users.name",
+        "users.email"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Result",
+          "Output": [
+            "$1",
+            "$2",
+            "NULL::text"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer"
+        }
+      ],
+      "Relation Name": "users",
+      "Schema": "public"
+    }
+  }
+]
