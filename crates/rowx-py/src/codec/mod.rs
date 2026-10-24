@@ -1,3 +1,4 @@
+pub mod array;
 pub mod bytes;
 pub mod extract;
 pub mod float;
@@ -31,7 +32,7 @@ fn is_citext(ty: &Type) -> bool {
     matches!(ty.kind(), Kind::Simple) && ty.name() == "citext"
 }
 
-/// One arm per type family; T17-T18 add the rest.
+/// One arm per type family; T18 adds array encode.
 ///
 /// # Errors
 /// `DecodeError` for an unsupported type or a malformed value.
@@ -56,6 +57,7 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: Option<&[u8]>) -> PyResult<B
         Type::TIMESTAMP | Type::TIMESTAMPTZ => temporal::decode_timestamp(py, ty, raw),
         Type::INTERVAL => temporal::decode_interval(py, raw),
         _ if matches!(ty.kind(), Kind::Enum(_)) || is_citext(ty) => text::decode(py, ty, raw),
+        _ if matches!(ty.kind(), Kind::Array(_)) => array::decode(py, ty, raw),
         // void arrives as an empty, non-NULL value
         Type::VOID => Ok(py.None().into_bound(py)),
         _ => Err(decode_error(
