@@ -22,9 +22,11 @@ db-up:
 db-down:
     @scripts/pg.sh down
 
-# release build plus bench/fetch_100k.py (stub until T24)
+# release build plus bench/fetch_100k.py; needs ROWX_TEST_DSN
 bench:
-    @echo "TODO: lands in T24"
+    uv sync --group bench --no-install-project
+    uv run --no-sync maturin develop --release
+    uv run --no-sync python bench/fetch_100k.py
 
 # format rust and python through prek
 fmt:
