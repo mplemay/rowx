@@ -4,7 +4,7 @@ from glob import translate as glob_translate
 from os import walk as os_walk
 from pathlib import Path, PurePosixPath
 from re import DOTALL, Pattern, compile as re_compile
-from subprocess import DEVNULL, CalledProcessError, run
+from subprocess import DEVNULL, CalledProcessError, run  # ruff: ignore[suspicious-subprocess-import]
 from typing import Final
 
 from rowx.check.config import Config, ConfigError
@@ -49,7 +49,7 @@ def _relative(path: Path, root: Path, anchor: Path) -> PurePosixPath:
 def _git_files(root: Path) -> set[Path] | None:
     try:
         completed = run(
-            ["git", "ls-files", "-z", "--others", "--exclude-standard", "--cached"],  # noqa: S607
+            ["git", "ls-files", "-z", "--others", "--exclude-standard", "--cached"],  # ruff: ignore[start-process-with-partial-path]
             cwd=root,
             check=True,
             capture_output=True,

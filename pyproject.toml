@@ -55,26 +55,31 @@ bench = [
 target-version = "py314"
 line-length = 120
 include = ["pyproject.toml"]
+preview = true
+required-version = ">=0.17.2"
 
 [tool.ruff.lint]
+preview = true
 select = ["ALL"]
 ignore = [
-    "D",   # pydocstyle (project uses inline comments instead of docstrings)
-    "CPY", # flake8-copyright (project does not use copyright headers)
+    "D",          # pydocstyle (project uses inline comments instead of docstrings)
+    "CPY",        # flake8-copyright (project does not use copyright headers)
+    "formatting", # overlaps ruff format; preview whitespace rules live in this category
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = [
-    "T201", # print is intentional in CLI entry points
+    "print", # print is intentional in CLI entry points
 ]
 "**/__tests__/**/*" = [
-    "ANN001",  # missing type annotation for function argument
-    "ANN201",  # missing return type annotation for public function
-    "ANN202",  # missing return type annotation for private function
-    "INP001",  # implicit namespace package (tests dir may not need __init__.py)
-    "PLR2004", # magic value used in comparison (fine in test cases)
-    "S101",    # use of assert (tests typically use assert directly)
-    "SLF001",  # private member accessed
+    "missing-type-function-argument",  # missing type annotation for function argument
+    "missing-return-type-undocumented-public-function",  # missing return type annotation for public function
+    "missing-return-type-private-function",  # missing return type annotation for private function
+    "implicit-namespace-package",  # implicit namespace package (tests dir may not need __init__.py)
+    "magic-value-comparison", # magic value used in comparison (fine in test cases)
+    "assert",    # use of assert (tests typically use assert directly)
+    "private-member-access",  # private member accessed
+    "import-private-name",  # tests import private modules
 ]
 
 [tool.ruff.lint.flake8-quotes]
@@ -85,14 +90,30 @@ multiline-quotes = "double"
 combine-as-imports = true
 
 [tool.ruff.format]
+preview = true
 docstring-code-format = true
 quote-style = "double"
+
+[tool.ruff.analyze]
+preview = true
 
 [tool.ty.environment]
 python-version = "3.14"
 
+[tool.ty.analysis]
+return-type-inference = "always"
+strict-equality-semantics = true
+strict-generic-narrowing = true
+
 [tool.ty.rules]
 all = "error"
+
+[[tool.ty.overrides]]
+include = ["**/__tests__/**"]
+
+[tool.ty.overrides.rules]
+# Tests live inside the package, so ty will not treat the dev dependency group as declared.
+missing-direct-dependency = "ignore"
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers"]

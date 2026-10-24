@@ -21,8 +21,8 @@ class FakeImpl:
         _sql: str,
         _params: list[object],
         mask: list[bool],
-        scalar: bool,  # noqa: FBT001
-        _limit_one: bool,  # noqa: FBT001
+        scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
+        _limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int,
     ) -> list[object]:
         self.fetches.append((mask, scalar, arity))
@@ -31,7 +31,7 @@ class FakeImpl:
 
 def evaluate(source: str) -> object:
     ns: dict[str, object] = {}
-    exec(PRELUDE + source, ns)  # noqa: S102
+    exec(PRELUDE + source, ns)  # ruff: ignore[exec-builtin]
     return ns["T"]
 
 

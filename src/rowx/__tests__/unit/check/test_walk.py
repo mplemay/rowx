@@ -1,5 +1,5 @@
 from pathlib import Path, PurePosixPath
-from subprocess import run
+from subprocess import run  # ruff: ignore[suspicious-subprocess-import]
 
 import pytest
 
@@ -20,7 +20,7 @@ def names(root: Path, files: list[Path]) -> list[str]:
 
 
 def git(root: Path, *args: str) -> None:
-    run(["git", "-c", "user.email=a@b.c", "-c", "user.name=t", *args], cwd=root, check=True, capture_output=True)  # noqa: S603, S607
+    run(["git", "-c", "user.email=a@b.c", "-c", "user.name=t", *args], cwd=root, check=True, capture_output=True)  # ruff: ignore[subprocess-without-shell-equals-true, start-process-with-partial-path]
 
 
 @pytest.mark.parametrize(

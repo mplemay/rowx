@@ -28,14 +28,14 @@ def test_lateral_on_outer_join(schema: str) -> None:
 
 # correct: a window function over an outer join hides the join behind a subquery scan, so the boundary rule promotes it
 def test_window_over_outer_join(schema: str) -> None:
-    sql = f"SELECT x.t FROM (SELECT p.title AS t, row_number() OVER () {JOIN}) x"  # noqa: S608
+    sql = f"SELECT x.t FROM (SELECT p.title AS t, row_number() OVER () {JOIN}) x"  # ruff: ignore[hardcoded-sql-expression]
     assert verdicts(schema, sql) == [(True, "ScanBoundary")]
 
 
 # correct: a nested CTE chain is promoted at the outermost scan boundary
 def test_nested_cte_chain(schema: str) -> None:
     sql = (
-        f"WITH a AS MATERIALIZED (SELECT p.title {JOIN}), "  # noqa: S608
+        f"WITH a AS MATERIALIZED (SELECT p.title {JOIN}), "  # ruff: ignore[hardcoded-sql-expression]
         "b AS MATERIALIZED (SELECT title FROM a) SELECT title FROM b"
     )
     assert verdicts(schema, sql) == [(True, "ScanBoundary")]
@@ -43,7 +43,7 @@ def test_nested_cte_chain(schema: str) -> None:
 
 # limit: the scan-boundary rule promotes every column of the alias, including ones from the non-null side
 def test_scan_boundary_over_promotes(schema: str) -> None:
-    sql = f"SELECT x.id, x.title FROM (SELECT u.id, p.title, row_number() OVER () {JOIN}) x"  # noqa: S608
+    sql = f"SELECT x.id, x.title FROM (SELECT u.id, p.title, row_number() OVER () {JOIN}) x"  # ruff: ignore[hardcoded-sql-expression]
     assert verdicts(schema, sql) == [(True, "ScanBoundary"), (True, "ScanBoundary")]
 
 
@@ -77,8 +77,8 @@ def test_bang_narrows_computed_column(schema: str) -> None:
 
 
 def test_marker_count_matches_doc() -> None:
-    markers = len(MARKER.findall(Path(__file__).read_text()))
-    rows = [line for line in DOC.read_text().splitlines() if line.startswith("| ")]
+    markers = len(MARKER.findall(Path(__file__).read_text(encoding="utf-8")))
+    rows = [line for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("| ")]
     # the first two table lines are the header and its separator
     assert markers == len(rows) - 1
     assert markers == 9

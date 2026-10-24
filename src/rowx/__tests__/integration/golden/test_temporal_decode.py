@@ -68,19 +68,19 @@ def test_timetz_offset_sign(schema: str, literal: str, hours: float) -> None:
 
 def test_timestamp_is_naive(schema: str) -> None:
     value = fetch(schema, query[datetime](t"SELECT '2024-03-05 06:07:08.000009'::timestamp"))
-    assert value == datetime(2024, 3, 5, 6, 7, 8, 9)  # noqa: DTZ001
+    assert value == datetime(2024, 3, 5, 6, 7, 8, 9)  # ruff: ignore[call-datetime-without-tzinfo]
     assert value.tzinfo is None
 
 
 def test_timestamp_before_epoch(schema: str) -> None:
     value = fetch(schema, query[datetime](t"SELECT '1999-12-31 23:59:59.999999'::timestamp"))
-    assert value == datetime(1999, 12, 31, 23, 59, 59, 999999)  # noqa: DTZ001
+    assert value == datetime(1999, 12, 31, 23, 59, 59, 999999)  # ruff: ignore[call-datetime-without-tzinfo]
 
 
 def test_timestamp_bounds(schema: str) -> None:
-    assert fetch(schema, query[datetime](t"SELECT '0001-01-01'::timestamp")) == datetime(1, 1, 1)  # noqa: DTZ001
+    assert fetch(schema, query[datetime](t"SELECT '0001-01-01'::timestamp")) == datetime(1, 1, 1)  # ruff: ignore[call-datetime-without-tzinfo]
     last = fetch(schema, query[datetime](t"SELECT '9999-12-31 23:59:59.999999'::timestamp"))
-    assert last == datetime(9999, 12, 31, 23, 59, 59, 999999)  # noqa: DTZ001
+    assert last == datetime(9999, 12, 31, 23, 59, 59, 999999)  # ruff: ignore[call-datetime-without-tzinfo]
 
 
 def test_timestamptz_is_utc_aware(schema: str) -> None:

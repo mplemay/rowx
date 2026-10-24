@@ -65,6 +65,6 @@ async def positive(conn: Connection) -> None:
 def negative() -> None:
     query("SELECT 1")  # error  # ty: ignore[invalid-argument-type]
     name = "users"
-    query(f"SELECT * FROM {name}")  # error  # noqa: S608  # ty: ignore[invalid-argument-type]
+    query(f"SELECT * FROM {name}")  # error  # ruff: ignore[hardcoded-sql-expression]  # ty: ignore[invalid-argument-type]
     query[int]("SELECT 1")  # error  # ty: ignore[invalid-argument-type]
     query[int](f"SELECT {name}")  # error  # ty: ignore[invalid-argument-type]

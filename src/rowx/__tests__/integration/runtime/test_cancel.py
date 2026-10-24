@@ -83,7 +83,7 @@ def test_stress_cancel_then_query_never_fails_with_57014(schema: str) -> None:
     async def run() -> list[str]:
         conn = await rowx.connect(schema)
         failures: list[str] = []
-        rng = random.Random(22)  # noqa: S311
+        rng = random.Random(22)  # ruff: ignore[suspicious-non-cryptographic-random-usage]
         try:
             for _ in range(STRESS_ITERATIONS):
                 with contextlib.suppress(TimeoutError):

@@ -52,7 +52,7 @@ def _check(paths: list[Path], config_file: Path | None, url: str | None, jobs: i
         return asyncio.run(run_check(config, files, dsn, jobs)), config.root
     except CheckError as error:
         raise CheckError(redact(str(error), dsn)) from None
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:  # ruff: ignore[blind-except]
         msg = f"internal error: {type(error).__name__}: {redact(str(error), dsn)}"
         raise CheckError(msg) from None
 
@@ -65,10 +65,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result, root = _check(args.paths, args.config, args.database_url, args.jobs)
     except (ConfigError, CheckError) as error:
-        print(f"error: {error}", file=sys.stderr)  # noqa: T201
+        print(f"error: {error}", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
     except KeyboardInterrupt:
-        print("error: interrupted", file=sys.stderr)  # noqa: T201
+        print("error: interrupted", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
     if args.output_format == "json":
         sys.stdout.write(render_json(result.reports, root))

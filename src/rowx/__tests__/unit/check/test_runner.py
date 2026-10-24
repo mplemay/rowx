@@ -12,14 +12,14 @@ class FakeConnection:
     closed_count = 0
 
     async def close(self) -> None:
-        FakeConnection.closed_count += 1
+        type(self).closed_count += 1
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True)  # ruff: ignore[pytest-fixture-autouse]
 def fake_connect(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeConnection.closed_count = 0
 
-    async def connect(_dsn: str, _timeout_ms: int) -> Any:  # noqa: ANN401
+    async def connect(_dsn: str, _timeout_ms: int) -> Any:  # ruff: ignore[any-type, unused-async]
         return FakeConnection()
 
     monkeypatch.setattr(runner, "_connect", connect)
@@ -29,7 +29,7 @@ def _describe_with(monkeypatch: pytest.MonkeyPatch, *outcomes: object) -> list[s
     seen: list[str] = []
     queue = list(outcomes)
 
-    async def fake(_conn: object, sql: str) -> object:
+    async def fake(_conn: object, sql: str) -> object:  # ruff: ignore[unused-async]
         seen.append(sql)
         outcome = queue.pop(0)
         if isinstance(outcome, Exception):

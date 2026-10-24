@@ -153,7 +153,7 @@ class _Node:
     none: bool
 
 
-class _Reject(Exception):  # noqa: N818
+class _Reject(Exception):  # ruff: ignore[error-suffix-on-exception-name]
     def __init__(self, rule: Rule, message: str) -> None:
         super().__init__(message)
         self.rule: Rule = rule
@@ -615,7 +615,7 @@ class _Resolver:
                 for node in nodes[1:]:
                     result = _union(result, node)
                 return result
-            case "typing.Annotated" if len(elts) >= 2 and isinstance(slice_, ast.Tuple):  # noqa: PLR2004
+            case "typing.Annotated" if len(elts) >= 2 and isinstance(slice_, ast.Tuple):  # ruff: ignore[magic-value-comparison]
                 return self._eval(elts[0], module, chain)
             case "builtins.list" if len(elts) == 1 and not isinstance(slice_, ast.Tuple):
                 item = _to_elem(self._eval(slice_, module, chain), allow_none=False)

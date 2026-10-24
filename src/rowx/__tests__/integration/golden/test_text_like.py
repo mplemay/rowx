@@ -90,13 +90,13 @@ def test_uuid_from_str(schema: str) -> None:
 
 
 @pytest.mark.parametrize("value", [None, 1, "s", [1, "a", None], {"a": {"b": [1.5, True]}}])
-def test_jsonb_round_trip(schema: str, value: Any) -> None:  # noqa: ANN401
+def test_jsonb_round_trip(schema: str, value: Any) -> None:  # ruff: ignore[any-type]
     got = run_with_conn(schema, query[Any](t"SELECT {value}::jsonb").fetch_one)
     assert got == value
 
 
 @pytest.mark.parametrize("value", [1, "s", [1, 2], {"a": 1}])
-def test_json_round_trip(schema: str, value: Any) -> None:  # noqa: ANN401
+def test_json_round_trip(schema: str, value: Any) -> None:  # ruff: ignore[any-type]
     got = run_with_conn(schema, query[Any](t"SELECT {value}::json").fetch_one)
     assert got == value
 
