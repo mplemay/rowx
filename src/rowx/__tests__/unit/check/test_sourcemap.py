@@ -36,7 +36,7 @@ def runtime_sql(source: str, index: int = 0) -> str:
     templates = [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call) and n.args]
     call = templates[index]
     expression = compile(ast.Expression(call.args[0]), "<sample>", "eval")
-    compiled, _ = compile_template(eval(expression, {"x": 1, "y": 1}), dynamic=False)  # noqa: S307
+    compiled, _ = compile_template(eval(expression, {"x": 1, "y": 1}), dynamic=False)  # ruff: ignore[suspicious-eval-usage]
     return compiled.sql
 
 

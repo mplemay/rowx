@@ -1,4 +1,5 @@
 import ast
+import string
 from contextlib import suppress
 from dataclasses import dataclass
 from io import StringIO
@@ -35,8 +36,8 @@ SIMPLE_ESCAPES: Final[dict[str, str]] = {
     "v": "\v",
 }
 HEX_ESCAPE_WIDTHS: Final[dict[str, int]] = {"x": 2, "u": 4, "U": 8}
-HEX_DIGITS: Final[frozenset[str]] = frozenset("0123456789abcdefABCDEF")
-OCTAL_DIGITS: Final[frozenset[str]] = frozenset("01234567")
+HEX_DIGITS: Final[frozenset[str]] = frozenset(string.hexdigits)
+OCTAL_DIGITS: Final[frozenset[str]] = frozenset(string.octdigits)
 OCTAL_MAX_DIGITS: Final[int] = 3
 SPACE: Final[str] = " "
 
@@ -234,7 +235,7 @@ def _escape(text: str, i: int, emit: Callable[[str, int], None], skip: Callable[
     elif nxt in HEX_ESCAPE_WIDTHS:
         width = HEX_ESCAPE_WIDTHS[nxt]
         digits = text[i + 2 : i + 2 + width]
-        if len(digits) == width and set(digits) <= HEX_DIGITS and int(digits, 16) <= 0x10FFFF:  # noqa: PLR2004
+        if len(digits) == width and set(digits) <= HEX_DIGITS and int(digits, 16) <= 0x10FFFF:  # ruff: ignore[magic-value-comparison]
             emit(chr(int(digits, 16)), 2 + width)
         else:
             emit("\\", 1)

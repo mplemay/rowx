@@ -97,7 +97,7 @@ def test_reason_detail_names_node_or_alias(schema: str) -> None:
     (outer,) = run_describe(schema, f"SELECT p.title {join}").columns
     assert outer.reason == "OuterJoin"
     assert outer.reason_detail in {"Nested Loop", "Hash Join", "Merge Join"}
-    (boundary,) = run_describe(schema, f"SELECT x.title FROM (SELECT p.title, row_number() OVER () {join}) x").columns  # noqa: S608
+    (boundary,) = run_describe(schema, f"SELECT x.title FROM (SELECT p.title, row_number() OVER () {join}) x").columns  # ruff: ignore[hardcoded-sql-expression]
     assert (boundary.reason, boundary.reason_detail) == ("ScanBoundary", "x")
     (plain,) = run_describe(schema, "SELECT id FROM users").columns
     assert plain.reason_detail is None

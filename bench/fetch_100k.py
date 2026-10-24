@@ -65,12 +65,12 @@ async def main(dsn: str) -> None:
         await setup.execute(DROP_SQL)
         await setup.close()
 
-    print("rowx_ms asyncpg_ms ratio")  # noqa: T201
-    print(f"{rowx_ms:.1f} {asyncpg_ms:.1f} {rowx_ms / asyncpg_ms:.2f}")  # noqa: T201
+    print("rowx_ms asyncpg_ms ratio")  # ruff: ignore[print]
+    print(f"{rowx_ms:.1f} {asyncpg_ms:.1f} {rowx_ms / asyncpg_ms:.2f}")  # ruff: ignore[print]
 
 
 if __name__ == "__main__":
     if not (dsn := os.environ.get("ROWX_TEST_DSN")):
-        print("ROWX_TEST_DSN is not set", file=sys.stderr)  # noqa: T201
+        print("ROWX_TEST_DSN is not set", file=sys.stderr)  # ruff: ignore[print]
         sys.exit(2)
     asyncio.run(main(dsn))

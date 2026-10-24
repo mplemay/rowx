@@ -83,6 +83,15 @@ def _bind_arguments(scope: _Scope, arguments: ast.arguments) -> None:
             scope.bind(arg.arg)
 
 
+def _as_query_kind(name: str) -> QueryKind | None:
+    # strict equality does not narrow `str` through `in QUERY_KINDS`
+    if name == "query":
+        return "query"
+    if name == "query_unchecked":
+        return "query_unchecked"
+    return None
+
+
 def _import_tag(module: str, name: str) -> Tag:
     if module == ROWX_MODULE and name in QUERY_KINDS:
         return "query" if name == "query" else "query_unchecked"
@@ -209,10 +218,10 @@ class _Finder(ast.NodeVisitor):
                 tag, ambiguous = self._tags(node.id)
                 if tag in QUERY_KINDS:
                     return _Ref(tag, ambiguous)
-            case ast.Attribute(value=ast.Name() as base, attr=attr) if attr in QUERY_KINDS:
+            case ast.Attribute(value=ast.Name() as base, attr=attr) if (kind := _as_query_kind(attr)) is not None:
                 tag, ambiguous = self._tags(base.id)
                 if tag == "module":
-                    return _Ref(attr, ambiguous)
+                    return _Ref(kind, ambiguous)
         return None
 
     def _indirect(self, node: ast.expr | ast.stmt | ast.alias, what: str) -> None:
@@ -350,7 +359,7 @@ class _Finder(ast.NodeVisitor):
         self._scoped(node, node.body)
         del self._scopes[len(self._scopes) - pushed :]
 
-    visit_AsyncFunctionDef = visit_FunctionDef  # noqa: N815
+    visit_AsyncFunctionDef = visit_FunctionDef  # ruff: ignore[mixed-case-variable-in-class-scope]
 
     @override
     def visit_Lambda(self, node: ast.Lambda) -> None:
@@ -387,7 +396,7 @@ class _Finder(ast.NodeVisitor):
         body.extend([node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt])
         self._scoped(node, body)
 
-    visit_ListComp = visit_SetComp = visit_GeneratorExp = visit_DictComp = _visit_comprehension  # noqa: N815
+    visit_ListComp = visit_SetComp = visit_GeneratorExp = visit_DictComp = _visit_comprehension  # ruff: ignore[mixed-case-variable-in-class-scope]
 
 
 def _syntax_error(path: Path, message: str, span: Span) -> FileResult:

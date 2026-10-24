@@ -161,7 +161,7 @@ async def describe_all(dsn: str, statements: list[str], jobs: int, timeout_ms: i
     async def run() -> None:
         worker = _Worker(dsn, timeout_ms)
         try:
-            await worker._open()  # noqa: SLF001
+            await worker._open()  # ruff: ignore[private-member-access]
             while pending:
                 sql = pending.popleft()
                 results[sql] = await worker.describe(sql)
@@ -232,18 +232,18 @@ def _sql_error(site: _Site, error: DatabaseError) -> Report:
 
 def _template(site: _Site) -> ast.expr:
     template = site.call.template
-    assert template is not None  # noqa: S101
+    assert template is not None  # ruff: ignore[assert]
     return template
 
 
-def _report(  # noqa: PLR0913
+def _report(  # ruff: ignore[too-many-arguments]
     site: _Site,
     rule: Rule,
     message: str,
     span: Span,
     *,
     notes: tuple[str, ...] = (),
-    help: str | None = None,  # noqa: A002
+    help: str | None = None,  # ruff: ignore[builtin-argument-shadowing]
     label: str | None = None,
     column_index: int | None = None,
 ) -> Report:
@@ -382,7 +382,7 @@ def _finding_report(
     else:
         notes.extend(_alias_note(site.row_type))
     name = columns[finding.column].name if finding.column is not None else None
-    if (reason := finding.reason) != "":
+    if reason := finding.reason:
         notes.append(null_reason_note(reason, finding.reason_detail, column=name))
     return _report(
         site,

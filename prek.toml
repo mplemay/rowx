@@ -73,6 +73,7 @@ hooks = [
     name = "ty check",
     entry = "uv run ty check",
     args = ["src"],
+    env = { TY_UV = "1" },
     language = "python",
     types_or = [
       "python",

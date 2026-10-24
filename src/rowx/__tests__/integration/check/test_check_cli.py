@@ -25,7 +25,8 @@ def run() -> None:
 
 
 def _dsn() -> str:
-    if (dsn := os.environ.get("ROWX_TEST_DSN")) is not None and dsn != "":
+    # an empty DSN and a missing DSN fail differently
+    if (dsn := os.environ.get("ROWX_TEST_DSN")) is not None and dsn != "":  # ruff: ignore[compare-to-empty-string]
         return dsn
     if os.environ.get("ROWX_REQUIRE_DB") == "1":
         pytest.fail("ROWX_REQUIRE_DB=1 but ROWX_TEST_DSN is not set")
@@ -57,7 +58,7 @@ def test_unreachable_database_exits_two(capsys: pytest.CaptureFixture[str]) -> N
     url = "postgresql://nobody:hunter2secret@127.0.0.1:1/nope?connect_timeout=2"
     code, out, err = _run(capsys, str(OK_BASIC), "--database-url", url)
     assert code == 2
-    assert out == ""
+    assert not out
     assert "could not connect" in err
 
 
@@ -156,7 +157,7 @@ def test_sql_error_points_into_the_template(schema: str, tmp_path: Path, capsys:
 
 
 def test_password_never_appears(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    secret = "hunter2secret"  # noqa: S105
+    secret = "hunter2secret"  # ruff: ignore[hardcoded-password-string]
     path = _write(tmp_path, "q.py", 'from rowx import query\n\nquery[int](t"SELECT 1")\n')
     urls = [
         f"postgresql://someone:{secret}@127.0.0.1:1/db?connect_timeout=2",

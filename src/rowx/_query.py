@@ -1,5 +1,6 @@
 from typing import TYPE_CHECKING, ClassVar, Self
 
+from rowx._core import connect as connect_impl
 from rowx._rowplan import NO_ROWS, RowPlan, row_plan
 from rowx._template import Compiled, compile_template
 from rowx.errors import InterfaceError, RowNotFound
@@ -34,6 +35,11 @@ class Connection:
         return self._impl.closed
 
 
+async def connect(dsn: str, /, *, connect_timeout: float | None = None, statement_cache_size: int = 256) -> Connection:
+    impl = await connect_impl(dsn, connect_timeout=connect_timeout, statement_cache_size=statement_cache_size)
+    return Connection(impl)
+
+
 class _BaseQuery[T]:
     _dynamic: ClassVar[bool]
 
@@ -52,7 +58,7 @@ class _BaseQuery[T]:
         if plan.kind == "none":
             msg = "query without a row type; use .execute() or add query[T]"
             raise InterfaceError(msg)
-        return await conn._impl._fetch(  # noqa: SLF001
+        return await conn._impl._fetch(  # ruff: ignore[private-member-access]
             self._compiled.sql,
             self._params,
             list(plan.nullable_mask),
@@ -72,12 +78,12 @@ class _BaseQuery[T]:
         return await self._rows(conn, limit_one=False)  # ty: ignore[invalid-return-type]
 
     async def execute(self, conn: Connection, /) -> int:
-        return await conn._impl._execute(self._compiled.sql, self._params)  # noqa: SLF001
+        return await conn._impl._execute(self._compiled.sql, self._params)  # ruff: ignore[private-member-access]
 
 
-class query[T = None](_BaseQuery[T]):  # noqa: N801
+class query[T = None](_BaseQuery[T]):  # ruff: ignore[invalid-class-name]
     _dynamic: ClassVar[bool] = False
 
 
-class query_unchecked[T = None](_BaseQuery[T]):  # noqa: N801
+class query_unchecked[T = None](_BaseQuery[T]):  # ruff: ignore[invalid-class-name]
     _dynamic: ClassVar[bool] = True

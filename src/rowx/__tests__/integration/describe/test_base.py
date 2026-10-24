@@ -33,7 +33,7 @@ def run_checker[T](dsn: str, body: Callable[[Connection], Awaitable[T]]) -> T:
 
 
 async def scalar(conn: Connection, sql: str) -> object:
-    rows = await conn._fetch(sql, [], None, True, True, None)  # noqa: FBT003
+    rows = await conn._fetch(sql, [], None, True, True, None)  # ruff: ignore[boolean-positional-value-in-call]
     return rows[0]
 
 
