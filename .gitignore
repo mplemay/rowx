@@ -20,3 +20,4 @@ target/
 # Local test DSN
 /.rowx-test-dsn
 .rumdl_cache/
+/.rowx-certs/

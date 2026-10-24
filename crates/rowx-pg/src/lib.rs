@@ -6,6 +6,7 @@ pub mod error;
 pub mod exec;
 pub mod state;
 pub mod stmt_cache;
+pub mod tls;
 pub mod types;
 pub mod wire;
 
