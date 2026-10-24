@@ -239,3 +239,13 @@ def test_param_not_flagged(key: str | None, evident: ParamType | None) -> None:
 )
 def test_param_flagged(key: str, evident: ParamType) -> None:
     assert compare_param(0, key, key, evident) is not None  # ty: ignore[invalid-argument-type]
+
+
+def test_array_param_checks_elements() -> None:
+    assert compare_param(0, "_int4", "array", ParamType("list", ParamType("str")), "int4") is not None
+    assert (
+        compare_param(0, "_int4", "array", ParamType("list", ParamType("list", ParamType("str"))), "int4") is not None
+    )
+    assert compare_param(0, "_int4", "array", ParamType("list", ParamType("int")), "int4") is None
+    assert compare_param(0, "_uuid", "array", ParamType("list", ParamType("str")), "uuid") is None
+    assert compare_param(0, "_int4", "array", ParamType("list"), "int4") is None

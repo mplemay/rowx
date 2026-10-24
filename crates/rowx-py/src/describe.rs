@@ -24,6 +24,7 @@ pub struct ParamInfo {
     oid: u32,
     type_name: String,
     type_key: Option<String>,
+    element_key: Option<String>,
 }
 
 #[pyclass(
@@ -70,6 +71,7 @@ impl From<pg::ParamInfo> for ParamInfo {
         Self {
             oid: p.oid,
             type_key: key(&p.type_key),
+            element_key: p.element_key.map(str::to_owned),
             type_name: p.type_name,
         }
     }

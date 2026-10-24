@@ -286,7 +286,7 @@ def _param_type_reports(site: _Site, described: Describe) -> list[Report]:
         return []
     reports: list[Report] = []
     for index, (param, found) in enumerate(zip(described.params, evident, strict=True)):
-        if (finding := compare_param(index, param.type_name, param.type_key, found)) is not None:
+        if (finding := compare_param(index, param.type_name, param.type_key, found, param.element_key)) is not None:
             reports.append(_report(site, finding.rule, finding.message, holes[index]))
     return reports
 

@@ -67,6 +67,8 @@ pub struct ParamInfo {
     pub oid: u32,
     pub type_name: String,
     pub type_key: TypeKey,
+    // the table key of an array parameter's element, `None` for any other parameter or an unsupported element
+    pub element_key: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +273,7 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
             oid: ty.oid(),
             type_name: ty.name().to_owned(),
             type_key: resolve(ty, &sends),
+            element_key: element_key(ty, &sends),
         })
         .collect();
     let mut columns: Vec<ColumnInfo> = stmt

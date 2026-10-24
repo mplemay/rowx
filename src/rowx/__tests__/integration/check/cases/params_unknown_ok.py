@@ -11,4 +11,6 @@ def run(value, name: str | None, count: int) -> None:
     query[int | None](t'SELECT {None}::int AS "n?"')
     query[Decimal](t'SELECT {42}::numeric AS "n!"')
     query[uuid.UUID](t'SELECT {"c3d4bd56-0f3b-4bd9-8a3c-6b0a0d9d3a11"}::uuid AS "u!"')
+    query[int](t'SELECT count(*)::int AS "n!" WHERE 1 = ANY({[1, 2]}::int[])')
+    query[int](t'SELECT count(*)::int AS "n!" WHERE 1 = ANY({(1, 2)}::int[])')
     query[float](t'SELECT {1}::float8 AS "n!"')
