@@ -1,0 +1,7 @@
+error[sql-error]: syntax error at end of input
+ --> app/users.py:2:42
+  |
+2 | rows = query[tuple[int]](t"select id from")
+  |                                          ^
+  |
+  = help: cast the parameter: `{x}::int`

@@ -52,6 +52,8 @@ class SourceMap:
     end: Span
     # one flag per static segment, false when the decoded source text did not match the AST
     exact: tuple[bool, ...]
+    # one span per interpolation, in order
+    holes: tuple[Span, ...] = ()
 
     def locate(self, position: int) -> Span:
         # the server's `position` is a 1-based character index into the SQL
@@ -93,6 +95,13 @@ class SourceMapper:
                 tokens.extend(generate_tokens(StringIO(self._source, newline="").readline))
             self._tokens = tokens
         return self._tokens
+
+    def span(self, node: ast.expr) -> Span:
+        end_line = node.end_lineno or node.lineno
+        return _span(
+            (node.lineno, self._col(node.lineno, node.col_offset)),
+            (end_line, self._col(end_line, node.end_col_offset or 0)),
+        )
 
     def build(self, node: ast.TemplateStr) -> SourceMap:
         start = (node.lineno, self._col(node.lineno, node.col_offset))
@@ -286,4 +295,4 @@ def _assemble(expected: list[str], segments: list[_Segment], holes: list[Span]) 
     else:
         tail = last.start or (1, 0)
     resolved = tuple(s if s is not None else _span(tail, tail) for s in spans)
-    return SourceMap(sql=sql, spans=resolved, end=_span(tail, tail), exact=tuple(exact))
+    return SourceMap(sql=sql, spans=resolved, end=_span(tail, tail), exact=tuple(exact), holes=tuple(holes))

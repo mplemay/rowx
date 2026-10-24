@@ -1,0 +1,5 @@
+error[sql-error]: syntax error at or near "from"
+ --> app/users.py:1:28
+  |
+1 | rows = query[tuple[int]](t"select \q from users")
+  |                            ^

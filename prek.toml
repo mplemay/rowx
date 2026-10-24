@@ -26,7 +26,9 @@ hooks = [
   # Safety guards
   { id = "check-added-large-files" },
   { id = "check-case-conflict" },
+  { id = "check-executables-have-shebangs" },
   { id = "check-merge-conflict" },
+  { id = "check-shebang-scripts-are-executable" },
   { id = "detect-private-key" },
 ]
 
@@ -112,6 +114,23 @@ hooks = [
     language = "system",
     files = '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.cargo/config\.toml|(src|crates)/.*\.rs)$',
     pass_filenames = false,
+    require_serial = true,
+  },
+  {
+    id = "shfmt",
+    name = "shfmt",
+    entry = "uv run shfmt",
+    args = ["-w"],
+    language = "python",
+    types = ["shell"],
+    require_serial = true,
+  },
+  {
+    id = "shellcheck",
+    name = "shellcheck",
+    entry = "uv run shellcheck",
+    language = "python",
+    types = ["shell"],
     require_serial = true,
   },
 ]

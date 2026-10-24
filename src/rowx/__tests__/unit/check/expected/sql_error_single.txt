@@ -1,0 +1,5 @@
+error[sql-error]: syntax error at or near "users"
+ --> app/users.py:2:39
+  |
+2 | rows = query[tuple[int]](t"select frm users")
+  |                                       ^

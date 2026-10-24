@@ -121,3 +121,8 @@ def test_statement_timeout_applied(schema: str) -> None:
             await conn.close()
 
     assert asyncio.run(run()) == "2500ms"
+
+
+def test_array_columns_carry_their_element_key(schema: str) -> None:
+    d = run_describe(schema, "SELECT ARRAY[1] AS a, ARRAY['x']::text[] AS b, 1 AS c")
+    assert [(c.type_key, c.element_key) for c in d.columns] == [("array", "int4"), ("array", "text"), ("int4", None)]

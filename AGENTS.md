@@ -13,9 +13,9 @@
     - **Don't use `unsafe`, `unwrap`, `expect`, or `panic!`** (denied by the lint config).
 - **`prek`**: Checks, linting, and formatting
   - *Usage:* `uv run prek`
-  - *Files:* [configuration](prek.toml)
-  - *Tools:* `rumdl` (markdown), `ruff` (python linting / formatting), `ty` (type checker), `cargo fmt` /
-    `cargo clippy` (rust)
+  - *Files:* [configuration](prek.toml), [shellcheck](.shellcheckrc), [shfmt](.editorconfig)
+  - *Tools:* `rumdl` (markdown), `ruff` (python linting / formatting), `ty` (type checker), `shellcheck` /
+    `shfmt` (shell), `cargo fmt` / `cargo clippy` (rust)
   - *Rules:*
     - **Don't run the underlying linters / formatters directly.**
     - **Never use file-wide ignores.**
@@ -123,7 +123,7 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Command | What it does |
 |---|---|
 | `just check` | All gates through `uv run prek run --all-files` |
-| `just fmt` | Format rust and python through the prek hooks |
+| `just fmt` | Format rust, python, and shell through the prek hooks |
 | `just test-rust` | `cargo test --workspace` (DB tests run if `ROWX_TEST_DSN` is set) |
 | `just test-py` | `uv run pytest` |
 | `just db-up` / `just db-down` | Start or stop `postgres:18` (lands in T03) |
@@ -150,6 +150,19 @@ validates every query against a live Postgres 18 database by preparing and descr
 - Python has no runtime dependencies. The checker never imports or executes user code.
 - DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked
   `@pytest.mark.timing` and synchronise by polling `pg_stat_activity`, never with `sleep`.
+
+## Cursor Cloud specific instructions
+
+- Run Python through `uv run`. The image Python is older than `.python-version` (3.14); `uv` installs that
+  interpreter and the project venv.
+- Postgres 18 is already started on boot: plain container `rowx-pg` (state in `.rowx-test-dsn`) and TLS container
+  `rowx-pg-ssl`. A login shell sources `$HOME/.rowx/env.sh` via `/etc/profile.d/rowx.sh`. Other shells need
+  `. "$HOME/.rowx/env.sh"` before `just test-py` or `just test-rust`, which sets `ROWX_TEST_DSN`,
+  `ROWX_TEST_DSN_SSL`, and `ROWX_TEST_CERTS`.
+- `just db-up` is unnecessary while those containers are running (`scripts/pg.sh up` refuses when
+  `.rowx-test-dsn` points at a live container). `just db-down` removes the plain container; the next boot start
+  script creates it again.
+- `just check` is the lint and typecheck gate (`prek`: ruff, ty, rumdl, cargo fmt, clippy).
 
 ## File ownership
 
