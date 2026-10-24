@@ -1,13 +1,14 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx._types import result_type
+from rowx._types import accepts, by_key, result_type
 from rowx._vocab import NullReasonName, TypeKey
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from rowx.check.model import Rule
+    from rowx.check.params import ParamType
     from rowx.check.resolve import Elem, RowType
 
 JSON_KEYS: Final[frozenset[TypeKey]] = frozenset({"json", "jsonb"})
@@ -182,3 +183,18 @@ def compare(describe: DescribeDesc, row_type: RowType) -> list[Finding]:
             for index, (column, elem) in enumerate(zip(columns, row_type.elements, strict=True)):
                 findings.extend(_compare_element(column, index, elem, index))
             return findings
+
+
+def _shown_param(evident: ParamType) -> str:
+    return (
+        f"list[{_shown_param(evident.item)}]" if evident.name == "list" and evident.item is not None else evident.name
+    )
+
+
+# `None` binds NULL for every parameter, and an unknown or unsupported parameter is never reported here
+def compare_param(index: int, type_name: str, type_key: TypeKey | None, evident: ParamType | None) -> Finding | None:
+    if evident is None or type_key is None or evident.name == "None" or accepts(evident.name, type_key):
+        return None
+    accepted = ", ".join(f"`{name}`" for name in by_key(type_key).accepted_params)
+    message = f'parameter ${index + 1} has type "{type_name}", which accepts {accepted}, but the interpolation is `{_shown_param(evident)}`'
+    return Finding(rule="param-type-mismatch", message=message)

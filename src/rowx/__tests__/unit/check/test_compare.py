@@ -1,4 +1,7 @@
-from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare
+import pytest
+
+from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
+from rowx.check.params import ParamType
 from rowx.check.resolve import Elem, RowType
 
 
@@ -199,3 +202,40 @@ def test_none_element_facing_json_is_type_mismatch() -> None:
 
 def test_none_element_facing_array_is_type_mismatch() -> None:
     assert rules(run(tup(Elem("none", nullable=True)), col("array", element_key="int4"))) == ["type-mismatch"]
+
+
+def test_param_mismatch_names_both_types() -> None:
+    finding = compare_param(0, "int4", "int4", ParamType("str"))
+    assert finding is not None
+    assert finding.rule == "param-type-mismatch"
+    assert finding.message == 'parameter $1 has type "int4", which accepts `int`, but the interpolation is `str`'
+
+
+@pytest.mark.parametrize(
+    ("key", "evident"),
+    [
+        ("int4", None),
+        ("int4", ParamType("None")),
+        ("numeric", ParamType("int")),
+        ("uuid", ParamType("str")),
+        ("jsonb", ParamType("Decimal")),
+        ("int4", ParamType("int")),
+        ("int4[]", None),
+        (None, ParamType("str")),
+    ],
+)
+def test_param_not_flagged(key: str | None, evident: ParamType | None) -> None:
+    assert compare_param(0, "t", key, evident) is None  # ty: ignore[invalid-argument-type]
+
+
+@pytest.mark.parametrize(
+    ("key", "evident"),
+    [
+        ("int4", ParamType("bool")),
+        ("text", ParamType("int")),
+        ("date", ParamType("datetime")),
+        ("bool", ParamType("int")),
+    ],
+)
+def test_param_flagged(key: str, evident: ParamType) -> None:
+    assert compare_param(0, key, key, evident) is not None  # ty: ignore[invalid-argument-type]
