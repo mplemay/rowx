@@ -1,0 +1,32 @@
+[
+  {
+    "rule": "sql-error",
+    "message": "boom",
+    "file": "app/a.py",
+    "line": 1,
+    "col": 1,
+    "end_line": 1,
+    "end_col": 5,
+    "notes": [],
+    "help": "try again",
+    "sqlstate": "42P01",
+    "sql": "select 1",
+    "column_index": null
+  },
+  {
+    "rule": "nullability-mismatch",
+    "message": "column 3 \"email\" may be NULL but tuple element 3 is `str`",
+    "file": "app/users.py",
+    "line": 2,
+    "col": 43,
+    "end_line": 2,
+    "end_col": 46,
+    "notes": [
+      "nullable because users.email has no NOT NULL constraint"
+    ],
+    "help": "annotate `str | None`, or alias the column as \"email!\" if it can't be NULL",
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 2
+  }
+]
