@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyInt, PyList, PyString};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
 
+use crate::codec::numeric::decimal_class;
 use crate::errors::encode_error;
 
 /// A Python parameter copied out under the GIL so encoding can run without it.
@@ -10,6 +11,9 @@ pub enum PyParam {
     Int(i64),
     // an int outside i64, kept as its decimal text
     BigInt(String),
+    Float(f64),
+    // the `str()` of a `decimal.Decimal`
+    Decimal(String),
     Str(String),
     // anything without a dedicated variant yet, with its Python type name
     Other(Py<PyAny>, String),
@@ -28,6 +32,8 @@ impl PyParam {
             Self::Null => "None",
             Self::Bool(_) => "bool",
             Self::Int(_) | Self::BigInt(_) => "int",
+            Self::Float(_) => "float",
+            Self::Decimal(_) => "Decimal",
             Self::Str(_) => "str",
             Self::Other(_, name) => name,
         }
@@ -47,6 +53,12 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<PyParam
             Ok(value) => PyParam::Int(value),
             Err(_) => PyParam::BigInt(int.str()?.to_string()),
         });
+    }
+    if let Ok(float) = obj.cast::<PyFloat>() {
+        return Ok(PyParam::Float(float.value()));
+    }
+    if obj.is_instance(decimal_class(py)?)? {
+        return Ok(PyParam::Decimal(obj.str()?.to_string()));
     }
     if let Ok(text) = obj.cast::<PyString>() {
         return text

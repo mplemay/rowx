@@ -1,5 +1,7 @@
 pub mod extract;
+pub mod float;
 pub mod int;
+pub mod numeric;
 pub mod text;
 
 use pyo3::prelude::*;
@@ -22,6 +24,9 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: Option<&[u8]>) -> PyResult<B
     };
     match *ty {
         Type::BOOL | Type::INT2 | Type::INT4 | Type::INT8 => int::decode(py, ty, raw),
+        Type::OID => numeric::decode_oid(py, raw),
+        Type::FLOAT4 | Type::FLOAT8 => float::decode(py, ty, raw),
+        Type::NUMERIC => numeric::decode(py, raw),
         Type::TEXT | Type::VARCHAR => text::decode(py, ty, raw),
         // void arrives as an empty, non-NULL value
         Type::VOID => Ok(py.None().into_bound(py)),
@@ -51,6 +56,10 @@ fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         Type::BOOL | Type::INT2 | Type::INT4 | Type::INT8 => {
             int::encode(ty, param).map(Param::binary)
         }
+        Type::OID => numeric::encode_oid(param).map(Param::binary),
+        Type::FLOAT4 | Type::FLOAT8 => float::encode(ty, param).map(Param::binary),
+        // numeric travels as text so any Decimal or int keeps full precision
+        Type::NUMERIC => numeric::encode(param).map(Param::text),
         Type::TEXT | Type::VARCHAR => text::encode(ty, param).map(Param::binary),
         _ => Err(format!("no encoder for the postgres type {}", ty.name())),
     }
