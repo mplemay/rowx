@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
@@ -45,6 +46,35 @@ impl Connection {
             cache: StmtCache::new(statement_cache_size),
             cancel,
         })
+    }
+
+    /// Connects for `rowx check`: a read-only session with bounded timeouts, and no statement cache.
+    ///
+    /// # Errors
+    /// As `connect`, plus `Db` when the server rejects a session setting.
+    pub async fn connect_checker(
+        dsn: &str,
+        handle: &Handle,
+        statement_timeout: Duration,
+    ) -> Result<Self, Error> {
+        let mut conn = Self::connect(dsn, handle, 0).await?;
+        let settings = format!(
+            "SET default_transaction_read_only = on; \
+             SET statement_timeout = '{}ms'; \
+             SET lock_timeout = '2s'; \
+             SET idle_in_transaction_session_timeout = '30s'; \
+             SET application_name = 'rowx-check'",
+            statement_timeout.as_millis()
+        );
+        let applied = match conn.client() {
+            Ok(client) => client.batch_execute(&settings).await.map_err(Error::from),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = applied {
+            conn.close().await;
+            return Err(e);
+        }
+        Ok(conn)
     }
 
     #[must_use]

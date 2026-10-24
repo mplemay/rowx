@@ -8,6 +8,7 @@ use rowx_pg::cancel::Cancel;
 use rowx_pg::conn::Connection as PgConnection;
 use rowx_pg::error::Error;
 use rowx_pg::state::State;
+use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
 use crate::errors::{PgError, interface_error};
@@ -17,9 +18,24 @@ use crate::runtime;
 #[pyclass(frozen, module = "rowx._core", name = "Connection")]
 #[derive(Debug)]
 pub struct Connection {
-    cancel: Cancel,
+    pub(crate) cancel: Cancel,
     #[pyo3(get)]
     statement_cache_size: usize,
+}
+
+impl Connection {
+    #[must_use]
+    pub fn new(conn: PgConnection, handle: Handle, statement_cache_size: usize) -> Self {
+        Self {
+            cancel: Cancel {
+                state: Arc::new(State::default()),
+                target: conn.cancel_target(),
+                conn: Arc::new(Mutex::new(conn)),
+                handle,
+            },
+            statement_cache_size,
+        }
+    }
 }
 
 #[pymethods]
@@ -108,15 +124,6 @@ pub fn connect(
             None => connecting.await,
         };
         let conn = result.map_err(PgError)?;
-        let target = conn.cancel_target();
-        Ok(Connection {
-            cancel: Cancel {
-                state: Arc::new(State::default()),
-                target,
-                conn: Arc::new(Mutex::new(conn)),
-                handle,
-            },
-            statement_cache_size,
-        })
+        Ok(Connection::new(conn, handle, statement_cache_size))
     })
 }
