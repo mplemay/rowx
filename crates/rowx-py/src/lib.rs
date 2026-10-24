@@ -23,6 +23,11 @@ mod _core {
     }
 
     #[pyfunction]
+    fn _cancel_requests_sent() -> u64 {
+        rowx_pg::cancel::requests_sent()
+    }
+
+    #[pyfunction]
     const fn ping() -> &'static str {
         "pong"
     }

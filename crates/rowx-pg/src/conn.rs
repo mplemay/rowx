@@ -5,6 +5,7 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls, Statement};
 
+use crate::cancel::CancelTarget;
 use crate::dsn;
 use crate::error::Error;
 use crate::stmt_cache::StmtCache;
@@ -15,6 +16,7 @@ pub struct Connection {
     task: Option<JoinHandle<()>>,
     broken: Arc<AtomicBool>,
     cache: StmtCache<Statement>,
+    cancel: CancelTarget,
 }
 
 impl Connection {
@@ -27,6 +29,7 @@ impl Connection {
     ) -> Result<Self, Error> {
         let parsed = dsn::parse(dsn)?;
         let (client, connection) = parsed.config.connect(NoTls).await?;
+        let cancel = CancelTarget::new(client.cancel_token(), &parsed.config)?;
         let broken = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&broken);
         let task = handle.spawn(async move {
@@ -39,7 +42,13 @@ impl Connection {
             task: Some(task),
             broken,
             cache: StmtCache::new(statement_cache_size),
+            cancel,
         })
+    }
+
+    #[must_use]
+    pub fn cancel_target(&self) -> CancelTarget {
+        self.cancel.clone()
     }
 
     /// # Errors

@@ -78,6 +78,7 @@ class Connection:
     @property
     def statement_cache_size(self) -> int: ...
 
+def _cancel_requests_sent() -> int: ...
 async def connect(
     dsn: str,
     /,

@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyCFunction, PyList, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
-use rowx_pg::conn::Connection as PgConnection;
+use rowx_pg::cancel::{self, Cancel, Hook};
 use rowx_pg::error::Error;
 use rowx_pg::exec::{self, Raw, Shape};
 use rowx_pg::state::{Claim, State};
 use rowx_pg::{Row, Type};
-use tokio::sync::Mutex;
 
 use crate::codec;
 use crate::errors::{PgError, to_py_err};
@@ -26,19 +25,22 @@ pub struct FetchArgs {
 /// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed or a parameter cannot be extracted.
 pub fn fetch<'py>(
     py: Python<'py>,
-    inner: &Arc<Mutex<PgConnection>>,
-    state: &Arc<State>,
+    cancel: &Cancel,
     params: &Bound<'py, PyList>,
     args: FetchArgs,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params = codec::extract(py, params)?;
     // claimed synchronously so a second call made before the first is awaited fails immediately
-    let claim = state.claim().map_err(|e| to_py_err(py, &e))?;
-    let inner = Arc::clone(inner);
-    let state = Arc::clone(state);
-    future_into_py(py, async move {
-        let claim = settle_claim(&state, claim).await?;
-        let rows = {
+    let claim = cancel.state.claim().map_err(|e| to_py_err(py, &e))?;
+    let cancel = cancel.clone();
+    let hook = Hook::default();
+    let watched = hook.clone();
+    let future = future_into_py(py, async move {
+        let claim = settle_claim(&cancel.state, claim).await?;
+        let inner = Arc::clone(&cancel.conn);
+        let scalar = args.scalar;
+        // the operation owns the request; dropping this future while it runs cancels it
+        let pending = cancel::spawn(&cancel, claim, &hook, async move {
             let mut conn = inner.lock().await;
             let shape = Shape {
                 mask: args.mask.as_deref(),
@@ -46,7 +48,7 @@ pub fn fetch<'py>(
                 limit_one: args.limit_one,
                 arity: args.arity,
             };
-            let result = match conn.parts() {
+            match conn.parts() {
                 Ok((client, cache)) => {
                     exec::fetch(client, cache, &args.sql, &shape, |types: &[Type]| {
                         codec::encode_all(&params, types)
@@ -54,45 +56,71 @@ pub fn fetch<'py>(
                     .await
                 }
                 Err(e) => Err(e),
-            };
-            // Busy → Idle happens before Python sees the result, so `await a(); await b()` never sees Busy
-            drop(conn);
-            drop(claim);
-            result.map_err(|e| fail(&state, e))?
-        };
-        Python::attach(|py| build(py, &rows, args.scalar))
-    })
+            }
+        });
+        let rows = pending
+            .wait()
+            .await
+            .map_err(PgError)?
+            .map_err(|e| fail(&cancel.state, e))?;
+        Python::attach(|py| build(py, &rows, scalar))
+    })?;
+    watch(&future, watched)?;
+    Ok(future)
 }
 
 /// # Errors
 /// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed or a parameter cannot be extracted.
 pub fn execute<'py>(
     py: Python<'py>,
-    inner: &Arc<Mutex<PgConnection>>,
-    state: &Arc<State>,
+    cancel: &Cancel,
     params: &Bound<'py, PyList>,
     sql: String,
 ) -> PyResult<Bound<'py, PyAny>> {
     let params = codec::extract(py, params)?;
-    let claim = state.claim().map_err(|e| to_py_err(py, &e))?;
-    let inner = Arc::clone(inner);
-    let state = Arc::clone(state);
-    future_into_py(py, async move {
-        let claim = settle_claim(&state, claim).await?;
-        let mut conn = inner.lock().await;
-        let result = match conn.parts() {
-            Ok((client, cache)) => {
-                exec::execute(client, cache, &sql, |types: &[Type]| {
-                    codec::encode_all(&params, types)
-                })
-                .await
+    let claim = cancel.state.claim().map_err(|e| to_py_err(py, &e))?;
+    let cancel = cancel.clone();
+    let hook = Hook::default();
+    let watched = hook.clone();
+    let future = future_into_py(py, async move {
+        let claim = settle_claim(&cancel.state, claim).await?;
+        let inner = Arc::clone(&cancel.conn);
+        let pending = cancel::spawn(&cancel, claim, &hook, async move {
+            let mut conn = inner.lock().await;
+            match conn.parts() {
+                Ok((client, cache)) => {
+                    exec::execute(client, cache, &sql, |types: &[Type]| {
+                        codec::encode_all(&params, types)
+                    })
+                    .await
+                }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
-        };
-        drop(conn);
-        drop(claim);
-        Ok(result.map_err(|e| fail(&state, e))?)
-    })
+        });
+        let count = pending
+            .wait()
+            .await
+            .map_err(PgError)?
+            .map_err(|e| fail(&cancel.state, e))?;
+        Ok(count)
+    })?;
+    watch(&future, watched)?;
+    Ok(future)
+}
+
+// asyncio runs done callbacks before the awaiting task resumes, while the Rust future is only dropped
+// later on another thread; settling here keeps `cancel(); await next()` from seeing Busy
+fn watch(future: &Bound<'_, PyAny>, hook: Hook) -> PyResult<()> {
+    let callback = PyCFunction::new_closure(future.py(), None, None, move |args, _kwargs| {
+        if let Ok(done) = args.get_item(0)
+            && done.call_method0("cancelled")?.is_truthy()?
+        {
+            hook.fire();
+        }
+        PyResult::Ok(())
+    })?;
+    future.call_method1("add_done_callback", (callback,))?;
+    Ok(())
 }
 
 // a call that arrived while a cancelled operation was settling waits here, outside the GIL

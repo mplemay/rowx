@@ -4,6 +4,7 @@ use std::time::Duration;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
+use rowx_pg::cancel::Cancel;
 use rowx_pg::conn::Connection as PgConnection;
 use rowx_pg::error::Error;
 use rowx_pg::state::State;
@@ -16,8 +17,7 @@ use crate::runtime;
 #[pyclass(frozen, module = "rowx._core", name = "Connection")]
 #[derive(Debug)]
 pub struct Connection {
-    inner: Arc<Mutex<PgConnection>>,
-    state: Arc<State>,
+    cancel: Cancel,
     #[pyo3(get)]
     statement_cache_size: usize,
 }
@@ -25,11 +25,16 @@ pub struct Connection {
 #[pymethods]
 impl Connection {
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        let state = Arc::clone(&self.state);
+        let cancel = self.cancel.clone();
         future_into_py(py, async move {
-            state.close();
-            inner.lock().await.close().await;
+            let running = cancel.state.is_busy();
+            cancel.state.close();
+            if running {
+                // an operation that is still running would hold the lock for its full length;
+                // a failed request is fine because dropping the client ends the query anyway
+                let _ = cancel.target.request().await;
+            }
+            cancel.conn.lock().await.close().await;
             Ok(())
         })
     }
@@ -54,7 +59,7 @@ impl Connection {
             limit_one,
             arity,
         };
-        exec::fetch(py, &self.inner, &self.state, params, args)
+        exec::fetch(py, &self.cancel, params, args)
     }
 
     #[pyo3(name = "_execute")]
@@ -64,12 +69,12 @@ impl Connection {
         sql: String,
         params: &Bound<'py, PyList>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        exec::execute(py, &self.inner, &self.state, params, sql)
+        exec::execute(py, &self.cancel, params, sql)
     }
 
     #[getter]
     fn closed(&self) -> bool {
-        self.state.is_closed()
+        self.cancel.state.is_closed()
     }
 }
 
@@ -103,9 +108,14 @@ pub fn connect(
             None => connecting.await,
         };
         let conn = result.map_err(PgError)?;
+        let target = conn.cancel_target();
         Ok(Connection {
-            inner: Arc::new(Mutex::new(conn)),
-            state: Arc::new(State::default()),
+            cancel: Cancel {
+                state: Arc::new(State::default()),
+                target,
+                conn: Arc::new(Mutex::new(conn)),
+                handle,
+            },
             statement_cache_size,
         })
     })
