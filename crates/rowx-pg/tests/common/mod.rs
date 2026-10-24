@@ -1,5 +1,6 @@
-// clippy::redundant_pub_crate rejects pub(crate) in a private module, so rustc's unreachable_pub is silenced here
-#![allow(unreachable_pub)]
+// clippy::redundant_pub_crate rejects pub(crate) in a private module, so rustc's unreachable_pub is silenced here;
+// each test binary uses only a subset of these shared helpers, hence dead_code
+#![allow(unreachable_pub, dead_code)]
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
