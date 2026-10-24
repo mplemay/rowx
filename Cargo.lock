@@ -522,6 +522,7 @@ dependencies = [
 name = "rowx-pg"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "thiserror",
  "tokio",

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bytes = "1"
 futures-util = { version = "0.3", default-features = false }
 thiserror = "2"
 tokio = { workspace = true }

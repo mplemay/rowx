@@ -126,12 +126,11 @@ def test_execute_row_counts(schema: str) -> None:
     assert run_with_conn(schema, body) == (0, 3)
 
 
-def test_params_not_yet_supported(schema: str) -> None:
-    async def body(c: ConnectionImpl) -> None:
-        await fetch(c, "SELECT $1::int4", params=[1], scalar=True, arity=1)
+def test_params_are_bound(schema: str) -> None:
+    async def body(c: ConnectionImpl) -> list[object]:
+        return await fetch(c, "SELECT $1::int4", params=[1], scalar=True, arity=1)
 
-    with pytest.raises(InterfaceError, match="params not yet supported"):
-        run_with_conn(schema, body)
+    assert run_with_conn(schema, body) == [1]
 
 
 def test_concurrent_call_is_busy_then_idle_again(schema: str) -> None:
