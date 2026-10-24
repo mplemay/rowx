@@ -1,4 +1,5 @@
-mod common;
+// pub, so the shared helpers are reachable from the crate root and need no visibility waiver
+pub mod common;
 
 use common::TestResult;
 use rowx_pg::conn::Connection;

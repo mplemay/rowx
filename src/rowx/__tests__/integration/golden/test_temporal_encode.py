@@ -1,6 +1,6 @@
 import asyncio
 from datetime import UTC, date, datetime, time, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
-EAST = timezone(timedelta(hours=5, minutes=30))
-WEST = timezone(timedelta(hours=-8))
+EAST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+WEST: Final[timezone] = timezone(timedelta(hours=-8))
 
 
 def run_with_conn[T](dsn: str, body: Callable[[rowx.Connection], Awaitable[T]]) -> T:

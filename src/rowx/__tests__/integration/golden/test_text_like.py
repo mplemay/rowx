@@ -1,4 +1,5 @@
 import asyncio
+from array import array
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -61,6 +62,12 @@ def test_bytea_accepts_bytes_likes(schema: str) -> None:
     for value in (bytearray(b"x\x00y"), memoryview(b"x\x00y")):
         got = run_with_conn(schema, query[bytes](t"SELECT {value}::bytea").fetch_one)
         assert got == b"x\x00y"
+
+
+@pytest.mark.parametrize("value", [memoryview(array("b", [-1, 0, 1])), memoryview(array("I", [123]))])
+def test_bytea_takes_raw_bytes_of_any_memoryview_format(schema: str, value: memoryview) -> None:
+    got = run_with_conn(schema, query[bytes](t"SELECT {value}::bytea").fetch_one)
+    assert got == value.tobytes()
 
 
 def test_bytes_to_int4_is_encode_error(schema: str) -> None:

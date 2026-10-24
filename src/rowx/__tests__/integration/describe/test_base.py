@@ -93,6 +93,17 @@ def test_enum_citext_domain_resolve(schema: str) -> None:
     assert [c.type_key for c in d.columns] == ["enum", "citext", "int4", "array", "array", "array"]
 
 
+def test_domain_param_resolves_to_its_base_key(schema: str) -> None:
+    d = run_describe(schema, "SELECT $1::positive_int")
+    assert [(p.type_name, p.type_key) for p in d.params] == [("positive_int", "int4")]
+
+
+def test_unlisted_type_with_a_builtin_send_function_is_unsupported(schema: str) -> None:
+    # refcursor reuses textsend, but the runtime has no decoder for it
+    (col,) = run_describe(schema, "SELECT 'c'::refcursor AS cur").columns
+    assert (col.type_name, col.type_key) == ("refcursor", None)
+
+
 def test_checker_session_settings(schema: str) -> None:
     async def body(conn: Connection) -> list[object]:
         names = ("application_name", "default_transaction_read_only", "lock_timeout")

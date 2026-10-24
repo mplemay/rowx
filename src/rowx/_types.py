@@ -13,7 +13,9 @@ def by_key(key: str) -> TypeInfo:
 
 
 def accepts(py_type_name: str, key: str) -> bool:
-    return py_type_name in by_key(key).accepted_params
+    accepted = by_key(key).accepted_params
+    # `object` (json/jsonb) takes any value; json.dumps is the arbiter at runtime
+    return "object" in accepted or py_type_name in accepted
 
 
 def result_type(key: str) -> str:

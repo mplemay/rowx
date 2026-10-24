@@ -36,6 +36,22 @@ pub fn decode<'py>(py: Python<'py>, raw: &[u8]) -> PyResult<Bound<'py, PyAny>> {
     uuid_class(py)?.call((), Some(&kwargs))
 }
 
+/// The canonical hyphenated form, as the server prints it.
+#[must_use]
+pub fn to_text(bytes: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(36);
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            out.push('-');
+        }
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
 /// A `UUID` goes out as 16 binary bytes, a `str` as text for the server to parse.
 ///
 /// # Errors

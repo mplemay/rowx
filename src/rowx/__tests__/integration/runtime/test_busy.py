@@ -1,5 +1,5 @@
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -11,8 +11,10 @@ if TYPE_CHECKING:
 
 pytestmark = [pytest.mark.integration, pytest.mark.db, pytest.mark.timing]
 
-SLEEPING = "SELECT count(*)::int4 FROM pg_stat_activity WHERE query LIKE '%pg_sleep(1)%' AND pid <> pg_backend_pid()"
-POLL_LIMIT = 2000
+SLEEPING: Final[str] = (
+    "SELECT count(*)::int4 FROM pg_stat_activity WHERE query LIKE '%pg_sleep(1)%' AND pid <> pg_backend_pid()"
+)
+POLL_LIMIT: Final[int] = 2000
 
 
 async def fetch(conn: ConnectionImpl, sql: str, *, scalar: bool = False) -> list[object]:

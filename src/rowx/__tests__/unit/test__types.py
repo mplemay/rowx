@@ -29,6 +29,12 @@ def test_accepts() -> None:
     assert accepts("str", "uuid")
 
 
+@pytest.mark.parametrize("key", ["json", "jsonb"])
+@pytest.mark.parametrize("py_type_name", ["str", "int", "bool", "float", "list", "dict", "None"])
+def test_json_accepts_any_value(py_type_name: str, key: str) -> None:
+    assert accepts(py_type_name, key)
+
+
 def test_text_accepts_only_str() -> None:
     assert by_key("text").accepted_params == ["str"]
 

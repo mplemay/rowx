@@ -116,21 +116,18 @@ impl<F: Fn(&[Type]) -> Result<Vec<Param>, Error> + Sync> Encode for F {
 
 const TXN_HINT: &str = "schema changed inside a transaction; ROLLBACK and retry";
 
-async fn bind(
+// the statement for `sql`, and whether it came from the cache
+async fn prepare(
     client: &Client,
     cache: &mut StmtCache<Statement>,
     sql: &str,
-    encode: &impl Encode,
-) -> Result<(Statement, Vec<Param>), Error> {
-    let stmt = if let Some(stmt) = cache.get(sql) {
-        stmt
-    } else {
-        let stmt = client.prepare(sql).await?;
-        cache.insert(sql, stmt.clone());
-        stmt
-    };
-    let params = encode.encode(stmt.params())?;
-    Ok((stmt, params))
+) -> Result<(Statement, bool), Error> {
+    if let Some(stmt) = cache.get(sql) {
+        return Ok((stmt, true));
+    }
+    let stmt = client.prepare(sql).await?;
+    cache.insert(sql, stmt.clone());
+    Ok((stmt, false))
 }
 
 enum Retry {
@@ -245,9 +242,33 @@ async fn fetch_once(
     shape: &Shape<'_>,
     encode: &impl Encode,
 ) -> Result<Vec<Row>, Error> {
-    let (stmt, params) = bind(client, cache, sql, encode).await?;
-    let columns = stmt.columns().len();
+    let (mut stmt, cached) = prepare(client, cache, sql).await?;
+    if cached && check_shape(shape, stmt.columns().len()).is_err() {
+        // a schema change since caching can alter the columns, and the server only reports it on
+        // execution, which the shape check would prevent; judge the shape on a fresh prepare
+        cache.remove(sql);
+        (stmt, _) = prepare(client, cache, sql).await?;
+    }
     // checked before executing so a statement with no rows still reports a wrong shape
+    check_shape(shape, stmt.columns().len())?;
+    let params = encode.encode(stmt.params())?;
+    let stream = client.query_raw(&stmt, &params).await?;
+    pin_mut!(stream);
+    let mut rows = Vec::new();
+    while let Some(row) = stream.try_next().await? {
+        if let Some(mask) = shape.mask {
+            check_nulls(&row, mask)?;
+        }
+        rows.push(row);
+        // dropping the stream discards the rest of the result; the connection task drains it
+        if shape.limit_one {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
+fn check_shape(shape: &Shape<'_>, columns: usize) -> Result<(), Error> {
     if let Some(arity) = shape.arity
         && arity != columns
     {
@@ -268,20 +289,7 @@ async fn fetch_once(
             mask.len()
         )));
     }
-    let stream = client.query_raw(&stmt, &params).await?;
-    pin_mut!(stream);
-    let mut rows = Vec::new();
-    while let Some(row) = stream.try_next().await? {
-        if let Some(mask) = shape.mask {
-            check_nulls(&row, mask)?;
-        }
-        rows.push(row);
-        // dropping the stream discards the rest of the result; the connection task drains it
-        if shape.limit_one {
-            break;
-        }
-    }
-    Ok(rows)
+    Ok(())
 }
 
 /// # Errors
@@ -307,7 +315,8 @@ async fn execute_once(
     sql: &str,
     encode: &impl Encode,
 ) -> Result<u64, Error> {
-    let (stmt, params) = bind(client, cache, sql, encode).await?;
+    let (stmt, _) = prepare(client, cache, sql).await?;
+    let params = encode.encode(stmt.params())?;
     Ok(client.execute_raw(&stmt, &params).await?)
 }
 

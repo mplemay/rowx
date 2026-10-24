@@ -181,8 +181,10 @@ pub fn decode_interval(raw: &[u8]) -> Result<Interval, TemporalError> {
     let microseconds = i64::from_be_bytes([m0, m1, m2, m3, m4, m5, m6, m7]);
     let days = i32::from_be_bytes([d0, d1, d2, d3]);
     let months = i32::from_be_bytes([n0, n1, n2, n3]);
-    // infinity is stored as the maximum (or minimum) of every field
-    if microseconds == i64::MAX || microseconds == i64::MIN {
+    // infinity is stored as the maximum (or minimum) of every field; one extreme field alone is finite
+    if (microseconds, days, months) == (i64::MAX, i32::MAX, i32::MAX)
+        || (microseconds, days, months) == (i64::MIN, i32::MIN, i32::MIN)
+    {
         return Err(TemporalError::Infinite { ty: "interval" });
     }
     if months != 0 {
@@ -378,6 +380,26 @@ mod tests {
         assert_eq!(
             decode_interval(&interval(i64::MIN, i32::MIN, i32::MIN)),
             Err(TemporalError::Infinite { ty: "interval" })
+        );
+    }
+
+    #[test]
+    fn interval_with_one_extreme_field_is_finite() {
+        for micros in [i64::MAX, i64::MIN] {
+            assert_eq!(
+                decode_interval(&interval(micros, 0, 0)),
+                Ok(Interval {
+                    days: 0,
+                    microseconds: micros
+                })
+            );
+        }
+        assert_eq!(
+            decode_interval(&interval(i64::MAX, i32::MAX, 0)),
+            Ok(Interval {
+                days: i32::MAX,
+                microseconds: i64::MAX
+            })
         );
     }
 }

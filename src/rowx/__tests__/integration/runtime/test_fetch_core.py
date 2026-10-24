@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import rowx
-from rowx.errors import ConnectionBusyError, DecodeError, InterfaceError, RowShapeError
+from rowx.errors import DecodeError, InterfaceError, RowShapeError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -129,19 +129,6 @@ def test_execute_row_counts(schema: str) -> None:
 def test_params_are_bound(schema: str) -> None:
     async def body(c: ConnectionImpl) -> list[object]:
         return await fetch(c, "SELECT $1::int4", params=[1], scalar=True, arity=1)
-
-    assert run_with_conn(schema, body) == [1]
-
-
-def test_concurrent_call_is_busy_then_idle_again(schema: str) -> None:
-    async def body(c: ConnectionImpl) -> list[object]:
-        slow = asyncio.create_task(fetch(c, "SELECT pg_sleep(0.2)", scalar=True, arity=1))
-        # one loop turn lets the task claim the connection
-        await asyncio.sleep(0)
-        with pytest.raises(ConnectionBusyError):
-            await fetch(c, "SELECT 1", scalar=True, arity=1)
-        await slow
-        return await fetch(c, "SELECT 1", scalar=True, arity=1)
 
     assert run_with_conn(schema, body) == [1]
 
