@@ -1,0 +1,7 @@
+error[arity-mismatch]: row type has 2 elements but the query returns 3 columns
+ --> app/users.py:3:15
+  |
+3 | rows = query[Row](t"select id, name from users")
+  |               ^^^
+  |
+  = note: alias `Row` defined at app/users.py:1:1
