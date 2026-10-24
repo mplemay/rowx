@@ -28,6 +28,16 @@ pub struct TypeInfo {
 const fn codec_name(codec: Codec) -> &'static str {
     match codec {
         Codec::Unsupported => "unsupported",
+        Codec::Int => "int",
+        Codec::Float => "float",
+        Codec::Numeric => "numeric",
+        Codec::Text => "text",
+        Codec::Bytes => "bytes",
+        Codec::Uuid => "uuid",
+        Codec::Json => "json",
+        Codec::Temporal => "temporal",
+        Codec::Array => "array",
+        Codec::Void => "void",
     }
 }
 

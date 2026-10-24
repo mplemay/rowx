@@ -75,7 +75,7 @@ These exist after T00, T01 and T03.
 | Bindings | `crates/rowx-py/src/{lib,conn,exec,errors,runtime,types}.rs`; `lib.rs` only registers | T01, T05, T07, T08 |
 | Python runtime | `src/rowx/{__init__,_query,errors,_template,_rowplan,_types}.py` | T02, T05, T09–T11 |
 | Checker | `src/rowx/check/<module>.py` | T35–T44, one module each |
-| Tests | `tests/<area>/…`, `tests/golden/<family>.py`, `tests/check/cases/<rule>.py` | the task that owns that area |
+| Tests | `tests/<area>/…`, `src/rowx/__tests__/integration/golden/test_<family>.py`, `tests/check/cases/<rule>.py` | the task that owns that area |
 
 ---
 
@@ -243,7 +243,7 @@ P3  T45 → T46 → T47
 ### T07 · Bindings: async `connect`, `Connection`, error mapping
 
 - **Deps:** T02, T05, T06 · **Files:** `crates/rowx-py/src/{lib,conn,errors,runtime}.rs`, `src/rowx/__init__.py`,
-  `src/rowx/_query.py` (only the `Connection` wrapper), `tests/runtime/test_connect.py`
+  `src/rowx/_query.py` (only the `Connection` wrapper), `src/rowx/__tests__/integration/runtime/test_connect.py`
 - **Do:**
   - The Python `Connection` wraps `_core.Connection`. It has `async def close`,
     `__aenter__`/`__aexit__` and `closed`.
@@ -251,7 +251,7 @@ P3  T45 → T46 → T47
   - `errors.rs` is the single mapping point: it imports `rowx.errors` classes at module
     init.
   - Honour `connect_timeout`. Store `statement_cache_size`; it has no effect until T20.
-- **Accept** (DB): `uv run pytest tests/runtime/test_connect.py -q` covers:
+- **Accept** (DB): `uv run pytest src/rowx/__tests__/integration/runtime/test_connect.py -q` covers:
   - connect and close, `async with`, and `closed`;
   - a malformed DSN gives `InterfaceError`, and a bad password gives `DatabaseError` with
     `.sqlstate == "28P01"`;
@@ -261,7 +261,8 @@ P3  T45 → T46 → T47
 ### T08 · Fetch/execute core with a minimal codec
 
 - **Deps:** T07 · **Files:** `crates/rowx-pg/src/{exec,state}.rs` (minimal state: Idle/Busy/Closed),
-  `crates/rowx-py/src/{exec,codec/mod,codec/int,codec/text}.rs`, `tests/runtime/test_fetch_core.py`
+  `crates/rowx-py/src/{exec,codec/mod,codec/int,codec/text}.rs`,
+  `src/rowx/__tests__/integration/runtime/test_fetch_core.py`
 - **Do:** implement design §7.2 steps 1–6 **without** the statement cache, retries or
   parameters.
   - A non-empty `params` raises `InterfaceError("params not yet supported")`; T12 removes
@@ -271,7 +272,7 @@ P3  T45 → T46 → T47
     raises `DecodeError`.
   - Check arity before executing, and apply the NULL mask, scalar and `limit_one`.
   - Release the GIL during IO. Move Busy → Idle before delivering the result.
-- **Accept** (DB): `uv run pytest tests/runtime/test_fetch_core.py -q` covers:
+- **Accept** (DB): `uv run pytest src/rowx/__tests__/integration/runtime/test_fetch_core.py -q` covers:
   - `await c._fetch("SELECT 1, 'a'", [], [False, False], False, False, 2) == [(1, 'a')]`;
   - the scalar form returns bare values;
   - `limit_one` on `generate_series(1,100000)` returns 1 row, and the **next** call on the
@@ -284,14 +285,14 @@ P3  T45 → T46 → T47
 
 ### T09 · `_template.py`
 
-- **Deps:** T02 · **Files:** `src/rowx/_template.py`, `tests/unit/test_template.py`
+- **Deps:** T02 · **Files:** `src/rowx/_template.py`, `src/rowx/__tests__/unit/test_template.py`
 - **Do:** implement design §3.5 in full:
   - `Compiled`, `compile_parts` and `compile_template`;
   - the adjacency rule;
   - every `TypeError` case;
   - the `:ident` rules, including the 63-byte limit;
   - nested flattening and renumbering for dynamic queries.
-- **Accept:** `uv run pytest tests/unit/test_template.py -q`, table-driven, covering:
+- **Accept:** `uv run pytest src/rowx/__tests__/unit/test_template.py -q`, table-driven, covering:
   - `t"{x}{x}"` gives `$1 $2`, and `t"SELECT 1 AS x{y}"` gives `x $1`;
   - `segments` and `placeholders` offsets are asserted for each case;
   - nested renumbering;
@@ -301,13 +302,13 @@ P3  T45 → T46 → T47
 
 ### T10 · `_rowplan.py` and the conformance table
 
-- **Deps:** T02 · **Files:** `src/rowx/_rowplan.py`, `tests/conformance/row_types.py` (the table:
-  `(source_text, expected_plan_or_error, expected_checker_verdict)`), `tests/unit/test_rowplan.py`
+- **Deps:** T02 · **Files:** `src/rowx/_rowplan.py`, `src/rowx/__tests__/conformance/row_types.py` (the table:
+  `(source_text, expected_plan_or_error, expected_checker_verdict)`), `src/rowx/__tests__/unit/test_rowplan.py`
 - **Do:** implement the design §3.4 grammar.
   - Unwrap aliases and `Annotated`.
   - Compute the nullable mask, with `Any` and `object` nullable.
   - Rejected forms raise `InterfaceError`. Cache plans per `T`.
-- **Accept:** `uv run pytest tests/unit/test_rowplan.py -q` runs every conformance row
+- **Accept:** `uv run pytest src/rowx/__tests__/unit/test_rowplan.py -q` runs every conformance row
   through `_rowplan`. The rows include:
   - `type A = tuple[int, str | None]` gives mask `[False, True]`;
   - an alias of an alias;
@@ -318,13 +319,14 @@ P3  T45 → T46 → T47
 
 ### T11 · `query` / `query_unchecked` — VERTICAL SLICE
 
-- **Deps:** T08, T09, T10 · **Files:** `src/rowx/_query.py`, `src/rowx/__init__.py`, `tests/runtime/test_query_slice.py`
+- **Deps:** T08, T09, T10 · **Files:** `src/rowx/_query.py`, `src/rowx/__init__.py`,
+  `src/rowx/__tests__/integration/runtime/test_query_slice.py`
 - **Do:**
   - Write `_BaseQuery` and its two siblings (design §3.2), with no `__slots__`.
   - Compile eagerly in `__init__`, and build the plan lazily from `__orig_class__`.
   - `fetch_one`, `fetch_all` and `execute` are `async def`. Map the result to
     `RowNotFound` where needed.
-- **Accept** (DB): `uv run pytest tests/runtime/test_query_slice.py -q` covers:
+- **Accept** (DB): `uv run pytest src/rowx/__tests__/integration/runtime/test_query_slice.py -q` covers:
   - `await query[int](t"SELECT 1").fetch_one(conn) == 1`;
   - `query[tuple[int, str]]` gives `(1, 'a')`;
   - `fetch_all` over `generate_series(1,3)` gives `[1, 2, 3]`;
@@ -343,7 +345,7 @@ P3  T45 → T46 → T47
 
 - **Deps:** T11 · **Files:** `crates/rowx-py/src/codec/extract.rs`, `crates/rowx-pg/src/exec.rs` (encode step,
   per-parameter `encode_format`), `crates/rowx-py/src/codec/{int,text}.rs` (encode arms),
-  `tests/golden/test_params_basic.py`
+  `src/rowx/__tests__/integration/golden/test_params_basic.py`
 - **Do:** implement design §7.3: `PyParam` extraction under the GIL, then encoding without
   it.
   - Check the parameter count, giving `InterfaceError`.
@@ -352,7 +354,7 @@ P3  T45 → T46 → T47
   - Range-check ints. `bool` is not an `int`. `None` becomes NULL.
   - Wrap parameters in a type whose `Debug` impl is redacted.
   - Remove the "params not yet supported" error.
-- **Accept** (DB): `uv run pytest tests/golden/test_params_basic.py -q` covers:
+- **Accept** (DB): `uv run pytest src/rowx/__tests__/integration/golden/test_params_basic.py -q` covers:
   - `query[int](t"SELECT {x}::int")` round-trips;
   - `40000` to an `int2` raises `EncodeError` mentioning `$1`;
   - `True` to an `int4` raises `EncodeError`, and `42` to a `text` raises `EncodeError`;
@@ -367,7 +369,7 @@ P3  T45 → T46 → T47
 ### T13 · Numeric family
 
 - **Deps:** T12 · **Files:** `crates/rowx-pg/src/wire/numeric.rs`, `crates/rowx-py/src/codec/{float,numeric}.rs`,
-  `tests/golden/test_numeric.py`
+  `src/rowx/__tests__/integration/golden/test_numeric.py`
 - **Do:**
   - Cover `oid`, `float4`, `float8` and `numeric`.
   - `numeric` decodes from binary to `Decimal`, including NaN, ±Infinity, negative scale
@@ -377,20 +379,20 @@ P3  T45 → T46 → T47
 - **Accept:**
   - `cargo test -p rowx-pg wire::numeric`, a pure test covering `1e-30`, `1e100`, NaN and
     `-0.00`.
-  - `uv run pytest tests/golden/test_numeric.py -q` covers the round-trip table, `int` →
+  - `uv run pytest src/rowx/__tests__/integration/golden/test_numeric.py -q` covers the round-trip table, `int` →
     `numeric`, `int` → `float8`, and `float` → `numeric` raising `EncodeError`.
 
 ### T14 · Text-like, bytea, uuid, json/jsonb, enum, citext, `"char"`
 
 - **Deps:** T12 · **Files:** `crates/rowx-py/src/codec/{text,bytes,uuid,json}.rs`, `codec/mod.rs` (Kind dispatch for
-  Enum/Domain), `tests/golden/test_text_like.py`
+  Enum/Domain), `src/rowx/__tests__/integration/golden/test_text_like.py`
 - **Do:**
   - Dispatch through `Type::kind()` (design §6). A domain resolves to its base type.
   - jsonb decode strips the version byte. json encode always uses `json.dumps`, acquiring
     the GIL.
   - `uuid` accepts `UUID` (binary) or `str` (text).
   - bytes-likes are accepted for `bytea`.
-- **Accept** (DB): `uv run pytest tests/golden/test_text_like.py -q` covers:
+- **Accept** (DB): `uv run pytest src/rowx/__tests__/integration/golden/test_text_like.py -q` covers:
   - unicode, the empty string, and a bytea containing NUL;
   - jsonb `null`, `1`, `"s"`, `[…]` and `{…}`;
   - binding a `str` to jsonb stores a JSON string, and `{s}::jsonb` stores raw JSON;
@@ -401,7 +403,7 @@ P3  T45 → T46 → T47
 ### T15 · Temporal decode
 
 - **Deps:** T12 · **Files:** `crates/rowx-pg/src/wire/temporal.rs`, `crates/rowx-py/src/codec/temporal.rs`,
-  `tests/golden/test_temporal_decode.py`
+  `src/rowx/__tests__/integration/golden/test_temporal_decode.py`
 - **Do:**
   - Decode `date`, `time`, `timetz` (negating the offset), `timestamp`, `timestamptz`
     (as UTC-aware) and `interval`.
@@ -416,7 +418,8 @@ P3  T45 → T46 → T47
 
 ### T16 · Temporal encode
 
-- **Deps:** T15 · **Files:** `crates/rowx-py/src/codec/temporal_enc.rs`, `tests/golden/test_temporal_encode.py`
+- **Deps:** T15 · **Files:** `crates/rowx-py/src/codec/temporal_enc.rs`,
+  `src/rowx/__tests__/integration/golden/test_temporal_encode.py`
 - **Do:** implement the design §6 rules.
   - The native pairs encode as binary; `timetz` encodes as text.
   - These raise `EncodeError`: a naive value to `timestamptz`, an aware value to
@@ -427,7 +430,7 @@ P3  T45 → T46 → T47
 ### T17 · Array decode
 
 - **Deps:** T13, T14, T15 · **Files:** `crates/rowx-pg/src/wire/array.rs`, `crates/rowx-py/src/codec/array.rs`,
-  `tests/golden/test_arrays_decode.py`
+  `src/rowx/__tests__/integration/golden/test_array_decode.py`
 - **Do:**
   - Decode 1-D and multi-dimensional arrays into nested lists.
   - Handle empty arrays and NULL elements.
@@ -440,7 +443,8 @@ P3  T45 → T46 → T47
 
 ### T18 · Array encode and `ANY({list})`
 
-- **Deps:** T16, T17 · **Files:** `crates/rowx-py/src/codec/array_enc.rs`, `tests/golden/test_arrays_encode.py`
+- **Deps:** T16, T17 · **Files:** `crates/rowx-py/src/codec/array_enc.rs`,
+  `src/rowx/__tests__/integration/golden/test_array_encode.py`
 - **Do:**
   - Use binary when every element encodes as binary, writing the element OID exactly as
     declared. Otherwise build the text literal (design §7.3).
@@ -455,14 +459,15 @@ P3  T45 → T46 → T47
 
 ### T19 · Codec completeness gate
 
-- **Deps:** T13–T18 · **Files:** `tests/golden/test_table_coverage.py`
+- **Deps:** T13–T18 · **Files:** `src/rowx/__tests__/integration/golden/test_table_coverage.py`,
+  `crates/rowx-pg/src/types.rs` and `crates/rowx-py/src/types.rs` (flip each supported row's `Codec` off `Unsupported`)
 - **Do:**
   - Add a meta-test: every supported `type_table()` row has at least one decode golden and
     one encode golden, or a listed exemption.
   - No row may be left at `Codec::Unsupported` unless the table marks it unsupported.
   - `money`, `inet`, `int4range` and `aclitem` must fail cleanly: `DecodeError`, or
     `DatabaseError` 42883 for `aclitem`.
-- **Accept:** `uv run pytest tests/golden -q` is green. Deleting one golden entry makes
+- **Accept:** `uv run pytest src/rowx/__tests__/integration/golden -q` is green. Deleting one golden entry makes
   `test_table_coverage` fail; demonstrate this in the PR.
 
 ## P2b — Driver features, end to end, typing
@@ -470,7 +475,7 @@ P3  T45 → T46 → T47
 ### T20 · Statement cache and retry rules
 
 - **Deps:** T11 · **Files:** `crates/rowx-pg/src/stmt_cache.rs`, `exec.rs` (lookup and retry),
-  `tests/runtime/test_stmt_cache.py`
+  `src/rowx/__tests__/integration/runtime/test_stmt_cache.py`
 - **Do:** implement design §7.2 (schema-change retry) and §7.4.
   - The cache is an LRU per connection; `statement_cache_size=0` disables it.
   - Retry once on `0A000` with routine `RevalidateCachedQuery`. A `25P02` on the retry
@@ -488,7 +493,7 @@ P3  T45 → T46 → T47
 ### T21 · Connection state machine
 
 - **Deps:** T11 · **Files:** `crates/rowx-pg/src/state.rs`, wiring in `conn.rs` and `exec.rs`,
-  `tests/runtime/test_busy.py`
+  `src/rowx/__tests__/integration/runtime/test_busy.py`
 - **Do:** implement design §7.5 in full.
   - The states are `Idle | Busy | Settling | Broken | Closed`, held in an atomic and
     claimed by CAS in the synchronous part of the pymethod.
@@ -505,7 +510,8 @@ P3  T45 → T46 → T47
 
 ### T22 · Cancellation (Settling, own CancelRequest, drain)
 
-- **Deps:** T21 · **Files:** `crates/rowx-pg/src/cancel.rs`, `exec.rs`, `tests/runtime/test_cancel.py`
+- **Deps:** T21 · **Files:** `crates/rowx-pg/src/cancel.rs`, `exec.rs`,
+  `src/rowx/__tests__/integration/runtime/test_cancel.py`
 - **Do:** implement design §7.6 exactly.
   - Each operation runs as its own task, with a guard that is disarmed on every completion
     path.
@@ -526,14 +532,14 @@ P3  T45 → T46 → T47
 ### T23 · TLS (rustls, sslmode mapping, sslrootcert)
 
 - **Deps:** T06, T22 · **Files:** `crates/rowx-pg/src/tls.rs`, `dsn.rs` (ssl keys), `scripts/gen-certs.sh`,
-  `scripts/pg.sh` (`up --ssl`), `tests/runtime/test_tls.py`
+  `scripts/pg.sh` (`up --ssl`), `src/rowx/__tests__/integration/runtime/test_tls.py`
 - **Do:** implement the design §7.1 table.
   - Use custom rustls verifiers (accept-any, CA-only and full) with the `ring` provider
     only.
   - `sslcert`, `sslkey` and `sslcrl` raise `InterfaceError`.
   - Cancel requests reuse the same connector.
-- **Accept** (DB with an SSL container): `ROWX_TEST_DSN_SSL=… uv run pytest tests/runtime/test_tls.py -q`
-  covers:
+- **Accept** (DB with an SSL container):
+  `ROWX_TEST_DSN_SSL=… uv run pytest src/rowx/__tests__/integration/runtime/test_tls.py -q` covers:
   - `verify-full` succeeds with the right CA;
   - the wrong CA fails;
   - `verify-full` against the wrong-host cert fails;
@@ -559,7 +565,8 @@ P3  T45 → T46 → T47
 
 ### T25 · End-to-end example and runtime error suite
 
-- **Deps:** T12, T13, T14, T20 · **Files:** `tests/runtime/test_example.py`, `tests/runtime/test_errors_runtime.py`
+- **Deps:** T12, T13, T14, T20 · **Files:** `src/rowx/__tests__/integration/runtime/test_example.py`,
+  `src/rowx/__tests__/integration/runtime/test_errors_runtime.py`
 - **Do:**
   - Run the design §3.1 example against the seeded data.
   - Cover every error in design §3.7:
@@ -569,7 +576,7 @@ P3  T45 → T46 → T47
     - `RowShapeError` for arity and for NULL.
   - Cover `execute()` on `query[T]`, and `query_unchecked` with a nested template and
     `:ident`.
-- **Accept:** `uv run pytest tests/runtime -q` is green, and the test names mirror the
+- **Accept:** `uv run pytest src/rowx/__tests__/integration/runtime -q` is green, and the test names mirror the
   §3.5 and §3.7 bullets; list them in the PR.
 
 ### T26 · Type-checker suite
@@ -588,11 +595,11 @@ P3  T45 → T46 → T47
 
 ### T27 · Runtime half of the conformance suite (complete)
 
-- **Deps:** T10, T11 · **Files:** `tests/conformance/test_runtime.py`
+- **Deps:** T10, T11 · **Files:** `src/rowx/__tests__/conformance/test_runtime.py`
 - **Do:** for every conformance row with a runtime verdict, build a `query[T]` and assert
   either the plan or `InterfaceError` at the first fetch. Use a fake connection for the
   error rows and the DB for 3 representative OK rows.
-- **Accept:** `uv run pytest tests/conformance -q` is green.
+- **Accept:** `uv run pytest src/rowx/__tests__/conformance -q` is green.
 
 ## P2c — Describe and nullability
 
@@ -726,10 +733,10 @@ P3  T45 → T46 → T47
 ### T38 · Row-type resolution and the checker half of the conformance suite
 
 - **Deps:** T36, T10 · **Files:** `src/rowx/check/resolve.py`, `tests/check/test_resolve.py`, `tests/check/projects/**`
-  (mini project trees), `tests/conformance/test_checker.py`
+  (mini project trees), `src/rowx/__tests__/conformance/test_checker.py`
 - **Do:** implement design §9.4, covering the grammar, import-resolved leaves, aliases
   across modules, the module graph, and the hop limit and cycle detection.
-- **Accept:** `uv run pytest tests/check/test_resolve.py tests/conformance -q`. The tests
+- **Accept:** `uv run pytest tests/check/test_resolve.py src/rowx/__tests__/conformance -q`. The tests
   include:
   - a cross-module alias, a relative import, and an `__init__` re-export;
   - a cycle gives `unresolved-row-type`;

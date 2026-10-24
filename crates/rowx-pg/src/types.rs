@@ -20,10 +20,19 @@ pub enum Format {
     Text,
 }
 
-// Codec families are added by the codec tasks (T12-T18) as they flip rows off `Unsupported`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     Unsupported,
+    Int,
+    Float,
+    Numeric,
+    Text,
+    Bytes,
+    Uuid,
+    Json,
+    Temporal,
+    Array,
+    Void,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,6 +67,14 @@ const fn row(
     }
 }
 
+impl TypeInfo {
+    const fn codecs(mut self, decode: Codec, encode: Codec) -> Self {
+        self.decode = decode;
+        self.encode = encode;
+        self
+    }
+}
+
 const INT: &[&str] = &["int"];
 const STR: &[&str] = &["str"];
 
@@ -69,7 +86,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["bool"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Int, Codec::Int),
     row(
         "int2",
         Matcher::Oid(21),
@@ -77,7 +95,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         INT,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Int, Codec::Int),
     row(
         "int4",
         Matcher::Oid(23),
@@ -85,7 +104,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         INT,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Int, Codec::Int),
     row(
         "int8",
         Matcher::Oid(20),
@@ -93,7 +113,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         INT,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Int, Codec::Int),
     row(
         "oid",
         Matcher::Oid(26),
@@ -101,7 +122,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         INT,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Numeric, Codec::Numeric),
     row(
         "float4",
         Matcher::Oid(700),
@@ -109,7 +131,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["float", "int"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Float, Codec::Float),
     row(
         "float8",
         Matcher::Oid(701),
@@ -117,7 +140,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["float", "int"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Float, Codec::Float),
     row(
         "numeric",
         Matcher::Oid(1700),
@@ -125,7 +149,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["Decimal", "int"],
         Format::Text,
-    ),
+    )
+    .codecs(Codec::Numeric, Codec::Numeric),
     row(
         "text",
         Matcher::Oid(25),
@@ -133,7 +158,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         STR,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Text, Codec::Text),
     row(
         "varchar",
         Matcher::Oid(1043),
@@ -141,7 +167,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         STR,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Text, Codec::Text),
     row(
         "bpchar",
         Matcher::Oid(1042),
@@ -149,7 +176,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         STR,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Text, Codec::Text),
     row(
         "name",
         Matcher::Oid(19),
@@ -157,7 +185,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         STR,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Text, Codec::Text),
     row(
         "citext",
         Matcher::NamedSimple("citext"),
@@ -165,7 +194,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         STR,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Text, Codec::Text),
     row(
         "char",
         Matcher::Oid(18),
@@ -173,7 +203,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         STR,
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Text, Codec::Text),
     row(
         "bytea",
         Matcher::Oid(17),
@@ -181,7 +212,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["bytes", "bytearray", "memoryview"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Bytes, Codec::Bytes),
     row(
         "date",
         Matcher::Oid(1082),
@@ -189,7 +221,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["date"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Temporal, Codec::Temporal),
     row(
         "time",
         Matcher::Oid(1083),
@@ -197,7 +230,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::Naive,
         &["time"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Temporal, Codec::Temporal),
     row(
         "timetz",
         Matcher::Oid(1266),
@@ -205,7 +239,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::Aware,
         &["time"],
         Format::Text,
-    ),
+    )
+    .codecs(Codec::Temporal, Codec::Temporal),
     row(
         "timestamp",
         Matcher::Oid(1114),
@@ -213,7 +248,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::Naive,
         &["datetime"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Temporal, Codec::Temporal),
     row(
         "timestamptz",
         Matcher::Oid(1184),
@@ -221,7 +257,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::Aware,
         &["datetime"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Temporal, Codec::Temporal),
     row(
         "interval",
         Matcher::Oid(1186),
@@ -229,7 +266,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["timedelta"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Temporal, Codec::Temporal),
     row(
         "uuid",
         Matcher::Oid(2950),
@@ -237,7 +275,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["UUID", "str"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Uuid, Codec::Uuid),
     // json/jsonb results take the user's annotation (design §9.5), so the leaf is `object`
     row(
         "json",
@@ -246,7 +285,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["object"],
         Format::Text,
-    ),
+    )
+    .codecs(Codec::Json, Codec::Json),
     row(
         "jsonb",
         Matcher::Oid(3802),
@@ -254,7 +294,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["object"],
         Format::Text,
-    ),
+    )
+    .codecs(Codec::Json, Codec::Json),
     row(
         "enum",
         Matcher::EnumKind,
@@ -262,7 +303,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         STR,
         Format::Text,
-    ),
+    )
+    .codecs(Codec::Text, Codec::Text),
     // a domain resolves to its base type at dispatch time, so it carries no metadata of its own
     row(
         "domain",
@@ -279,7 +321,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &["list", "tuple"],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Array, Codec::Array),
     row(
         "void",
         Matcher::Oid(2278),
@@ -287,7 +330,8 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         TzRule::None,
         &[],
         Format::Binary,
-    ),
+    )
+    .codecs(Codec::Void, Codec::Unsupported),
 ];
 
 #[cfg(test)]
@@ -328,6 +372,18 @@ mod tests {
             assert!(
                 t.key == "void" || !t.accepted_params.is_empty(),
                 "{} has no accepted params",
+                t.key
+            );
+        }
+    }
+
+    #[test]
+    fn supported_rows_have_codecs_except_void_encode() {
+        for t in TYPE_TABLE.iter().filter(|t| !t.py_result.is_empty()) {
+            assert_ne!(t.decode, super::Codec::Unsupported, "{} decode", t.key);
+            assert!(
+                t.key == "void" || t.encode != super::Codec::Unsupported,
+                "{} encode",
                 t.key
             );
         }
