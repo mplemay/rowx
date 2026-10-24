@@ -219,3 +219,25 @@ def run() -> None:
 def test_live_rules_match_markers(schema: str, tmp_path: Path) -> None:
     path = _write(tmp_path, "live.py", LIVE_RULES.replace("__LONG__", "a" * 70))
     assert check_case(path, schema) == []
+
+
+def test_comment_text_is_not_an_alias(
+    schema: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    name = "a" * 63
+    source = f'from rowx import query\n\nquery[str](t\'SELECT current_user::text AS "{name}" /* "{name}extra!" */ \')\n'
+    ok = _run(capsys, str(_write(tmp_path, "alias.py", source)), "--database-url", schema)
+    assert "invalid-override" not in ok[1]
+
+
+def test_source_encoding_is_honoured(schema: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    text = '# -*- coding: latin-1 -*-\nfrom rowx import query\n\nx = "é"; query[int](t"SELECT id FROM usrs")\n'
+    path = tmp_path / "latin.py"
+    path.write_bytes(text.encode("latin-1"))
+    code, out, _ = _run(capsys, str(path), "--database-url", schema)
+    assert code == 1
+    assert "é" in out
+    assert "\ufffd" not in out
+    assert ":4:" in out

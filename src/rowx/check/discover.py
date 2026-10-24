@@ -430,6 +430,7 @@ def discover_source(path: Path, data: bytes) -> FileResult:
         return _syntax_error(path, f"cannot parse file: {error}", Span(line=1, col=1, end_line=1, end_col=2))
     finder = _Finder(path, tree, lines)
     finder.visit(tree)
+    finder.result.source = source
     return finder.result
 
 

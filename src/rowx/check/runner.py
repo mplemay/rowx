@@ -3,7 +3,7 @@ import asyncio
 from collections import Counter, deque
 from contextlib import suppress
 from dataclasses import dataclass, field
-from re import IGNORECASE, compile as re_compile
+from re import DOTALL, IGNORECASE, VERBOSE, compile as re_compile
 from typing import TYPE_CHECKING, Final
 from urllib.parse import unquote, urlparse
 
@@ -17,7 +17,7 @@ from rowx.check.sourcemap import SourceMap, SourceMapper
 from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
     from pathlib import Path
 
     from rowx.check.config import Config
@@ -34,7 +34,19 @@ CAST_HELP: Final[dict[str, str]] = {
     "42P08": "cast the parameter: `{x}::int`",
     "42501": "grant the checker's role the privileges this query needs, or run the check as a role that has them",
 }
-QUOTED_IDENT: Final = re_compile(r'"((?:[^"]|"")*)"')
+SQL_TOKEN: Final = re_compile(
+    r"""
+    (?P<space>\s+)
+    |(?P<line_comment>--[^\n]*)
+    |(?P<block_open>/\*)
+    |(?P<string>[eE]?'(?:[^'\\]|\\.|'')*')
+    |(?P<dollar>\$(?:[^\W\d]\w*)?\$)
+    |(?P<quoted>"(?:[^"]|"")*")
+    |(?P<word>[^\W\d]\w*)
+    |(?P<other>.)
+    """,
+    flags=VERBOSE | DOTALL,
+)
 PASSWORD_PARAM: Final = re_compile(r"password\s*=\s*(?:'((?:[^'\\]|\\.)*)'|([^\s&]+))", flags=IGNORECASE)
 
 
@@ -165,10 +177,6 @@ async def describe_all(dsn: str, statements: list[str], jobs: int, timeout_ms: i
     return results
 
 
-def _decode(data: bytes) -> str:
-    return data.decode("utf-8-sig", errors="replace")
-
-
 def _element_spans(site: _Site) -> tuple[Span, ...] | None:
     node, row_type = site.call.row_type, site.row_type
     if row_type is None or row_type.kind != "tuple" or not isinstance(node, ast.Subscript):
@@ -274,15 +282,48 @@ def _column_desc(column: ColumnInfo) -> ColumnDesc:
     )
 
 
+def _skip_block_comment(sql: str, start: int) -> int:
+    depth = 0
+    index = start
+    while index < len(sql):
+        if sql.startswith("/*", index):
+            depth += 1
+            index += 2
+        elif sql.startswith("*/", index):
+            depth -= 1
+            index += 2
+            if depth == 0:
+                return index
+        else:
+            index += 1
+    return len(sql)
+
+
+# quoted identifiers that follow `AS`, so text in comments, string literals and dollar quotes is never read as an alias
+def quoted_aliases(sql: str) -> Iterator[tuple[int, str]]:
+    index = 0
+    previous = ""
+    while (match := SQL_TOKEN.match(sql, index)) is not None:
+        kind = match.lastgroup
+        index = match.end()
+        if kind == "block_open":
+            index = _skip_block_comment(sql, match.start())
+        elif kind == "dollar":
+            index = len(sql) if (close := sql.find(match[0], index)) == -1 else close + len(match[0])
+        elif kind == "quoted" and previous == "as":
+            yield match.start(), match[0][1:-1].replace('""', '"')
+        if kind not in {"space", "line_comment", "block_open"}:
+            previous = match[0].lower() if kind == "word" else ""
+
+
 def _truncated_alias(sql: str, column: ColumnInfo) -> int | None:
-    # a 63-byte name whose quoted alias in the source ends in `!`/`?` lost its suffix to truncation
+    # a described name that is a prefix of a longer `AS "…!"` alias lost its suffix to truncation
     # a cut at a character boundary can leave up to three bytes of room
     if not IDENT_MAX_BYTES - 4 < len(column.raw_name.encode()) <= IDENT_MAX_BYTES:
         return None
-    for match in QUOTED_IDENT.finditer(sql):
-        ident = match[1].replace('""', '"')
+    for offset, ident in quoted_aliases(sql):
         if ident.endswith(("!", "?")) and len(ident.encode()) > IDENT_MAX_BYTES and ident.startswith(column.raw_name):
-            return match.start()
+            return offset
     return None
 
 
@@ -375,12 +416,14 @@ def _collect(
     sources: dict[Path, str] = {}
     for path in files:
         stats.files += 1
-        result = discover_source(path, (data := path.read_bytes()))
-        sources[path] = (source := _decode(data))
+        result = discover_source(path, path.read_bytes())
         reports.extend(Report(diagnostic=diagnostic) for diagnostic in result.diagnostics)
         stats.unchecked += result.unchecked_count
-        mapper = SourceMapper(source)
         roots = roots_for(config, path)
+        if result.source is None:
+            continue
+        sources[path] = result.source
+        mapper = SourceMapper(result.source)
         for call in result.calls:
             stats.call_sites += 1
             if call.template is None:
