@@ -25,6 +25,8 @@ pub enum Error {
     RowShape(String),
     #[error("{0}")]
     Decode(String),
+    #[error("{0}")]
+    Encode(String),
 }
 
 impl From<tokio_postgres::Error> for Error {

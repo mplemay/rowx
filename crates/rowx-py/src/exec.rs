@@ -3,24 +3,15 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
-use rowx_pg::Row;
 use rowx_pg::conn::Connection as PgConnection;
 use rowx_pg::error::Error;
 use rowx_pg::exec::{self, Raw, Shape};
 use rowx_pg::state::State;
+use rowx_pg::{Row, Type};
 use tokio::sync::Mutex;
 
 use crate::codec;
-use crate::errors::{PgError, interface_error, to_py_err};
-
-// T12 replaces this with real parameter extraction
-fn reject_params(py: Python<'_>, params: &Bound<'_, PyList>) -> PyResult<()> {
-    if params.is_empty() {
-        Ok(())
-    } else {
-        Err(interface_error(py, "params not yet supported"))
-    }
-}
+use crate::errors::{PgError, to_py_err};
 
 #[derive(Debug)]
 pub struct FetchArgs {
@@ -32,7 +23,7 @@ pub struct FetchArgs {
 }
 
 /// # Errors
-/// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed or `params` is non-empty.
+/// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed or a parameter cannot be extracted.
 pub fn fetch<'py>(
     py: Python<'py>,
     inner: &Arc<Mutex<PgConnection>>,
@@ -40,7 +31,7 @@ pub fn fetch<'py>(
     params: &Bound<'py, PyList>,
     args: FetchArgs,
 ) -> PyResult<Bound<'py, PyAny>> {
-    reject_params(py, params)?;
+    let params = codec::extract(py, params)?;
     // claimed synchronously so a second call made before the first is awaited fails immediately
     let claim = state.claim().map_err(|e| to_py_err(py, &e))?;
     let inner = Arc::clone(inner);
@@ -54,7 +45,12 @@ pub fn fetch<'py>(
                 arity: args.arity,
             };
             let result = match conn.client() {
-                Ok(client) => exec::fetch(client, &args.sql, &shape).await,
+                Ok(client) => {
+                    exec::fetch(client, &args.sql, &shape, |types: &[Type]| {
+                        codec::encode_all(&params, types)
+                    })
+                    .await
+                }
                 Err(e) => Err(e),
             };
             // Busy → Idle happens before Python sees the result, so `await a(); await b()` never sees Busy
@@ -67,7 +63,7 @@ pub fn fetch<'py>(
 }
 
 /// # Errors
-/// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed or `params` is non-empty.
+/// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed or a parameter cannot be extracted.
 pub fn execute<'py>(
     py: Python<'py>,
     inner: &Arc<Mutex<PgConnection>>,
@@ -75,13 +71,18 @@ pub fn execute<'py>(
     params: &Bound<'py, PyList>,
     sql: String,
 ) -> PyResult<Bound<'py, PyAny>> {
-    reject_params(py, params)?;
+    let params = codec::extract(py, params)?;
     let claim = state.claim().map_err(|e| to_py_err(py, &e))?;
     let inner = Arc::clone(inner);
     future_into_py(py, async move {
         let conn = inner.lock().await;
         let result = match conn.client() {
-            Ok(client) => exec::execute(client, &sql).await,
+            Ok(client) => {
+                exec::execute(client, &sql, |types: &[Type]| {
+                    codec::encode_all(&params, types)
+                })
+                .await
+            }
             Err(e) => Err(e),
         };
         drop(conn);
