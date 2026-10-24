@@ -90,6 +90,7 @@ all = "error"
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers"]
 testpaths = ["src/rowx/__tests__"]
+pythonpath = ["."]
 norecursedirs = ["target", "dist", "build", ".venv"]
 markers = [
     "integration: marks tests that hit the database or external services",
