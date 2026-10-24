@@ -32,6 +32,13 @@ def test_view_column(schema: str) -> None:
     ]
 
 
+def test_foreign_table_column(schema: str) -> None:
+    assert verdicts(schema, "SELECT id, name FROM foreign_users") == [
+        (True, "ForeignOrView"),
+        (True, "ForeignOrView"),
+    ]
+
+
 def test_duplicate_origin_columns(schema: str) -> None:
     assert verdicts(schema, "SELECT id, id AS again FROM users") == [(False, "NotNullColumn")] * 2
 
