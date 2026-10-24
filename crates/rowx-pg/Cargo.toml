@@ -8,7 +8,7 @@ rust-version.workspace = true
 bytes = "1"
 futures-util = { version = "0.3", default-features = false }
 thiserror = "2"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
 tokio-postgres = "0.7"
 
 [dev-dependencies]
