@@ -1,6 +1,6 @@
-// describe lands in a later task
 pub mod cancel;
 pub mod conn;
+pub mod describe;
 pub mod dsn;
 pub mod error;
 pub mod exec;

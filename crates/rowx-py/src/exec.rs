@@ -108,9 +108,12 @@ pub fn execute<'py>(
     Ok(future)
 }
 
-// asyncio runs done callbacks before the awaiting task resumes, while the Rust future is only dropped
-// later on another thread; settling here keeps `cancel(); await next()` from seeing Busy
-fn watch(future: &Bound<'_, PyAny>, hook: Hook) -> PyResult<()> {
+/// asyncio runs done callbacks before the awaiting task resumes, while the Rust future is only dropped
+/// later on another thread; settling here keeps `cancel(); await next()` from seeing Busy
+///
+/// # Errors
+/// Any Python error from registering the callback.
+pub fn watch(future: &Bound<'_, PyAny>, hook: Hook) -> PyResult<()> {
     let callback = PyCFunction::new_closure(future.py(), None, None, move |args, _kwargs| {
         if let Ok(done) = args.get_item(0)
             && done.call_method0("cancelled")?.is_truthy()?
@@ -123,8 +126,11 @@ fn watch(future: &Bound<'_, PyAny>, hook: Hook) -> PyResult<()> {
     Ok(())
 }
 
-// a call that arrived while a cancelled operation was settling waits here, outside the GIL
-async fn settle_claim(state: &Arc<State>, claim: Option<Claim>) -> Result<Claim, PgError> {
+/// A call that arrived while a cancelled operation was settling waits here, outside the GIL.
+///
+/// # Errors
+/// `InterfaceError` when the connection closed or broke while waiting.
+pub async fn settle_claim(state: &Arc<State>, claim: Option<Claim>) -> Result<Claim, PgError> {
     match claim {
         Some(claim) => Ok(claim),
         None => Ok(state.claim_settled().await?),
@@ -132,7 +138,7 @@ async fn settle_claim(state: &Arc<State>, claim: Option<Claim>) -> Result<Claim,
 }
 
 // a dead connection stays dead; every other error leaves the state to the claim's drop (Idle)
-fn fail(state: &State, err: Error) -> PgError {
+pub fn fail(state: &State, err: Error) -> PgError {
     if err == Error::Broken {
         state.mark_broken();
     }

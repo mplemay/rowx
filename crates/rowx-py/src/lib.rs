@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod conn;
+pub mod describe;
 pub mod errors;
 pub mod exec;
 pub mod runtime;
@@ -13,6 +14,8 @@ mod _core {
 
     #[pymodule_export]
     use crate::conn::{Connection, connect};
+    #[pymodule_export]
+    use crate::describe::{ColumnInfo, Describe, ParamInfo, connect_checker, describe};
     #[pymodule_export]
     use crate::types::{TypeInfo, type_table};
 

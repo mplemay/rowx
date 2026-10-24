@@ -2,24 +2,9 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-mod boundaries;
+use crate::describe::NullReason;
 
-// Mirrors design §8.1. T31 moves this to describe.rs; only the plan-walk variants are produced here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NullReason {
-    NotNullColumn,
-    NullableColumn,
-    NotValidatedConstraint,
-    ForeignOrView,
-    OuterJoin { node: String },
-    GroupingSets,
-    ScanBoundary { alias: String },
-    ReturningOldNew,
-    Computed,
-    ExplainFailed,
-    OverrideBang,
-    OverrideQuestion,
-}
+mod boundaries;
 
 type Marked = HashMap<String, NullReason>;
 
