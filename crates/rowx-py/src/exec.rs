@@ -37,16 +37,16 @@ pub fn fetch<'py>(
     let inner = Arc::clone(inner);
     future_into_py(py, async move {
         let rows = {
-            let conn = inner.lock().await;
+            let mut conn = inner.lock().await;
             let shape = Shape {
                 mask: args.mask.as_deref(),
                 scalar: args.scalar,
                 limit_one: args.limit_one,
                 arity: args.arity,
             };
-            let result = match conn.client() {
-                Ok(client) => {
-                    exec::fetch(client, &args.sql, &shape, |types: &[Type]| {
+            let result = match conn.parts() {
+                Ok((client, cache)) => {
+                    exec::fetch(client, cache, &args.sql, &shape, |types: &[Type]| {
                         codec::encode_all(&params, types)
                     })
                     .await
@@ -75,10 +75,10 @@ pub fn execute<'py>(
     let claim = state.claim().map_err(|e| to_py_err(py, &e))?;
     let inner = Arc::clone(inner);
     future_into_py(py, async move {
-        let conn = inner.lock().await;
-        let result = match conn.client() {
-            Ok(client) => {
-                exec::execute(client, &sql, |types: &[Type]| {
+        let mut conn = inner.lock().await;
+        let result = match conn.parts() {
+            Ok((client, cache)) => {
+                exec::execute(client, cache, &sql, |types: &[Type]| {
                     codec::encode_all(&params, types)
                 })
                 .await

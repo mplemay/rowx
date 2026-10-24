@@ -4,6 +4,7 @@ use tokio_postgres::types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
 use tokio_postgres::{Client, Row, Statement};
 
 use crate::error::Error;
+use crate::stmt_cache::StmtCache;
 
 /// The undecoded bytes of one cell (`None` for NULL); accepts every Postgres type.
 #[derive(Debug, Clone, Copy)]
@@ -101,26 +102,112 @@ impl ToSql for Param {
 }
 
 /// Encodes the caller's parameters against the types the server reported for the statement.
-pub trait Encode {
+pub trait Encode: Sync {
     /// # Errors
     /// `Interface` for a count mismatch, `Encode` when a value does not fit its parameter type.
-    fn encode(self, types: &[Type]) -> Result<Vec<Param>, Error>;
+    fn encode(&self, types: &[Type]) -> Result<Vec<Param>, Error>;
 }
 
-impl<F: FnOnce(&[Type]) -> Result<Vec<Param>, Error>> Encode for F {
-    fn encode(self, types: &[Type]) -> Result<Vec<Param>, Error> {
+impl<F: Fn(&[Type]) -> Result<Vec<Param>, Error> + Sync> Encode for F {
+    fn encode(&self, types: &[Type]) -> Result<Vec<Param>, Error> {
         self(types)
     }
 }
 
+const TXN_HINT: &str = "schema changed inside a transaction; ROLLBACK and retry";
+
 async fn bind(
     client: &Client,
+    cache: &mut StmtCache<Statement>,
     sql: &str,
-    encode: impl Encode,
+    encode: &impl Encode,
 ) -> Result<(Statement, Vec<Param>), Error> {
-    let stmt = client.prepare(sql).await?;
+    let stmt = if let Some(stmt) = cache.get(sql) {
+        stmt
+    } else {
+        let stmt = client.prepare(sql).await?;
+        cache.insert(sql, stmt.clone());
+        stmt
+    };
     let params = encode.encode(stmt.params())?;
     Ok((stmt, params))
+}
+
+enum Retry {
+    Revalidate,
+    Missing,
+}
+
+fn retry_kind(err: &Error) -> Option<Retry> {
+    let Error::Db {
+        sqlstate, routine, ..
+    } = err
+    else {
+        return None;
+    };
+    match &**sqlstate {
+        "0A000" if routine.as_deref() == Some("RevalidateCachedQuery") => Some(Retry::Revalidate),
+        "26000" => Some(Retry::Missing),
+        _ => None,
+    }
+}
+
+fn with_txn_hint(err: Error) -> Error {
+    match err {
+        Error::Db {
+            sqlstate,
+            message,
+            detail,
+            position,
+            routine,
+            ..
+        } => Error::Db {
+            sqlstate,
+            message,
+            detail,
+            hint: Some(TXN_HINT.into()),
+            position,
+            routine,
+        },
+        other => other,
+    }
+}
+
+// one retry at most: a stale cached plan (0A000) re-prepares, a vanished statement (26000) clears the cache
+#[derive(Default)]
+struct Retrier {
+    spent: bool,
+    original: Option<Error>,
+}
+
+impl Retrier {
+    // Ok means the caller should run the operation again
+    fn on_error(
+        &mut self,
+        err: Error,
+        cache: &mut StmtCache<Statement>,
+        sql: &str,
+    ) -> Result<(), Error> {
+        if self.spent {
+            return Err(match self.original.take() {
+                // inside a transaction the failed statement aborted it, so the retry cannot succeed
+                Some(original) if matches!(&err, Error::Db { sqlstate, .. } if &**sqlstate == "25P02") => {
+                    with_txn_hint(original)
+                }
+                _ => err,
+            });
+        }
+        match retry_kind(&err) {
+            Some(Retry::Revalidate) => {
+                cache.remove(sql);
+                self.original = Some(err);
+            }
+            Some(Retry::Missing) => cache.clear(),
+            None => return Err(err),
+        }
+        self.spent = true;
+        Ok(())
+    }
 }
 
 /// What the caller expects of the result, checked before and while rows stream in.
@@ -137,11 +224,28 @@ pub struct Shape<'a> {
 /// `RowShape` for an arity, scalar or NULL-mask violation, `Db`/`Interface` for driver failures.
 pub async fn fetch(
     client: &Client,
+    cache: &mut StmtCache<Statement>,
     sql: &str,
     shape: &Shape<'_>,
     encode: impl Encode,
 ) -> Result<Vec<Row>, Error> {
-    let (stmt, params) = bind(client, sql, encode).await?;
+    let mut retrier = Retrier::default();
+    loop {
+        match fetch_once(client, cache, sql, shape, &encode).await {
+            Ok(rows) => return Ok(rows),
+            Err(err) => retrier.on_error(err, cache, sql)?,
+        }
+    }
+}
+
+async fn fetch_once(
+    client: &Client,
+    cache: &mut StmtCache<Statement>,
+    sql: &str,
+    shape: &Shape<'_>,
+    encode: &impl Encode,
+) -> Result<Vec<Row>, Error> {
+    let (stmt, params) = bind(client, cache, sql, encode).await?;
     let columns = stmt.columns().len();
     // checked before executing so a statement with no rows still reports a wrong shape
     if let Some(arity) = shape.arity
@@ -182,8 +286,28 @@ pub async fn fetch(
 
 /// # Errors
 /// `Db`/`Interface` for driver failures, `Encode` for a parameter that does not fit.
-pub async fn execute(client: &Client, sql: &str, encode: impl Encode) -> Result<u64, Error> {
-    let (stmt, params) = bind(client, sql, encode).await?;
+pub async fn execute(
+    client: &Client,
+    cache: &mut StmtCache<Statement>,
+    sql: &str,
+    encode: impl Encode,
+) -> Result<u64, Error> {
+    let mut retrier = Retrier::default();
+    loop {
+        match execute_once(client, cache, sql, &encode).await {
+            Ok(count) => return Ok(count),
+            Err(err) => retrier.on_error(err, cache, sql)?,
+        }
+    }
+}
+
+async fn execute_once(
+    client: &Client,
+    cache: &mut StmtCache<Statement>,
+    sql: &str,
+    encode: &impl Encode,
+) -> Result<u64, Error> {
+    let (stmt, params) = bind(client, cache, sql, encode).await?;
     Ok(client.execute_raw(&stmt, &params).await?)
 }
 
