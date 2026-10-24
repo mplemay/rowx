@@ -29,6 +29,30 @@ fn class<'py>(
     Ok(cls.bind(py))
 }
 
+/// # Errors
+/// An import failure of the `datetime` module.
+pub fn date_class(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    class(py, &DATE, "date")
+}
+
+/// # Errors
+/// An import failure of the `datetime` module.
+pub fn datetime_class(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    class(py, &DATETIME, "datetime")
+}
+
+/// # Errors
+/// An import failure of the `datetime` module.
+pub fn time_class(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    class(py, &TIME, "time")
+}
+
+/// # Errors
+/// An import failure of the `datetime` module.
+pub fn timedelta_class(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    class(py, &TIMEDELTA, "timedelta")
+}
+
 fn utc(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     let tz = UTC.get_or_try_init(py, || {
         Ok::<_, PyErr>(class(py, &TIMEZONE, "timezone")?.getattr("utc")?.unbind())
