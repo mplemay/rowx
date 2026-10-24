@@ -75,9 +75,9 @@ async fn refused_port_is_interface_error() -> TestResult {
 }
 
 #[tokio::test]
-async fn unsupported_sslmode_is_interface_error() -> TestResult {
+async fn client_certificate_settings_are_interface_errors() -> TestResult {
     let Err(err) =
-        Connection::connect("postgres://u@h/db?sslmode=require", &Handle::current(), 256).await
+        Connection::connect("postgres://u@h/db?sslcert=/x", &Handle::current(), 256).await
     else {
         return Err("connect unexpectedly succeeded".into());
     };

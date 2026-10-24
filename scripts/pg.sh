@@ -25,10 +25,16 @@ up)
   if ((ssl)); then
     "$root/scripts/gen-certs.sh"
     certs="$root/.rowx-certs"
-    args+=(-v "$certs:/certs:ro")
-    pg_args+=(-c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key)
+    # postgres refuses a key it does not own, and a read-only host mount keeps the host owner
+    args+=(-v "$certs:/certs-src:ro" --entrypoint bash)
+    pg_args=(-c "install -m 600 -o postgres -g postgres /certs-src/server.key /var/lib/postgresql/server.key \
+      && install -m 644 -o postgres -g postgres /certs-src/server.crt /var/lib/postgresql/server.crt \
+      && exec docker-entrypoint.sh postgres -c max_connections=200 -c ssl=on \
+        -c ssl_cert_file=/var/lib/postgresql/server.crt -c ssl_key_file=/var/lib/postgresql/server.key")
+    id="$(docker run "${args[@]}" postgres:18 "${pg_args[@]}")"
+  else
+    id="$(docker run "${args[@]}" postgres:18 "${pg_args[@]}")"
   fi
-  id="$(docker run "${args[@]}" postgres:18 "${pg_args[@]}")"
   # the container logs to stderr, so keep stdout to the DSN only
   for _ in $(seq 1 60); do
     docker exec "$id" pg_isready -U "$user" -d "$database" -h 127.0.0.1 >/dev/null 2>&1 && break

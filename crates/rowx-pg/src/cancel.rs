@@ -1,16 +1,21 @@
 use std::future::Future;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio_postgres::config::Host;
-use tokio_postgres::{CancelToken, Config, NoTls};
+use tokio_postgres::tls::MakeTlsConnect;
+use tokio_postgres::{CancelToken, Config};
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::conn::Connection;
 use crate::error::Error;
@@ -34,6 +39,7 @@ pub struct CancelTarget {
     host: Host,
     hostaddr: Option<IpAddr>,
     port: u16,
+    tls: MakeRustlsConnect,
 }
 
 impl std::fmt::Debug for CancelTarget {
@@ -48,7 +54,7 @@ impl std::fmt::Debug for CancelTarget {
 impl CancelTarget {
     /// # Errors
     /// `Interface` when the config names no host to reach.
-    pub fn new(token: CancelToken, config: &Config) -> Result<Self, Error> {
+    pub fn new(token: CancelToken, config: &Config, tls: MakeRustlsConnect) -> Result<Self, Error> {
         let host =
             config.get_hosts().first().cloned().ok_or_else(|| {
                 Error::Interface("no host to send a cancel request to".to_owned())
@@ -58,6 +64,7 @@ impl CancelTarget {
             host,
             hostaddr: config.get_hostaddrs().first().copied(),
             port: config.get_ports().first().copied().unwrap_or(DEFAULT_PORT),
+            tls,
         })
     }
 
@@ -82,7 +89,7 @@ impl CancelTarget {
                     None => TcpStream::connect((name.as_str(), self.port)).await,
                 }
                 .map_err(|e| io_error(&e))?;
-                self.over(stream).await
+                self.over(stream, name).await
             }
             #[cfg(unix)]
             Host::Unix(dir) => {
@@ -90,20 +97,79 @@ impl CancelTarget {
                 let stream = tokio::net::UnixStream::connect(path)
                     .await
                     .map_err(|e| io_error(&e))?;
-                self.over(stream).await
+                // TLS is never negotiated over a unix socket, so the name is only a placeholder
+                self.over(stream, "localhost").await
             }
         }
     }
 
-    // the connector passed here is the T23 hook: it must become the one shared with connect
-    async fn over<S>(&self, mut stream: S) -> Result<(), Error>
+    // the connector is the one the connection was made with, so the cancel is verified identically
+    async fn over<S>(&self, stream: S, host: &str) -> Result<(), Error>
     where
-        S: AsyncRead + AsyncWrite + Unpin + Send,
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        self.token.cancel_query_raw(&mut stream, NoTls).await?;
+        // the TLS connector takes its stream by value, so a second handle on the raw socket is
+        // kept to read until the server closes, which also works under TLS (ciphertext is discarded)
+        let mut stream = Shared::new(stream);
+        let owned = stream.clone();
+        let tls = MakeTlsConnect::<Shared<S>>::make_tls_connect(&mut self.tls.clone(), host)
+            .map_err(|e| Error::Interface(e.to_string()))?;
+        self.token.cancel_query_raw(owned, tls).await?;
         let mut sink = [0_u8; 64];
         while stream.read(&mut sink).await.map_err(|e| io_error(&e))? != 0 {}
         Ok(())
+    }
+}
+
+// two handles on one socket; the lock is only held inside a single poll
+struct Shared<S>(Arc<std::sync::Mutex<S>>);
+
+impl<S> Shared<S> {
+    fn new(stream: S) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(stream)))
+    }
+}
+
+impl<S> Clone for Shared<S> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> Shared<S> {
+    fn with<R>(&self, f: impl FnOnce(Pin<&mut S>) -> Poll<io::Result<R>>) -> Poll<io::Result<R>> {
+        self.0.lock().map_or_else(
+            |_| Poll::Ready(Err(io::Error::other("cancel socket lock poisoned"))),
+            |mut guard| f(Pin::new(&mut *guard)),
+        )
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for Shared<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.with(|stream| stream.poll_read(cx, buf))
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Shared<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.with(|stream| stream.poll_write(cx, buf))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.with(|stream| stream.poll_flush(cx))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.with(|stream| stream.poll_shutdown(cx))
     }
 }
 

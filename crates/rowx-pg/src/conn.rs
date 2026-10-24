@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
-use tokio_postgres::{Client, NoTls, Statement};
+use tokio_postgres::{Client, Statement};
 
 use crate::cancel::CancelTarget;
 use crate::dsn;
@@ -21,15 +21,16 @@ pub struct Connection {
 
 impl Connection {
     /// # Errors
-    /// `Interface` for DSN, IO or unsupported-TLS problems, `Db` for a server rejection.
+    /// `Interface` for DSN, IO or TLS problems, `Db` for a server rejection.
     pub async fn connect(
         dsn: &str,
         handle: &Handle,
         statement_cache_size: usize,
     ) -> Result<Self, Error> {
         let parsed = dsn::parse(dsn)?;
-        let (client, connection) = parsed.config.connect(NoTls).await?;
-        let cancel = CancelTarget::new(client.cancel_token(), &parsed.config)?;
+        let connector = parsed.tls.connector()?;
+        let (client, connection) = parsed.config.connect(connector.clone()).await?;
+        let cancel = CancelTarget::new(client.cancel_token(), &parsed.config, connector)?;
         let broken = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&broken);
         let task = handle.spawn(async move {

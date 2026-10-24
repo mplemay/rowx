@@ -1,20 +1,14 @@
 use tokio_postgres::Config;
-use tokio_postgres::config::SslMode;
 
 use crate::error::Error;
+use crate::tls::{Mode, TlsSettings};
 
 const SSL_KEYS: [&str; 5] = ["sslmode", "sslrootcert", "sslcert", "sslkey", "sslcrl"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestedSsl {
-    Unset,
-    Disable,
-}
 
 #[derive(Debug)]
 pub struct ParsedDsn {
     pub config: Config,
-    pub ssl: RequestedSsl,
+    pub tls: TlsSettings,
 }
 
 fn is_ssl_key(key: &str) -> bool {
@@ -27,7 +21,7 @@ fn invalid(what: &str) -> Error {
 }
 
 /// # Errors
-/// `Interface` for malformed DSNs and for `ssl*` settings that are not supported yet.
+/// `Interface` for malformed DSNs and for an unusable `sslmode`, and the client-certificate keys.
 pub fn parse(dsn: &str) -> Result<ParsedDsn, Error> {
     let dsn = dsn.trim();
     let (stripped, ssl_pairs) =
@@ -37,28 +31,21 @@ pub fn parse(dsn: &str) -> Result<ParsedDsn, Error> {
             split_key_value(dsn)?
         };
 
-    let mut ssl = RequestedSsl::Unset;
+    let mut tls = TlsSettings::default();
     for (key, value) in ssl_pairs {
-        match (key.as_str(), value.as_str()) {
-            ("sslmode", "disable") => ssl = RequestedSsl::Disable,
-            ("sslmode", _) => {
-                return Err(Error::Interface(
-                    "sslmode other than 'disable' is not supported yet".to_owned(),
-                ));
-            }
-            _ => {
-                return Err(Error::Interface(format!("{key} is not supported yet")));
-            }
+        match key.as_str() {
+            "sslmode" => tls.mode = Mode::parse(&value)?,
+            "sslrootcert" => tls.root_cert = Some(value.into()),
+            // client certificates and CRLs are out of scope for v1
+            _ => return Err(Error::Interface(format!("{key} is not supported in v1"))),
         }
     }
 
     let mut config: Config = stripped
         .parse()
         .map_err(|_| invalid("could not be parsed"))?;
-    if ssl == RequestedSsl::Disable {
-        config.ssl_mode(SslMode::Disable);
-    }
-    Ok(ParsedDsn { config, ssl })
+    config.ssl_mode(tls.mode.transport());
+    Ok(ParsedDsn { config, tls })
 }
 
 type Split = (String, Vec<(String, String)>);
@@ -168,9 +155,11 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tokio_postgres::config::SslMode;
+
     use super::*;
 
-    fn host(dsn: &str) -> Result<(Vec<String>, RequestedSsl), Error> {
+    fn host(dsn: &str) -> Result<(Vec<String>, Mode), Error> {
         let parsed = parse(dsn)?;
         let hosts = parsed
             .config
@@ -178,7 +167,7 @@ mod tests {
             .iter()
             .map(|h| format!("{h:?}"))
             .collect();
-        Ok((hosts, parsed.ssl))
+        Ok((hosts, parsed.tls.mode))
     }
 
     #[test]
@@ -187,14 +176,14 @@ mod tests {
         assert_eq!(parsed.config.get_user(), Some("u"));
         assert_eq!(parsed.config.get_dbname(), Some("db"));
         assert_eq!(parsed.config.get_ports(), &[5433]);
-        assert_eq!(parsed.ssl, RequestedSsl::Unset);
+        assert_eq!(parsed.tls, TlsSettings::default());
         Ok(())
     }
 
     #[test]
     fn url_strips_ssl_keys_and_keeps_others() -> Result<(), Error> {
         let parsed = parse("postgresql://u@h/db?sslmode=disable&application_name=x")?;
-        assert_eq!(parsed.ssl, RequestedSsl::Disable);
+        assert_eq!(parsed.tls.mode, Mode::Disable);
         assert_eq!(parsed.config.get_application_name(), Some("x"));
         assert_eq!(parsed.config.get_ssl_mode(), SslMode::Disable);
         Ok(())
@@ -206,18 +195,33 @@ mod tests {
             parse("host=localhost port=5433 user=u password='a b\\'c' dbname=db sslmode=disable")?;
         assert_eq!(parsed.config.get_password(), Some(&b"a b'c"[..]));
         assert_eq!(parsed.config.get_ports(), &[5433]);
-        assert_eq!(parsed.ssl, RequestedSsl::Disable);
+        assert_eq!(parsed.tls.mode, Mode::Disable);
         assert_eq!(host("host=h")?.0.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn ssl_keys_map_to_tls_settings() -> Result<(), Error> {
+        let parsed = parse("postgres://u@h/db?sslmode=verify-full&sslrootcert=%2Ftmp%2Fca.pem")?;
+        assert_eq!(parsed.tls.mode, Mode::VerifyFull);
+        assert_eq!(parsed.tls.root_cert, Some("/tmp/ca.pem".into()));
+        assert_eq!(parsed.config.get_ssl_mode(), SslMode::Require);
+
+        let parsed = parse("host=h sslmode=verify-ca sslrootcert=/tmp/ca.pem")?;
+        assert_eq!(parsed.tls.mode, Mode::VerifyCa);
+        assert_eq!(parsed.config.get_ssl_mode(), SslMode::Require);
+
+        assert_eq!(parse("host=h")?.config.get_ssl_mode(), SslMode::Prefer);
         Ok(())
     }
 
     #[test]
     fn unsupported_ssl_settings_error() {
         for dsn in [
-            "postgres://u@h/db?sslmode=require",
-            "postgres://u@h/db?sslrootcert=/x",
-            "host=h sslmode=verify-full",
-            "host=h sslcert=/x",
+            "postgres://u@h/db?sslmode=allow",
+            "postgres://u@h/db?sslcert=/x",
+            "host=h sslkey=/x",
+            "host=h sslcrl=/x",
         ] {
             assert!(matches!(parse(dsn), Err(Error::Interface(_))), "{dsn}");
         }
