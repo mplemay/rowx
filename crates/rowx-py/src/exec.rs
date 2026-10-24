@@ -6,7 +6,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_pg::conn::Connection as PgConnection;
 use rowx_pg::error::Error;
 use rowx_pg::exec::{self, Raw, Shape};
-use rowx_pg::state::State;
+use rowx_pg::state::{Claim, State};
 use rowx_pg::{Row, Type};
 use tokio::sync::Mutex;
 
@@ -35,7 +35,9 @@ pub fn fetch<'py>(
     // claimed synchronously so a second call made before the first is awaited fails immediately
     let claim = state.claim().map_err(|e| to_py_err(py, &e))?;
     let inner = Arc::clone(inner);
+    let state = Arc::clone(state);
     future_into_py(py, async move {
+        let claim = settle_claim(&state, claim).await?;
         let rows = {
             let mut conn = inner.lock().await;
             let shape = Shape {
@@ -56,7 +58,7 @@ pub fn fetch<'py>(
             // Busy → Idle happens before Python sees the result, so `await a(); await b()` never sees Busy
             drop(conn);
             drop(claim);
-            result.map_err(PgError)?
+            result.map_err(|e| fail(&state, e))?
         };
         Python::attach(|py| build(py, &rows, args.scalar))
     })
@@ -74,7 +76,9 @@ pub fn execute<'py>(
     let params = codec::extract(py, params)?;
     let claim = state.claim().map_err(|e| to_py_err(py, &e))?;
     let inner = Arc::clone(inner);
+    let state = Arc::clone(state);
     future_into_py(py, async move {
+        let claim = settle_claim(&state, claim).await?;
         let mut conn = inner.lock().await;
         let result = match conn.parts() {
             Ok((client, cache)) => {
@@ -87,8 +91,24 @@ pub fn execute<'py>(
         };
         drop(conn);
         drop(claim);
-        Ok(result.map_err(PgError)?)
+        Ok(result.map_err(|e| fail(&state, e))?)
     })
+}
+
+// a call that arrived while a cancelled operation was settling waits here, outside the GIL
+async fn settle_claim(state: &Arc<State>, claim: Option<Claim>) -> Result<Claim, PgError> {
+    match claim {
+        Some(claim) => Ok(claim),
+        None => Ok(state.claim_settled().await?),
+    }
+}
+
+// a dead connection stays dead; every other error leaves the state to the claim's drop (Idle)
+fn fail(state: &State, err: Error) -> PgError {
+    if err == Error::Broken {
+        state.mark_broken();
+    }
+    PgError(err)
 }
 
 fn build(py: Python<'_>, rows: &[Row], scalar: bool) -> PyResult<Py<PyAny>> {
