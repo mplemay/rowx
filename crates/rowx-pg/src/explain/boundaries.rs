@@ -1,0 +1,104 @@
+use std::collections::{HashMap, HashSet};
+
+use serde_json::Value;
+
+use super::{children, null_extends, outputs, str_key};
+
+pub(super) type Ctes<'a> = HashMap<&'a str, &'a Value>;
+
+pub(super) fn collect_ctes<'a>(node: &'a Value, ctes: &mut Ctes<'a>) {
+    if let Some(name) = str_key(node, "Subplan Name").and_then(|n| n.strip_prefix("CTE ")) {
+        ctes.insert(name, node);
+    }
+    for child in children(node) {
+        collect_ctes(child, ctes);
+    }
+}
+
+pub(super) fn has_multiple_grouping_sets(node: &Value) -> bool {
+    node.get("Grouping Sets")
+        .and_then(Value::as_array)
+        .is_some_and(|sets| sets.len() > 1)
+}
+
+// True when anything under `node` can introduce NULLs: a null-extending join or a grouping-sets aggregate.
+fn introduces_nulls<'a>(node: &'a Value, ctes: &Ctes<'a>, seen: &mut HashSet<&'a str>) -> bool {
+    if has_multiple_grouping_sets(node) {
+        return true;
+    }
+    let join_type = str_key(node, "Join Type");
+    for child in children(node) {
+        if null_extends(join_type, child) || introduces_nulls(child, ctes, seen) {
+            return true;
+        }
+    }
+    // a scan of another CTE inherits whatever that CTE introduces; `seen` stops recursive CTEs looping
+    cte_name(node).is_some_and(|name| {
+        seen.insert(name)
+            && ctes
+                .get(name)
+                .is_some_and(|source| introduces_nulls(source, ctes, seen))
+    })
+}
+
+fn cte_name(node: &Value) -> Option<&str> {
+    match str_key(node, "Node Type")? {
+        "CTE Scan" | "WorkTable Scan" => {
+            str_key(node, "CTE Name").or_else(|| str_key(node, "Alias"))
+        }
+        _ => None,
+    }
+}
+
+// Aliases of every Subquery Scan / CTE Scan / WorkTable Scan whose source can introduce NULLs.
+pub(super) fn nullable_aliases<'a>(node: &'a Value, ctes: &Ctes<'a>, found: &mut Vec<&'a str>) {
+    if let (Some("Subquery Scan" | "CTE Scan" | "WorkTable Scan"), Some(alias)) =
+        (str_key(node, "Node Type"), str_key(node, "Alias"))
+    {
+        let nullable = cte_name(node).map_or_else(
+            || introduces_nulls(node, ctes, &mut HashSet::new()),
+            |name| {
+                ctes.get(name).is_some_and(|source| {
+                    introduces_nulls(source, ctes, &mut HashSet::from([name]))
+                })
+            },
+        );
+        if nullable {
+            found.push(alias);
+        }
+    }
+    for child in children(node) {
+        nullable_aliases(child, ctes, found);
+    }
+}
+
+fn qualifier(expr: &str) -> Option<&str> {
+    let (head, _) = expr.split_once('.')?;
+    head.chars()
+        .all(|c| c.is_alphanumeric() || c == '_')
+        .then_some(head)
+}
+
+// Per-output promotion for a ModifyTable root. The plan doesn't record `WITH (OLD AS o, NEW AS n)`,
+// so any other qualifier is treated as a possible alias, which only over-promotes.
+pub(super) fn returning_promotions(root: &Value) -> Vec<bool> {
+    let operation = str_key(root, "Operation");
+    let exprs: Vec<&str> = outputs(root).collect();
+    let target = [str_key(root, "Alias"), str_key(root, "Relation Name")];
+    let is_alias = |q: &str| !matches!(q, "old" | "new") && !target.contains(&Some(q));
+    let aliased = exprs.iter().any(|e| qualifier(e).is_some_and(is_alias));
+
+    exprs
+        .iter()
+        .map(|expr| {
+            let qual = qualifier(expr);
+            match operation {
+                Some("Merge") if aliased => true,
+                Some("Merge") => matches!(qual, Some("old" | "new")),
+                Some("Insert") => qual.is_some_and(|q| q == "old" || is_alias(q)),
+                Some("Delete") => qual.is_some_and(|q| q == "new" || is_alias(q)),
+                _ => false,
+            }
+        })
+        .collect()
+}

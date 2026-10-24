@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+mod boundaries;
+
 // Mirrors design §8.1. T31 moves this to describe.rs; only the plan-walk variants are produced here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NullReason {
@@ -32,10 +34,52 @@ pub fn walk(plan: &Value, column_count: usize) -> Vec<Option<NullReason>> {
     let mut marked = Marked::new();
     mark_joins(root, None, &mut marked);
 
-    for (slot, expr) in promotions.iter_mut().zip(outputs(root)) {
-        *slot = marked.get(expr).cloned();
+    let mut ctes = boundaries::Ctes::new();
+    boundaries::collect_ctes(root, &mut ctes);
+    let mut aliases = Vec::new();
+    boundaries::nullable_aliases(root, &ctes, &mut aliases);
+
+    let returning = if str_key(root, "Node Type") == Some("ModifyTable") {
+        boundaries::returning_promotions(root)
+    } else {
+        Vec::new()
+    };
+
+    for (index, (slot, expr)) in promotions.iter_mut().zip(outputs(root)).enumerate() {
+        *slot = marked.get(expr).cloned().or_else(|| {
+            aliases
+                .iter()
+                .find(|alias| {
+                    expr.strip_prefix(**alias)
+                        .is_some_and(|rest| rest.starts_with('.'))
+                })
+                .map(|alias| NullReason::ScanBoundary {
+                    alias: (*alias).to_owned(),
+                })
+                .or_else(|| {
+                    returning
+                        .get(index)
+                        .copied()
+                        .unwrap_or(false)
+                        .then_some(NullReason::ReturningOldNew)
+                })
+        });
     }
     promotions
+}
+
+fn children(node: &Value) -> impl Iterator<Item = &Value> {
+    node.get("Plans")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+
+fn null_extends(join_type: Option<&str>, child: &Value) -> bool {
+    matches!(
+        (join_type, str_key(child, "Parent Relationship")),
+        (Some("Full"), _) | (Some("Left"), Some("Inner")) | (Some("Right"), Some("Outer"))
+    )
 }
 
 fn outputs(node: &Value) -> impl Iterator<Item = &str> {
@@ -65,18 +109,16 @@ fn mark_joins(node: &Value, inherited: Option<&NullReason>, marked: &mut Marked)
         node: str_key(node, "Node Type").unwrap_or_default().to_owned(),
     };
 
-    let children = node
-        .get("Plans")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten();
-    for child in children {
-        let null_extended = match (join_type, str_key(child, "Parent Relationship")) {
-            (Some("Full"), _) | (Some("Left"), Some("Inner")) | (Some("Right"), Some("Outer")) => {
-                Some(&reason)
-            }
-            _ => None,
-        };
+    if boundaries::has_multiple_grouping_sets(node) {
+        for expr in outputs(node) {
+            marked
+                .entry(expr.to_owned())
+                .or_insert(NullReason::GroupingSets);
+        }
+    }
+
+    for child in children(node) {
+        let null_extended = null_extends(join_type, child).then_some(&reason);
         mark_joins(child, null_extended.or(inherited), marked);
     }
 }
@@ -178,6 +220,78 @@ mod join {
                 node: "Hash Join".to_owned()
             }),
         );
+    }
+
+    fn reasons(name: &str, columns: usize) -> Vec<Option<NullReason>> {
+        walk(&fixture(name), columns)
+    }
+
+    fn boundary(alias: &str) -> NullReason {
+        NullReason::ScanBoundary {
+            alias: alias.to_owned(),
+        }
+    }
+
+    #[test]
+    fn window_function_subquery_is_nullable() {
+        assert_eq!(nullable_flags("window_subquery", 2), [true, false]);
+    }
+
+    #[test]
+    fn materialized_cte_scan_is_a_boundary() {
+        assert_eq!(reasons("cte_materialized", 1), [Some(boundary("c"))]);
+    }
+
+    #[test]
+    fn recursive_cte_without_nulls_promotes_nothing() {
+        assert!(reasons("cte_recursive", 1).iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn rollup_marks_grouping_sets() {
+        assert_eq!(
+            reasons("grouping_rollup", 1),
+            [Some(NullReason::GroupingSets)]
+        );
+    }
+
+    #[test]
+    fn insert_returning_old_is_promoted_not_new() {
+        assert_eq!(
+            reasons("returning_insert_old", 2),
+            [Some(NullReason::ReturningOldNew), None]
+        );
+    }
+
+    #[test]
+    fn delete_returning_new_is_promoted() {
+        assert_eq!(
+            reasons("returning_delete_new", 1),
+            [Some(NullReason::ReturningOldNew)]
+        );
+    }
+
+    #[test]
+    fn update_returning_old_new_promotes_nothing() {
+        assert_eq!(
+            nullable_flags("returning_update_old_new", 2),
+            [false, false]
+        );
+    }
+
+    #[test]
+    fn plain_returning_promotes_nothing() {
+        assert_eq!(nullable_flags("returning_plain", 3), [false, false, false]);
+    }
+
+    #[test]
+    fn merge_promotes_old_and_new_but_not_the_action() {
+        assert_eq!(nullable_flags("merge_returning", 3), [false, true, true]);
+    }
+
+    #[test]
+    fn aliased_update_promotes_nothing() {
+        assert_eq!(nullable_flags("returning_alias", 2), [false, false]);
     }
 
     #[test]
