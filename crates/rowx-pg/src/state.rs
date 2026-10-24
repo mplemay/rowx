@@ -38,7 +38,7 @@ impl State {
             .phase
             .compare_exchange(IDLE, BUSY, Ordering::AcqRel, Ordering::Acquire)
         {
-            Ok(_) => Ok(Some(Claim(Arc::clone(self)))),
+            Ok(_) => Ok(Some(Claim::new(self))),
             Err(BUSY) => Err(Error::Busy),
             Err(SETTLING) => Ok(None),
             Err(BROKEN) => Err(Error::Broken),
@@ -124,13 +124,34 @@ impl State {
 }
 
 #[derive(Debug)]
-pub struct Claim(Arc<State>);
+pub struct Claim {
+    state: Arc<State>,
+    release: bool,
+}
+
+impl Claim {
+    fn new(state: &Arc<State>) -> Self {
+        Self {
+            state: Arc::clone(state),
+            release: true,
+        }
+    }
+
+    /// Drops the claim but leaves the connection Busy, for a cancelled operation whose canceller
+    /// moves it Busy → Settling; releasing first would let another call claim it in between.
+    pub fn hand_off(mut self) {
+        self.release = false;
+    }
+}
 
 impl Drop for Claim {
     fn drop(&mut self) {
+        if !self.release {
+            return;
+        }
         // a failed swap means the state moved on (Settling, Broken or Closed), which must stay
         let _ = self
-            .0
+            .state
             .phase
             .compare_exchange(BUSY, IDLE, Ordering::AcqRel, Ordering::Acquire);
     }
@@ -147,7 +168,18 @@ mod tests {
             .phase
             .compare_exchange(IDLE, BUSY, Ordering::AcqRel, Ordering::Acquire);
         assert!(swapped.is_ok(), "state must be idle");
-        Claim(Arc::clone(state))
+        Claim::new(state)
+    }
+
+    #[test]
+    fn a_handed_off_claim_stays_busy_until_settled() {
+        let state = Arc::new(State::default());
+        claimed(&state).hand_off();
+        assert_eq!(state.phase(), Phase::Busy);
+        assert_eq!(state.claim().err(), Some(Error::Busy));
+        assert!(state.settle());
+        state.settled(true);
+        assert_eq!(state.phase(), Phase::Idle);
     }
 
     #[test]

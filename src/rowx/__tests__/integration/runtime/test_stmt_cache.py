@@ -1,5 +1,5 @@
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -13,12 +13,17 @@ if TYPE_CHECKING:
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
-PREPARED_COUNT = "SELECT count(*)::int4 FROM pg_prepared_statements"
+PREPARED_COUNT: Final[str] = "SELECT count(*)::int4 FROM pg_prepared_statements"
 
 
 async def fetch(conn: ConnectionImpl, sql: str, *, scalar: bool = False) -> list[object]:
     mask = [False] if scalar else None
     return await conn._fetch(sql, [], mask, scalar, scalar, 1 if scalar else None)
+
+
+async def fetch_rows(conn: ConnectionImpl, sql: str, mask: list[bool]) -> list[object]:
+    scalar = limit_one = False
+    return await conn._fetch(sql, [], mask, scalar, limit_one, len(mask))
 
 
 async def prepared_count(conn: ConnectionImpl) -> int:
@@ -63,6 +68,18 @@ def test_schema_change_retries_outside_a_transaction(schema: str) -> None:
         assert await fetch(c, "SELECT * FROM cached_t") == [(1,)]
         await c._execute("ALTER TABLE cached_t ADD COLUMN b int4 DEFAULT 2", [])
         return await fetch(c, "SELECT * FROM cached_t")
+
+    assert run_with_conn(schema, body) == [(1, 2)]
+
+
+def test_schema_change_reprepares_before_rejecting_a_new_row_shape(schema: str) -> None:
+    async def body(c: ConnectionImpl) -> list[object]:
+        sql = "SELECT * FROM cached_t"
+        await c._execute("CREATE TABLE cached_t (a int4)", [])
+        await c._execute("INSERT INTO cached_t VALUES (1)", [])
+        assert await fetch_rows(c, sql, [False]) == [(1,)]
+        await c._execute("ALTER TABLE cached_t ADD COLUMN b int4 DEFAULT 2", [])
+        return await fetch_rows(c, sql, [False, False])
 
     assert run_with_conn(schema, body) == [(1, 2)]
 

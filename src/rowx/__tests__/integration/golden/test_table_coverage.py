@@ -136,5 +136,6 @@ def test_unsupported_type_is_decode_error(schema: str, sql_type: str) -> None:
 
 def test_aclitem_has_no_binary_send(schema: str) -> None:
     with pytest.raises(DatabaseError) as info:
-        fetch_scalar(schema, "SELECT 'rowx=r/rowx'::aclitem")
+        # built from role oids (PUBLIC by the bootstrap superuser), so no role name has to exist
+        fetch_scalar(schema, "SELECT makeaclitem(0, 10, 'SELECT', false)")
     assert info.value.sqlstate == "42883"

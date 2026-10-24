@@ -1,6 +1,7 @@
 import asyncio
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
+from uuid import UUID
 
 import pytest
 
@@ -13,7 +14,21 @@ if TYPE_CHECKING:
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
-AWKWARD = ['a"b', "a\\b", "a,b", "{x}", "NULL", "null", "", " lead", "trail ", "two  spaces", "é☃", "{", "}"]
+AWKWARD: Final[list[str]] = [
+    'a"b',
+    "a\\b",
+    "a,b",
+    "{x}",
+    "NULL",
+    "null",
+    "",
+    " lead",
+    "trail ",
+    "two  spaces",
+    "é☃",
+    "{",
+    "}",
+]
 
 
 def run_with_conn[T](dsn: str, body: Callable[[rowx.Connection], Awaitable[T]]) -> T:
@@ -116,7 +131,17 @@ def test_none_array(schema: str) -> None:
     assert fetch(schema, query[list[int] | None](t"SELECT {None}::int[]")) is None
 
 
-@pytest.mark.parametrize("value", [[[1, 2], [3]], [1, [2]], [[1], 2], [[1, 2], [3, 4], [5]]])
+def test_uuid_list_mixing_uuid_and_str(schema: str) -> None:
+    u = UUID("12345678-1234-5678-1234-567812345678")
+    v = UUID("87654321-4321-8765-4321-876543218765")
+    value = [u, str(v), None]
+    assert fetch(schema, query[list[UUID | None]](t"SELECT {value}::uuid[]")) == [u, v, None]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [[[1, 2], [3]], [1, [2]], [[1], 2], [[1, 2], [3, 4], [5]], [[], [1]], [[], 42], [[1], []]],
+)
 def test_ragged_raises(schema: str, value: list[object]) -> None:
     with pytest.raises(EncodeError):
         fetch(schema, query[list[list[int]]](t"SELECT {value}::int[]"))

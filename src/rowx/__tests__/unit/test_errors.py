@@ -1,4 +1,5 @@
 import pickle
+from typing import Final
 
 import pytest
 
@@ -15,7 +16,7 @@ from rowx.errors import (
     RowShapeError,
 )
 
-ALL_ERRORS = [
+ALL_ERRORS: Final[list[type[Error]]] = [
     InterfaceError,
     ConnectionBusyError,
     DatabaseError,

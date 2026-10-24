@@ -123,7 +123,8 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
     if let Ok(int) = obj.cast::<PyInt>() {
         return Ok(match int.extract::<i64>() {
             Ok(value) => PyParam::Int(value),
-            Err(_) => PyParam::BigInt(int.str()?.to_string()),
+            // str() of an int is capped at 4300 digits by default; Decimal's conversion is not
+            Err(_) => PyParam::BigInt(decimal_class(py)?.call1((int,))?.str()?.to_string()),
         });
     }
     if let Ok(float) = obj.cast::<PyFloat>() {
@@ -137,12 +138,16 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
         || obj.is_instance_of::<PyMemoryView>()
     {
         let name = obj.get_type().name()?.to_string();
-        return PyBuffer::<u8>::get(obj)
-            .and_then(|buf| buf.to_vec(py))
-            .map(|data| PyParam::Bytes(data, name))
-            .map_err(|e| {
-                encode_error(py, &format!("${}: the buffer is unusable: {e}", index + 1))
-            });
+        let data = if obj.is_instance_of::<PyMemoryView>() {
+            // a memoryview of any element format or layout is copied as its raw bytes
+            obj.call_method0("tobytes")
+                .and_then(|raw| Ok(raw.cast_into::<PyBytes>()?.as_bytes().to_vec()))
+        } else {
+            PyBuffer::<u8>::get(obj).and_then(|buf| buf.to_vec(py))
+        };
+        return data.map(|data| PyParam::Bytes(data, name)).map_err(|e| {
+            encode_error(py, &format!("${}: the buffer is unusable: {e}", index + 1))
+        });
     }
     if obj.is_instance(uuid_class(py)?)? {
         let raw = obj.getattr("bytes")?.extract::<Vec<u8>>()?;

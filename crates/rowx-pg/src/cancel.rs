@@ -22,6 +22,7 @@ use crate::error::Error;
 use crate::state::{Claim, State};
 
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+const RECANCEL_EVERY: Duration = Duration::from_millis(100);
 const DEFAULT_PORT: u16 = 5432;
 
 static REQUESTS_SENT: AtomicU64 = AtomicU64::new(0);
@@ -36,7 +37,8 @@ pub fn requests_sent() -> u64 {
 #[derive(Clone)]
 pub struct CancelTarget {
     token: CancelToken,
-    host: Host,
+    // `None` when the config gives only a hostaddr
+    host: Option<Host>,
     hostaddr: Option<IpAddr>,
     port: u16,
     tls: MakeRustlsConnect,
@@ -53,16 +55,17 @@ impl std::fmt::Debug for CancelTarget {
 
 impl CancelTarget {
     /// # Errors
-    /// `Interface` when the config names no host to reach.
+    /// `Interface` when the config names no host or hostaddr to reach.
     pub fn new(token: CancelToken, config: &Config, tls: MakeRustlsConnect) -> Result<Self, Error> {
-        let host =
-            config.get_hosts().first().cloned().ok_or_else(|| {
-                Error::Interface("no host to send a cancel request to".to_owned())
-            })?;
+        let host = config.get_hosts().first().cloned();
+        let hostaddr = config.get_hostaddrs().first().copied();
+        if host.is_none() && hostaddr.is_none() {
+            return Err(no_host());
+        }
         Ok(Self {
             token,
             host,
-            hostaddr: config.get_hostaddrs().first().copied(),
+            hostaddr,
             port: config.get_ports().first().copied().unwrap_or(DEFAULT_PORT),
             tls,
         })
@@ -82,7 +85,15 @@ impl CancelTarget {
     }
 
     async fn send(&self) -> Result<(), Error> {
-        match &self.host {
+        let Some(host) = &self.host else {
+            let ip = self.hostaddr.ok_or_else(no_host)?;
+            let stream = TcpStream::connect(SocketAddr::new(ip, self.port))
+                .await
+                .map_err(|e| io_error(&e))?;
+            // tokio-postgres gives TLS an empty name when there is no host, so the cancel matches
+            return self.over(stream, "").await;
+        };
+        match host {
             Host::Tcp(name) => {
                 let stream = match self.hostaddr {
                     Some(ip) => TcpStream::connect(SocketAddr::new(ip, self.port)).await,
@@ -171,6 +182,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Shared<S> {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.with(|stream| stream.poll_shutdown(cx))
     }
+}
+
+fn no_host() -> Error {
+    Error::Interface("no host to send a cancel request to".to_owned())
 }
 
 fn io_error(err: &std::io::Error) -> Error {
@@ -262,14 +277,25 @@ impl Drop for Guard {
     }
 }
 
-async fn settle(cancel: Cancel, task: JoinHandle<()>) {
-    // a finished operation has already consumed its response, so there is nothing left to cancel
-    if !task.is_finished() && cancel.target.request().await.is_err() {
-        cancel.state.settled(false);
-        return;
-    }
-    // the abandoned operation drains to ReadyForQuery (or an error) before the next one starts
-    let drained = task.await.is_ok();
+async fn settle(cancel: Cancel, mut task: JoinHandle<()>) {
+    // a CancelRequest only stops the statement running when it arrives, so one that lands between
+    // the operation's round trips (while it encodes, or between prepare and execute) is ignored and
+    // the next statement would run in full; resend until the operation ends. Only the abandoned
+    // operation can use the backend meanwhile, since the state is Settling
+    let drained = loop {
+        // a finished operation has already consumed its response, so there is nothing left to cancel
+        if task.is_finished() {
+            break (&mut task).await.is_ok();
+        }
+        if cancel.target.request().await.is_err() {
+            cancel.state.settled(false);
+            return;
+        }
+        // the abandoned operation drains to ReadyForQuery (or an error) before the next one starts
+        if let Ok(joined) = tokio::time::timeout(RECANCEL_EVERY, &mut task).await {
+            break joined.is_ok();
+        }
+    };
     let alive = cancel.conn.lock().await.client().is_ok();
     cancel.state.settled(drained && alive);
 }
@@ -304,10 +330,13 @@ where
         let op = Arc::clone(&op);
         cancel.handle.spawn(async move {
             let out = fut.await;
-            // after a cancellation the settling task owns the state, so the claim's drop is a no-op
-            op.finish();
-            // Busy → Idle happens before the caller sees the result
-            drop(claim);
+            if op.finish() {
+                // Busy → Idle happens before the caller sees the result
+                drop(claim);
+            } else {
+                // the canceller won and moves Busy → Settling itself
+                claim.hand_off();
+            }
             // the receiver is gone when the caller was dropped, which is the cancelled case
             let _ = tx.send(out);
         })

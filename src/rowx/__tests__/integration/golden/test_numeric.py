@@ -63,8 +63,32 @@ def test_int_to_numeric(schema: str) -> None:
         assert got == Decimal(x)
 
 
-def test_snan_is_encode_error(schema: str) -> None:
-    x = Decimal("sNaN")
+def test_int_beyond_the_str_digit_limit_to_numeric(schema: str) -> None:
+    x = 10**5000 + 7
+    got = run_with_conn(schema, query[Decimal](t"SELECT {x}::numeric").fetch_one)
+    assert got == Decimal(x)
+
+
+def test_int_beyond_the_str_digit_limit_to_int8_is_encode_error(schema: str) -> None:
+    x = 10**5000
+    with pytest.raises(EncodeError, match=r"\$1.*int8"):
+        run_with_conn(schema, query[int](t"SELECT {x}::int8").fetch_one)
+
+
+def test_numeric_decodes_more_than_32767_digit_groups(schema: str) -> None:
+    q = query[Decimal](t"SELECT repeat('1', 131072)::numeric")
+    assert run_with_conn(schema, q.fetch_one) == Decimal("1" * 131072)
+
+
+@pytest.mark.parametrize("text", ["NaN123", "-NaN7"])
+def test_nan_with_payload_is_sent_as_nan(schema: str, text: str) -> None:
+    x = Decimal(text)
+    assert run_with_conn(schema, query[Decimal](t"SELECT {x}::numeric").fetch_one).is_nan()
+
+
+@pytest.mark.parametrize("text", ["sNaN", "sNaN123"])
+def test_snan_is_encode_error(schema: str, text: str) -> None:
+    x = Decimal(text)
     with pytest.raises(EncodeError, match=r"\$1.*sNaN"):
         run_with_conn(schema, query[Decimal](t"SELECT {x}::numeric").fetch_one)
 

@@ -3,6 +3,7 @@ use rowx_pg::{Kind, Type};
 
 use crate::codec::encode_one;
 use crate::codec::extract::PyParam;
+use crate::codec::uuid;
 
 const MAX_DIMS: usize = 6;
 
@@ -117,24 +118,31 @@ pub fn encode(ty: &Type, param: &PyParam) -> Result<Param, String> {
             ty.name()
         ));
     };
-    // an empty list at any level makes the whole array empty
     let dims = dims_of(items);
-    if dims.contains(&0) {
-        return Ok(Param::binary(binary(elem_ty.oid(), &[], &[])?));
-    }
     if dims.len() > MAX_DIMS {
         return Err(format!("the list nests deeper than {MAX_DIMS} levels"));
     }
     let mut leaves = Vec::new();
     flatten(items, &dims, &mut leaves)?;
-    let elements = leaves
-        .into_iter()
+    // an empty list at any level makes the whole array empty, once the shape is known to be regular
+    if dims.contains(&0) {
+        return Ok(Param::binary(binary(elem_ty.oid(), &[], &[])?));
+    }
+    let mut elements = leaves
+        .iter()
         .enumerate()
         .map(|(index, leaf)| {
             encode_one(elem_ty, leaf).map_err(|msg| format!("element {index}: {msg}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     if elements.iter().any(Param::is_text) {
+        // uuid is the only element type that mixes forms (`UUID` binary, `str` text), and the
+        // literal needs every element as text; other binary elements are already their text bytes
+        for (element, leaf) in elements.iter_mut().zip(&leaves) {
+            if let PyParam::Uuid(bytes) = leaf {
+                *element = Param::text(uuid::to_text(bytes).into_bytes());
+            }
+        }
         let mut literal = String::new();
         push_literal(&mut literal, &mut elements.iter(), &dims);
         return Ok(Param::text(literal.into_bytes()));

@@ -14,7 +14,7 @@ pub enum NumericError {
     #[error("numeric needs at least {HEADER_LEN} header bytes, got {0}")]
     Truncated(usize),
     #[error("numeric declares {declared} digit groups but carries {actual} bytes of digits")]
-    LengthMismatch { declared: i16, actual: usize },
+    LengthMismatch { declared: u16, actual: usize },
     #[error("numeric has an invalid sign word {0:#06x}")]
     Sign(u16),
     #[error("numeric has an invalid scale {0}")]
@@ -52,8 +52,9 @@ fn be_i16(raw: &[u8], at: usize) -> Option<i16> {
 /// # Errors
 /// `NumericError` when the bytes are not a well-formed binary numeric.
 pub fn decode(raw: &[u8]) -> Result<Numeric, NumericError> {
+    // the digit count is unsigned: up to 131072 integer digits need more than i16::MAX groups
     let (Some(ndigits), Some(weight), Some(sign), Some(scale)) = (
-        be_i16(raw, 0),
+        be_u16(raw, 0),
         be_i16(raw, 2),
         be_u16(raw, 4),
         be_u16(raw, 6),
@@ -61,8 +62,7 @@ pub fn decode(raw: &[u8]) -> Result<Numeric, NumericError> {
         return Err(NumericError::Truncated(raw.len()));
     };
     let body = &raw[HEADER_LEN..];
-    let count = usize::try_from(ndigits).unwrap_or(usize::MAX);
-    if body.len() != count.saturating_mul(2) {
+    if body.len() != usize::from(ndigits) * 2 {
         return Err(NumericError::LengthMismatch {
             declared: ndigits,
             actual: body.len(),
@@ -158,11 +158,17 @@ impl Numeric {
 /// # Errors
 /// `SignalingNan` for `sNaN`.
 pub fn normalize_decimal_text(text: &str) -> Result<String, NumericError> {
-    let unsigned = text.trim_start_matches(['+', '-']);
-    if unsigned.eq_ignore_ascii_case("snan") {
+    let unsigned = text.trim_start_matches(['+', '-']).to_ascii_lowercase();
+    // Decimal keeps a NaN's diagnostic payload, as in `NaN123` or `sNaN7`
+    let is_nan = |prefix: &str| {
+        unsigned
+            .strip_prefix(prefix)
+            .is_some_and(|payload| payload.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if is_nan("snan") {
         return Err(NumericError::SignalingNan);
     }
-    if unsigned.eq_ignore_ascii_case("nan") {
+    if is_nan("nan") {
         return Ok("NaN".to_owned());
     }
     Ok(text.to_owned())
@@ -174,7 +180,7 @@ mod tests {
 
     fn wire(weight: i16, sign: u16, scale: u16, digits: &[u16]) -> Vec<u8> {
         let mut out = Vec::new();
-        out.extend_from_slice(&i16::try_from(digits.len()).unwrap_or(0).to_be_bytes());
+        out.extend_from_slice(&u16::try_from(digits.len()).unwrap_or(0).to_be_bytes());
         out.extend_from_slice(&weight.to_be_bytes());
         out.extend_from_slice(&sign.to_be_bytes());
         out.extend_from_slice(&scale.to_be_bytes());
@@ -272,5 +278,27 @@ mod tests {
             normalize_decimal_text("sNaN"),
             Err(NumericError::SignalingNan)
         );
+    }
+
+    #[test]
+    fn encode_text_handles_nan_payloads() {
+        assert_eq!(normalize_decimal_text("NaN123").as_deref(), Ok("NaN"));
+        assert_eq!(normalize_decimal_text("-NaN9").as_deref(), Ok("NaN"));
+        assert_eq!(
+            normalize_decimal_text("sNaN123"),
+            Err(NumericError::SignalingNan)
+        );
+        assert_eq!(
+            normalize_decimal_text("-sNaN1"),
+            Err(NumericError::SignalingNan)
+        );
+    }
+
+    #[test]
+    fn digit_count_is_unsigned() {
+        // 32768 groups overflow i16; postgres reads the count as uint16
+        let digits = vec![1; 32_768];
+        let decoded = decode(&wire(32_767, SIGN_POSITIVE, 0, &digits));
+        assert!(matches!(decoded, Ok(Numeric::Finite { digits, .. }) if digits.len() == 32_768));
     }
 }

@@ -2,10 +2,10 @@ import os
 import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import psycopg
 import pytest
+from psycopg.conninfo import make_conninfo
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -23,11 +23,9 @@ def _require_dsn() -> str:
     pytest.skip("ROWX_TEST_DSN is not set")
 
 
+# accepts URL and keyword DSNs alike, and returns the keyword form
 def _with_search_path(dsn: str, schema: str) -> str:
-    parts = urlparse(dsn)
-    query = [(k, v) for k, v in parse_qsl(parts.query) if k != "options"]
-    query.append(("options", f"-c search_path={schema}"))
-    return urlunparse(parts._replace(query=urlencode(query, quote_via=quote)))
+    return make_conninfo(dsn, options=f"-c search_path={schema}")
 
 
 @pytest.fixture

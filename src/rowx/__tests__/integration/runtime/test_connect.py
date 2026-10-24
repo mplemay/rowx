@@ -1,8 +1,8 @@
 import asyncio
 import inspect
-from urllib.parse import urlparse, urlunparse
 
 import pytest
+from psycopg.conninfo import make_conninfo
 
 import rowx
 from rowx.errors import DatabaseError, InterfaceError
@@ -11,10 +11,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.db]
 
 
 def _with_password(dsn: str, password: str) -> str:
-    parts = urlparse(dsn)
-    host = parts.hostname or "127.0.0.1"
-    port = "" if parts.port is None else f":{parts.port}"
-    return urlunparse(parts._replace(netloc=f"{parts.username}:{password}@{host}{port}"))
+    return make_conninfo(dsn, password=password)
 
 
 def test_connect_and_close(schema: str) -> None:

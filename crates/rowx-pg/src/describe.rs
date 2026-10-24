@@ -88,30 +88,6 @@ pub struct Describe {
     pub columns: Vec<ColumnInfo>,
 }
 
-// a type whose send function is one of these is wire-compatible with the table row of that key
-const TYPSEND_KEYS: &[(&str, &str)] = &[
-    ("boolsend", "bool"),
-    ("int2send", "int2"),
-    ("int4send", "int4"),
-    ("int8send", "int8"),
-    ("float4send", "float4"),
-    ("float8send", "float8"),
-    ("numeric_send", "numeric"),
-    ("textsend", "text"),
-    ("varcharsend", "varchar"),
-    ("bpcharsend", "bpchar"),
-    ("byteasend", "bytea"),
-    ("date_send", "date"),
-    ("time_send", "time"),
-    ("timetz_send", "timetz"),
-    ("timestamp_send", "timestamp"),
-    ("timestamptz_send", "timestamptz"),
-    ("interval_send", "interval"),
-    ("uuid_send", "uuid"),
-    ("json_send", "json"),
-    ("jsonb_send", "jsonb"),
-];
-
 fn key_of(matcher: Matcher) -> Option<&'static str> {
     TYPE_TABLE
         .iter()
@@ -139,24 +115,17 @@ fn unresolved_leaf(ty: &Type) -> Option<u32> {
     }
 }
 
+// a type outside the table is unsupported even when it reuses a built-in send function, since the
+// runtime codecs dispatch on the table alone; its typsend only describes why (`-` has no binary send)
 fn resolve(ty: &Type, sends: &HashMap<u32, String>) -> TypeKey {
     let wrapper = |matcher| key_of(matcher).ok_or(Unsupported { typsend: None });
     match ty.kind() {
         Kind::Enum(_) => wrapper(Matcher::EnumKind),
         Kind::Array(inner) => resolve(inner, sends).and_then(|_| wrapper(Matcher::ArrayKind)),
-        Kind::Domain(base) => resolve(base, sends).and_then(|_| wrapper(Matcher::DomainKind)),
-        _ => table_key(ty).ok_or(()).or_else(|()| {
-            let typsend = sends.get(&ty.oid());
-            typsend
-                .and_then(|send| {
-                    TYPSEND_KEYS
-                        .iter()
-                        .find(|(name, _)| name == send)
-                        .map(|(_, key)| *key)
-                })
-                .ok_or_else(|| Unsupported {
-                    typsend: typsend.cloned(),
-                })
+        // the runtime encodes and decodes a domain as its base type, so it takes the base key
+        Kind::Domain(base) => resolve(base, sends),
+        _ => table_key(ty).ok_or_else(|| Unsupported {
+            typsend: sends.get(&ty.oid()).cloned(),
         }),
     }
 }
@@ -374,11 +343,34 @@ mod tests {
     }
 
     #[test]
-    fn custom_type_resolves_through_a_known_send_function() {
-        let ty = custom("shell_text", 90_001);
+    fn custom_type_with_a_builtin_send_function_is_unsupported() {
+        let ty = custom("refcursor_like", 90_001);
         assert_eq!(unresolved_leaf(&ty), Some(90_001));
         let sends = HashMap::from([(90_001, "textsend".to_owned())]);
-        assert_eq!(resolve(&ty, &sends), Ok("text"));
+        assert_eq!(
+            resolve(&ty, &sends),
+            Err(Unsupported {
+                typsend: Some("textsend".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn domain_resolves_to_its_base_key() {
+        let domain = Type::new(
+            "posint".to_owned(),
+            90_004,
+            Kind::Domain(Type::INT4),
+            "public".to_owned(),
+        );
+        assert_eq!(resolve(&domain, &HashMap::new()), Ok("int4"));
+        let over_unsupported = Type::new(
+            "odd_domain".to_owned(),
+            90_005,
+            Kind::Domain(custom("odd", 90_002)),
+            "public".to_owned(),
+        );
+        assert!(resolve(&over_unsupported, &HashMap::new()).is_err());
     }
 
     #[test]
