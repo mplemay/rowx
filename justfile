@@ -1,7 +1,7 @@
 default:
     @just --list
 
-# all checks via prek (ruff, ty, rumdl, cargo fmt, clippy); more gates land with T02 and T04
+# all checks via prek (ruff, ty, rumdl, shellcheck, shfmt, cargo fmt, clippy)
 check:
     uv run prek run --all-files
 
@@ -28,7 +28,8 @@ bench:
     uv run --no-sync maturin develop --release
     uv run --no-sync python bench/fetch_100k.py
 
-# format rust and python through prek
+# format rust, python, and shell through prek
 fmt:
     uv run prek run cargo-fmt --all-files
     uv run prek run ruff-format --all-files
+    uv run prek run shfmt --all-files

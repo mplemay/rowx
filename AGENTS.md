@@ -13,9 +13,9 @@
     - **Don't use `unsafe`, `unwrap`, `expect`, or `panic!`** (denied by the lint config).
 - **`prek`**: Checks, linting, and formatting
   - *Usage:* `uv run prek`
-  - *Files:* [configuration](prek.toml)
-  - *Tools:* `rumdl` (markdown), `ruff` (python linting / formatting), `ty` (type checker), `cargo fmt` /
-    `cargo clippy` (rust)
+  - *Files:* [configuration](prek.toml), [shellcheck](.shellcheckrc), [shfmt](.editorconfig)
+  - *Tools:* `rumdl` (markdown), `ruff` (python linting / formatting), `ty` (type checker), `shellcheck` /
+    `shfmt` (shell), `cargo fmt` / `cargo clippy` (rust)
   - *Rules:*
     - **Don't run the underlying linters / formatters directly.**
     - **Never use file-wide ignores.**
@@ -123,7 +123,7 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Command | What it does |
 |---|---|
 | `just check` | All gates through `uv run prek run --all-files` |
-| `just fmt` | Format rust and python through the prek hooks |
+| `just fmt` | Format rust, python, and shell through the prek hooks |
 | `just test-rust` | `cargo test --workspace` (DB tests run if `ROWX_TEST_DSN` is set) |
 | `just test-py` | `uv run pytest` |
 | `just db-up` / `just db-down` | Start or stop `postgres:18` (lands in T03) |
