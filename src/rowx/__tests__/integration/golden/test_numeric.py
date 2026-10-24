@@ -109,7 +109,7 @@ def test_float8_special_values(schema: str) -> None:
     q = query[tuple[float, float]](t"SELECT {inf}::float8, {nan}::float8")
     got_inf, got_nan = run_with_conn(schema, q.fetch_one)
     assert got_inf == inf
-    assert got_nan != got_nan  # noqa: PLR0124
+    assert got_nan != got_nan  # ruff: ignore[comparison-with-itself]
 
 
 def test_float4_round_trip(schema: str) -> None:
@@ -126,7 +126,7 @@ def test_float4_overflow_is_encode_error(schema: str) -> None:
 def test_int_to_float8(schema: str) -> None:
     x = 3
     got = run_with_conn(schema, query[float](t"SELECT {x}::float8").fetch_one)
-    assert got == 3.0
+    assert got == 3.0  # ruff: ignore[float-equality-comparison]
     assert isinstance(got, float)
 
 

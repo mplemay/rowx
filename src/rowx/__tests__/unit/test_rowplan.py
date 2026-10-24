@@ -7,7 +7,7 @@ from rowx.errors import InterfaceError
 
 def evaluate(source: str) -> object:
     ns: dict[str, object] = {}
-    exec(PRELUDE + source, ns)  # noqa: S102
+    exec(PRELUDE + source, ns)  # ruff: ignore[exec-builtin]
     return ns["T"]
 
 
@@ -39,7 +39,7 @@ def test_unhashable_annotation_is_not_cached() -> None:
 def test_alias_depth_limit() -> None:
     ns: dict[str, object] = {}
     lines = ["type A0 = int"] + [f"type A{i} = A{i - 1}" for i in range(1, 20)]
-    exec("\n".join(lines), ns)  # noqa: S102
+    exec("\n".join(lines), ns)  # ruff: ignore[exec-builtin]
     with pytest.raises(InterfaceError):
         row_plan(ns["A19"])
     assert row_plan(ns["A10"]).kind == "scalar"

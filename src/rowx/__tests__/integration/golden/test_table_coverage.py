@@ -34,7 +34,7 @@ DECODE_GOLDENS: Final[dict[str, tuple[str, str, Any]]] = {
     "date": ("date", "2024-02-29", dt.date(2024, 2, 29)),
     "time": ("time", "01:02:03.000004", dt.time(1, 2, 3, 4)),
     "timetz": ("timetz", "01:02:03+02", dt.time(1, 2, 3, tzinfo=dt.timezone(dt.timedelta(hours=2)))),
-    "timestamp": ("timestamp", "2024-01-02 03:04:05", dt.datetime(2024, 1, 2, 3, 4, 5)),  # noqa: DTZ001
+    "timestamp": ("timestamp", "2024-01-02 03:04:05", dt.datetime(2024, 1, 2, 3, 4, 5)),  # ruff: ignore[call-datetime-without-tzinfo]
     "timestamptz": ("timestamptz", "2024-01-02 03:04:05+00", dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)),
     "interval": ("interval", "1 day 02:00:00", dt.timedelta(days=1, hours=2)),
     "uuid": ("uuid", "12345678-1234-5678-1234-567812345678", UUID("12345678-1234-5678-1234-567812345678")),
@@ -65,7 +65,7 @@ ENCODE_GOLDENS: Final[dict[str, tuple[str, Any]]] = {
     "date": ("date", dt.date(1, 1, 1)),
     "time": ("time", dt.time(23, 59, 59, 999999)),
     "timetz": ("timetz", dt.time(1, 2, 3, tzinfo=dt.timezone(dt.timedelta(hours=-5)))),
-    "timestamp": ("timestamp", dt.datetime(2024, 1, 2, 3, 4, 5, 6)),  # noqa: DTZ001
+    "timestamp": ("timestamp", dt.datetime(2024, 1, 2, 3, 4, 5, 6)),  # ruff: ignore[call-datetime-without-tzinfo]
     "timestamptz": ("timestamptz", dt.datetime(2024, 1, 2, 3, 4, 5, 6, tzinfo=UTC)),
     "interval": ("interval", dt.timedelta(days=-1, seconds=5, microseconds=7)),
     "uuid": ("uuid", UUID("12345678-1234-5678-1234-567812345678")),

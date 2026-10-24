@@ -55,7 +55,7 @@ class DatabaseError(Error):
         return type(self), (self.sqlstate, self.message, self.detail, self.hint, self.position)
 
 
-class RowNotFound(Error):  # noqa: N818
+class RowNotFound(Error):  # ruff: ignore[error-suffix-on-exception-name]
     pass
 
 

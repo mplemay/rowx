@@ -1,6 +1,6 @@
 import json
 import re
-import subprocess
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -41,7 +41,7 @@ def _expectations() -> tuple[dict[int, str], set[int]]:
 
 
 def _run_pyright() -> tuple[dict[int, str], set[int]]:
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         [sys.executable, "-m", "pyright", "--outputjson", "--pythonversion", "3.14", str(CASES)],
         capture_output=True,
         text=True,
@@ -60,7 +60,7 @@ def _run_pyright() -> tuple[dict[int, str], set[int]]:
 
 
 def _run_mypy() -> tuple[dict[int, str], set[int]]:
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         [
             sys.executable,
             "-m",

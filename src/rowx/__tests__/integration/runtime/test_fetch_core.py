@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
 
-async def fetch(  # noqa: PLR0913
+async def fetch(  # ruff: ignore[too-many-arguments]
     conn: ConnectionImpl,
     sql: str,
     *,

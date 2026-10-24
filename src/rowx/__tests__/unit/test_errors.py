@@ -1,4 +1,4 @@
-import pickle
+import pickle  # ruff: ignore[suspicious-pickle-import]
 from typing import Final
 
 import pytest
@@ -64,6 +64,6 @@ def test_database_error_defaults() -> None:
 
 
 def test_database_error_pickles() -> None:
-    err = pickle.loads(pickle.dumps(DatabaseError("42P01", "missing", position=3)))  # noqa: S301
+    err = pickle.loads(pickle.dumps(DatabaseError("42P01", "missing", position=3)))  # ruff: ignore[suspicious-pickle-usage]
     assert isinstance(err, DatabaseError)
     assert (err.sqlstate, err.message, err.position) == ("42P01", "missing", 3)

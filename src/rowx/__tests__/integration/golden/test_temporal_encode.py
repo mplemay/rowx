@@ -59,11 +59,11 @@ def test_timetz_round_trip(schema: str, value: time) -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        datetime(1, 1, 1),  # noqa: DTZ001
-        datetime(1999, 12, 31, 23, 59, 59, 999999),  # noqa: DTZ001
-        datetime(2000, 1, 1),  # noqa: DTZ001
-        datetime(2024, 2, 29, 12, 30, 15, 250000),  # noqa: DTZ001
-        datetime(9999, 12, 31, 23, 59, 59, 999999),  # noqa: DTZ001
+        datetime(1, 1, 1),  # ruff: ignore[call-datetime-without-tzinfo]
+        datetime(1999, 12, 31, 23, 59, 59, 999999),  # ruff: ignore[call-datetime-without-tzinfo]
+        datetime(2000, 1, 1),  # ruff: ignore[call-datetime-without-tzinfo]
+        datetime(2024, 2, 29, 12, 30, 15, 250000),  # ruff: ignore[call-datetime-without-tzinfo]
+        datetime(9999, 12, 31, 23, 59, 59, 999999),  # ruff: ignore[call-datetime-without-tzinfo]
     ],
 )
 def test_timestamp_round_trip(schema: str, value: datetime) -> None:
@@ -100,7 +100,7 @@ def test_interval_round_trip(schema: str, value: timedelta) -> None:
 
 
 def test_naive_datetime_to_timestamptz_is_encode_error(schema: str) -> None:
-    value = datetime(2024, 1, 1)  # noqa: DTZ001
+    value = datetime(2024, 1, 1)  # ruff: ignore[call-datetime-without-tzinfo]
     with pytest.raises(EncodeError, match=r"\$1.*naive"):
         fetch(schema, query[datetime](t"SELECT {value}::timestamptz"))
 
@@ -124,7 +124,7 @@ def test_aware_time_to_time_is_encode_error(schema: str) -> None:
 
 
 def test_datetime_to_date_is_encode_error(schema: str) -> None:
-    value = datetime(2024, 1, 1)  # noqa: DTZ001
+    value = datetime(2024, 1, 1)  # ruff: ignore[call-datetime-without-tzinfo]
     with pytest.raises(EncodeError, match=r"\$1.*datetime"):
         fetch(schema, query[date](t"SELECT {value}::date"))
 
