@@ -187,3 +187,52 @@ def test_fixture_module_is_never_executed(tmp_path: Path) -> None:
     assert leaves(resolve(tmp_path, "main.py")) == [("int", False)]
     assert set(sys.modules) == before
     assert "boom" not in sys.modules
+
+
+def test_local_binding_shadows_module_name(tmp_path: Path) -> None:
+    source = """
+        from rowx import query
+
+        Row = int
+
+        def f():
+            Row = str
+            return query[Row](t"select 1")
+
+        def g(Row):
+            return query[Row](t"select 1")
+
+        def h():
+            return query[Row](t"select 1")
+    """
+    write(tmp_path, {"main.py": source})
+    calls = discover_file(tmp_path / "main.py").calls
+    graph = ModuleGraph()
+    results = [resolve_row_type(graph, call, (tmp_path,)) for call in calls]
+    assert [r.diagnostic.rule if r.diagnostic else None for r in results] == [
+        "unresolved-row-type",
+        "unresolved-row-type",
+        None,
+    ]
+
+
+def test_conflicting_star_imports_are_unresolved(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        {
+            "a.py": "Row = int\n",
+            "b.py": "Row = str\n",
+            "main.py": "from a import *\nfrom b import *\n" + QUERY.format(t="Row"),
+        },
+    )
+    diagnostic = resolve(tmp_path, "main.py").diagnostic
+    assert diagnostic is not None
+    assert diagnostic.rule == "unresolved-row-type"
+
+
+def test_plain_alias_of_constructor_is_subscriptable(tmp_path: Path) -> None:
+    write(tmp_path, {"main.py": "L = list\n" + QUERY.format(t="L[int]")})
+    resolution = resolve(tmp_path, "main.py")
+    assert row_type(resolution).elements[0].leaf == "list"
+    write(tmp_path, {"typed.py": "type L = list\n" + QUERY.format(t="L[int]")})
+    assert resolve(tmp_path, "typed.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]

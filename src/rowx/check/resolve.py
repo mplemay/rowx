@@ -2,6 +2,7 @@ import ast
 import builtins
 from dataclasses import dataclass, field
 from io import BytesIO
+from pathlib import Path
 from sys import stdlib_module_names
 from tokenize import detect_encoding
 from typing import TYPE_CHECKING, Final, Literal
@@ -10,7 +11,6 @@ from rowx.check.model import Diagnostic, QueryCall, Rule, Span
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
 
     from rowx.check.config import Config
 
@@ -32,6 +32,17 @@ LEAVES: Final[dict[str, str]] = {
     "uuid.UUID": "uuid.UUID",
 }
 NEUTRAL: Final[frozenset[str]] = frozenset({"typing.Any", "builtins.object"})
+
+SCOPE_TYPES: Final = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
 
 type RowKind = Literal["none", "scalar", "tuple"]
 type BindingKind = Literal["import", "from", "alias", "invalid", "other"]
@@ -73,6 +84,7 @@ class _Binding:
     name: str = ""
     expr: ast.expr | None = None
     generic: bool = False
+    type_stmt: bool = False
     site: Span | None = None
     tc: bool = field(default=False, compare=False)
 
@@ -82,6 +94,7 @@ class _Module:
     path: Path
     # set for a package (`__init__.py` or a namespace directory); submodules live beside it
     directory: Path | None
+    tree: ast.Module | None = None
     lines: list[bytes] = field(default_factory=list)
     bindings: dict[str, list[_Binding]] = field(default_factory=dict)
     stars: list[tuple[int, str | None]] = field(default_factory=list)
@@ -122,6 +135,8 @@ class _Alias:
     expr: ast.expr
     site: Span
     chain: tuple[tuple[Path, str], ...]
+    # a `type X = …` statement makes a `TypeAliasType`, which can't be subscripted
+    type_stmt: bool = False
 
 
 type _Value = _External | _ModuleRef | _Alias
@@ -203,7 +218,10 @@ def _collect_definition(module: _Module, stmt: ast.stmt, *, tc: bool) -> None:
     site = module.span(stmt)
     match stmt:
         case ast.TypeAlias(name=ast.Name(id=name)):
-            module.bind(name, _Binding("alias", expr=stmt.value, generic=bool(stmt.type_params), site=site, tc=tc))
+            module.bind(
+                name,
+                _Binding("alias", expr=stmt.value, generic=bool(stmt.type_params), type_stmt=True, site=site, tc=tc),
+            )
         case ast.AnnAssign(target=ast.Name(id=name), value=value) if value is not None and _is_type_alias_annotation(
             stmt.annotation,
         ):
@@ -278,9 +296,56 @@ def _parse(path: Path, *, directory: Path | None) -> _Module | None:
         tree = ast.parse(text, str(path))
     except OSError, SyntaxError, UnicodeDecodeError, LookupError, ValueError:
         return None
-    module = _Module(path=path, directory=directory, lines=text.encode().splitlines(keepends=True))
+    module = _Module(path=path, tree=tree, directory=directory, lines=text.encode().splitlines(keepends=True))
     _collect(module, tree.body, tc=False)
     return module
+
+
+def _same_node(left: ast.AST, right: ast.AST) -> bool:
+    keys = ("lineno", "col_offset", "end_lineno", "end_col_offset")
+    return type(left) is type(right) and all(getattr(left, key, None) == getattr(right, key, None) for key in keys)
+
+
+def _enclosing_scopes(node: ast.AST, target: ast.expr, stack: tuple[ast.AST, ...]) -> tuple[ast.AST, ...] | None:
+    if _same_node(node, target):
+        return stack
+    if isinstance(node, SCOPE_TYPES):
+        stack = (*stack, node)
+    for child in ast.iter_child_nodes(node):
+        if (found := _enclosing_scopes(child, target, stack)) is not None:
+            return found
+    return None
+
+
+def _local_names(scope: ast.AST) -> set[str]:
+    names: set[str] = set()
+    body: list[ast.stmt] = []
+    match scope:
+        case ast.ListComp() | ast.SetComp() | ast.DictComp() | ast.GeneratorExp():
+            names = {name for generator in scope.generators for name in _stored_names(generator.target)}
+        case ast.ClassDef():
+            body = scope.body
+        case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.Lambda():
+            arguments = scope.args
+            every = (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg)
+            names = {arg.arg for arg in every if arg is not None}
+            body = [] if isinstance(scope, ast.Lambda) else scope.body
+    holder = _Module(path=Path(), directory=None)
+    _collect(holder, body, tc=False)
+    return names | set(holder.bindings)
+
+
+# only module-level bindings are followed, so a name rebound in a scope around the call can't be trusted
+def _reject_shadowed(tree: ast.Module, row_type: ast.expr) -> None:
+    scopes = _enclosing_scopes(tree, row_type, ()) or ()
+    used = {child.id for child in ast.walk(row_type) if isinstance(child, ast.Name)}
+    for index, scope in enumerate(reversed(scopes)):
+        # a class body is visible only from its own scope
+        if isinstance(scope, ast.ClassDef) and index > 0:
+            continue
+        if shadowed := used & _local_names(scope):
+            msg = f"`{min(shadowed)}` is rebound in a scope around the query, and only module-level names are followed"
+            raise _unresolved(msg)
 
 
 def roots_for(config: Config, path: Path) -> tuple[Path, ...]:
@@ -396,10 +461,16 @@ class _Resolver:
         chain = (*chain, key)
         if (bindings := module.bindings.get(name)) is not None:
             return self._follow(module, name, bindings, chain)
-        for level, dotted in module.stars:
-            target = self._find(module, level, dotted)
-            if target is not None and name in self._exports(target, frozenset()):
-                return self._lookup(target, name, chain, allow_builtin=False)
+        providers = [
+            target
+            for level, dotted in module.stars
+            if (target := self._find(module, level, dotted)) is not None and name in self._exports(target, frozenset())
+        ]
+        if len({provider.path for provider in providers}) > 1:
+            msg = f"`{name}` is provided by more than one star import"
+            raise _unresolved(msg)
+        if providers:
+            return self._lookup(providers[0], name, chain, allow_builtin=False)
         if allow_builtin and name in BUILTIN_NAMES:
             return _External(f"builtins.{name}")
         msg = f"`{name}` can't be resolved statically"
@@ -432,7 +503,7 @@ class _Resolver:
                 if binding.expr is None or binding.site is None:
                     msg = f"`{name}` has no value"
                     raise _unresolved(msg)
-                return _Alias(module, binding.expr, binding.site, chain)
+                return _Alias(module, binding.expr, binding.site, chain, type_stmt=binding.type_stmt)
             case "invalid":
                 msg = f"`{name}` is not a type expression"
                 raise _invalid(msg)
@@ -518,8 +589,18 @@ class _Resolver:
         module, _, name = qualname.rpartition(".")
         return f"typing.{name}" if module in TYPING_MODULES else qualname
 
+    def _constructor(self, value: _Value) -> _Value:
+        # `L = list` is just `list` at runtime, so `L[int]` is `list[int]`
+        while isinstance(value, _Alias) and not value.type_stmt:
+            if self.alias is None:
+                self.alias = AliasSite(path=value.module.path, span=value.site)
+            if not isinstance(value.expr, ast.Name | ast.Attribute):
+                break
+            value = self._resolve_ref(value.expr, value.module, value.chain)
+        return value
+
     def _eval_subscript(self, expr: ast.Subscript, module: _Module, chain: tuple[tuple[Path, str], ...]) -> _Node:
-        base = self._resolve_ref(expr.value, module, chain)
+        base = self._constructor(self._resolve_ref(expr.value, module, chain))
         if not isinstance(base, _External):
             msg = "only `tuple`, `list`, `Optional`, `Union` and `Annotated` can be subscripted"
             raise _invalid(msg)
@@ -552,6 +633,8 @@ class _Resolver:
         if module is None:
             msg = "the module could not be parsed"
             raise _unresolved(msg)
+        if module.tree is not None:
+            _reject_shadowed(module.tree, call.row_type)
         node = self._eval(call.row_type, module, ())
         if not node.members:
             return RowType(kind="none", alias=self.alias)
