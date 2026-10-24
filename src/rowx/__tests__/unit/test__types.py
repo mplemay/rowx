@@ -1,7 +1,10 @@
+from typing import TypeAliasType, get_args
+
 import pytest
 
 from rowx import _core
 from rowx._types import accepts, by_key, result_type
+from rowx._vocab import AcceptedParam, CodecName, PyResultName, TypeKey
 
 
 def test_type_table_has_core_keys() -> None:
@@ -37,6 +40,18 @@ def test_json_accepts_any_value(py_type_name: str, key: str) -> None:
 
 def test_text_accepts_only_str() -> None:
     assert by_key("text").accepted_params == ["str"]
+
+
+def _names(alias: TypeAliasType) -> set[str]:
+    return set(get_args(alias.__value__))
+
+
+def test_vocab_matches_the_type_table() -> None:
+    rows = _core.type_table()
+    assert {row.key for row in rows} == _names(TypeKey)
+    assert {row.py_result for row in rows} == _names(PyResultName)
+    assert {name for row in rows for name in row.accepted_params} == _names(AcceptedParam)
+    assert {codec for row in rows for codec in (row.decode, row.encode)} == _names(CodecName)
 
 
 def test_type_info_is_frozen() -> None:

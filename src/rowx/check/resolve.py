@@ -5,8 +5,9 @@ from io import BytesIO
 from pathlib import Path
 from sys import stdlib_module_names
 from tokenize import detect_encoding
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, get_args
 
+from rowx._vocab import LeafName
 from rowx.check.model import Diagnostic, QueryCall, Rule, Span
 
 if TYPE_CHECKING:
@@ -18,7 +19,7 @@ MAX_HOPS: Final[int] = 16
 INIT_FILE: Final[str] = "__init__.py"
 TYPING_MODULES: Final[frozenset[str]] = frozenset({"typing", "typing_extensions"})
 BUILTIN_NAMES: Final[frozenset[str]] = frozenset(dir(builtins))
-LEAVES: Final[dict[str, str]] = {
+LEAVES: Final[dict[str, LeafName]] = {
     "builtins.int": "int",
     "builtins.float": "float",
     "builtins.str": "str",
@@ -31,6 +32,8 @@ LEAVES: Final[dict[str, str]] = {
     "datetime.timedelta": "datetime.timedelta",
     "uuid.UUID": "uuid.UUID",
 }
+# `LeafName` is this map plus the three structural markers; keep the two in lockstep
+assert set(LEAVES.values()) | {"list", "any", "none"} == set(get_args(LeafName.__value__))  # noqa: S101
 NEUTRAL: Final[frozenset[str]] = frozenset({"typing.Any", "builtins.object"})
 
 SCOPE_TYPES: Final = (
@@ -51,7 +54,7 @@ type BindingKind = Literal["import", "from", "alias", "invalid", "other"]
 # `leaf` is a LEAVES value, "list" (with `item`), "any" (`Any` and `object`) or "none" (a tuple element `None`)
 @dataclass(slots=True, frozen=True)
 class Elem:
-    leaf: str
+    leaf: LeafName
     nullable: bool
     item: Elem | None = None
 

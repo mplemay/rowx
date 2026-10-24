@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from json import dumps
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal, assert_never
 
 from rowx.check.sourcemap import LINE_PATTERN
 
@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from pathlib import Path
 
+    from rowx._vocab import NullReasonName
     from rowx.check.model import Diagnostic, Span
 
 TAB_WIDTH: Final[int] = 4
@@ -25,8 +26,20 @@ class Report:
     column_index: int | None = None
 
 
+type _TemplateReason = Literal[
+    "NullableColumn",
+    "NotNullColumn",
+    "NotValidatedConstraint",
+    "ForeignOrView",
+    "GroupingSets",
+    "ReturningOldNew",
+    "ExplainFailed",
+    "OverrideBang",
+    "OverrideQuestion",
+]
+
 # `{d}` is the detail, or "the column" when there is none
-NULL_NOTES: Final[dict[str, str]] = {
+NULL_NOTES: Final[dict[_TemplateReason, str]] = {
     "NullableColumn": "nullable because {d} has no NOT NULL constraint",
     "NotNullColumn": "NOT NULL because {d} is declared NOT NULL",
     "NotValidatedConstraint": "{d} has a NOT NULL constraint that is not validated, so it may still hold NULL",
@@ -39,20 +52,32 @@ NULL_NOTES: Final[dict[str, str]] = {
 }
 
 
-def null_reason_note(reason: str, detail: str | None = None, *, column: str | None = None) -> str | None:
-    if (template := NULL_NOTES.get(reason)) is not None:
-        return template.format(d="the column" if detail is None else detail)
-    if reason == "Computed":
-        return f'computed expression; add AS "{column or "col"}!"'
-    if reason == "OuterJoin":
-        return "nullable side of an outer join" + ("" if detail is None else f" ({detail})")
-    if reason == "ScanBoundary":
-        return (
-            "a subquery contains an outer join"
-            if detail is None
-            else f'"{detail}" contains an outer join or GROUPING SETS'
-        )
-    return None
+def null_reason_note(reason: NullReasonName, detail: str | None = None, *, column: str | None = None) -> str:
+    match reason:
+        case "Computed":
+            return f'computed expression; add AS "{column or "col"}!"'
+        case "OuterJoin":
+            return "nullable side of an outer join" + ("" if detail is None else f" ({detail})")
+        case "ScanBoundary":
+            return (
+                "a subquery contains an outer join"
+                if detail is None
+                else f'"{detail}" contains an outer join or GROUPING SETS'
+            )
+        case (
+            "NullableColumn"
+            | "NotNullColumn"
+            | "NotValidatedConstraint"
+            | "ForeignOrView"
+            | "GroupingSets"
+            | "ReturningOldNew"
+            | "ExplainFailed"
+            | "OverrideBang"
+            | "OverrideQuestion"
+        ):
+            return NULL_NOTES[reason].format(d="the column" if detail is None else detail)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _sort_key(report: Report) -> tuple[str, int, int, int, int, str, str]:

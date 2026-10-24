@@ -1,6 +1,10 @@
 from functools import cache
+from typing import TYPE_CHECKING
 
 from rowx._core import TypeInfo, type_table
+
+if TYPE_CHECKING:
+    from rowx._vocab import PyResultName
 
 
 @cache
@@ -18,5 +22,5 @@ def accepts(py_type_name: str, key: str) -> bool:
     return "object" in accepted or py_type_name in accepted
 
 
-def result_type(key: str) -> str:
+def result_type(key: str) -> PyResultName:
     return by_key(key).py_result
