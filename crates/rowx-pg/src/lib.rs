@@ -4,6 +4,7 @@ pub mod conn;
 pub mod dsn;
 pub mod error;
 pub mod exec;
+pub mod explain;
 pub mod state;
 pub mod stmt_cache;
 pub mod tls;
