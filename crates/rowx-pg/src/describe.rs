@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio_postgres::Client;
 use tokio_postgres::types::{Kind, Type};
@@ -149,6 +150,53 @@ fn resolve(ty: &Type, sends: &HashMap<u32, String>) -> TypeKey {
     }
 }
 
+static CATALOG_QUERIES: AtomicU64 = AtomicU64::new(0);
+
+/// How many base-nullability catalog queries this process has run; tests use it to prove batching.
+#[must_use]
+pub fn catalog_queries() -> u64 {
+    CATALOG_QUERIES.load(Ordering::Acquire)
+}
+
+// one round trip for every column with a table origin; foreign tables and views are never NotNull
+const BASE_NULLABILITY_SQL: &str = "\
+SELECT o.relid, o.attnum, CASE \
+    WHEN c.relkind NOT IN ('r', 'p', 'm') THEN 'foreign_or_view' \
+    WHEN NOT a.attnotnull THEN 'nullable' \
+    WHEN EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = a.attrelid AND k.contype = 'n' \
+        AND NOT k.convalidated AND k.conkey = ARRAY[a.attnum]) THEN 'not_validated' \
+    ELSE 'not_null' END \
+FROM unnest($1::oid[], $2::int2[]) AS o(relid, attnum) \
+JOIN pg_attribute a ON a.attrelid = o.relid AND a.attnum = o.attnum \
+JOIN pg_class c ON c.oid = a.attrelid";
+
+async fn base_nullability(
+    client: &Client,
+    origins: &[(u32, i16)],
+) -> Result<HashMap<(u32, i16), NullReason>, Error> {
+    if origins.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (relids, attnums): (Vec<u32>, Vec<i16>) = origins.iter().copied().unzip();
+    CATALOG_QUERIES.fetch_add(1, Ordering::AcqRel);
+    let rows = client
+        .query(BASE_NULLABILITY_SQL, &[&relids, &attnums])
+        .await?;
+    rows.iter()
+        .map(|row| {
+            let status: String = row.try_get(2)?;
+            let reason = match status.as_str() {
+                "not_null" => NullReason::NotNullColumn,
+                "not_validated" => NullReason::NotValidatedConstraint,
+                "foreign_or_view" => NullReason::ForeignOrView,
+                _ => NullReason::NullableColumn,
+            };
+            Ok(((row.try_get(0)?, row.try_get(1)?), reason))
+        })
+        .collect::<Result<_, tokio_postgres::Error>>()
+        .map_err(Error::from)
+}
+
 async fn typsends(client: &Client, oids: &[u32]) -> Result<HashMap<u32, String>, Error> {
     if oids.is_empty() {
         return Ok(HashMap::new());
@@ -193,7 +241,7 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
             type_key: resolve(ty, &sends),
         })
         .collect();
-    let columns = stmt
+    let mut columns: Vec<ColumnInfo> = stmt
         .columns()
         .iter()
         .map(|col| {
@@ -206,8 +254,7 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
                 type_key: resolve(col.type_(), &sends),
                 table_oid,
                 attnum: table_oid.and_then(|_| col.column_id()),
-                // base nullability lands in T32 and the plan pass in T33; until then every column is
-                // conservatively nullable
+                // the catalog pass below refines origin columns; the plan pass lands in T33
                 nullable: true,
                 reason: if table_oid.is_some() {
                     NullReason::NullableColumn
@@ -217,6 +264,20 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
             }
         })
         .collect();
+
+    let mut origins: Vec<(u32, i16)> = columns
+        .iter()
+        .filter_map(|c| c.table_oid.zip(c.attnum))
+        .collect();
+    origins.sort_unstable();
+    origins.dedup();
+    let base = base_nullability(client, &origins).await?;
+    for col in &mut columns {
+        if let Some(reason) = col.table_oid.zip(col.attnum).and_then(|o| base.get(&o)) {
+            col.nullable = *reason != NullReason::NotNullColumn;
+            col.reason = reason.clone();
+        }
+    }
     Ok(Describe { params, columns })
 }
 

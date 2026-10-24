@@ -1,4 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS file_fdw WITH SCHEMA public;
+CREATE SERVER IF NOT EXISTS rowx_files FOREIGN DATA WRAPPER file_fdw;
 
 CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
 CREATE DOMAIN positive_int AS integer CHECK (VALUE > 0);
@@ -78,3 +80,9 @@ CREATE VIEW user_posts AS
 SELECT u.id AS user_id, u.name, p.id AS post_id, p.title
 FROM users u
 LEFT JOIN posts p ON p.user_id = u.id;
+
+-- describe only prepares, so the file is never read
+CREATE FOREIGN TABLE foreign_users (
+    id integer NOT NULL,
+    name text
+) SERVER rowx_files OPTIONS (filename '/dev/null', format 'csv');
