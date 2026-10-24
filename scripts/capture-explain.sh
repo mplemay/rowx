@@ -12,13 +12,19 @@ container="${ROWX_PG_CONTAINER:-}"
 if [[ -z "$container" && -f "$state" ]]; then
   container="$(sed -n 1p "$state")"
 fi
-[[ -n "$container" ]] || { echo "no test postgres; run 'just db-up' or set ROWX_PG_CONTAINER" >&2; exit 1; }
+[[ -n "$container" ]] || {
+  echo "no test postgres; run 'just db-up' or set ROWX_PG_CONTAINER" >&2
+  exit 1
+}
 
-mode=write
+mode="write"
 case "${1:-}" in
-"") ;;
---check) mode=check ;;
-*) echo "usage: $0 [--check]" >&2; exit 2 ;;
+  "") ;;
+  --check) mode=check ;;
+  *)
+    echo "usage: $0 [--check]" >&2
+    exit 2
+    ;;
 esac
 
 psql_admin() { docker exec -i "$container" psql -U rowx -d rowx -X -q -v ON_ERROR_STOP=1 "$@"; }
@@ -105,10 +111,10 @@ emit() {
     echo "-- server_version: $version"
     printf '%s\n' "$sql"
   } >"$out/$name.sql"
-  printf '%s\n' "EXPLAIN (GENERIC_PLAN, VERBOSE, COSTS OFF, FORMAT JSON) $sql" |
-    psql_scratch -At |
-    # same layout as the pretty-format-json hook (sorted keys, 2-space indent), so committing doesn't rewrite them
-    python3 -I -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True, ensure_ascii=False))' \
+  # same layout as the pretty-format-json hook (sorted keys, 2-space indent), so committing doesn't rewrite them
+  printf '%s\n' "EXPLAIN (GENERIC_PLAN, VERBOSE, COSTS OFF, FORMAT JSON) $sql" \
+    | psql_scratch -At \
+    | python3 -I -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True, ensure_ascii=False))' \
       >"$out/$name.json"
 }
 

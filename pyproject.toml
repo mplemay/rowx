@@ -43,6 +43,8 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.17.2",
     "rumdl>=0.3.0",
+    "shellcheck-py==0.11.0.1",
+    "shfmt-py==4.2.0",
     "ty>=0.0.91",
 ]
 bench = [

@@ -1,0 +1,3 @@
+# All scripts in this repo are bash. Follow sourced files when they appear.
+shell=bash
+external-sources=true
