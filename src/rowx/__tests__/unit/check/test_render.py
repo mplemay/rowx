@@ -2,17 +2,16 @@ import json
 import os
 from pathlib import Path
 from textwrap import dedent
-from typing import TYPE_CHECKING, Final
+from typing import Final, get_args
 
 import pytest
 
+from rowx._vocab import NullReasonName
 from rowx.check.discover import discover_source
 from rowx.check.model import Diagnostic, Span
-from rowx.check.render import Report, null_reason_note, render_json, render_text
+from rowx.check.render import NULL_NOTES, Report, null_reason_note, render_json, render_text
 from rowx.check.sourcemap import SourceMapper
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 EXPECTED: Final[Path] = Path(__file__).parent / "expected"
 PATH: Final[Path] = Path("app/users.py")
 
@@ -201,29 +200,17 @@ def test_crlf_and_tabs() -> None:
         ("NullableColumn", "users.email", "nullable because users.email has no NOT NULL constraint"),
         ("OuterJoin", "Hash Left Join", "nullable side of an outer join (Hash Left Join)"),
         ("Computed", None, 'computed expression; add AS "col!"'),
-        ("Nope", None, None),
     ],
 )
-def test_null_reason_note(reason: str, detail: str | None, expected: str | None) -> None:
+def test_null_reason_note(reason: NullReasonName, detail: str | None, expected: str) -> None:
     assert null_reason_note(reason, detail) == expected
 
 
-def test_every_reason_has_a_note() -> None:
-    reasons: Sequence[str] = (
-        "NotNullColumn",
-        "NullableColumn",
-        "NotValidatedConstraint",
-        "ForeignOrView",
-        "OuterJoin",
-        "GroupingSets",
-        "ScanBoundary",
-        "ReturningOldNew",
-        "Computed",
-        "ExplainFailed",
-        "OverrideBang",
-        "OverrideQuestion",
-    )
-    assert all(null_reason_note(r) is not None for r in reasons)
+def test_null_reasons_match_the_note_table() -> None:
+    noted = set(NULL_NOTES) | {"Computed", "OuterJoin", "ScanBoundary"}
+    names = set(get_args(NullReasonName.__value__))
+    assert noted == names
+    assert all(null_reason_note(reason) for reason in names)
 
 
 def test_unicode_line_separator_is_not_a_line_break() -> None:

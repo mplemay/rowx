@@ -1,7 +1,8 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 from rowx._types import result_type
+from rowx._vocab import NullReasonName, TypeKey
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -9,8 +10,9 @@ if TYPE_CHECKING:
     from rowx.check.model import Rule
     from rowx.check.resolve import Elem, RowType
 
-JSON_KEYS: Final[frozenset[str]] = frozenset({"json", "jsonb"})
+JSON_KEYS: Final[frozenset[TypeKey]] = frozenset({"json", "jsonb"})
 USE_EXECUTE: Final[str] = "use .execute()"
+type _Reason = NullReasonName | Literal[""]
 
 
 # `type_key` is None for a type outside the table; an array column carries its innermost
@@ -19,11 +21,11 @@ USE_EXECUTE: Final[str] = "use .execute()"
 class ColumnDesc:
     name: str
     type_name: str
-    type_key: str | None
+    type_key: TypeKey | None
     nullable: bool
-    reason: str = ""
+    reason: _Reason = ""
     reason_detail: str | None = None
-    element_key: str | None = None
+    element_key: TypeKey | None = None
     dims: int = 1
 
 
@@ -40,7 +42,7 @@ class Finding:
     column: int | None = None
     element: int | None = None
     help: str | None = None
-    reason: str = ""
+    reason: _Reason = ""
     reason_detail: str | None = None
 
 

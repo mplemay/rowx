@@ -61,7 +61,7 @@ class Statistics:
     checked: int = 0
     distinct_sql: int = 0
     unchecked: int = 0
-    by_rule: Counter[str] = field(default_factory=Counter)
+    by_rule: Counter[Rule] = field(default_factory=Counter)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -382,8 +382,8 @@ def _finding_report(
     else:
         notes.extend(_alias_note(site.row_type))
     name = columns[finding.column].name if finding.column is not None else None
-    if finding.reason and (note := null_reason_note(finding.reason, finding.reason_detail, column=name)) is not None:
-        notes.append(note)
+    if reason := finding.reason:
+        notes.append(null_reason_note(reason, finding.reason_detail, column=name))
     return _report(
         site,
         finding.rule,
