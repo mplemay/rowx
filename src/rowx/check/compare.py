@@ -1,13 +1,14 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx._types import result_type
+from rowx._types import accepts, by_key, result_type
 from rowx._vocab import NullReasonName, TypeKey
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from rowx.check.model import Rule
+    from rowx.check.params import ParamType
     from rowx.check.resolve import Elem, RowType
 
 JSON_KEYS: Final[frozenset[TypeKey]] = frozenset({"json", "jsonb"})
@@ -182,3 +183,52 @@ def compare(describe: DescribeDesc, row_type: RowType) -> list[Finding]:
             for index, (column, elem) in enumerate(zip(columns, row_type.elements, strict=True)):
                 findings.extend(_compare_element(column, index, elem, index))
             return findings
+
+
+def _shown_param(evident: ParamType) -> str:
+    return (
+        f"list[{_shown_param(evident.item)}]" if evident.name == "list" and evident.item is not None else evident.name
+    )
+
+
+# `None` binds NULL for every parameter, and an unknown or unsupported parameter is never reported here
+def _array_leaf(evident: ParamType) -> ParamType | None:
+    # the dimension count of a parameter is unknown, so nested literals are flattened to their leaf
+    item = evident
+    while item.name == "list":
+        if item.item is None:
+            return None
+        item = item.item
+    return item
+
+
+def _param_finding(index: int, type_name: str, key: TypeKey, evident: ParamType, noun: str) -> Finding:
+    accepted = ", ".join(f"`{name}`" for name in by_key(key).accepted_params)
+    message = (
+        f'parameter ${index + 1} has type "{type_name}", {noun} accepts {accepted}, '
+        f"but the interpolation is `{_shown_param(evident)}`"
+    )
+    return Finding(rule="param-type-mismatch", message=message)
+
+
+def _element_finding(index: int, type_name: str, element_key: TypeKey, evident: ParamType) -> Finding | None:
+    leaf = _array_leaf(evident)
+    if leaf is None or leaf.name == "None" or accepts(leaf.name, element_key):
+        return None
+    return _param_finding(index, type_name, element_key, evident, "whose element")
+
+
+def compare_param(
+    index: int,
+    type_name: str,
+    type_key: TypeKey | None,
+    evident: ParamType | None,
+    element_key: TypeKey | None = None,
+) -> Finding | None:
+    if evident is None or type_key is None or evident.name == "None":
+        return None
+    if not accepts(evident.name, type_key):
+        return _param_finding(index, type_name, type_key, evident, "which")
+    if type_key == "array" and element_key is not None:
+        return _element_finding(index, type_name, element_key, evident)
+    return None

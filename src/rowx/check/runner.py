@@ -8,9 +8,10 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import unquote, urlparse
 
 from rowx._core import ColumnInfo, Connection, Describe, connect_checker, describe as describe_impl
-from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare
+from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
 from rowx.check.discover import discover_source
 from rowx.check.model import Diagnostic, Rule, Span
+from rowx.check.params import ParamInference
 from rowx.check.render import Report, null_reason_note
 from rowx.check.resolve import ModuleGraph, RowType, resolve_row_type, roots_for
 from rowx.check.sourcemap import SourceMap, SourceMapper
@@ -77,6 +78,7 @@ class _Site:
     mapper: SourceMapper
     sourcemap: SourceMap
     row_type: RowType | None
+    inference: ParamInference | None
 
 
 def secrets_in(dsn: str) -> list[str]:
@@ -267,6 +269,25 @@ def _param_reports(site: _Site, described: Describe) -> list[Report]:
             message = f'parameter ${index + 1} has unsupported type "{param.type_name}"'
             help_ = "cast the parameter to a supported type, such as `{x}::text`"
             reports.append(_report(site, "unsupported-type", message, holes[index], help=help_))
+    reports.extend(_param_type_reports(site, described))
+    return reports
+
+
+def _param_type_reports(site: _Site, described: Describe) -> list[Report]:
+    holes = site.sourcemap.holes
+    # with a count mismatch the interpolations no longer line up with `$n`
+    if site.inference is None or len(described.params) != len(holes):
+        return []
+    template = site.call.template
+    if template is None:
+        return []
+    evident = site.inference.interpolations(template)
+    if len(evident) != len(holes):
+        return []
+    reports: list[Report] = []
+    for index, (param, found) in enumerate(zip(described.params, evident, strict=True)):
+        if (finding := compare_param(index, param.type_name, param.type_key, found, param.element_key)) is not None:
+            reports.append(_report(site, finding.rule, finding.message, holes[index]))
     return reports
 
 
@@ -419,6 +440,7 @@ def _collect(
         roots = roots_for(config, path)
         if result.source is None:
             continue
+        inference = ParamInference(result.tree) if result.tree is not None else None
         sources[path] = result.source
         mapper = SourceMapper(result.source)
         for call in result.calls:
@@ -430,7 +452,13 @@ def _collect(
             if resolution.diagnostic is not None:
                 reports.append(Report(diagnostic=resolution.diagnostic))
             sites.append(
-                _Site(call=call, mapper=mapper, sourcemap=mapper.build(call.template), row_type=resolution.row_type),
+                _Site(
+                    call=call,
+                    mapper=mapper,
+                    sourcemap=mapper.build(call.template),
+                    row_type=resolution.row_type,
+                    inference=inference,
+                ),
             )
     return sites, reports, sources
 
