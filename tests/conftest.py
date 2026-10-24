@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 TESTS_DIR: Final[Path] = Path(__file__).resolve().parent
 SCHEMA_SQL: Final[Path] = TESTS_DIR / "schema.sql"
 SEED_SQL: Final[Path] = TESTS_DIR / "seed_data.sql"
+APP_SCHEMA_SQL: Final[Path] = TESTS_DIR.parent / "examples" / "app" / "schema.sql"
 
 
 def _require_dsn() -> str:
@@ -41,6 +42,21 @@ def schema() -> Iterator[str]:
                 conn.execute(f'SET LOCAL search_path = "{name}"')
                 conn.execute(SCHEMA_SQL.read_text())
                 conn.execute(SEED_SQL.read_text())
+            yield _with_search_path(admin_dsn, name)
+        finally:
+            conn.execute(f'DROP SCHEMA "{name}" CASCADE')
+
+
+@pytest.fixture
+def app_schema() -> Iterator[str]:
+    admin_dsn = _require_dsn()
+    name = f"t_{secrets.token_hex(8)}"
+    with psycopg.connect(admin_dsn, autocommit=True) as conn:
+        conn.execute(f'CREATE SCHEMA "{name}"')
+        try:
+            with conn.transaction():
+                conn.execute(f'SET LOCAL search_path = "{name}"')
+                conn.execute(APP_SCHEMA_SQL.read_text())
             yield _with_search_path(admin_dsn, name)
         finally:
             conn.execute(f'DROP SCHEMA "{name}" CASCADE')
