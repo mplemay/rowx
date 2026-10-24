@@ -1,0 +1,181 @@
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Final
+
+from rowx._types import result_type
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from rowx.check.model import Rule
+    from rowx.check.resolve import Elem, RowType
+
+JSON_KEYS: Final[frozenset[str]] = frozenset({"json", "jsonb"})
+USE_EXECUTE: Final[str] = "use .execute()"
+
+
+# `type_key` is None for a type outside the table; an array column carries its innermost
+# element key and dimension count because the key alone is just "array"
+@dataclass(slots=True, kw_only=True, frozen=True)
+class ColumnDesc:
+    name: str
+    type_name: str
+    type_key: str | None
+    nullable: bool
+    reason: str = ""
+    reason_detail: str | None = None
+    element_key: str | None = None
+    dims: int = 1
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class DescribeDesc:
+    columns: tuple[ColumnDesc, ...]
+
+
+# `column` and `element` are 0-based; `element` is None for a finding about the whole row type
+@dataclass(slots=True, kw_only=True, frozen=True)
+class Finding:
+    rule: Rule
+    message: str
+    column: int | None = None
+    element: int | None = None
+    help: str | None = None
+    reason: str = ""
+    reason_detail: str | None = None
+
+
+def _label(column: ColumnDesc, index: int) -> str:
+    return f'column {index + 1} "{column.name}"'
+
+
+def _expected(column: ColumnDesc) -> str:
+    if column.type_key == "array":
+        leaf = result_type(column.element_key) if column.element_key is not None else "?"
+        return "list[" * column.dims + leaf + "]" * column.dims
+    return "None" if column.type_key == "void" else result_type(column.type_key or "")
+
+
+def _shown(elem: Elem) -> str:
+    match elem.leaf:
+        case "none":
+            return "None"
+        case "any":
+            return "Any"
+        case "list":
+            return f"list[{_shown(elem.item)}]" if elem.item is not None else "list"
+    return elem.leaf
+
+
+def _array_matches(column: ColumnDesc, elem: Elem) -> bool:
+    if column.element_key is None:
+        return False
+    item: Elem | None = elem
+    for _ in range(column.dims):
+        if item is None or item.leaf != "list":
+            return False
+        # an element at any nesting level may be `X` or `X | None`
+        item = item.item
+    if item is None:
+        return False
+    return item.leaf == "any" or column.element_key in JSON_KEYS or item.leaf == result_type(column.element_key)
+
+
+def _leaf_matches(column: ColumnDesc, elem: Elem) -> bool:
+    if elem.leaf == "any":
+        return True
+    match column.type_key:
+        case None:
+            return False
+        case "array":
+            return _array_matches(column, elem)
+        case "void":
+            return elem.leaf == "none"
+        case key if key in JSON_KEYS:
+            return True
+        case key:
+            return elem.leaf == result_type(key)
+
+
+def _unsupported(column: ColumnDesc, index: int, element: int | None) -> Finding:
+    return Finding(
+        rule="unsupported-type",
+        message=f'{_label(column, index)} has unsupported type "{column.type_name}"',
+        column=index,
+        element=element,
+        help="cast the column to a supported type, such as `::text`",
+    )
+
+
+def _supported(column: ColumnDesc) -> bool:
+    if column.type_key is None:
+        return False
+    if column.type_key == "array":
+        return column.element_key is not None
+    return True
+
+
+def _void_finding(column: ColumnDesc, index: int, elem: Elem, element: int | None) -> list[Finding]:
+    if elem.leaf == "none":
+        return []
+    message = f"{_label(column, index)}: `void` column faces `{_shown(elem)}`, which only matches the element `None`"
+    return [Finding(rule="type-mismatch", message=message, column=index, element=element, help=USE_EXECUTE)]
+
+
+def _nullability_finding(column: ColumnDesc, index: int, elem: Elem, element: int | None) -> list[Finding]:
+    if column.nullable == elem.nullable:
+        return []
+    if column.nullable:
+        message = f"{_label(column, index)} may be NULL but the element is `{_shown(elem)}`"
+        help_ = f'annotate `{_shown(elem)} | None`, or alias the column as "{column.name}!" if it can\'t be NULL'
+    else:
+        message = f"{_label(column, index)} is NOT NULL but the element is `{_shown(elem)} | None`"
+        help_ = f'annotate `{_shown(elem)}`, or alias the column as "{column.name}?" if it may be NULL'
+    return [
+        Finding(
+            rule="nullability-mismatch",
+            message=message,
+            column=index,
+            element=element,
+            help=help_,
+            reason=column.reason,
+            reason_detail=column.reason_detail,
+        ),
+    ]
+
+
+def _compare_element(column: ColumnDesc, index: int, elem: Elem, element: int | None) -> list[Finding]:
+    if not _supported(column):
+        return [_unsupported(column, index, element)]
+    if column.type_key == "void":
+        return _void_finding(column, index, elem, element)
+    # `Any` and `object` are the only annotations neutral to both type and nullability
+    if elem.leaf == "any":
+        return []
+    if not _leaf_matches(column, elem):
+        message = (
+            f"{_label(column, index)}: column type is `{_expected(column)}` but the annotation is `{_shown(elem)}`"
+        )
+        return [Finding(rule="type-mismatch", message=message, column=index, element=element)]
+    return _nullability_finding(column, index, elem, element)
+
+
+def compare(describe: DescribeDesc, row_type: RowType) -> list[Finding]:
+    columns: Sequence[ColumnDesc] = describe.columns
+    match row_type.kind:
+        case "none":
+            return []
+        case "scalar":
+            if len(columns) != 1:
+                message = f"a scalar row type needs exactly 1 column but the query returns {len(columns)}"
+                return [Finding(rule="arity-mismatch", message=message)]
+            return _compare_element(columns[0], 0, row_type.elements[0], None)
+        case "tuple":
+            if len(columns) != len(row_type.elements):
+                message = (
+                    f"the tuple has {len(row_type.elements)} elements but the query returns {len(columns)} columns"
+                )
+                return [Finding(rule="arity-mismatch", message=message)]
+            findings: list[Finding] = []
+            for index, (column, elem) in enumerate(zip(columns, row_type.elements, strict=True)):
+                findings.extend(_compare_element(column, index, elem, index))
+            return findings
