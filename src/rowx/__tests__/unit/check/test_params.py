@@ -410,3 +410,36 @@ def test_async_function_and_nested_template() -> None:
 
 def test_format_spec_interpolations_are_not_parameters() -> None:
     assert infer('w = 5\nq(t"{1:{w}}")') == ["int"]
+
+
+def test_type_parameter_shadows_builtin_annotation() -> None:
+    source = """
+        def f[int](x: int, y: str) -> int:
+            q(t"{x} {y}")
+        class C[str]:
+            def m(self, z: str):
+                q(t"{z}")
+    """
+    assert infer(source) == [None, "str", None]
+
+
+def test_type_parameter_does_not_leak_to_default_or_decorator_scope() -> None:
+    source = """
+        def f[T](x: T, y: int = 1):
+            q(t"{x} {y}")
+    """
+    assert infer(source) == [None, "int"]
+
+
+@pytest.mark.parametrize(
+    ("imports", "annotation", "expected"),
+    [
+        ("import builtins", "builtins.int", "int"),
+        ("from builtins import int as I", "I", "int"),
+        ("from builtins import str", "str", "str"),
+        ("import builtins", "builtins.list[builtins.int]", "list[int]"),
+        ("import builtins as b", "b.bytes | None", "bytes"),
+    ],
+)
+def test_qualified_builtin_annotations(imports: str, annotation: str, expected: str) -> None:
+    assert infer(f'{imports}\ndef f(x: {annotation}):\n    q(t"{{x}}")') == [expected]

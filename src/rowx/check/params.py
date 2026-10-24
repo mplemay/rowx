@@ -21,7 +21,7 @@ type ParamName = Literal[
     "list",
 ]
 type _BindingKind = Literal["annotated", "assign", "import", "other"]
-type _ScopeKind = Literal["module", "function", "class", "comprehension"]
+type _ScopeKind = Literal["module", "function", "class", "comprehension", "type_params"]
 
 
 # `item` is the element type of a `list`; a tuple literal is a `list` too, since it binds an array
@@ -104,6 +104,19 @@ def _union_members(node: ast.expr) -> list[ast.expr]:
     return [node]
 
 
+def _type_params_scope(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef, scope: _Scope
+) -> _Scope:
+    if isinstance(node, ast.Lambda) or not node.type_params:
+        return scope
+    inner = _Scope("type_params", scope)
+    for param in node.type_params:
+        match param:
+            case ast.TypeVar(name=name) | ast.ParamSpec(name=name) | ast.TypeVarTuple(name=name):
+                inner.bind_other(name)
+    return inner
+
+
 class ParamInference:
     def __init__(self, tree: ast.Module) -> None:
         self._module = _Scope("module", None)
@@ -136,31 +149,34 @@ class ParamInference:
         if not isinstance(node, ast.Lambda):
             scope.bind_other(node.name)
             self._visit_all(node.decorator_list, scope)
-            if node.returns is not None:
-                self._visit(node.returns, scope)
         self._visit_all([*args.defaults, *(d for d in args.kw_defaults if d is not None)], scope)
-        inner = _Scope("function", scope)
+        # annotations are evaluated inside the scope that holds the function's type parameters
+        outer = _type_params_scope(node, scope)
+        inner = _Scope("function", outer)
         self._scopes[id(node)] = inner
         positional = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+        if not isinstance(node, ast.Lambda) and node.returns is not None:
+            self._visit(node.returns, outer)
         for arg in positional:
-            self._scopes[id(arg)] = scope
+            self._scopes[id(arg)] = outer
             if arg.annotation is not None:
-                self._visit(arg.annotation, scope)
-                inner.bind(arg.arg, _Binding("annotated", scope, arg.annotation))
+                self._visit(arg.annotation, outer)
+                inner.bind(arg.arg, _Binding("annotated", outer, arg.annotation))
             else:
                 inner.bind_other(arg.arg)
         for arg in (args.vararg, args.kwarg):
             if arg is not None:
                 if arg.annotation is not None:
-                    self._visit(arg.annotation, scope)
+                    self._visit(arg.annotation, outer)
                 inner.bind_other(arg.arg)
         self._visit_all([node.body] if isinstance(node, ast.Lambda) else node.body, inner)
 
     def _visit_class(self, node: ast.ClassDef, scope: _Scope) -> None:
         scope.bind_other(node.name)
-        self._visit_all([*node.decorator_list, *node.bases], scope)
-        self._visit_all([keyword.value for keyword in node.keywords], scope)
-        self._visit_all(node.body, _Scope("class", scope))
+        self._visit_all(node.decorator_list, scope)
+        outer = _type_params_scope(node, scope)
+        self._visit_all([*node.bases, *(keyword.value for keyword in node.keywords)], outer)
+        self._visit_all(node.body, _Scope("class", outer))
 
     def _visit_comprehension(
         self, node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp, scope: _Scope
@@ -265,7 +281,7 @@ class ParamInference:
             return None if self._star_import else ".".join(parts)
         match bindings:
             case [_Binding(kind="import", target=target)] if target:
-                return ".".join([target, *rest])
+                return ".".join([target, *rest]).removeprefix("builtins.")
             case _:
                 return None
 
