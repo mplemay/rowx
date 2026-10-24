@@ -151,6 +151,19 @@ validates every query against a live Postgres 18 database by preparing and descr
 - DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked
   `@pytest.mark.timing` and synchronise by polling `pg_stat_activity`, never with `sleep`.
 
+## Cursor Cloud specific instructions
+
+- Run Python through `uv run`. The image Python is older than `.python-version` (3.14); `uv` installs that
+  interpreter and the project venv.
+- Postgres 18 is already started on boot: plain container `rowx-pg` (state in `.rowx-test-dsn`) and TLS container
+  `rowx-pg-ssl`. A login shell sources `$HOME/.rowx/env.sh` via `/etc/profile.d/rowx.sh`. Other shells need
+  `. "$HOME/.rowx/env.sh"` before `just test-py` or `just test-rust`, which sets `ROWX_TEST_DSN`,
+  `ROWX_TEST_DSN_SSL`, and `ROWX_TEST_CERTS`.
+- `just db-up` is unnecessary while those containers are running (`scripts/pg.sh up` refuses when
+  `.rowx-test-dsn` points at a live container). `just db-down` removes the plain container; the next boot start
+  script creates it again.
+- `just check` is the lint and typecheck gate (`prek`: ruff, ty, rumdl, cargo fmt, clippy).
+
 ## File ownership
 
 | Area | Paths |
