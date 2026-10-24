@@ -109,8 +109,8 @@ def test_null_in_non_nullable_position(schema: str) -> None:
 
 def test_unsupported_type_is_decode_error(schema: str) -> None:
     async def body(c: ConnectionImpl) -> tuple[bool, list[object]]:
-        with pytest.raises(DecodeError, match="numeric"):
-            await fetch(c, "SELECT 1.5::numeric", scalar=True, arity=1)
+        with pytest.raises(DecodeError, match="money"):
+            await fetch(c, "SELECT 1::money", scalar=True, arity=1)
         # a decode failure still releases the connection
         return True, await fetch(c, "SELECT 1", scalar=True, arity=1)
 
