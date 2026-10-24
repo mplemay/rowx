@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio_postgres::Client;
 use tokio_postgres::types::{Kind, Type};
+use tokio_postgres::{Client, SimpleQueryMessage};
 
 use crate::error::Error;
+use crate::explain;
 use crate::types::{Matcher, TYPE_TABLE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,16 @@ impl NullReason {
             Self::ExplainFailed => "ExplainFailed",
             Self::OverrideBang => "OverrideBang",
             Self::OverrideQuestion => "OverrideQuestion",
+        }
+    }
+
+    /// The join node or scan alias behind the reason, when it has one.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::OuterJoin { node } => Some(node),
+            Self::ScanBoundary { alias } => Some(alias),
+            _ => None,
         }
     }
 }
@@ -213,6 +224,47 @@ async fn typsends(client: &Client, oids: &[u32]) -> Result<HashMap<u32, String>,
         .map_err(Error::from)
 }
 
+// simple_query, because the extended protocol would demand values for `$n`; the caller's Parse has
+// already rejected anything but a single statement
+async fn plan_promotions(
+    client: &Client,
+    sql: &str,
+    column_count: usize,
+) -> Option<Vec<Option<NullReason>>> {
+    let messages = client
+        .simple_query(&format!(
+            "EXPLAIN (GENERIC_PLAN, VERBOSE, COSTS OFF, FORMAT JSON) {sql}"
+        ))
+        .await
+        .ok()?;
+    let text: String = messages
+        .iter()
+        .filter_map(|message| match message {
+            SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        })
+        .collect();
+    let plan = serde_json::from_str(&text).ok()?;
+    Some(explain::walk(&plan, column_count))
+}
+
+fn apply_overrides(col: &mut ColumnInfo) {
+    // the server names an unnamed expression `?column?`, which is not an override
+    if col.raw_name == "?column?" {
+        return;
+    }
+    let (stripped, reason, nullable) = if let Some(rest) = col.raw_name.strip_suffix('!') {
+        (rest, NullReason::OverrideBang, false)
+    } else if let Some(rest) = col.raw_name.strip_suffix('?') {
+        (rest, NullReason::OverrideQuestion, true)
+    } else {
+        return;
+    };
+    col.name = stripped.to_owned();
+    col.nullable = nullable;
+    col.reason = reason;
+}
+
 /// Prepares `sql` and reports its parameter and column types. Nothing is executed.
 ///
 /// A multi-statement string is rejected by Parse, which later steps rely on: they concatenate the
@@ -254,7 +306,7 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
                 type_key: resolve(col.type_(), &sends),
                 table_oid,
                 attnum: table_oid.and_then(|_| col.column_id()),
-                // the catalog pass below refines origin columns; the plan pass lands in T33
+                // the catalog and plan passes below refine this
                 nullable: true,
                 reason: if table_oid.is_some() {
                     NullReason::NullableColumn
@@ -278,6 +330,28 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
             col.reason = reason.clone();
         }
     }
+
+    if !columns.is_empty() {
+        match plan_promotions(client, sql, columns.len()).await {
+            Some(promotions) => {
+                for (col, promotion) in columns.iter_mut().zip(promotions) {
+                    if let Some(reason) = promotion {
+                        col.nullable = true;
+                        col.reason = reason;
+                    }
+                }
+            }
+            None => {
+                for col in &mut columns {
+                    if col.reason == NullReason::Computed {
+                        col.reason = NullReason::ExplainFailed;
+                    }
+                }
+            }
+        }
+    }
+    // Unknown columns (Computed, ExplainFailed) were never set to NotNull, so they are already Nullable
+    columns.iter_mut().for_each(apply_overrides);
     Ok(Describe { params, columns })
 }
 
