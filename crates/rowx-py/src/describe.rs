@@ -40,6 +40,7 @@ pub struct ColumnInfo {
     oid: u32,
     type_name: String,
     type_key: Option<String>,
+    element_key: Option<String>,
     table_oid: Option<u32>,
     attnum: Option<i16>,
     nullable: bool,
@@ -78,6 +79,7 @@ impl From<pg::ColumnInfo> for ColumnInfo {
     fn from(c: pg::ColumnInfo) -> Self {
         Self {
             type_key: key(&c.type_key),
+            element_key: c.element_key.map(str::to_owned),
             reason: c.reason.name().to_owned(),
             reason_detail: c.reason.detail().map(str::to_owned),
             name: c.name,

@@ -19,6 +19,7 @@ type Rule = Literal[
     "unsupported-type",
     "type-mismatch",
     "nullability-mismatch",
+    "invalid-override",
 ]
 type QueryKind = Literal["query", "query_unchecked"]
 
