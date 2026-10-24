@@ -8,4 +8,4 @@ pub mod types;
 pub mod wire;
 
 pub use tokio_postgres::Row;
-pub use tokio_postgres::types::Type;
+pub use tokio_postgres::types::{Kind, Type};
