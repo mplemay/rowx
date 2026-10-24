@@ -3,6 +3,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString};
 
 use crate::codec::numeric::decimal_class;
+use crate::codec::temporal::{date_class, datetime_class, time_class, timedelta_class};
+use crate::codec::temporal_enc::Ymd;
 use crate::codec::uuid::uuid_class;
 use crate::errors::encode_error;
 
@@ -20,6 +22,23 @@ pub enum PyParam {
     // bytes, bytearray or memoryview contents, with the Python type name
     Bytes(Vec<u8>, String),
     Uuid([u8; 16]),
+    // a `date` that is not a `datetime`
+    Date(Ymd),
+    // microseconds since midnight, and the UTC offset in microseconds when aware
+    Time {
+        micros: i64,
+        offset: Option<i64>,
+    },
+    DateTime {
+        date: Ymd,
+        micros: i64,
+        offset: Option<i64>,
+    },
+    // whole days plus the microseconds of the remaining seconds
+    Timedelta {
+        days: i64,
+        micros: i64,
+    },
     // anything without a dedicated variant yet, with its Python type name
     Other(Py<PyAny>, String),
 }
@@ -41,9 +60,48 @@ impl PyParam {
             Self::Decimal(_) => "Decimal",
             Self::Str(_) => "str",
             Self::Uuid(_) => "UUID",
+            Self::Date(_) => "date",
+            Self::Time { .. } => "time",
+            Self::DateTime { .. } => "datetime",
+            Self::Timedelta { .. } => "timedelta",
             Self::Bytes(_, name) | Self::Other(_, name) => name,
         }
     }
+}
+
+const MICROS_PER_SECOND: i64 = 1_000_000;
+
+fn delta_micros(delta: &Bound<'_, PyAny>) -> PyResult<(i64, i64)> {
+    let days = delta.getattr("days")?.extract::<i64>()?;
+    let seconds = delta.getattr("seconds")?.extract::<i64>()?;
+    let micros = delta.getattr("microseconds")?.extract::<i64>()?;
+    Ok((days, seconds * MICROS_PER_SECOND + micros))
+}
+
+// `None` when the value is naive, including a tzinfo whose utcoffset() is None
+fn utc_offset(obj: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
+    let offset = obj.call_method0("utcoffset")?;
+    if offset.is_none() {
+        return Ok(None);
+    }
+    let (days, micros) = delta_micros(&offset)?;
+    Ok(Some(days * 86_400 * MICROS_PER_SECOND + micros))
+}
+
+fn ymd(obj: &Bound<'_, PyAny>) -> PyResult<Ymd> {
+    Ok(Ymd {
+        year: obj.getattr("year")?.extract()?,
+        month: obj.getattr("month")?.extract()?,
+        day: obj.getattr("day")?.extract()?,
+    })
+}
+
+fn time_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    let hour = obj.getattr("hour")?.extract::<i64>()?;
+    let minute = obj.getattr("minute")?.extract::<i64>()?;
+    let second = obj.getattr("second")?.extract::<i64>()?;
+    let micro = obj.getattr("microsecond")?.extract::<i64>()?;
+    Ok(((hour * 60 + minute) * 60 + second) * MICROS_PER_SECOND + micro)
 }
 
 fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<PyParam> {
@@ -83,6 +141,27 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<PyParam
         if let Ok(bytes) = <[u8; 16]>::try_from(raw) {
             return Ok(PyParam::Uuid(bytes));
         }
+    }
+    // datetime subclasses date, so it has to be checked first
+    if obj.is_instance(datetime_class(py)?)? {
+        return Ok(PyParam::DateTime {
+            date: ymd(obj)?,
+            micros: time_micros(obj)?,
+            offset: utc_offset(obj)?,
+        });
+    }
+    if obj.is_instance(date_class(py)?)? {
+        return Ok(PyParam::Date(ymd(obj)?));
+    }
+    if obj.is_instance(time_class(py)?)? {
+        return Ok(PyParam::Time {
+            micros: time_micros(obj)?,
+            offset: utc_offset(obj)?,
+        });
+    }
+    if obj.is_instance(timedelta_class(py)?)? {
+        let (days, micros) = delta_micros(obj)?;
+        return Ok(PyParam::Timedelta { days, micros });
     }
     if let Ok(text) = obj.cast::<PyString>() {
         return text

@@ -5,6 +5,7 @@ pub mod int;
 pub mod json;
 pub mod numeric;
 pub mod temporal;
+pub mod temporal_enc;
 pub mod text;
 pub mod uuid;
 
@@ -30,7 +31,7 @@ fn is_citext(ty: &Type) -> bool {
     matches!(ty.kind(), Kind::Simple) && ty.name() == "citext"
 }
 
-/// One arm per type family; T16-T18 add the rest.
+/// One arm per type family; T17-T18 add the rest.
 ///
 /// # Errors
 /// `DecodeError` for an unsupported type or a malformed value.
@@ -105,6 +106,13 @@ fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         Type::BYTEA => bytes::encode(param).map(Param::binary),
         Type::UUID => uuid::encode(param),
         Type::JSON | Type::JSONB => json::encode(param).map(Param::text),
+        Type::DATE => temporal_enc::encode_date(param).map(Param::binary),
+        Type::TIME => temporal_enc::encode_time(param).map(Param::binary),
+        // timetz travels as text so the offset needs no sign flip
+        Type::TIMETZ => temporal_enc::encode_timetz(param).map(Param::text),
+        Type::TIMESTAMP => temporal_enc::encode_timestamp(param).map(Param::binary),
+        Type::TIMESTAMPTZ => temporal_enc::encode_timestamptz(param).map(Param::binary),
+        Type::INTERVAL => temporal_enc::encode_interval(param).map(Param::binary),
         // an enum label is sent as text so the server resolves it
         _ if is_enum => text::encode(ty, param).map(Param::text),
         _ if is_citext(ty) => text::encode(ty, param).map(Param::binary),
