@@ -83,13 +83,14 @@ def _array_matches(column: ColumnDesc, elem: Elem) -> bool:
 def _leaf_matches(column: ColumnDesc, elem: Elem) -> bool:
     if elem.leaf == "any":
         return True
+    # a bare `None` only ever matches `void`, so no wider rule below may accept it
+    if elem.leaf == "none" or column.type_key == "void":
+        return elem.leaf == "none" and column.type_key == "void"
     match column.type_key:
         case None:
             return False
         case "array":
             return _array_matches(column, elem)
-        case "void":
-            return elem.leaf == "none"
         case key if key in JSON_KEYS:
             return True
         case key:

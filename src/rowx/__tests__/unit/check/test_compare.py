@@ -190,3 +190,12 @@ def test_none_element_facing_a_real_column_is_type_mismatch() -> None:
 def test_enum_and_domain_columns_use_their_leaf() -> None:
     assert run(scalar(Elem("str", nullable=False)), col("enum")) == []
     assert rules(run(scalar(Elem("int", nullable=False)), col("enum"))) == ["type-mismatch"]
+
+
+def test_none_element_facing_json_is_type_mismatch() -> None:
+    assert rules(run(tup(Elem("none", nullable=True)), col("jsonb", nullable=True))) == ["type-mismatch"]
+    assert rules(run(tup(Elem("none", nullable=True)), col("json"))) == ["type-mismatch"]
+
+
+def test_none_element_facing_array_is_type_mismatch() -> None:
+    assert rules(run(tup(Elem("none", nullable=True)), col("array", element_key="int4"))) == ["type-mismatch"]
