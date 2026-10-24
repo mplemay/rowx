@@ -581,7 +581,7 @@ P3  T45 → T46 → T47
 
 ### T26 · Type-checker suite
 
-- **Deps:** T11 · **Files:** `tests/typing/{cases.py,test_typing.py}`
+- **Deps:** T11 · **Files:** `src/rowx/__tests__/unit/typing/{cases.py,test_query.py}`
 - **Do:**
   - Run `pyright --outputjson` and `mypy` as subprocesses with
     `--python-version 3.14`.
@@ -590,7 +590,7 @@ P3  T45 → T46 → T47
     - the default `None`, and `query[Any]`;
     - `fetch_all` and `execute`.
   - Negative cases: `query("…")` and `query(f"…")` must produce errors in both checkers.
-- **Accept:** `uv run pytest tests/typing -q` is green, and flipping one expectation makes
+- **Accept:** `uv run pytest src/rowx/__tests__/unit/typing -q` is green, and flipping one expectation makes
   it fail.
 
 ### T27 · Runtime half of the conformance suite (complete)

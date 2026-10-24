@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 TYPING_DIR: Final[Path] = Path(__file__).resolve().parent
-ROOT_DIR: Final[Path] = TYPING_DIR.parent.parent
+ROOT_DIR: Final[Path] = TYPING_DIR.parents[4]
 CASES: Final[Path] = TYPING_DIR / "cases.py"
 
 REVEAL_COMMENT: Final[re.Pattern[str]] = re.compile(r"# reveal: (?P<type>.+)$")
