@@ -112,7 +112,7 @@ P3  T45 → T46 → T47
 ### T00 · Agent guide, justfile, commit docs
 
 - **Deps:** none · **Files:** `AGENTS.md`, `CLAUDE.md` (one line: `@AGENTS.md`), `justfile`, `.gitignore`,
-  `docs/design.md`, `docs/tasks.md`, `docs/decisions.md` (empty template), `conversation.md`
+  `docs/design.md`, `docs/tasks.md`, `docs/decisions.md` (empty template)
 - **Do:**
   - `AGENTS.md` holds §0 of this file (commands, definition of done, conventions, ownership
     map), plus a one-paragraph project summary and links to the docs.
