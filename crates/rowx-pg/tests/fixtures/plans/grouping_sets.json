@@ -1,0 +1,49 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Grouping Sets": [
+        {
+          "Hash Keys": [
+            [
+              "users.name"
+            ]
+          ]
+        },
+        {
+          "Hash Keys": [
+            [
+              "users.email"
+            ]
+          ]
+        }
+      ],
+      "Node Type": "Aggregate",
+      "Output": [
+        "name",
+        "email"
+      ],
+      "Parallel Aware": false,
+      "Partial Mode": "Simple",
+      "Plans": [
+        {
+          "Alias": "users",
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Seq Scan",
+          "Output": [
+            "id",
+            "name",
+            "email"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Relation Name": "users",
+          "Schema": "public"
+        }
+      ],
+      "Strategy": "Hashed"
+    }
+  }
+]

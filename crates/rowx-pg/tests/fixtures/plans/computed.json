@@ -1,0 +1,33 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Node Type": "WindowAgg",
+      "Output": [
+        "upper(name)",
+        "count(*) OVER w1",
+        "COALESCE(email, ''::text)",
+        "1"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Alias": "users",
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Seq Scan",
+          "Output": [
+            "name",
+            "email"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Relation Name": "users",
+          "Schema": "public"
+        }
+      ],
+      "Window": "w1 AS ()"
+    }
+  }
+]

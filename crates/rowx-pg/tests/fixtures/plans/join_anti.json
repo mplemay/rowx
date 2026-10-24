@@ -1,0 +1,60 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Hash Cond": "(p.user_id = u.id)",
+      "Inner Unique": true,
+      "Join Type": "Right Anti",
+      "Node Type": "Hash Join",
+      "Output": [
+        "u.name"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Alias": "p",
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Seq Scan",
+          "Output": [
+            "p.id",
+            "p.user_id",
+            "p.title"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Relation Name": "posts",
+          "Schema": "public"
+        },
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Hash",
+          "Output": [
+            "u.name",
+            "u.id"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Inner",
+          "Plans": [
+            {
+              "Alias": "u",
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Seq Scan",
+              "Output": [
+                "u.name",
+                "u.id"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer",
+              "Relation Name": "users",
+              "Schema": "public"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

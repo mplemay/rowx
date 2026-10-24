@@ -1,0 +1,52 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Inner Unique": false,
+      "Join Type": "Left",
+      "Node Type": "Nested Loop",
+      "Output": [
+        "u.name",
+        "p.title"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Alias": "u",
+          "Async Capable": false,
+          "Disabled": false,
+          "Index Cond": "(u.id = $1)",
+          "Index Name": "users_pkey",
+          "Node Type": "Index Scan",
+          "Output": [
+            "u.id",
+            "u.name",
+            "u.email"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Relation Name": "users",
+          "Scan Direction": "Forward",
+          "Schema": "public"
+        },
+        {
+          "Alias": "p",
+          "Async Capable": false,
+          "Disabled": false,
+          "Filter": "(p.user_id = $1)",
+          "Node Type": "Seq Scan",
+          "Output": [
+            "p.id",
+            "p.user_id",
+            "p.title"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Inner",
+          "Relation Name": "posts",
+          "Schema": "public"
+        }
+      ]
+    }
+  }
+]

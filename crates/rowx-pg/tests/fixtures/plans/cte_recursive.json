@@ -1,0 +1,50 @@
+[
+  {
+    "Plan": {
+      "Alias": "t",
+      "Async Capable": false,
+      "CTE Name": "t",
+      "Disabled": false,
+      "Node Type": "CTE Scan",
+      "Output": [
+        "t.n"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Recursive Union",
+          "Parallel Aware": false,
+          "Parent Relationship": "InitPlan",
+          "Plans": [
+            {
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Result",
+              "Output": [
+                "1"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer"
+            },
+            {
+              "Alias": "t_1",
+              "Async Capable": false,
+              "CTE Name": "t",
+              "Disabled": false,
+              "Filter": "(t_1.n < 5)",
+              "Node Type": "WorkTable Scan",
+              "Output": [
+                "(t_1.n + 1)"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Inner"
+            }
+          ],
+          "Subplan Name": "CTE t"
+        }
+      ]
+    }
+  }
+]

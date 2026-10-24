@@ -1,0 +1,75 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Hash Cond": "(u.id = p.user_id)",
+      "Inner Unique": true,
+      "Join Type": "Inner",
+      "Node Type": "Hash Join",
+      "Output": [
+        "u.name"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Alias": "u",
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Seq Scan",
+          "Output": [
+            "u.id",
+            "u.name",
+            "u.email"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Relation Name": "users",
+          "Schema": "public"
+        },
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Hash",
+          "Output": [
+            "p.user_id"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Inner",
+          "Plans": [
+            {
+              "Async Capable": false,
+              "Disabled": false,
+              "Group Key": [
+                "p.user_id"
+              ],
+              "Node Type": "Aggregate",
+              "Output": [
+                "p.user_id"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer",
+              "Partial Mode": "Simple",
+              "Plans": [
+                {
+                  "Alias": "p",
+                  "Async Capable": false,
+                  "Disabled": false,
+                  "Node Type": "Seq Scan",
+                  "Output": [
+                    "p.user_id"
+                  ],
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Relation Name": "posts",
+                  "Schema": "public"
+                }
+              ],
+              "Strategy": "Hashed"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]
