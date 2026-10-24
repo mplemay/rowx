@@ -47,7 +47,7 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 - A `float4`/`float8` parameter takes an `int`, but an `int` above 2^53 loses precision.
 - `str` is never treated as a sequence, so it cannot be bound to an array parameter.
 - `json` and `jsonb` accept any JSON-serialisable value, always encoded with `json.dumps`. A `str` becomes a JSON
-  string; to bind raw JSON text, write `{s}::jsonb`.
+  string; to bind raw JSON text, write `{s}::text::jsonb`.
 - Timezone rules are checked when encoding: a naive `datetime` for `timestamptz` (or an aware one for `timestamp`)
   raises `EncodeError`.
 - A domain behaves as its base type.

@@ -287,7 +287,8 @@ newer with `max_prepared_statements` set.
 conn = await rowx.connect("postgresql://app@pooler:6432/app", statement_cache_size=0)
 ```
 
-TLS defaults to `prefer`, which is encrypted but not verified, as in libpq. Use `sslmode=verify-full` in production.
+TLS defaults to `prefer`, as in libpq: it uses TLS when the server offers it, without verifying the certificate, and
+falls back to plaintext when the server doesn't support TLS. Use `sslmode=verify-full` in production.
 
 ## Known limits
 
