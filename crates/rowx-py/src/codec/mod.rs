@@ -4,6 +4,7 @@ pub mod float;
 pub mod int;
 pub mod json;
 pub mod numeric;
+pub mod temporal;
 pub mod text;
 pub mod uuid;
 
@@ -29,7 +30,7 @@ fn is_citext(ty: &Type) -> bool {
     matches!(ty.kind(), Kind::Simple) && ty.name() == "citext"
 }
 
-/// One arm per type family; T12-T18 add the rest.
+/// One arm per type family; T16-T18 add the rest.
 ///
 /// # Errors
 /// `DecodeError` for an unsupported type or a malformed value.
@@ -48,6 +49,11 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: Option<&[u8]>) -> PyResult<B
         Type::BYTEA => Ok(bytes::decode(py, raw)),
         Type::UUID => uuid::decode(py, raw),
         Type::JSON | Type::JSONB => json::decode(py, ty, raw),
+        Type::DATE => temporal::decode_date(py, raw),
+        Type::TIME => temporal::decode_time(py, raw),
+        Type::TIMETZ => temporal::decode_timetz(py, raw),
+        Type::TIMESTAMP | Type::TIMESTAMPTZ => temporal::decode_timestamp(py, ty, raw),
+        Type::INTERVAL => temporal::decode_interval(py, raw),
         _ if matches!(ty.kind(), Kind::Enum(_)) || is_citext(ty) => text::decode(py, ty, raw),
         // void arrives as an empty, non-NULL value
         Type::VOID => Ok(py.None().into_bound(py)),
