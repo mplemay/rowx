@@ -90,3 +90,14 @@ def test_sqlx_cases(schema: str, case: str) -> None:
     sql, expected = SQLX_CASES[case]
     got = [(c.name, c.nullable, c.reason) for c in run_describe(schema, sql).columns]
     assert got == expected
+
+
+def test_reason_detail_names_node_or_alias(schema: str) -> None:
+    join = "FROM users u LEFT JOIN posts p ON p.user_id = u.id"
+    (outer,) = run_describe(schema, f"SELECT p.title {join}").columns
+    assert outer.reason == "OuterJoin"
+    assert outer.reason_detail in {"Nested Loop", "Hash Join", "Merge Join"}
+    (boundary,) = run_describe(schema, f"SELECT x.title FROM (SELECT p.title, row_number() OVER () {join}) x").columns  # noqa: S608
+    assert (boundary.reason, boundary.reason_detail) == ("ScanBoundary", "x")
+    (plain,) = run_describe(schema, "SELECT id FROM users").columns
+    assert plain.reason_detail is None

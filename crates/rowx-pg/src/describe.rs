@@ -42,6 +42,16 @@ impl NullReason {
             Self::OverrideQuestion => "OverrideQuestion",
         }
     }
+
+    /// The join node or scan alias behind the reason, when it has one.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::OuterJoin { node } => Some(node),
+            Self::ScanBoundary { alias } => Some(alias),
+            _ => None,
+        }
+    }
 }
 
 /// A type with no row in the type table; `typsend` is the binary send function the server reports for it.

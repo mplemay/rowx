@@ -44,6 +44,7 @@ pub struct ColumnInfo {
     attnum: Option<i16>,
     nullable: bool,
     reason: String,
+    reason_detail: Option<String>,
 }
 
 #[pyclass(
@@ -78,6 +79,7 @@ impl From<pg::ColumnInfo> for ColumnInfo {
         Self {
             type_key: key(&c.type_key),
             reason: c.reason.name().to_owned(),
+            reason_detail: c.reason.detail().map(str::to_owned),
             name: c.name,
             raw_name: c.raw_name,
             oid: c.oid,
