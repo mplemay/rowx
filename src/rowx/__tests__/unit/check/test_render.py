@@ -224,3 +224,10 @@ def test_every_reason_has_a_note() -> None:
         "OverrideQuestion",
     )
     assert all(null_reason_note(r) is not None for r in reasons)
+
+
+def test_unicode_line_separator_is_not_a_line_break() -> None:
+    source = 's = "a\u2028b"\nrows = 1\n'
+    diagnostic = Diagnostic(rule="sql-error", message="m", path=PATH, span=Span(line=2, col=1, end_line=2, end_col=5))
+    text = render_text([Report(diagnostic=diagnostic)], {PATH: source})
+    assert "2 | rows = 1\n  | ^^^^\n" in text

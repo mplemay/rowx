@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from json import dumps
 from typing import TYPE_CHECKING, Final
 
+from rowx.check.sourcemap import LINE_PATTERN
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from pathlib import Path
@@ -64,6 +66,11 @@ def sort_reports(reports: Iterable[Report]) -> list[Report]:
     return sorted(reports, key=_sort_key)
 
 
+# only CR, LF and CRLF end a line, as in Python's tokenizer; `str.splitlines` also splits on U+2028 and friends
+def _source_lines(source: str) -> list[str]:
+    return [line.rstrip("\r\n") for line in LINE_PATTERN.findall(source)]
+
+
 def _expand(text: str) -> str:
     return text.replace("\t", " " * TAB_WIDTH)
 
@@ -83,7 +90,7 @@ def _carets(line: str, span: Span, number: int) -> tuple[int, int]:
 
 def _snippet(report: Report, source: str, gutter: int) -> list[str]:
     span = report.diagnostic.span
-    lines = source.splitlines()
+    lines = _source_lines(source)
     pad = " " * gutter
     rows: list[str] = []
     last = min(span.end_line, len(lines))
@@ -106,7 +113,7 @@ def _block(report: Report, source: str | None, width: int) -> list[str]:
         f"error[{diagnostic.rule}]: {diagnostic.message}",
         f"{pad}--> {diagnostic.path.as_posix()}:{span.line}:{span.col}",
     ]
-    if source is not None and 1 <= span.line <= len(source.splitlines()):
+    if source is not None and 1 <= span.line <= len(_source_lines(source)):
         out.append(f"{pad} |")
         out.extend(_snippet(report, source, width))
     trailer = [f"= note: {note}" for note in diagnostic.notes]
@@ -120,7 +127,7 @@ def _block(report: Report, source: str | None, width: int) -> list[str]:
 
 def _gutter(report: Report, source: str | None) -> int:
     span = report.diagnostic.span
-    shown = min(span.end_line, len(source.splitlines())) if source is not None else span.line
+    shown = min(span.end_line, len(_source_lines(source))) if source is not None else span.line
     return len(str(max(span.line, shown)))
 
 
