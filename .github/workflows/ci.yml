@@ -76,6 +76,10 @@ jobs:
       - name: Test rust
         run: just test-rust
 
+      # a service container can't mount certs or override the entrypoint, so the TLS postgres comes from scripts/pg.sh
+      - name: Start the TLS postgres
+        run: echo "ROWX_TEST_DSN_SSL=$(scripts/pg.sh up --ssl)" >> "$GITHUB_ENV"
+
       - name: Test python
         run: just test-py
 
