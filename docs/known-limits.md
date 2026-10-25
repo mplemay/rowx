@@ -15,3 +15,10 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
 | limit | `test_recursive_cte_is_nullable` | Recursive CTE columns have no table origin, so they default to nullable. |
 | limit | `test_computed_column_is_nullable` | Computed columns are always nullable; narrowing needs a parser ([dependencies](design/dependencies.md)). |
 | correct | `test_bang_narrows_computed_column` | `"col!"` forces NOT NULL on a computed column (`OverrideBang`). |
+
+## Execution limits
+
+- **No multi-statement execution.** A query is one statement. Postgres prepares one statement at a time, so a string
+  with several statements fails at prepare time. Run them as separate queries.
+- **No `command` tag in `QueryResult`.** `QueryResult` carries `rows_affected` only. The tag (`"INSERT 0 5"`) is not
+  exposed by the driver.
