@@ -172,8 +172,8 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Type-table metadata | `crates/rowx-postgres/src/types.rs` (append-only after T05) |
 | Wire codecs (pure) | `crates/rowx-postgres/src/wire/<family>.rs` |
 | PyObject codecs | `crates/rowx-postgres-py/src/codec/<family>.rs`; `codec/mod.rs` is dispatch only |
-| Shared core (pure) | `crates/rowx-core/src/` (claim/settle state machine, cancel plumbing, shared errors, pool) |
-| Driver | `crates/rowx-postgres/src/{dsn,tls,conn,state,cancel,stmt_cache,exec}.rs` and its pool connector |
+| Shared core (pure) | `crates/rowx-core/src/` (`state.rs` claim/settle state machine, `cancel.rs` plumbing, shared errors, pool) |
+| Driver | `crates/rowx-postgres/src/{dsn,tls,conn,cancel,stmt_cache,exec}.rs` and its pool connector |
 | Describe | `crates/rowx-postgres/src/{describe,explain}.rs`, `crates/rowx-postgres-py/src/describe.rs` |
 | Bindings | `crates/rowx-postgres-py/src/{conn,exec,stream,pool,transaction,errors,types}.rs`, `crates/rowx-py-core/src/{runtime,errors}.rs`, `crates/rowx-py/src/lib.rs` |
 | Python runtime (shared) | `src/rowx/{__init__,_query,_executor,errors,_template,_rowplan}.py` |

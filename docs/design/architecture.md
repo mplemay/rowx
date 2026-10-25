@@ -23,8 +23,9 @@
 │                            error mapping)                                     │
 │  crates/rowx-py-core       rlib: the runtime, the exception-class registry    │
 │                            (errors.rs), the core pool-error mapping           │
-│  crates/rowx-postgres      PURE RUST (no pyo3): dsn, tls, conn, state,        │
-│                            cancel, stmt_cache, exec, describe, explain,       │
+│  crates/rowx-postgres      PURE RUST (no pyo3): dsn, tls, conn,               │
+│                            cancel (impl), stmt_cache, exec, describe,         │
+│                            explain,                                           │
 │                            types.rs, wire/, and its pool connector            │
 │  crates/rowx-core          PURE RUST (no pyo3): claim/settle state machine,   │
 │                            cancel-guard plumbing, shared thiserror variants,  │

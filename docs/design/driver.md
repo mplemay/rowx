@@ -230,6 +230,8 @@ build **should** take no longer than asyncpg does on the same machine. The spike
 
 ## Connection state machine (`state.rs`)
 
+`state.rs` lives in `rowx-core/src/`, generic over the backend. `rowx-postgres` only supplies the Postgres connection.
+
 The states are `Idle | Busy | Settling | Broken | Closed`, held in an atomic and changed by
 compare-and-swap in the synchronous part of each `#[pymethods]` call.
 
@@ -251,6 +253,9 @@ it.
 **Leases.** The Idle → Busy claim also checks the lease ([Leases](#leases)) in the same compare-and-swap.
 
 ## Cancellation (`cancel.rs`)
+
+The claim/settle and guard plumbing (`cancel.rs`) lives in `rowx-core/src/`. `rowx-postgres/src/cancel.rs` holds only
+the backend implementation: the Postgres CancelRequest over the same TLS settings, and the is-alive check.
 
 1. Each operation runs as a spawned tokio task that owns the request: the `Statement` and
    the `RowStream`. The Python-facing future awaits a oneshot from that task.
