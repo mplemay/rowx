@@ -265,3 +265,30 @@ async fn execute_returns_rows_affected() -> TestResult {
 
     schema.drop().await
 }
+
+#[tokio::test]
+async fn db_error_midstream_yields_prefix_then_error() -> TestResult {
+    let Some(schema) = common::fresh_schema().await? else {
+        return Ok(());
+    };
+    let client = schema.connect().await?;
+    let mut cache = cache();
+    let sql = "SELECT (10 / (3 - g))::int4 FROM generate_series(1, 5) g";
+
+    let mut batches = open_stream(&client, &mut cache, sql, None, 100).await?;
+    let (_, rows, end) = drain(&mut batches).await;
+    assert_eq!(rows.len(), 2);
+    assert!(
+        matches!(&end, Err(Error::Db { sqlstate, .. }) if &**sqlstate == "22012"),
+        "{end:?}"
+    );
+    assert_eq!(
+        client
+            .query_one("SELECT 1::int4", &[])
+            .await?
+            .get::<_, i32>(0),
+        1
+    );
+
+    schema.drop().await
+}
