@@ -16,7 +16,7 @@ type BookRow = tuple[int, str, Decimal, date | None, list[str]]
 
 
 async def list_authors(conn: Connection) -> list[AuthorRow]:
-    return await query[AuthorRow](t"SELECT id, name, bio FROM authors ORDER BY name").fetch_all(conn)
+    return await query[AuthorRow](t"SELECT id, name, bio FROM authors ORDER BY name").all(conn)
 
 
 async def books_by(conn: Connection, author: str) -> list[BookRow]:
@@ -28,11 +28,11 @@ async def books_by(conn: Connection, author: str) -> list[BookRow]:
         WHERE a.name = {author}
         ORDER BY b.title
         """,
-    ).fetch_all(conn)
+    ).all(conn)
 
 
 async def books_tagged(conn: Connection, tags: list[str]) -> list[str]:
-    return await query[str](t"SELECT title FROM books WHERE tags && {tags} ORDER BY title").fetch_all(conn)
+    return await query[str](t"SELECT title FROM books WHERE tags && {tags} ORDER BY title").all(conn)
 
 
 async def book_counts(conn: Connection) -> list[tuple[str, int, Decimal | None]]:
@@ -44,7 +44,7 @@ async def book_counts(conn: Connection) -> list[tuple[str, int, Decimal | None]]
         GROUP BY a.name
         ORDER BY a.name
         """,
-    ).fetch_all(conn)
+    ).all(conn)
 
 
 async def add_book(conn: Connection, author: str, title: str, price: Decimal) -> int:
@@ -54,7 +54,7 @@ async def add_book(conn: Connection, author: str, title: str, price: Decimal) ->
         SELECT id, {title}, {price} FROM authors WHERE name = {author}
         RETURNING id
         """,
-    ).fetch_one(conn)
+    ).one(conn)
 
 
 async def main(dsn: str) -> None:

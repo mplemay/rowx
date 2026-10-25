@@ -1,5 +1,5 @@
 from rowx._core import ping
-from rowx._query import Connection, connect, query, query_unchecked
+from rowx._query import Connection, QueryResult, connect, query, query_unchecked
 from rowx.errors import (
     ConnectionBusyError,
     DatabaseError,
@@ -19,6 +19,7 @@ __all__ = [
     "EncodeError",
     "Error",
     "InterfaceError",
+    "QueryResult",
     "RowNotFound",
     "RowShapeError",
     "connect",

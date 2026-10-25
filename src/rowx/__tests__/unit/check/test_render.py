@@ -20,7 +20,7 @@ ELEMENT_SOURCE: Final[str] = dedent(
     async def load(conn):
         user = await query[tuple[int, str, str]](
             t"select id, name, email from users"
-        ).fetch_one(conn)
+        ).one(conn)
     """,
 )
 

@@ -40,11 +40,11 @@ def run_with_conn[T](dsn: str, body: Callable[[rowx.Connection], Awaitable[T]]) 
 
 
 def fetch[T](dsn: str, q: query[T]) -> T:
-    return run_with_conn(dsn, q.fetch_one)
+    return run_with_conn(dsn, q.one)
 
 
 def fetch_all[T](dsn: str, q: query[T]) -> list[T]:
-    return run_with_conn(dsn, q.fetch_all)
+    return run_with_conn(dsn, q.all)
 
 
 def test_any_with_list(schema: str) -> None:

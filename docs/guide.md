@@ -19,8 +19,8 @@ type UserRow = tuple[int, str, str | None]
 
 async def main() -> None:
     async with await rowx.connect(DSN) as conn:
-        uid = await query[int](t"SELECT id FROM users WHERE name = {'alice'}").fetch_one(conn)
-        user = await query[UserRow](t"SELECT id, name, email FROM users WHERE id = {uid}").fetch_one(conn)
+        uid = await query[int](t"SELECT id FROM users WHERE name = {'alice'}").one(conn)
+        user = await query[UserRow](t"SELECT id, name, email FROM users WHERE id = {uid}").one(conn)
         assert user == (uid, "alice", "alice@example.com")
 
 
@@ -29,12 +29,13 @@ asyncio.run(main())
 
 | Method | Result | Behaviour |
 |---|---|---|
-| `fetch_one` | `T` | The first row. Raises `RowNotFound` if there are none. Extra rows are not an error. |
-| `fetch_all` | `list[T]` | Every row. |
-| `execute` | `int` | The rows affected. Allowed on `query[T]`; the rows are discarded. |
+| `one` | `T` | The first row. Raises `RowNotFound` if there are none. Extra rows are not an error. |
+| `optional` | `T \| None` | The first row, or `None` if there are none. Extra rows are not an error. |
+| `all` | `list[T]` | Every row. |
+| `execute` | `QueryResult` | `rows_affected` is the count of rows affected. Allowed on `query[T]`; the rows are discarded. |
 
-`fetch_one` discards the rest of the result, but DML side effects (`INSERT ... RETURNING`) always run to completion. Add
-`LIMIT 1` to large selects.
+`one` and `optional` discard the rest of the result, but DML side effects (`INSERT ... RETURNING`) always run to
+completion. Add `LIMIT 1` to large selects.
 
 `rowx.connect(dsn, connect_timeout=None, statement_cache_size=256)` returns a `Connection`. Use it as an async context
 manager, or call `close()`.
@@ -63,9 +64,9 @@ type OrderRow = tuple[int, Decimal, str | None]
 
 async def main() -> None:
     async with await rowx.connect(DSN) as conn:
-        rows = await query[OrderRow](t"SELECT id, amount, note FROM orders ORDER BY id").fetch_all(conn)
+        rows = await query[OrderRow](t"SELECT id, amount, note FROM orders ORDER BY id").all(conn)
         assert rows
-        total = await query[Decimal](t'SELECT sum(amount) AS "total!" FROM orders').fetch_one(conn)
+        total = await query[Decimal](t'SELECT sum(amount) AS "total!" FROM orders').one(conn)
         assert total == sum(amount for _, amount, _ in rows)
 
 
@@ -92,27 +93,27 @@ async def main() -> None:
     async with await rowx.connect(DSN) as conn:
         # IN-lists: bind a list as an array with = ANY(...)
         wanted = ["alice", "bob"]
-        found = await query[str](t"SELECT name FROM users WHERE name = ANY({wanted}) ORDER BY name").fetch_all(conn)
+        found = await query[str](t"SELECT name FROM users WHERE name = ANY({wanted}) ORDER BY name").all(conn)
         assert found == wanted
 
         # literal braces are doubled
-        arr = await query[list[int]](t"SELECT '{{1,2,3}}'::int[]").fetch_one(conn)
+        arr = await query[list[int]](t"SELECT '{{1,2,3}}'::int[]").one(conn)
         assert arr == [1, 2, 3]
 
         # bind the whole pattern, never an interpolation inside a literal
         pattern = "al%"
-        like = await query[str](t"SELECT name FROM users WHERE name LIKE {pattern}").fetch_all(conn)
+        like = await query[str](t"SELECT name FROM users WHERE name LIKE {pattern}").all(conn)
         assert like == ["alice"]
 
         # cast a parameter whose type the server cannot infer
         missing = None
-        none_ok = await query[bool](t"SELECT {missing}::int IS NULL").fetch_one(conn)
+        none_ok = await query[bool](t"SELECT {missing}::int IS NULL").one(conn)
         assert none_ok
 
         # dynamic identifiers and nested templates are for query_unchecked only
         table, column = "users", "name"
         cond = t"WHERE id > {0}"
-        names = await query_unchecked[str](t"SELECT {column:ident} FROM {table:ident} {cond} ORDER BY 1").fetch_all(conn)
+        names = await query_unchecked[str](t"SELECT {column:ident} FROM {table:ident} {cond} ORDER BY 1").all(conn)
         assert names == ["alice", "bob", "carol"]
 
 
@@ -154,9 +155,9 @@ from rowx import query
 
 async def main() -> None:
     async with await rowx.connect(DSN) as conn:
-        n = await query[int](t'SELECT count(*) AS "n!" FROM users').fetch_one(conn)
+        n = await query[int](t'SELECT count(*) AS "n!" FROM users').one(conn)
         assert n == 3
-        email = await query[str | None](t'SELECT email AS "email?" FROM users WHERE name = {"carol"}').fetch_one(conn)
+        email = await query[str | None](t'SELECT email AS "email?" FROM users WHERE name = {"carol"}').one(conn)
         assert email is None or isinstance(email, str)
 
 
@@ -185,7 +186,7 @@ async def main() -> None:
             raise
         await query(t"ROLLBACK").execute(conn)
 
-        remaining = await query[int](t'SELECT count(*) AS "n!" FROM orders').fetch_one(conn)
+        remaining = await query[int](t'SELECT count(*) AS "n!" FROM orders').one(conn)
         assert remaining > 0
 
 

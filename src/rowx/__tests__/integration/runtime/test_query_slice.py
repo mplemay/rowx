@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import rowx
-from rowx import query
+from rowx import QueryResult, query
 from rowx.errors import InterfaceError, RowNotFound
 
 if TYPE_CHECKING:
@@ -22,22 +22,22 @@ def run_with_conn[T](dsn: str, body: Callable[[rowx.Connection], Awaitable[T]]) 
     return asyncio.run(run())
 
 
-def test_scalar_fetch_one(schema: str) -> None:
-    assert run_with_conn(schema, query[int](t"SELECT 1").fetch_one) == 1
+def test_scalar_one(schema: str) -> None:
+    assert run_with_conn(schema, query[int](t"SELECT 1").one) == 1
 
 
-def test_tuple_fetch_one(schema: str) -> None:
-    assert run_with_conn(schema, query[tuple[int, str]](t"SELECT 1, 'a'").fetch_one) == (1, "a")
+def test_tuple_one(schema: str) -> None:
+    assert run_with_conn(schema, query[tuple[int, str]](t"SELECT 1, 'a'").one) == (1, "a")
 
 
-def test_fetch_all(schema: str) -> None:
+def test_all(schema: str) -> None:
     q = query[int](t"SELECT x FROM generate_series(1, 3) x")
-    assert run_with_conn(schema, q.fetch_all) == [1, 2, 3]
+    assert run_with_conn(schema, q.all) == [1, 2, 3]
 
 
 def test_no_rows_raises_row_not_found(schema: str) -> None:
     with pytest.raises(RowNotFound):
-        run_with_conn(schema, query[int](t"SELECT 1 WHERE false").fetch_one)
+        run_with_conn(schema, query[int](t"SELECT 1 WHERE false").one)
 
 
 def test_str_argument_is_type_error() -> None:
@@ -47,11 +47,34 @@ def test_str_argument_is_type_error() -> None:
 
 def test_fetch_without_row_type_is_interface_error(schema: str) -> None:
     with pytest.raises(InterfaceError, match="without a row type"):
-        run_with_conn(schema, query(t"SELECT 1").fetch_one)
+        run_with_conn(schema, query(t"SELECT 1").one)
 
 
 def test_execute_returns_row_count(schema: str) -> None:
-    assert run_with_conn(schema, query(t"SELECT 1").execute) == 1
+    assert run_with_conn(schema, query(t"SELECT 1").execute) == QueryResult(rows_affected=1)
+
+
+def test_execute_update_rows_affected(schema: str) -> None:
+    q = query(t"UPDATE users SET name = name WHERE id > {0}")
+    assert run_with_conn(schema, q.execute).rows_affected == 3
+
+
+def test_execute_ddl_rows_affected_is_zero(schema: str) -> None:
+    assert run_with_conn(schema, query(t"CREATE TEMP TABLE rowx_ddl (id int)").execute).rows_affected == 0
+
+
+def test_optional_no_rows_is_none(schema: str) -> None:
+    assert run_with_conn(schema, query[int](t"SELECT 1 WHERE false").optional) is None
+
+
+def test_optional_many_rows_returns_first(schema: str) -> None:
+    q = query[int](t"SELECT x FROM generate_series(1, 3) x ORDER BY x")
+    assert run_with_conn(schema, q.optional) == 1
+
+
+def test_optional_without_row_type_is_interface_error(schema: str) -> None:
+    with pytest.raises(InterfaceError, match="without a row type"):
+        run_with_conn(schema, query(t"SELECT 1").optional)
 
 
 def test_orig_class_is_present() -> None:
@@ -60,6 +83,7 @@ def test_orig_class_is_present() -> None:
 
 
 def test_methods_are_coroutine_functions() -> None:
-    assert inspect.iscoroutinefunction(query.fetch_one)
-    assert inspect.iscoroutinefunction(query.fetch_all)
+    assert inspect.iscoroutinefunction(query.one)
+    assert inspect.iscoroutinefunction(query.optional)
+    assert inspect.iscoroutinefunction(query.all)
     assert inspect.iscoroutinefunction(query.execute)
