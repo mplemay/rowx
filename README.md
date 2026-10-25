@@ -51,4 +51,4 @@ connection error.
 - [User guide](docs/guide.md): row types, writing queries, overrides, transactions, the checker, CI and poolers.
 - [Postgres type mapping](docs/types.md): what each Postgres type decodes to and which Python types can be bound.
 - [Known limits](docs/known-limits.md): where nullability inference is less precise than the database.
-- [Design](docs/design.md): the full specification.
+- [Design](docs/design/README.md): the full specification.

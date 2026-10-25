@@ -1,0 +1,11 @@
+# Dependency evaluation
+
+| Candidate | Use | Verdict |
+|---|---|---|
+| **sqlx** as the runtime driver | Connections, codecs | **No.** Parameters are binary-only, so every Python type and Postgres type pair needs a hand-written encoder, and `int`→`numeric` and `str`→`date` failed. Its `&mut` connection serialises everything. It has no public cancel API: a cancelled `pg_sleep(3)` kept running. It pulls in 180 crates and builds in 19 s, against 90 crates and 13 s. |
+| **sqlx** `describe` | Nullability | **No.** It is `#[doc(hidden)]`, `offline`-gated and only reachable through `macros`, and its signature changed in 0.9. It gives unsafe answers ([Evidence: why not sqlx's describe](nullability.md#evidence-why-not-sqlxs-describe)). rowx copies its *model* and ports its test cases with attribution; sqlx is MIT/Apache-2.0. |
+| **tokio-postgres** | Runtime and describe | **Yes.** It has a public describe API (`Statement::params/columns`, `Column::table_oid/column_id`), raw `FromSql`, a per-parameter `encode_format`, `Kind` resolution and cancel tokens, and it can pipeline later. psqlpy shows the stack works in production. |
+| **deadpool-postgres** | Pool | Deferred along with the pool. |
+| **datafusion-sqlparser-rs** | Client-side parsing | **Not in v1.** The server already provides validity, types, parameter inference and outer-join nullability, and t-strings give placeholder positions. A parser would add dialect gaps, so queries that Postgres accepts would need a fallback path. **Revisit for:** (a) NOT NULL narrowing of computed columns (`coalesce`, `count(*)`, `WHERE x IS NOT NULL`), building on sqlty's `nullability.rs` (MIT); (b) detecting the statement kind before connecting; (c) finer positional mapping across scan boundaries ([Plan walk](nullability.md#plan-walk-explainrs-a-pure-function-over-serde_jsonvalue)). |
+| **sqlty** | Reference | MIT, borrowed with attribution: `_params.py` rules, `_config.py` ergonomics and the fixture style. Not a dependency. |
+| **ruff_python_parser** | A checker in Rust | **No.** Its API is unstable, and stdlib `ast`/`tokenize` are exact for 3.14. |
