@@ -178,8 +178,10 @@ async with q.fetch(conn) as rows:
   does, and as sqlx does (it reads to `ReadyForQuery` before the next operation).
   - The server finishes the statement, and the connection discards the remaining rows.
     No CancelRequest is sent, so DML side effects run to completion.
-  - The connection is Idle at once, and the next operation queues behind the drain on the
-    wire. The docs say to bound large reads with `LIMIT`, or to cancel the task, when
+  - The connection is Idle before `aclose()` returns (or when the stream is collected), and
+    the next operation queues behind the drain on the wire. After a `break`, a stream still
+    referenced by a variable stays open until it is collected, which is why `async with`
+    is recommended. The docs say to bound large reads with `LIMIT`, or to cancel the task, when
     stopping early must be fast.
 - **Cancellation.** Cancelling the task while it awaits `__anext__` cancels the statement,
   exactly as for the other methods ([Cancellation](driver.md#cancellation-cancelrs)). A cancel

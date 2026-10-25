@@ -80,8 +80,13 @@ This implements [Streaming](api.md#streaming-fetch).
 1. **Claim.** Python calls `_stream` from the first `RowStream.__anext__`. Under the GIL, it
    claims the connection and extracts parameters, as in step 1 of the execution path.
 2. **Producer task.**
-   - `_stream` spawns a producer task. The task owns the claim, the connection lock and the
+   - `_stream` spawns a producer task. The task owns the connection lock and the
      tokio-postgres `RowStream`.
+   - The claim and the guard live in a slot shared by the binding object and the producer.
+     Exactly one party takes the claim out of the slot:
+     - `close()` or Drop releases it (Busy → Idle);
+     - the producer releases it at `End` or an error, before sending that message;
+     - the canceller hands it off (Busy → Settling).
    - It runs `open()`, then sends `Batch(Vec<Row>)` messages, and finally
      `End { rows_affected }` (from `RowStream::rows_affected()`) or an error, over a
      `tokio::sync::mpsc::channel(1)`.
@@ -90,13 +95,25 @@ This implements [Streaming](api.md#streaming-fetch).
      `batch_size`.
    - The `mask` NULL check runs per row. On a violation, the rows before it go out as a
      batch, then the error.
-4. **`_next()`** awaits one message without the GIL, then decodes the batch with the GIL in
-   one pass, using the same builder as `_fetch`. After `End`, it records `rows_affected`
-   and returns `[]`. After an error, it raises, and later calls return `[]`.
-5. **Early exit.** `close()`, or Drop of the binding object, closes the receiver.
-   - The producer sees the closed channel at its next send and disarms the guard. It then
-     drops the tokio-postgres `RowStream`, so the connection task discards the remaining
-     rows, and releases the claim (Busy → Idle).
+4. **`_next()`** awaits one message without the GIL, then decodes it with the GIL.
+   - Rows are decoded one at a time. If row k fails (for example, a `DecodeError` for
+     `infinity`), `_next()` returns rows 0..k and keeps the error.
+   - The next `_next()` raises the kept error. If k is 0, the error is raised at once.
+   - A raised error ends the stream: the binding releases the stream as in early exit
+     (step 5), and later calls return `[]`.
+   - After `End`, `_next()` records `rows_affected` and returns `[]`.
+   - `_fetch` keeps its single-pass builder, since it has no prefix to preserve.
+5. **Early exit.** `close()`, or Drop of the binding object, does the following
+   **synchronously**:
+   - It disarms the guard and releases the claim from the shared slot (Busy → Idle), so the
+     connection is Idle before `aclose()` returns.
+   - It closes the receiver. The producer waits for rows with `select!` on the stream and
+     on `Sender::closed()`, so it sees the closure even while it is waiting on the server.
+     It then drops the tokio-postgres `RowStream`, so the connection task discards the
+     remaining rows, and releases the connection lock.
+   - The next operation claims the Idle connection and waits briefly on the lock, never
+     seeing Busy. It is sent after the stream is dropped, so it queues on the wire behind
+     the remaining rows.
    - Drop does no async work, so it is safe outside a runtime.
 6. **Cancellation.**
    - The guard ([Cancellation](#cancellation-cancelrs)) is armed from the request until
@@ -115,12 +132,17 @@ This implements [Streaming](api.md#streaming-fetch).
 
 - A full stream yields every row in order. `result` is `None` mid-stream and
   `QueryResult(rows_affected=N)` once exhausted, including N for `INSERT … RETURNING`.
-- After `break`, `aclose()`, leaving `async with`, or garbage collection, the next query
-  on the same connection succeeds, and `result` stays `None`. An early-exited
-  `INSERT … RETURNING` commits every row.
+- After `break` (with no other reference to the stream), `aclose()`, leaving `async with`,
+  or garbage collection, the next query on the same connection succeeds, and `result`
+  stays `None`. An early-exited `INSERT … RETURNING` commits every row.
+- `aclose()` while the producer is waiting on the server (`SELECT 1 UNION ALL SELECT
+  pg_sleep(5)`, closed after the first row) returns with the connection Idle. The next
+  query runs without `ConnectionBusyError`.
 - Another operation while a stream is open raises `ConnectionBusyError`.
 - A mid-stream NULL violation yields the rows before it, then raises `RowShapeError`. The
   next query succeeds.
+- A batch whose third row holds `'infinity'::date` yields the two rows before it, then
+  raises `DecodeError`. The next query succeeds.
 - Cancelling a task awaiting `__anext__` on `pg_sleep` frees the backend
   (`pg_stat_activity` within 2 s), and the next query succeeds.
 - In a 300-iteration stress test, a stream is cancelled at a random point and a query
