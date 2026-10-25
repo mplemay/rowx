@@ -15,8 +15,8 @@
 | 9 | Checker split | Python front-end with the Rust core doing DB work |
 | 10 | Offline | None; a live DB is required |
 | 11 | Diagnostics | Errors only, no fix |
-| 12 | Methods | `fetch_one` (raises), `fetch_all`, `execute` |
-| 13 | No T | `T = None`; only `execute` |
+| 12 | Methods | `fetch_one` (raises), `fetch_all`, `execute`; superseded by Q1 |
+| 13 | No T | `T = None`; only `execute` (unchanged by Q1) |
 | 14 | Runtime scope | A single connection only |
 | 15 | Migrations | Out of scope |
 | 16 | Type map | asyncpg-like |
@@ -54,3 +54,17 @@
 | R18 | Arity is checked against the statement before executing | Otherwise an empty result hides a shape mismatch |
 | R19 | No `NoReturn` overloads | `query[Any]` would be typed `NoReturn` |
 | R20 | macOS CI runs without the DB | Docker isn't available on macOS CI runners |
+
+## Query operations (2026-10-25)
+
+| # | Decision | Why |
+|---|---|---|
+| Q1 | `one`, `optional`, `all`, `fetch` and `execute`; a hard rename of `fetch_one`/`fetch_all`, with no aliases | sqlx's operation set under shorter names; 0.1.0 is unreleased |
+| Q2 | `one` returns the first row; extra rows are not an error | Matches sqlx `fetch_one` |
+| Q3 | `execute` returns `QueryResult(rows_affected)`, with no command tag | Room for more metadata; tokio-postgres doesn't expose the tag |
+| Q4 | No `many`/`fetch_many`; `RowStream.result` carries the `QueryResult` | Postgres prepares one statement at a time; sqlx deprecated `fetch_many` (launchbadge/sqlx#3108) |
+| Q5 | `fetch` returns an async iterator that is also an optional async context manager; the claim happens at the first `__anext__` | Plain `async for` stays simple; a stream that is never iterated holds nothing |
+| Q6 | Early exit drains; only task cancellation sends a CancelRequest | sqlx drains to `ReadyForQuery`; a cancel would roll back `… RETURNING` DML |
+| Q7 | `optional` on a nullable scalar is documented, not checked | asyncpg `fetchval` and SQLAlchemy `scalar_one_or_none` behave the same |
+| Q8 | `fetch(conn, *, batch_size=1024)` | Tunes GIL crossings, like asyncpg `prefetch` and psycopg `itersize` |
+| Q9 | Methods take `Connection`; the parameter widens to a protocol with the pool and transactions | YAGNI; widening is backward compatible |

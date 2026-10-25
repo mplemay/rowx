@@ -5,7 +5,8 @@
 2. A **transaction helper** (`async with conn.transaction()`), then opt-in **pipelining**.
 3. **Pool**, using deadpool-postgres.
 4. **Offline cache** (`rowx prepare`, `.rowx/query-<sha256>.json`, `--check` drift).
-5. `fetch_optional`, and streaming `fetch` as an async iterator.
+5. **Multi-statement execution** over the simple protocol (sqlx's `fetch_many` results),
+   and the `CommandComplete` tag on `QueryResult`.
 6. `--fix`, warnings and ignore comments.
 7. **Type overrides** (`"col: T"`) and custom codecs (domains, composites, ranges, `inet`,
    `money`).

@@ -70,7 +70,7 @@ Unknown keys are an error (exit 2), with a did-you-mean suggestion; port the log
 **Allowed uses** of a name that resolves to `rowx.query` or `rowx.query_unchecked`:
 
 - (a) `NAME[T](arg)` or `NAME(arg)`, where the `Call`'s `func` is exactly that `Subscript`
-  or `Name` (or `rx.query…` as an `Attribute`). Chaining (`….fetch_one(conn)`, `await …`)
+  or `Name` (or `rx.query…` as an `Attribute`). Chaining (`….one(conn)`, `await …`)
   is irrelevant, because the inner `Call` is the match.
 - (b) Annotation position, and `isinstance` or `issubclass` arguments.
 - Any other use is `indirect-query`. That covers an assignment right-hand side
