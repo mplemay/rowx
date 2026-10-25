@@ -1,7 +1,9 @@
+use std::pin::Pin;
+
 use bytes::BytesMut;
-use futures_util::{TryStreamExt, pin_mut};
+use futures_util::{FutureExt, TryStreamExt, pin_mut};
 use tokio_postgres::types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
-use tokio_postgres::{Client, Row, Statement};
+use tokio_postgres::{Client, Row, RowStream, Statement};
 
 use crate::error::Error;
 use crate::stmt_cache::StmtCache;
@@ -242,17 +244,7 @@ async fn fetch_once(
     shape: &Shape<'_>,
     encode: &impl Encode,
 ) -> Result<Vec<Row>, Error> {
-    let (mut stmt, cached) = prepare(client, cache, sql).await?;
-    if cached && check_shape(shape, stmt.columns().len()).is_err() {
-        // a schema change since caching can alter the columns, and the server only reports it on
-        // execution, which the shape check would prevent; judge the shape on a fresh prepare
-        cache.remove(sql);
-        (stmt, _) = prepare(client, cache, sql).await?;
-    }
-    // checked before executing so a statement with no rows still reports a wrong shape
-    check_shape(shape, stmt.columns().len())?;
-    let params = encode.encode(stmt.params())?;
-    let stream = client.query_raw(&stmt, &params).await?;
+    let stream = open(client, cache, sql, shape, encode).await?;
     pin_mut!(stream);
     let mut rows = Vec::new();
     while let Some(row) = stream.try_next().await? {
@@ -266,6 +258,146 @@ async fn fetch_once(
         }
     }
     Ok(rows)
+}
+
+// prepare, shape check, encode and send; errors here all precede the first row, so the retrier wraps it
+async fn open(
+    client: &Client,
+    cache: &mut StmtCache<Statement>,
+    sql: &str,
+    shape: &Shape<'_>,
+    encode: &impl Encode,
+) -> Result<RowStream, Error> {
+    let (mut stmt, cached) = prepare(client, cache, sql).await?;
+    if cached && check_shape(shape, stmt.columns().len()).is_err() {
+        // a schema change since caching can alter the columns, and the server only reports it on
+        // execution, which the shape check would prevent; judge the shape on a fresh prepare
+        cache.remove(sql);
+        (stmt, _) = prepare(client, cache, sql).await?;
+    }
+    // checked before executing so a statement with no rows still reports a wrong shape
+    check_shape(shape, stmt.columns().len())?;
+    let params = encode.encode(stmt.params())?;
+    Ok(client.query_raw(&stmt, &params).await?)
+}
+
+/// One trip of a stream.
+#[derive(Debug)]
+pub enum Batch {
+    /// At least one row, at most `batch_size`.
+    Rows(Vec<Row>),
+    /// The stream is over. `rows_affected` is `None` when it ended in an error.
+    End { rows_affected: Option<u64> },
+}
+
+/// The streaming consumer behind `fetch`-style iteration; dropping it discards the rest of the result.
+pub struct RowBatches {
+    stream: Option<Pin<Box<RowStream>>>,
+    mask: Option<Vec<bool>>,
+    batch_size: usize,
+    pending: Option<Error>,
+    rows_affected: Option<u64>,
+}
+
+impl std::fmt::Debug for RowBatches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowBatches")
+            .field("open", &self.stream.is_some())
+            .field("batch_size", &self.batch_size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RowBatches {
+    /// Waits for one row, then takes the rows that are ready without waiting, up to `batch_size`.
+    /// A failure after some rows were taken is returned by the next call.
+    ///
+    /// # Errors
+    /// `RowShape` for a NULL-mask violation, `Db`/`Interface` for driver failures.
+    pub async fn next_batch(&mut self) -> Result<Batch, Error> {
+        if let Some(err) = self.pending.take() {
+            return Err(err);
+        }
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(Batch::End {
+                rows_affected: self.rows_affected,
+            });
+        };
+        let mut rows = Vec::new();
+        loop {
+            let next = if rows.is_empty() {
+                stream.try_next().await
+            } else {
+                match stream.try_next().now_or_never() {
+                    Some(next) => next,
+                    None => break,
+                }
+            };
+            let err = match next {
+                Ok(Some(row)) => {
+                    let checked = self
+                        .mask
+                        .as_deref()
+                        .map_or(Ok(()), |m| check_nulls(&row, m));
+                    match checked {
+                        Ok(()) => {
+                            rows.push(row);
+                            if rows.len() >= self.batch_size {
+                                break;
+                            }
+                            continue;
+                        }
+                        Err(err) => err,
+                    }
+                }
+                Ok(None) => {
+                    self.rows_affected = stream.rows_affected();
+                    self.stream = None;
+                    if rows.is_empty() {
+                        return Ok(Batch::End {
+                            rows_affected: self.rows_affected,
+                        });
+                    }
+                    break;
+                }
+                Err(err) => err.into(),
+            };
+            // the rows before the failure go out first
+            self.stream = None;
+            if rows.is_empty() {
+                return Err(err);
+            }
+            self.pending = Some(err);
+            break;
+        }
+        Ok(Batch::Rows(rows))
+    }
+}
+
+/// # Errors
+/// Anything `fetch` reports before the first row; later failures come from `next_batch`.
+pub async fn stream(
+    client: &Client,
+    cache: &mut StmtCache<Statement>,
+    sql: &str,
+    shape: &Shape<'_>,
+    encode: impl Encode,
+    batch_size: usize,
+) -> Result<RowBatches, Error> {
+    let mut retrier = Retrier::default();
+    let stream = loop {
+        match open(client, cache, sql, shape, &encode).await {
+            Ok(stream) => break stream,
+            Err(err) => retrier.on_error(err, cache, sql)?,
+        }
+    };
+    Ok(RowBatches {
+        stream: Some(Box::pin(stream)),
+        mask: shape.mask.map(<[bool]>::to_vec),
+        batch_size: batch_size.max(1),
+        pending: None,
+        rows_affected: None,
+    })
 }
 
 fn check_shape(shape: &Shape<'_>, columns: usize) -> Result<(), Error> {
