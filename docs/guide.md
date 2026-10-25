@@ -69,6 +69,10 @@ asyncio.run(main())
 async context manager for callers that don't want release to depend on garbage collection. The rows cross into Python
 `batch_size` at a time (default 1024).
 
+Streaming bounds memory, not time. Each row is a separate `async for` step, so iterating 100,000 rows takes about 1.4
+times as long as `all()` (about 72 ms against 52 ms on a release build, for `int4`, `text` and `timestamptz` columns).
+Use `all()` when the result is known to be small, and `fetch` when it is large or unbounded.
+
 ```python test
 import asyncio
 
@@ -101,7 +105,8 @@ asyncio.run(main())
   an error or a cancellation.
 - **The connection is Busy while the stream is open.** From the first row until the stream ends, any other operation on
   that connection raises `ConnectionBusyError`, so a loop body can't query the connection it is streaming from. (A
-  result that fits in one batch ends as soon as it arrives, so the stream is already closed by the first row.)
+  result that arrives entirely with the first batch ends the stream at once, so the connection is already idle by the
+  first row.)
 - **`break` drains.** Stopping early does not cancel the statement: the server finishes it, and the connection
   discards the remaining rows, so DML side effects (`INSERT ... RETURNING`) complete. Prefer `async with`: a stream that
   is still referenced after a `break` stays open until it is collected. Bound large reads with `LIMIT`, or cancel the
