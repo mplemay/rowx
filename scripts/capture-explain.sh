@@ -4,7 +4,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fixtures="$root/crates/rowx-pg/tests/fixtures/plans"
+fixtures="$root/crates/rowx-postgres/tests/fixtures/plans"
 state="$root/.rowx-test-dsn"
 scratch_db=rowx_plans
 

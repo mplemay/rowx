@@ -2,13 +2,13 @@ from typing import TypeAliasType, get_args
 
 import pytest
 
-from rowx import _core
+from rowx._core.postgres import type_table
 from rowx._types import accepts, by_key, result_type
 from rowx._vocab import AcceptedParam, CodecName, PyResultName, TypeKey
 
 
 def test_type_table_has_core_keys() -> None:
-    keys = {t.key for t in _core.type_table()}
+    keys = {t.key for t in type_table()}
     assert keys >= {"int4", "numeric", "timestamptz", "uuid", "jsonb", "text", "char", "void"}
 
 
@@ -47,7 +47,7 @@ def _names(alias: TypeAliasType) -> set[str]:
 
 
 def test_vocab_matches_the_type_table() -> None:
-    rows = _core.type_table()
+    rows = type_table()
     assert {row.key for row in rows} == _names(TypeKey)
     assert {row.py_result for row in rows} == _names(PyResultName)
     assert {name for row in rows for name in row.accepted_params} == _names(AcceptedParam)

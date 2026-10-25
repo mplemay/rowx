@@ -9,7 +9,7 @@ from rowx.errors import DatabaseError
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from rowx._core import Connection as ConnectionImpl
+    from rowx._core.postgres import Connection as ConnectionImpl
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 

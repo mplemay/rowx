@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 import rowx
-from rowx._core import _cancel_requests_sent
+from rowx._core.postgres import _cancel_requests_sent
 from rowx.errors import DatabaseError
 
 if TYPE_CHECKING:
-    from rowx._core import Connection as ConnectionImpl
+    from rowx._core.postgres import Connection as ConnectionImpl
 
 pytestmark = [pytest.mark.integration, pytest.mark.db, pytest.mark.timing]
 

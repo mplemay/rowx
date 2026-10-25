@@ -6,7 +6,7 @@ import psycopg
 import pytest
 
 from rowx.__tests__.integration.check.harness import CASES_DIR, parse_markers
-from rowx._core import Describe
+from rowx._core.postgres import Describe
 from rowx.check.discover import discover_source
 from rowx.check.runner import describe_all
 from rowx.check.sourcemap import SourceMapper

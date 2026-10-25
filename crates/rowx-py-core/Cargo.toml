@@ -1,0 +1,18 @@
+[package]
+name = "rowx-py-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+pyo3.workspace = true
+pyo3-async-runtimes.workspace = true
+rowx-core.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/rowx-pg", "crates/rowx-py"]
+members = [
+    "crates/rowx-core",
+    "crates/rowx-postgres",
+    "crates/rowx-py-core",
+    "crates/rowx-postgres-py",
+    "crates/rowx-py",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,7 +18,10 @@ rust-version = "1.85"
 pyo3 = { version = "0.28", features = ["abi3-py314"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
-rowx-pg = { path = "crates/rowx-pg" }
+rowx-core = { path = "crates/rowx-core" }
+rowx-postgres = { path = "crates/rowx-postgres" }
+rowx-py-core = { path = "crates/rowx-py-core" }
+rowx-postgres-py = { path = "crates/rowx-postgres-py" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

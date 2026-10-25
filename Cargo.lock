@@ -761,12 +761,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "rowx-pg"
+name = "rowx-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rowx-postgres"
 version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
  "proptest",
+ "rowx-core",
  "rustls",
  "rustls-pemfile",
  "serde_json",
@@ -778,12 +787,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "rowx-py"
+name = "rowx-postgres-py"
 version = "0.1.0"
 dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
- "rowx-pg",
+ "rowx-core",
+ "rowx-postgres",
+ "rowx-py-core",
+ "tokio",
+]
+
+[[package]]
+name = "rowx-py"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "rowx-postgres",
+ "rowx-postgres-py",
+ "rowx-py-core",
+]
+
+[[package]]
+name = "rowx-py-core"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "pyo3-async-runtimes",
+ "rowx-core",
  "tokio",
 ]
 

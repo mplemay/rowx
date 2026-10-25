@@ -10,9 +10,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3.workspace = true
-pyo3-async-runtimes.workspace = true
-tokio = { workspace = true, features = ["macros"] }
-rowx-pg.workspace = true
+rowx-postgres.workspace = true
+rowx-postgres-py.workspace = true
+rowx-py-core.workspace = true
 
 [lints]
 workspace = true

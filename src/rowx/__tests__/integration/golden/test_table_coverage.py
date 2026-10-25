@@ -7,7 +7,7 @@ from uuid import UUID
 import pytest
 
 import rowx
-from rowx._core import type_table
+from rowx._core.postgres import type_table
 from rowx.errors import DatabaseError, DecodeError
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
