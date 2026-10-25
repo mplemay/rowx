@@ -36,7 +36,7 @@ order.
   error.
 - Named row types (dataclass, TypedDict, NamedTuple, Pydantic, Protocol). Only tuples and
   scalars are supported.
-- `fetch_optional` and streaming `fetch`.
+- Multi-statement execution (sqlx's `fetch_many`).
 - Migrations.
 - A client-side SQL parser ([Dependency evaluation](dependencies.md#dependency-evaluation)).
 - Type-checker plugins.

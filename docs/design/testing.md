@@ -48,7 +48,8 @@
   executed in a rolled-back transaction over the NULL-heavy seed data. The test asserts
   that no NULL appears where `describe` said NOT NULL.
 - **Typing.** `tests/typing/cases.py` holds `# reveal: <type>` expectations, plus negative
-  cases (`query("…")` and `query(f"…")` must error). It runs `pyright --outputjson` and
+  cases (`query("…")` and `query(f"…")` must error). Every query method, and `async for`
+  over `fetch`, has a case. It runs `pyright --outputjson` and
   `mypy`, with versions pinned and Python version 3.14.
 - **CI.**
   - Linux runs everything, with a `postgres:18` service and `ROWX_REQUIRE_DB=1`.
