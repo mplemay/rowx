@@ -68,6 +68,12 @@ class Describe:
     @property
     def columns(self) -> list[ColumnInfo]: ...
 
+class RowStream:
+    async def _next(self) -> list[object]: ...
+    def close(self) -> None: ...
+    @property
+    def rows_affected(self) -> int | None: ...
+
 class Connection:
     async def _fetch(
         self,
@@ -78,6 +84,15 @@ class Connection:
         limit_one: bool,
         arity: int | None,
     ) -> list[object]: ...
+    def _stream(
+        self,
+        sql: str,
+        params: list[object],
+        mask: list[bool] | None,
+        scalar: bool,
+        arity: int | None,
+        batch_size: int,
+    ) -> RowStream: ...
     async def _execute(self, sql: str, params: list[object]) -> int: ...
     async def close(self) -> None: ...
     @property

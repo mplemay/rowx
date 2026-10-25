@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use crate::errors::{PgError, interface_error};
 use crate::exec::{self, FetchArgs};
 use crate::runtime;
+use crate::stream::{RowStream, StreamArgs};
 
 #[pyclass(frozen, module = "rowx._core", name = "Connection")]
 #[derive(Debug)]
@@ -76,6 +77,29 @@ impl Connection {
             arity,
         };
         exec::fetch(py, &self.cancel, params, args)
+    }
+
+    // the argument list is fixed by the binding contract in docs/design/driver.md, streaming
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(name = "_stream")]
+    fn stream(
+        &self,
+        py: Python<'_>,
+        sql: String,
+        params: &Bound<'_, PyList>,
+        mask: Option<Vec<bool>>,
+        scalar: bool,
+        arity: Option<usize>,
+        batch_size: usize,
+    ) -> PyResult<RowStream> {
+        let args = StreamArgs {
+            sql,
+            mask,
+            scalar,
+            arity,
+            batch_size,
+        };
+        RowStream::new(py, &self.cancel, params, args)
     }
 
     #[pyo3(name = "_execute")]

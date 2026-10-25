@@ -14,6 +14,9 @@ async def positive(conn: Connection) -> None:
     reveal_type(await scalar.optional(conn))  # reveal: int | None
     reveal_type(await scalar.all(conn))  # reveal: list[int]
     reveal_type(await scalar.execute(conn))  # reveal: QueryResult
+    reveal_type(scalar.fetch(conn))  # reveal: RowStream[int]
+    async for value in scalar.fetch(conn, batch_size=10):
+        reveal_type(value)  # reveal: int
 
     text = query[str](t"SELECT name FROM users")
     reveal_type(await text.one(conn))  # reveal: str
@@ -30,6 +33,9 @@ async def positive(conn: Connection) -> None:
     reveal_type(await row.one(conn))  # reveal: tuple[int, str]
     reveal_type(await row.optional(conn))  # reveal: tuple[int, str] | None
     reveal_type(await row.all(conn))  # reveal: list[tuple[int, str]]
+    reveal_type(row.fetch(conn))  # reveal: RowStream[tuple[int, str]]
+    async for pair in row.fetch(conn):
+        reveal_type(pair)  # reveal: tuple[int, str]
 
     nullable_row = query[tuple[int, str | None]](t"SELECT id, name FROM users")
     reveal_type(await nullable_row.one(conn))  # reveal: tuple[int, str | None]

@@ -356,3 +356,109 @@ where
         },
     }
 }
+
+/// The claim of a running stream, shared by its producer task and the consumer that may close it.
+/// Whoever takes the claim out first releases it; later calls do nothing.
+#[derive(Debug, Clone)]
+pub struct StreamHandle {
+    op: Arc<Op>,
+    slot: Arc<std::sync::Mutex<Option<Claim>>>,
+}
+
+impl StreamHandle {
+    /// Busy → Idle, or a hand-off to the canceller when the stream was cancelled meanwhile.
+    pub fn release(&self) {
+        let Some(claim) = self.slot.lock().ok().and_then(|mut slot| slot.take()) else {
+            return;
+        };
+        if self.op.finish() {
+            drop(claim);
+        } else {
+            claim.hand_off();
+        }
+    }
+}
+
+/// Runs the producer of a stream as its own task. Unlike `spawn`, the claim outlives any single call:
+/// the producer, `StreamHandle::release` or the canceller (through `hook`) gives it up, whichever is first.
+pub fn spawn_stream<F>(
+    cancel: &Cancel,
+    claim: Claim,
+    hook: &Hook,
+    make: impl FnOnce(StreamHandle) -> F,
+) -> StreamHandle
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let handle = StreamHandle {
+        op: Arc::new(Op::default()),
+        slot: Arc::new(std::sync::Mutex::new(Some(claim))),
+    };
+    let fut = make(handle.clone());
+    let task = {
+        let handle = handle.clone();
+        cancel.handle.spawn(async move {
+            fut.await;
+            // a producer that ends without releasing (it was told to stop) still gives the claim up
+            handle.release();
+        })
+    };
+    let canceller = Arc::new(Canceller {
+        op: Arc::clone(&handle.op),
+        task: std::sync::Mutex::new(Some(task)),
+        cancel: cancel.clone(),
+    });
+    let _ = hook.0.set(canceller);
+    handle
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    fn handle_with(state: &Arc<State>) -> Option<StreamHandle> {
+        let claim = state.claim().ok().flatten()?;
+        Some(StreamHandle {
+            op: Arc::new(Op::default()),
+            slot: Arc::new(std::sync::Mutex::new(Some(claim))),
+        })
+    }
+
+    #[test]
+    fn release_moves_busy_to_idle_once() {
+        let state = Arc::new(State::default());
+        let handle = handle_with(&state);
+        assert!(handle.is_some());
+        let Some(handle) = handle else { return };
+        assert!(state.is_busy());
+        handle.release();
+        let next = state.claim();
+        assert!(matches!(next, Ok(Some(_))));
+        // the second release finds the slot empty and must not disturb the next operation
+        handle.release();
+        assert!(state.is_busy());
+    }
+
+    #[test]
+    fn release_after_a_cancel_leaves_the_connection_for_the_canceller() {
+        let state = Arc::new(State::default());
+        let Some(handle) = handle_with(&state) else {
+            return;
+        };
+        assert!(handle.op.cancel());
+        assert!(state.settle());
+        handle.release();
+        assert_eq!(state.phase(), crate::state::Phase::Settling);
+    }
+
+    #[test]
+    fn a_cancel_after_release_is_ignored() {
+        let state = Arc::new(State::default());
+        let Some(handle) = handle_with(&state) else {
+            return;
+        };
+        handle.release();
+        assert!(!handle.op.cancel());
+        assert_eq!(state.phase(), crate::state::Phase::Idle);
+    }
+}
