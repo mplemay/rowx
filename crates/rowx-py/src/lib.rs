@@ -17,9 +17,4 @@ mod _core {
             .set_item("rowx._core.postgres", &postgres)?;
         Ok(())
     }
-
-    #[pyfunction]
-    const fn ping() -> &'static str {
-        "pong"
-    }
 }

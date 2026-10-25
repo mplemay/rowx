@@ -2,7 +2,6 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Final, Self
 
-from rowx._core.postgres import connect as connect_impl
 from rowx._rowplan import NO_ROWS, RowPlan, row_plan
 from rowx._template import Compiled, compile_template
 from rowx.errors import InterfaceError, RowNotFound
@@ -12,7 +11,7 @@ if TYPE_CHECKING:
     from string.templatelib import Template
     from types import TracebackType
 
-    from rowx._core.postgres import Connection as ConnectionImpl, RowStream as RowStreamImpl
+    from rowx._executor import Executor, StreamHandle
 
 DEFAULT_BATCH_SIZE: Final[int] = 1024
 
@@ -23,10 +22,10 @@ class QueryResult:
 
 
 class RowStream[T]:
-    def __init__(self, open_stream: Callable[[], RowStreamImpl], connection_closed: Callable[[], bool], /) -> None:
+    def __init__(self, open_stream: Callable[[], StreamHandle], connection_closed: Callable[[], bool], /) -> None:
         self._open_stream = open_stream
         self._connection_closed = connection_closed
-        self._impl: RowStreamImpl | None = None
+        self._impl: StreamHandle | None = None
         self._buffer: deque[object] = deque()
         self._done = False
         self.result: QueryResult | None = None
@@ -76,34 +75,6 @@ class RowStream[T]:
         await self.aclose()
 
 
-class Connection:
-    def __init__(self, impl: ConnectionImpl, /) -> None:
-        self._impl = impl
-
-    async def close(self) -> None:
-        await self._impl.close()
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        await self.close()
-
-    @property
-    def closed(self) -> bool:
-        return self._impl.closed
-
-
-async def connect(dsn: str, /, *, connect_timeout: float | None = None, statement_cache_size: int = 256) -> Connection:
-    impl = await connect_impl(dsn, connect_timeout=connect_timeout, statement_cache_size=statement_cache_size)
-    return Connection(impl)
-
-
 class _BaseQuery[T]:
     _dynamic: ClassVar[bool]
 
@@ -124,9 +95,9 @@ class _BaseQuery[T]:
             raise InterfaceError(msg)
         return plan
 
-    async def _rows(self, conn: Connection, *, limit_one: bool) -> list[object]:
+    async def _rows(self, conn: Executor, *, limit_one: bool) -> list[object]:
         plan = self._row_plan()
-        return await conn._impl._fetch(  # ruff: ignore[private-member-access]
+        return await conn._fetch(  # ruff: ignore[private-member-access]
             self._compiled.sql,
             self._params,
             list(plan.nullable_mask),
@@ -135,28 +106,28 @@ class _BaseQuery[T]:
             plan.arity,
         )
 
-    async def one(self, conn: Connection, /) -> T:
+    async def one(self, conn: Executor, /) -> T:
         rows = await self._rows(conn, limit_one=True)
         if not rows:
             msg = "query returned no rows"
             raise RowNotFound(msg)
         return rows[0]  # ty: ignore[invalid-return-type]
 
-    async def optional(self, conn: Connection, /) -> T | None:
+    async def optional(self, conn: Executor, /) -> T | None:
         rows = await self._rows(conn, limit_one=True)
         return rows[0] if rows else None  # ty: ignore[invalid-return-type]
 
-    async def all(self, conn: Connection, /) -> list[T]:
+    async def all(self, conn: Executor, /) -> list[T]:
         return await self._rows(conn, limit_one=False)  # ty: ignore[invalid-return-type]
 
-    def fetch(self, conn: Connection, /, *, batch_size: int = DEFAULT_BATCH_SIZE) -> RowStream[T]:
+    def fetch(self, conn: Executor, /, *, batch_size: int = DEFAULT_BATCH_SIZE) -> RowStream[T]:
         plan = self._row_plan()
         if batch_size < 1:
             msg = "batch_size must be at least 1"
             raise ValueError(msg)
 
-        def open_stream() -> RowStreamImpl:
-            return conn._impl._stream(  # ruff: ignore[private-member-access]
+        def open_stream() -> StreamHandle:
+            return conn._stream(  # ruff: ignore[private-member-access]
                 self._compiled.sql,
                 self._params,
                 list(plan.nullable_mask),
@@ -167,8 +138,8 @@ class _BaseQuery[T]:
 
         return RowStream(open_stream, lambda: conn.closed)
 
-    async def execute(self, conn: Connection, /) -> QueryResult:
-        rows_affected = await conn._impl._execute(self._compiled.sql, self._params)  # ruff: ignore[private-member-access]
+    async def execute(self, conn: Executor, /) -> QueryResult:
+        rows_affected = await conn._execute(self._compiled.sql, self._params)  # ruff: ignore[private-member-access]
         return QueryResult(rows_affected=rows_affected)
 
 

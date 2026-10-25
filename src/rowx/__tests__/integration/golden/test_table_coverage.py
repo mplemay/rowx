@@ -6,9 +6,9 @@ from uuid import UUID
 
 import pytest
 
-import rowx
 from rowx._core.postgres import type_table
 from rowx.errors import DatabaseError, DecodeError
+from rowx.postgres import connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -92,7 +92,7 @@ def supported(side: str) -> set[str]:
 
 def fetch_scalar(dsn: str, sql: str, params: list[object] | None = None) -> list[object]:
     async def run() -> list[object]:
-        conn = await rowx.connect(dsn)
+        conn = await connect(dsn)
         try:
             return await conn._impl._fetch(sql, params or [], None, scalar=True, limit_one=True, arity=1)
         finally:

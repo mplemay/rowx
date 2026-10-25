@@ -3,8 +3,8 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
-import rowx
 from rowx.errors import ConnectionBusyError, DatabaseError
+from rowx.postgres import connect
 
 if TYPE_CHECKING:
     from rowx._core.postgres import Connection as ConnectionImpl
@@ -41,8 +41,8 @@ async def wait_until_running(observer: ConnectionImpl) -> None:
 
 def test_second_call_while_busy_raises_then_next_call_succeeds(schema: str) -> None:
     async def run() -> list[object]:
-        conn = await rowx.connect(schema)
-        observer = await rowx.connect(schema)
+        conn = await connect(schema)
+        observer = await connect(schema)
         try:
             slow = asyncio.create_task(sleep_one(conn._impl))
             await wait_until_running(observer._impl)
@@ -59,7 +59,7 @@ def test_second_call_while_busy_raises_then_next_call_succeeds(schema: str) -> N
 
 def test_sequential_awaits_never_raise_busy(schema: str) -> None:
     async def run() -> int:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         try:
             for _ in range(1000):
                 await select_one(conn._impl)
@@ -73,7 +73,7 @@ def test_sequential_awaits_never_raise_busy(schema: str) -> None:
 
 def test_error_result_leaves_the_connection_idle(schema: str) -> None:
     async def run() -> list[object]:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         try:
             with pytest.raises(DatabaseError):
                 await fetch(conn._impl, "SELECT 1/0")

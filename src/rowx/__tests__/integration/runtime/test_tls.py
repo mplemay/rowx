@@ -6,8 +6,8 @@ from urllib.parse import urlparse
 
 import pytest
 
-import rowx
 from rowx.errors import InterfaceError
+from rowx.postgres import Connection, connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -48,18 +48,18 @@ def _kv(dsn: str, *, host: str | None = None, **extra: str) -> str:
     return " ".join(f"{key}='{value}'" for key, value in pairs.items())
 
 
-async def _fetch(conn: rowx.Connection, sql: str, *, scalar: bool = False) -> list[object]:
+async def _fetch(conn: Connection, sql: str, *, scalar: bool = False) -> list[object]:
     mask = [False] if scalar else None
     return await conn._impl._fetch(sql, [], mask, scalar, scalar, 1 if scalar else None)
 
 
-async def _scalar(conn: rowx.Connection, sql: str) -> object:
+async def _scalar(conn: Connection, sql: str) -> object:
     (value,) = await _fetch(conn, sql, scalar=True)
     return value
 
 
 async def _connect_and_check(dsn: str) -> object:
-    conn = await rowx.connect(dsn)
+    conn = await connect(dsn)
     try:
         return await _scalar(conn, SSL_IN_USE)
     finally:
@@ -112,7 +112,7 @@ def test_prefer_against_a_non_ssl_server_falls_back_to_plaintext() -> None:
     dsn = _require_env("ROWX_TEST_DSN")
 
     async def run() -> object:
-        conn = await rowx.connect(dsn)
+        conn = await connect(dsn)
         try:
             if await _scalar(conn, "SELECT current_setting('ssl')::bool"):
                 pytest.skip("ROWX_TEST_DSN points at an SSL server")
@@ -140,12 +140,12 @@ def test_unreadable_sslrootcert_raises_interface_error(ssl_dsn: str) -> None:
 def test_cancellation_works_over_tls(ssl_dsn: str) -> None:
     dsn = _kv(ssl_dsn, host="localhost", sslmode="verify-full", sslrootcert=str(CERTS / "ca.crt"))
 
-    async def sleeping(observer: rowx.Connection) -> int:
+    async def sleeping(observer: Connection) -> int:
         count = await _scalar(observer, SLEEPING)
         assert isinstance(count, int)
         return count
 
-    async def wait_for_sleep(observer: rowx.Connection, *, present: bool) -> bool:
+    async def wait_for_sleep(observer: Connection, *, present: bool) -> bool:
         # each poll is a round trip on the observer, so no sleep is needed
         loop = asyncio.get_running_loop()
         deadline = loop.time() + GONE_WITHIN
@@ -154,12 +154,12 @@ def test_cancellation_works_over_tls(ssl_dsn: str) -> None:
                 return True
         return False
 
-    async def sleep_three(conn: rowx.Connection) -> list[object]:
+    async def sleep_three(conn: Connection) -> list[object]:
         return await _fetch(conn, "SELECT pg_sleep(3)")
 
     async def run() -> object:
-        conn = await rowx.connect(dsn)
-        observer = await rowx.connect(dsn)
+        conn = await connect(dsn)
+        observer = await connect(dsn)
         try:
             slow = asyncio.create_task(sleep_three(conn))
             assert await wait_for_sleep(observer, present=True)

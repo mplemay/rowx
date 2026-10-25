@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx._types import accepts, by_key, result_type
-from rowx._vocab import NullReasonName, TypeKey
+from rowx.postgres._types import accepts, by_key, result_type
+from rowx.postgres._vocab import NullReasonName, TypeKey
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

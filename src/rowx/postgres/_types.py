@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 from rowx._core.postgres import TypeInfo, type_table
 
 if TYPE_CHECKING:
-    from rowx._vocab import PyResultName
+    from rowx.postgres._vocab import PyResultName
 
 
 @cache

@@ -3,8 +3,8 @@ from typing import TypeAliasType, get_args
 import pytest
 
 from rowx._core.postgres import type_table
-from rowx._types import accepts, by_key, result_type
-from rowx._vocab import AcceptedParam, CodecName, PyResultName, TypeKey
+from rowx.postgres._types import accepts, by_key, result_type
+from rowx.postgres._vocab import AcceptedParam, CodecName, PyResultName, TypeKey
 
 
 def test_type_table_has_core_keys() -> None:

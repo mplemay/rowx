@@ -6,9 +6,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
-import rowx
 from rowx import (
-    Connection,
     ConnectionBusyError,
     DecodeError,
     EncodeError,
@@ -18,6 +16,7 @@ from rowx import (
     RowStream,
     query,
 )
+from rowx.postgres import Connection, connect
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -42,7 +41,7 @@ async def alive(conn: Connection) -> int:
 
 def run_with_conn(schema: str, body: Callable[[Connection], Coroutine[object, object, object]]) -> object:
     async def run() -> object:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         try:
             return await body(conn)
         finally:

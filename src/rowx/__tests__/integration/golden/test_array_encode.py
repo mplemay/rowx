@@ -8,6 +8,7 @@ import pytest
 import rowx
 from rowx import query
 from rowx.errors import EncodeError
+from rowx.postgres import Connection, connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -31,9 +32,9 @@ AWKWARD: Final[list[str]] = [
 ]
 
 
-def run_with_conn[T](dsn: str, body: Callable[[rowx.Connection], Awaitable[T]]) -> T:
+def run_with_conn[T](dsn: str, body: Callable[[Connection], Awaitable[T]]) -> T:
     async def run() -> T:
-        async with await rowx.connect(dsn) as conn:
+        async with await connect(dsn) as conn:
             return await body(conn)
 
     return asyncio.run(run())

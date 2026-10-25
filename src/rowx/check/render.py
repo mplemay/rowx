@@ -8,8 +8,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from pathlib import Path
 
-    from rowx._vocab import NullReasonName
     from rowx.check.model import Diagnostic, Span
+    from rowx.postgres._vocab import NullReasonName
 
 TAB_WIDTH: Final[int] = 4
 

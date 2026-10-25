@@ -1,7 +1,10 @@
 from decimal import Decimal
-from typing import Any, reveal_type
+from typing import TYPE_CHECKING, Any, reveal_type
 
-from rowx import Connection, query, query_unchecked
+from rowx import query, query_unchecked
+
+if TYPE_CHECKING:
+    from rowx.postgres import Connection
 
 type Pair = tuple[int, str]
 type UserId = int
@@ -77,3 +80,11 @@ def negative() -> None:
     query(f"SELECT * FROM {name}")  # error  # ruff: ignore[hardcoded-sql-expression]  # ty: ignore[invalid-argument-type]
     query[int]("SELECT 1")  # error  # ty: ignore[invalid-argument-type]
     query[int](f"SELECT {name}")  # error  # ty: ignore[invalid-argument-type]
+
+
+class NotAnExecutor:
+    pass
+
+
+async def negative_executor(conn: NotAnExecutor) -> None:
+    await query[int](t"SELECT 1").one(conn)  # error  # ty: ignore[invalid-argument-type]

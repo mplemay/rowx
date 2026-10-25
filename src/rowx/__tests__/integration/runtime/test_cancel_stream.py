@@ -7,7 +7,8 @@ from typing import Final
 import pytest
 
 import rowx
-from rowx import Connection, InterfaceError, query
+from rowx import InterfaceError, query
+from rowx.postgres import Connection, connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db, pytest.mark.timing]
 
@@ -36,8 +37,8 @@ async def consume_slow(conn: Connection) -> None:
 
 def test_cancelled_anext_on_slow_query_frees_the_backend(schema: str) -> None:
     async def run() -> int:
-        conn = await rowx.connect(schema)
-        observer = await rowx.connect(schema)
+        conn = await connect(schema)
+        observer = await connect(schema)
         try:
             task = asyncio.create_task(consume_slow(conn))
             assert await wait_for_sleep(observer, present=True, limit=GONE_WITHIN)
@@ -55,8 +56,8 @@ def test_cancelled_anext_on_slow_query_frees_the_backend(schema: str) -> None:
 
 def test_cancelled_stream_that_stays_referenced_ends_and_frees_the_connection(schema: str) -> None:
     async def run() -> tuple[int, bool]:
-        conn = await rowx.connect(schema)
-        observer = await rowx.connect(schema)
+        conn = await connect(schema)
+        observer = await connect(schema)
         try:
             stream = query[str](t"SELECT pg_sleep(3)::text").fetch(conn)
             task = asyncio.create_task(anext(stream))
@@ -79,8 +80,8 @@ def test_cancelled_stream_that_stays_referenced_ends_and_frees_the_connection(sc
 
 def test_close_during_a_pending_anext_raises_interface_error(schema: str) -> None:
     async def run() -> None:
-        conn = await rowx.connect(schema)
-        observer = await rowx.connect(schema)
+        conn = await connect(schema)
+        observer = await connect(schema)
         try:
             pending = asyncio.create_task(anext(query[str](t"SELECT pg_sleep(3)::text").fetch(conn)))
             assert await wait_for_sleep(observer, present=True, limit=GONE_WITHIN)
@@ -100,7 +101,7 @@ def test_stream_cancel_stress_follow_up_query_never_fails(schema: str) -> None:
                 pass
 
     async def run() -> list[str]:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         failures: list[str] = []
         rng = random.Random(63)  # ruff: ignore[suspicious-non-cryptographic-random-usage]
         try:

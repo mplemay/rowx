@@ -6,11 +6,11 @@ from typing import Final, get_args
 
 import pytest
 
-from rowx._vocab import NullReasonName
 from rowx.check.discover import discover_source
 from rowx.check.model import Diagnostic, Span
 from rowx.check.render import NULL_NOTES, Report, null_reason_note, render_json, render_text
 from rowx.check.sourcemap import SourceMapper
+from rowx.postgres._vocab import NullReasonName
 
 EXPECTED: Final[Path] = Path(__file__).parent / "expected"
 PATH: Final[Path] = Path("app/users.py")

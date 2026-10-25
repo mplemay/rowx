@@ -5,11 +5,11 @@ from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-import rowx
 from rowx import query
+from rowx.postgres import connect
 
 if TYPE_CHECKING:
-    from rowx import Connection
+    from rowx.postgres import Connection
 
 type AuthorRow = tuple[int, str, str | None]
 type BookRow = tuple[int, str, Decimal, date | None, list[str]]
@@ -58,7 +58,7 @@ async def add_book(conn: Connection, author: str, title: str, price: Decimal) ->
 
 
 async def main(dsn: str) -> None:
-    async with await rowx.connect(dsn) as conn:
+    async with await connect(dsn) as conn:
         for author_id, name, bio in await list_authors(conn):
             print(f"{author_id}. {name}: {bio or 'no bio'}")  # ruff: ignore[print]
 

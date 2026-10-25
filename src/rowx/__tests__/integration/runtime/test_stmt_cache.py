@@ -3,8 +3,8 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
-import rowx
 from rowx.errors import DatabaseError
+from rowx.postgres import connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -34,7 +34,7 @@ async def prepared_count(conn: ConnectionImpl) -> int:
 
 def run_with_conn[T](dsn: str, body: Callable[[ConnectionImpl], Awaitable[T]], *, cache_size: int = 256) -> T:
     async def run() -> T:
-        conn = await rowx.connect(dsn, statement_cache_size=cache_size)
+        conn = await connect(dsn, statement_cache_size=cache_size)
         try:
             return await body(conn._impl)
         finally:
