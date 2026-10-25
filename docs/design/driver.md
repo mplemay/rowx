@@ -121,6 +121,11 @@ This implements [Streaming](api.md#streaming-fetch).
    - Each `_next()` future registers a `Hook` via the done-callback watcher. Cancelling
      that future while the guard is armed fires the cancel path for the whole stream.
    - Unlike the other operations, dropping the receiver is **not** a cancellation.
+   - A cancel ends the stream. The binding returns no more rows (`_next()` returns `[]`), and
+     the producer keeps reading to the end of the statement, discarding rows, so it never
+     blocks on `send` and the settle task's CancelRequests find the statement still running.
+     Closing or dropping a cancelled stream does not stop the producer early for the same
+     reason.
 7. **Backpressure.**
    - The producer blocks on `send` until Python takes the batch. tokio-postgres's
      per-request response channel is also bounded, so its connection task stops reading

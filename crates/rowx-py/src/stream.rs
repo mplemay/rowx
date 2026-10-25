@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyCFunction, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_pg::Type;
 use rowx_pg::cancel::{self, Cancel, Hook, StreamHandle};
@@ -38,6 +38,9 @@ struct Start {
 #[derive(Debug, Default)]
 struct Shared {
     finished: AtomicBool,
+    // set when the task awaiting `_next` was cancelled; the statement is being cancelled
+    cancelled: AtomicBool,
+    cancel_wake: Notify,
     stop: Notify,
     handle: Mutex<Option<StreamHandle>>,
     rows_affected: Mutex<Option<u64>>,
@@ -49,7 +52,11 @@ impl Shared {
     // idempotent and synchronous: the claim is released (Busy → Idle) before this returns
     fn finish(&self) {
         self.finished.store(true, Ordering::Release);
-        self.stop.notify_one();
+        // a cancelled stream must keep reading until the server confirms, or the CancelRequest
+        // would find the producer already gone and the statement would run to completion
+        if !self.is_cancelled() {
+            self.stop.notify_one();
+        }
         if let Some(handle) = self.handle.lock().ok().and_then(|mut slot| slot.take()) {
             handle.release();
         }
@@ -57,6 +64,10 @@ impl Shared {
 
     fn is_finished(&self) -> bool {
         self.finished.load(Ordering::Acquire)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 
@@ -109,7 +120,7 @@ impl RowStream {
             self.shared.finish();
             return Err(err);
         }
-        if self.shared.is_finished() {
+        if self.shared.is_finished() || self.shared.is_cancelled() {
             return future_into_py(py, async { Ok(empty()) });
         }
         let first = self.start.lock().ok().and_then(|mut slot| slot.take());
@@ -153,6 +164,7 @@ impl RowStream {
             receive(&cancel, &rx, &shared, scalar).await
         })?;
         watch(&future, self.hook.clone())?;
+        watch_cancelled(&future, Arc::clone(&self.shared))?;
         Ok(future)
     }
 
@@ -164,6 +176,22 @@ impl RowStream {
     fn close(&self) {
         self.shared.finish();
     }
+}
+
+// registered after `watch`, so the cancel path has started when the flag is seen; a cancelled
+// stream is over: later calls return no rows
+fn watch_cancelled(future: &Bound<'_, PyAny>, shared: Arc<Shared>) -> PyResult<()> {
+    let callback = PyCFunction::new_closure(future.py(), None, None, move |args, _kwargs| {
+        if let Ok(done) = args.get_item(0)
+            && done.call_method0("cancelled")?.is_truthy()?
+        {
+            shared.cancelled.store(true, Ordering::Release);
+            shared.cancel_wake.notify_one();
+        }
+        PyResult::Ok(())
+    })?;
+    future.call_method1("add_done_callback", (callback,))?;
+    Ok(())
 }
 
 fn empty() -> Py<PyAny> {
@@ -181,6 +209,10 @@ async fn receive(
         return Err(crate::errors::PgError(Error::Closed).into());
     }
     let message = rx.lock().await.recv().await;
+    if shared.is_cancelled() {
+        shared.finish();
+        return Ok(empty());
+    }
     match message {
         Some(Ok(Batch::Rows(rows))) => Python::attach(|py| {
             let mut out = Vec::with_capacity(rows.len());
@@ -279,23 +311,33 @@ async fn run(
         let batch = tokio::select! {
             batch = batches.next_batch() => batch,
             () = shared.stop.notified() => return,
-            () = tx.closed() => return,
+            () = tx.closed(), if !shared.is_cancelled() => return,
             () = state.wait_closed() => return,
         };
+        // after a cancel nobody reads the stream any more: it is read to its end (the server answers
+        // the CancelRequest with an error) and the rows are discarded
+        let discard = shared.is_cancelled();
         match batch {
             Ok(rows @ Batch::Rows(_)) => {
-                if !deliver(&tx, Ok(rows), shared, state).await {
+                if !discard
+                    && !deliver(&tx, Ok(rows), shared, state).await
+                    && !shared.is_cancelled()
+                {
                     return;
                 }
             }
             Ok(end @ Batch::End { .. }) => {
                 handle.release();
-                deliver(&tx, Ok(end), shared, state).await;
+                if !discard {
+                    deliver(&tx, Ok(end), shared, state).await;
+                }
                 return;
             }
             Err(err) => {
                 handle.release();
-                deliver(&tx, Err(err), shared, state).await;
+                if !discard {
+                    deliver(&tx, Err(err), shared, state).await;
+                }
                 return;
             }
         }
@@ -307,6 +349,7 @@ async fn deliver(tx: &mpsc::Sender<Msg>, msg: Msg, shared: &Shared, state: &Stat
     tokio::select! {
         sent = tx.send(msg) => sent.is_ok(),
         () = shared.stop.notified() => false,
+        () = shared.cancel_wake.notified() => false,
         () = state.wait_closed() => false,
     }
 }

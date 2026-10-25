@@ -53,6 +53,30 @@ def test_cancelled_anext_on_slow_query_frees_the_backend(schema: str) -> None:
     assert asyncio.run(run()) == 1
 
 
+def test_cancelled_stream_that_stays_referenced_ends_and_frees_the_connection(schema: str) -> None:
+    async def run() -> tuple[int, bool]:
+        conn = await rowx.connect(schema)
+        observer = await rowx.connect(schema)
+        try:
+            stream = query[str](t"SELECT pg_sleep(3)::text").fetch(conn)
+            task = asyncio.create_task(anext(stream))
+            assert await wait_for_sleep(observer, present=True, limit=GONE_WITHIN)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await wait_for_sleep(observer, present=False, limit=GONE_WITHIN)
+            # the stream is still referenced, yet the connection is usable and the stream is over
+            ok = await query[int](t"SELECT 1").one(conn)
+            with pytest.raises(StopAsyncIteration):
+                await anext(stream)
+            return ok, stream.result is None
+        finally:
+            await conn.close()
+            await observer.close()
+
+    assert asyncio.run(run()) == (1, True)
+
+
 def test_stream_cancel_stress_follow_up_query_never_fails(schema: str) -> None:
     async def one_stream(conn: Connection) -> None:
         async with query[int](t"SELECT g FROM generate_series(1, 200000) g").fetch(conn, batch_size=50) as rows:

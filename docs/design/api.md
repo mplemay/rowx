@@ -184,8 +184,11 @@ async with q.fetch(conn) as rows:
     is recommended. The docs say to bound large reads with `LIMIT`, or to cancel the task, when
     stopping early must be fast.
 - **Cancellation.** Cancelling the task while it awaits `__anext__` cancels the statement,
-  exactly as for the other methods ([Cancellation](driver.md#cancellation-cancelrs)). A cancel
-  that lands in the loop body is an ordinary early exit, so the stream drains.
+  exactly as for the other methods ([Cancellation](driver.md#cancellation-cancelrs)).
+  - A cancelled stream is over, even if it is still referenced: the next `__anext__`
+    raises `StopAsyncIteration`, `result` stays `None`, and the connection is usable as soon as
+    the statement is cancelled (psycopg and asyncpg also treat a cancelled cursor as dead).
+  - A cancel that lands in the loop body is an ordinary early exit, so the stream drains.
 - **Errors partway through.** A NULL in a non-nullable column (`RowShapeError`), a
   `DecodeError` or a `DatabaseError` is raised from `__anext__`.
   - Rows before the failing row are yielded first, and rows already yielded stay yielded.
