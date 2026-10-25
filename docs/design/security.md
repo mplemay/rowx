@@ -11,6 +11,6 @@
 - The checker's EXPLAIN runs over the simple protocol only after Parse has accepted the
   SQL as a single statement ([Algorithm](nullability.md#algorithm), step 1). This invariant is tested.
 - Neither diagnostics nor exceptions may include a DSN password. Parameter values are
-  redacted from Rust debug logs ([Codec](driver.md#codec-rowx-pysrccodec-rowx-pgsrcwire)).
+  redacted from Rust debug logs ([Codec](driver.md#codec-rowx-postgres-pysrccodec-rowx-postgressrcwire)).
 - TLS defaults to `prefer`, which is encrypted but not verified, as in libpq. The docs
   recommend `verify-full`.

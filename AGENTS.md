@@ -137,14 +137,17 @@ validates every query against a live Postgres 18 database by preparing and descr
 2. New tests are named in the PR description. Behaviour without a test is not done.
 3. Changes stay scoped to the feature. Small wiring edits (`mod` lines, `__init__` exports, `.pyi` additions) are
    fine and must be called out in the PR.
-4. Errors use `thiserror` in `rowx-pg` and are mapped to Python exceptions only in `crates/rowx-py/src/errors.rs`.
+4. Errors use `thiserror` in `rowx-core` and `rowx-postgres`. They are mapped to Python exceptions only in an
+   `errors.rs`: the shared exception-class registry is in `crates/rowx-py-core/src/errors.rs`, and each backend maps its
+   own enum (`crates/rowx-postgres-py/src/errors.rs`).
 5. Public Python is fully typed, and `_core.pyi` is updated with any new binding.
 
 ## Architecture conventions
 
-- `rowx-pg` has no pyo3 dependency. Wire codecs in `rowx-pg/src/wire/` are pure functions over bytes with unit tests.
+- `rowx-core` and `rowx-postgres` have no pyo3 dependency. Wire codecs in `rowx-postgres/src/wire/` are pure functions
+  over bytes with unit tests.
 - The GIL is released around all IO (`Python::detach`), and IO runs on the shared tokio runtime in
-  `rowx-py/src/runtime.rs`.
+  `rowx-py-core/src/runtime.rs`.
 - Python has no runtime dependencies. The checker never imports or executes user code.
 - DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked
   `@pytest.mark.timing` and synchronise by polling `pg_stat_activity`, never with `sleep`.
@@ -166,11 +169,13 @@ validates every query against a live Postgres 18 database by preparing and descr
 
 | Area | Paths |
 |---|---|
-| Type-table metadata | `crates/rowx-pg/src/types.rs` (append-only after T05) |
-| Wire codecs (pure) | `crates/rowx-pg/src/wire/<family>.rs` |
-| PyObject codecs | `crates/rowx-py/src/codec/<family>.rs`; `codec/mod.rs` is dispatch only |
-| Driver | `crates/rowx-pg/src/{dsn,tls,conn,state,cancel,stmt_cache,exec}.rs` |
-| Describe | `crates/rowx-pg/src/{describe,explain}.rs`, `crates/rowx-py/src/describe.rs` |
-| Bindings | `crates/rowx-py/src/{lib,conn,exec,errors,runtime,types}.rs` |
-| Python runtime | `src/rowx/{__init__,_query,errors,_template,_rowplan,_types}.py` |
+| Type-table metadata | `crates/rowx-postgres/src/types.rs` (append-only after T05) |
+| Wire codecs (pure) | `crates/rowx-postgres/src/wire/<family>.rs` |
+| PyObject codecs | `crates/rowx-postgres-py/src/codec/<family>.rs`; `codec/mod.rs` is dispatch only |
+| Shared core (pure) | `crates/rowx-core/src/` (claim/settle state machine, cancel plumbing, shared errors, pool) |
+| Driver | `crates/rowx-postgres/src/{dsn,tls,conn,state,cancel,stmt_cache,exec}.rs` and its pool connector |
+| Describe | `crates/rowx-postgres/src/{describe,explain}.rs`, `crates/rowx-postgres-py/src/describe.rs` |
+| Bindings | `crates/rowx-postgres-py/src/{conn,exec,stream,pool,transaction,errors,types}.rs`, `crates/rowx-py-core/src/{runtime,errors}.rs`, `crates/rowx-py/src/lib.rs` |
+| Python runtime (shared) | `src/rowx/{__init__,_query,_executor,errors,_template,_rowplan}.py` |
+| Python Postgres backend | `src/rowx/postgres/` (including `_types.py` and `_vocab.py`) |
 | Checker | `src/rowx/check/<module>.py`, one module each |

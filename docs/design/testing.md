@@ -26,10 +26,10 @@
 - **Rust.**
   - Pure unit tests: the walker on captured plan fixtures, wire codecs, the LRU, the state
     machine and DSN parsing.
-  - Integration tests (`crates/rowx-pg/tests/*.rs`) use `tests/common/mod.rs` for the DSN
+  - Integration tests (`crates/rowx-postgres/tests/*.rs`) use `tests/common/mod.rs` for the DSN
     and a fresh schema.
 - **Plan fixtures.** `scripts/capture-explain.sh` writes
-  `crates/rowx-pg/tests/fixtures/plans/*.{sql,json}`. `--check` regenerates them and diffs
+  `crates/rowx-postgres/tests/fixtures/plans/*.{sql,json}`. `--check` regenerates them and diffs
   the result.
 - **Goldens.** There is one file per type family in `tests/golden/`, holding round-trip
   values, edge cases and expected errors. A meta-test asserts that every `type_table()` row
@@ -47,6 +47,26 @@
   the one place rowx tests execute checked queries. Every checked query in the fixtures is
   executed in a rolled-back transaction over the NULL-heavy seed data. The test asserts
   that no NULL appears where `describe` said NOT NULL.
+- **Pool and transactions** (DB tests; timing tests poll `pg_stat_activity`). Acceptance:
+  - Acquire is FIFO for waiters and LIFO for idle connections. Waiting past `acquire_timeout` raises `PoolTimeoutError`.
+    A closed pool raises `InterfaceError`, and a bad constructor argument raises `ValueError`.
+  - A cancelled waiter never runs its query, and its permit returns to the pool. Capacity is never leaked, including
+    when a hook raises.
+  - A stream iterated after its lease is revoked raises `InterfaceError`. Releasing a Busy connection cancels and
+    settles it.
+  - Release resets session state (`SET`, advisory locks, `LISTEN`) and keeps the statement cache. It issues `ROLLBACK`
+    from idle, in-transaction and failed-transaction states, with no 25P01 warning when the flag is unset.
+  - Retirement by `max_lifetime`, `max_queries`, `idle_timeout` and `expire_connections()`. `min_size` is maintained.
+    `close(timeout)` and `terminate()` behave as specified, and use after fork raises `InterfaceError`.
+  - The schema epoch drops stale statement caches. `ConnectOptions.from_dsn` round-trips the `schema` fixture DSN
+    (`options=-c search_path=…`), and `server_settings` survive `RESET ALL`.
+  - Transactions: commit, rollback, savepoints, a cancel mid-statement, a second cancel during `__aexit__`, the failed
+    flag, a failed `COMMIT`, and `pool.transaction()` returning a clean connection.
+  - A 300-iteration cancel stress test over a pool: **zero** follow-ups may fail.
+  - Non-gating benchmark: `query.one(pool)` at 64 tasks against asyncpg `pool.fetchrow`.
+- **Module split.** `import rowx` loads neither `rowx._core` nor `rowx.postgres`. `rowx._core.postgres` is importable
+  and registered in `sys.modules`, its classes report `module == "rowx._core.postgres"`, and `rowx.connect`,
+  `rowx.Connection` and `rowx.ping` no longer exist. `Connection`, `Pool` and `Transaction` satisfy `Executor`.
 - **Typing.** `tests/typing/cases.py` holds `# reveal: <type>` expectations, plus negative
   cases (`query("…")` and `query(f"…")` must error). Every query method, and `async for`
   over `fetch`, has a case. It runs `pyright --outputjson` and

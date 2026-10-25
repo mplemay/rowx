@@ -1,4 +1,4 @@
-# Describe and nullability (`rowx-pg/src/describe.rs`, `explain.rs`)
+# Describe and nullability (`rowx-postgres/src/describe.rs`, `explain.rs`)
 
 ## Interface and checker session
 
@@ -18,7 +18,7 @@ pub enum NullReason { NotNullColumn, NullableColumn, NotValidatedConstraint, For
     ReturningOldNew, Computed, ExplainFailed, OverrideBang, OverrideQuestion }
 ```
 
-The Python binding is `rowx._core.describe(conn, sql) -> Describe`. When the server
+The Python binding is `rowx._core.postgres.describe(conn, sql) -> Describe`. When the server
 rejects the SQL it raises `DatabaseError` with `.position` set.
 
 **Checker session.** On connect, the checker runs:
