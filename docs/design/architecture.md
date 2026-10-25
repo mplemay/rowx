@@ -2,22 +2,34 @@
 
 ```text
 ┌──────────────────────────── Python (rowx package) ────────────────────────────┐
-│  rowx/__init__.py, _query.py   query, query_unchecked, connect, Connection    │
-│  rowx/errors.py                exception hierarchy (Errors)                     │
-│  rowx/_template.py             compile_parts / compile_template (shared)      │
-│  rowx/_rowplan.py              T → RowPlan (grammar Row-type grammar and runtime row plan)                     │
-│  rowx/_types.py                typed view of _core.type_table() (shared)      │
-│  rowx/check/                   checker front-end (stdlib ast), CLI            │
+│  SHARED (never imports rowx._core; `import rowx` loads no backend)            │
+│  rowx/__init__.py, _query.py   query, query_unchecked, QueryResult, RowStream │
+│  rowx/_executor.py             Executor protocol (private SPI)                │
+│  rowx/errors.py                exception hierarchy (Errors)                   │
+│  rowx/_template.py             compile_parts / compile_template               │
+│  rowx/_rowplan.py              T → RowPlan (Row-type grammar)                 │
+│  POSTGRES                                                                     │
+│  rowx/postgres/                connect, ConnectOptions, Connection, Pool,     │
+│                                Transaction, RESET_QUERY, _types.py, _vocab.py │
+│  rowx/check/                   checker front-end (stdlib ast), CLI; Postgres  │
 └──────────────────────────────────┬────────────────────────────────────────────┘
-                                   │ PyO3 0.28 (abi3-py314)   rowx._core
+                                   │ PyO3 0.28 (abi3-py314)
+                                   │ rowx._core  +  rowx._core.postgres
 ┌──────────────────────────────────▼────────────────────────────────────────────┐
-│  crates/rowx-py   bindings + ALL PyObject conversion                          │
-│     conn.rs, exec.rs, describe.rs, errors.rs (single exception-mapping point) │
-│     codec/{mod,extract,int,float,numeric,text,bytes,uuid,json,temporal,array} │
-│  crates/rowx-pg   PURE RUST (no pyo3): testable with plain `cargo test`       │
-│     dsn.rs, tls.rs, conn.rs, state.rs, cancel.rs, stmt_cache.rs, exec.rs      │
-│     types.rs  (THE type table metadata)  wire/{numeric,temporal,array,...}.rs │
-│     describe.rs, explain.rs                                                   │
+│  crates/rowx-py            cdylib `_core`: registers the shared functions and │
+│                            the `rowx._core.postgres` submodule                │
+│  crates/rowx-postgres-py   rlib: codec/, conn, exec, stream, pool,            │
+│                            transaction, describe, types, errors.rs (Postgres  │
+│                            error mapping)                                     │
+│  crates/rowx-py-core       rlib: the runtime, the exception-class registry    │
+│                            (errors.rs), the core pool-error mapping           │
+│  crates/rowx-postgres      PURE RUST (no pyo3): dsn, tls, conn,               │
+│                            cancel (impl), stmt_cache, exec, describe,         │
+│                            explain,                                           │
+│                            types.rs, wire/, and its pool connector            │
+│  crates/rowx-core          PURE RUST (no pyo3): claim/settle state machine,   │
+│                            cancel-guard plumbing, shared thiserror variants,  │
+│                            the pool                                           │
 └──────────────────────────────────┬────────────────────────────────────────────┘
                                    │ tokio-postgres 0.7.x on a multi-thread tokio runtime
                                    ▼
@@ -26,19 +38,52 @@
 
 Decisions:
 
-- **`rowx-pg` is pure Rust.** It owns connections, the state machine, cancellation, the
-  statement cache, TLS, describe, the EXPLAIN walker, the type-table metadata, and the
-  byte-level wire codecs. Those return plain Rust values, such as numeric digits and
-  microseconds.
-- **`rowx-py` owns all PyObject work.** It extracts Python values into a neutral Rust enum
-  ([Codec](driver.md#codec-rowx-pysrccodec-rowx-pgsrcwire)), builds Python objects from wire values, and maps errors in
-  one place.
+- **`rowx-core` and `rowx-postgres` are pure Rust** (no pyo3), so `cargo test` is real.
+  - `rowx-core` holds what any backend shares: the claim/settle state machine, the
+    cancel-guard plumbing, the shared `thiserror` variants and the pool.
+  - `rowx-postgres` holds what is Postgres-specific: connections, DSN and TLS, the statement
+    cache, describe, the EXPLAIN walker, the type-table metadata, the byte-level wire codecs
+    (which return plain Rust values, such as numeric digits and microseconds) and the pool's
+    connector.
+- **The backend trait.** `Cancel` held Postgres types. `rowx-core` now defines a small trait
+  (send a cancel request, an is-alive check, with `Send` futures). `rowx-postgres`
+  implements it, and the pool's `Manage` trait reuses it.
+- **`rowx-py-core` and `rowx-postgres-py` own all PyObject work.**
+  - `rowx-py-core` holds the runtime and the exception-class registry.
+  - `rowx-postgres-py` extracts Python values into a neutral Rust enum
+    ([Codec](driver.md#codec-rowx-postgres-pysrccodec-rowx-postgressrcwire)), builds Python objects from wire values,
+    and maps the Postgres errors.
+  - `rowx-py` is the only cdylib. It registers the shared functions in `rowx._core` and the
+    Postgres bindings in the `rowx._core.postgres` submodule.
+- **A second backend only adds crates and a namespace** (for example `rowx-sqlite`,
+  `rowx-sqlite-py` and `rowx.sqlite`). No other backend is implemented.
+- **Error mapping.** The shared exception-class registry is in `rowx-py-core/src/errors.rs`.
+  Each backend maps its own `thiserror` enum in its own `errors.rs`
+  (`rowx-postgres-py/src/errors.rs`). The core pool errors (`PoolTimeout`, `PoolClosed`) are
+  mapped once, in `rowx-py-core`.
+- **`rowx._core` and `rowx._core.postgres`.**
+  - `rowx._core` keeps the shared bindings. The Postgres bindings live in
+    `rowx._core.postgres`, a PyO3 submodule that is registered in `sys.modules` at init, so
+    `from rowx._core.postgres import …` works.
+  - Postgres pyclasses use `module = "rowx._core.postgres"`. The Postgres-only test hooks
+    (`_cancel_requests_sent`, `_catalog_queries`) live in the submodule.
+  - `_core.pyi` is a stub package: `_core/__init__.pyi` and `_core/postgres.pyi`.
+- **Python module map.**
+  - Shared, in `rowx`: `__init__.py`, `_query.py`, `_template.py`, `_rowplan.py`,
+    `_executor.py` and `errors.py`. None of them imports the extension, so `import rowx`
+    loads no backend, and `rowx` never imports `rowx.postgres`.
+  - Postgres, in `rowx.postgres`: the public surface ([API](api.md#public-surface)),
+    plus `_types.py` (the typed view of `type_table()`) and `_vocab.py`, which are
+    Postgres-specific.
+  - The checker stays in `rowx.check` and imports Postgres internals. It is Postgres-only,
+    and backend dispatch in the checker is deferred.
 - **The checker front-end is Python** and uses stdlib `ast` and `tokenize`. It gets exact
   PEP 750 support and spans, and it can read type aliases from source without importing
-  user code. All database work goes through `rowx._core`, over the same connection type the
-  runtime uses.
-- `rowx._core` **MUST** import, and `type_table()` **MUST** work, with no database. The
-  checker's AST-only phases depend on this.
+  user code. All database work goes through `rowx._core.postgres`, over the same connection
+  type the runtime uses.
+- `rowx._core` and `rowx._core.postgres` **MUST** import, and `type_table()` **MUST** work,
+  with no database. The checker's AST-only phases depend on this.
+- Free-threading is out of scope: `abi3-py314` rules out `3.14t`.
 
 ## Packaging and toolchain
 
@@ -47,8 +92,9 @@ Decisions:
   manylinux x86_64 and aarch64. Windows is best effort, and `3.14t` is unsupported.
 - Console script: `rowx = "rowx.check.cli:main"`.
 - **Workspace layout.** A root `Cargo.toml` defines the workspace, with members
-  `crates/rowx-pg` and `crates/rowx-py`. The `rowx-py` crate has `lib.name = "_core"` and
-  `crate-type = ["cdylib"]`.
+  `crates/rowx-core`, `crates/rowx-postgres`, `crates/rowx-py-core`,
+  `crates/rowx-postgres-py` and `crates/rowx-py`. Only `rowx-py` has `lib.name = "_core"`
+  and `crate-type = ["cdylib"]`; `rowx-py-core` and `rowx-postgres-py` are rlibs.
 - **Maturin.** `[tool.maturin]` sets `manifest-path = "crates/rowx-py/Cargo.toml"`,
   `module-name = "rowx._core"`, `python-source = "src"`, and
   `features = ["pyo3/extension-module"]`. `extension-module` must **not** be hard-coded in

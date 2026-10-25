@@ -6,13 +6,13 @@
 import asyncio
 from decimal import Decimal
 
-import rowx
 from rowx import query
+from rowx.postgres import ConnectOptions, Pool, connect
 
 type UserRow = tuple[int, str, str | None]          # id, name, email
 
 async def main() -> None:
-    async with await rowx.connect("postgresql://app@localhost/app") as conn:
+    async with await connect("postgresql://app@localhost/app") as conn:
         uid = 42
         user = await query[UserRow](
             t"SELECT id, name, email FROM users WHERE id = {uid}"
@@ -41,10 +41,29 @@ async def main() -> None:
             t'SELECT sum(amount) AS "total!" FROM orders'   # "!" = force NOT NULL
         ).one(conn)
 
+    # a pool is an executor too: acquire, run and release in one call
+    pool = Pool("postgresql://app@localhost/app", max_size=20)   # no IO; safe at module level
+    async with pool:                                   # open() warms min_size; close() on exit
+        user = await query[UserRow](t"SELECT id, name, email FROM users WHERE id = {uid}").one(pool)
+        async with pool.acquire() as conn:             # conn: Connection
+            ...
+        async with pool.transaction() as tx:           # BEGIN ... COMMIT / ROLLBACK
+            await query(t"UPDATE users SET name = {'x'} WHERE id = {uid}").execute(tx)
+            async with tx.transaction():               # SAVEPOINT
+                ...
+
+    opts = ConnectOptions.from_dsn("postgresql://app@localhost/app", statement_cache_size=0)
+    async with await connect(opts) as conn:
+        await conn.ping()
+
 asyncio.run(main())
 ```
 
-## Public surface (`rowx/__init__.py`)
+## Public surface
+
+### `rowx` (`rowx/__init__.py`)
+
+The shared operations. `rowx` never imports `rowx._core` or `rowx.postgres`, so `import rowx` loads no backend.
 
 ```python
 from dataclasses import dataclass
@@ -54,11 +73,11 @@ from typing import Self
 class _BaseQuery[T]:                       # private; holds all behaviour
     _dynamic: ClassVar[bool]
     def __init__(self, template: Template, /) -> None: ...      # compiles eagerly ([t-string compilation](#t-string-compilation-rowx_templatepy))
-    async def one(self, conn: Connection, /) -> T: ...
-    async def optional(self, conn: Connection, /) -> T | None: ...
-    async def all(self, conn: Connection, /) -> list[T]: ...
-    def fetch(self, conn: Connection, /, *, batch_size: int = 1024) -> RowStream[T]: ...
-    async def execute(self, conn: Connection, /) -> QueryResult: ...
+    async def one(self, executor: Executor, /) -> T: ...
+    async def optional(self, executor: Executor, /) -> T | None: ...
+    async def all(self, executor: Executor, /) -> list[T]: ...
+    def fetch(self, executor: Executor, /, *, batch_size: int = 1024) -> RowStream[T]: ...
+    async def execute(self, executor: Executor, /) -> QueryResult: ...
 
 class query[T = None](_BaseQuery[T]):            _dynamic = False
 class query_unchecked[T = None](_BaseQuery[T]):  _dynamic = True
@@ -76,15 +95,10 @@ class RowStream[T]:                        # returned by fetch(); users never co
     @property
     def result(self) -> QueryResult | None: ...
 
-async def connect(dsn: str, /, *, connect_timeout: float | None = None,
-                  statement_cache_size: int = 256) -> Connection: ...
-
-class Connection:
-    async def close(self) -> None: ...
-    async def __aenter__(self) -> Self: ...
-    async def __aexit__(self, *exc: object) -> None: ...   # closes
+class Executor(Protocol):                  # structural; see below
     @property
     def closed(self) -> bool: ...
+    # private SPI called by the query methods: _fetch, _stream, _execute
 ```
 
 Requirements:
@@ -112,8 +126,110 @@ Requirements:
   - `fetch` is a plain `def`: it returns a `RowStream` and does no IO.
   - `RowStream.__anext__`, `aclose`, `__aenter__` and `__aexit__` are `async def`. A test
     also checks that `asyncio.create_task(anext(stream))` works.
-- `Connection` is the only executor. When the pool or transaction helper lands, the
-  parameter type widens to a protocol, which is backward compatible for callers.
+- **`Executor`** is a `typing.Protocol` over the private SPI that the shared query methods
+  call: `_fetch`, `_stream` and `_execute`, plus a `closed` view. `Connection`, `Pool` and
+  `Transaction` implement it.
+  - `rowx` never imports `rowx.postgres`.
+  - `RowStream` uses `closed`; on a pool it is per lease.
+  - `_stream` returns a handle whose first `_next()` claims a connection: a synchronous
+    claim on a Connection or Transaction, an async acquire on a Pool. The lazy claim of
+    [Streaming](#streaming-fetch) is preserved.
+  - The query methods take `Executor`, which widens the former `Connection` parameter
+    (backward compatible for callers).
+
+### `rowx.postgres`
+
+```python
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from typing import Final, Self
+
+RESET_QUERY: Final[str]      # "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;"
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ConnectOptions:
+    host: str | None = None
+    port: int | None = None
+    user: str | None = None
+    password: str | None = field(default=None, repr=False)
+    database: str | None = None
+    sslmode: str | None = None
+    sslrootcert: str | None = None
+    connect_timeout: float | None = None
+    statement_cache_size: int = 256
+    application_name: str | None = None
+    server_settings: Mapping[str, str] = field(default_factory=dict)
+    extra: Mapping[str, str] = field(default_factory=dict)
+    @classmethod
+    def from_dsn(cls, dsn: str, /, **overrides: object) -> Self: ...
+
+async def connect(options: str | ConnectOptions, /) -> Connection: ...
+
+class Connection:                                          # an Executor
+    async def close(self) -> None: ...                     # on a pooled connection: releases it
+    async def __aenter__(self) -> Self: ...
+    async def __aexit__(self, *exc: object) -> None: ...   # closes
+    async def ping(self) -> None: ...                      # an empty simple query
+    async def reset(self) -> None: ...                     # runs RESET_QUERY
+    def transaction(self, *, isolation: str | None = None, readonly: bool = False,
+                    deferrable: bool = False) -> Transaction: ...
+    def detach(self) -> None: ...                          # pooled connections only
+    @property
+    def closed(self) -> bool: ...
+
+class Pool:                                                # an Executor
+    def __init__(self, options: str | ConnectOptions, /, *, min_size: int = 0, max_size: int = 10,
+                 acquire_timeout: float = 30.0, idle_timeout: float = 600.0,
+                 max_lifetime: float = 1800.0, max_queries: int | None = None,
+                 ping_after: float = 30.0, init: Hook | None = None, setup: Hook | None = None,
+                 reset: Hook | None = None, reset_query: str | None = RESET_QUERY) -> None: ...
+    async def open(self) -> None: ...
+    async def close(self, *, timeout: float | None = None) -> None: ...
+    def terminate(self) -> None: ...                       # synchronous
+    def acquire(self) -> PoolAcquireContext: ...           # awaitable and an async context manager
+    async def release(self, conn: Connection, /) -> None: ...
+    def transaction(self, *, isolation: str | None = None, readonly: bool = False,
+                    deferrable: bool = False) -> Transaction: ...
+    def expire_connections(self) -> None: ...
+    async def __aenter__(self) -> Self: ...                # open()
+    async def __aexit__(self, *exc: object) -> None: ...   # close()
+    size: int; idle: int; waiting: int; min_size: int; max_size: int; closed: bool   # properties
+
+class Transaction:                                         # an Executor
+    def transaction(self) -> Transaction: ...              # SAVEPOINT; no isolation arguments
+    async def commit(self) -> None: ...
+    async def rollback(self) -> None: ...
+    async def __aenter__(self) -> Self: ...                # BEGIN / SAVEPOINT
+    async def __aexit__(self, *exc: object) -> None: ...   # COMMIT / ROLLBACK
+```
+
+`type Hook = Callable[[Connection], Awaitable[None]]`.
+
+| Module | Exports |
+|---|---|
+| `rowx` | `query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor`, errors |
+| `rowx.postgres` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `RESET_QUERY` |
+| `rowx.errors` | adds `PoolTimeoutError(InterfaceError)` |
+
+- **Hard move, no aliases.** `rowx.connect` and `rowx.Connection` are removed, and `rowx.ping` is removed
+  (use `Connection.ping`). `type_table()`, `_types.py` and `_vocab.py` move under `rowx.postgres`.
+- **`ConnectOptions`** is a frozen, slotted, keyword-only dataclass, and `password` is `repr=False`.
+  - `ConnectOptions.from_dsn(dsn, **overrides)` parses with the Rust DSN parser, so there is one parser. `connect` and
+    `Pool` accept `str | ConnectOptions`, and a pool parses a DSN only once.
+  - **`server_settings`.** tokio-postgres puts only `user`, `database`, `application_name`, `client_encoding` and
+    `options` in the startup packet, so `server_settings` travel inside `options` as `-c k=v`, with libpq escaping.
+    Because they are startup settings, they survive `RESET ALL`, unlike a `SET` run in `init`.
+  - **Nothing in the DSN is dropped.** `from_dsn` parses the `-c` pairs in `options` into `server_settings`, and
+    overrides take precedence. Every other key the DSN parser keeps (keepalives, `target_session_attrs`, multiple
+    hosts) goes in `extra` and is passed through. A DSN with `options=-c search_path=…` (the test `schema` fixture)
+    **MUST** round-trip.
+- **`Connection` methods.** `ping()` runs an empty simple query. `reset()` runs `RESET_QUERY`. `detach()` takes a pooled
+  connection out of the pool permanently. On a pooled connection `close()` releases it to the pool. One operation per
+  connection and `ConnectionBusyError` are unchanged.
+- **`Pool`**: semantics are in [Pool](driver.md#pool).
+- **`Transaction`**: semantics are in [Transactions](driver.md#transactions).
+- **Pool operations never raise `ConnectionBusyError`**: waiting longer than `acquire_timeout` raises
+  `PoolTimeoutError`, and a closed pool raises `InterfaceError`.
 
 ## Method semantics
 
@@ -198,6 +314,10 @@ async with q.fetch(conn) as rows:
   delivered. In practice the server reports `0A000` at Bind/Execute, before any `DataRow`.
 - **Closing the connection.** `conn.close()` while a stream is open cancels and settles,
   as for any Busy operation. The next `__anext__` raises `InterfaceError`.
+- **On a pool**, `fetch(pool)` acquires at the first `__anext__`, holds the connection until the stream ends or is
+  closed, then releases it. `closed` is per lease. A stream created inside `async with pool.acquire()` and iterated
+  after the block raises `InterfaceError`, because its lease was revoked
+  ([Leases](driver.md#leases)). Early exit drains the remaining rows before the release reset runs.
 - A stalled consumer keeps the server backend in the middle of the statement, holding its
   snapshot and locks. This is documented.
 
@@ -322,8 +442,10 @@ nullable. You write it with a quoted alias: `count(*) AS "n!"`.
 ```text
 rowx.Error(Exception)
 ├── InterfaceError          # misuse / client-side: closed or broken connection, param-count
-│   │                       # mismatch, unsupported or absent row type at fetch, DSN/network/TLS failure
-│   └── ConnectionBusyError # concurrent operation on one connection (Connection state machine)
+│   │                       # mismatch, unsupported or absent row type at fetch, DSN/network/TLS failure,
+│   │                       # closed pool, use after fork, use of a revoked lease or ended Transaction
+│   ├── ConnectionBusyError # concurrent operation on one connection (Connection state machine)
+│   └── PoolTimeoutError    # acquire waited longer than acquire_timeout
 ├── DatabaseError           # server ErrorResponse: .sqlstate .message .detail .hint .position
 │                           # (incl. auth failures 28P01, unknown database 3D000, query canceled 57014)
 ├── RowNotFound             # one with zero rows

@@ -1,7 +1,7 @@
 # Type mapping (single source of truth)
 
-`crates/rowx-pg/src/types.rs` defines one static table of `TypeInfo` rows. `rowx._core`
-exports it as `type_table() -> list[TypeInfo]`. `rowx/_types.py` wraps it, and both the
+`crates/rowx-postgres/src/types.rs` defines one static table of `TypeInfo` rows. `rowx._core.postgres`
+exports it as `type_table() -> list[TypeInfo]`. `rowx/postgres/_types.py` wraps it, and both the
 checker and `_rowplan` read from there. **No other file may hard-code OID↔Python
 mappings.**
 
@@ -49,7 +49,7 @@ declared.
 | `json`, `jsonb` | any annotation ([Rules](checker.md#rules-all-errors)) | `json.loads` (jsonb: strip the `0x01` version byte) | any JSON-serialisable value, always `json.dumps`-ed. A `str` becomes a JSON **string**; to bind raw JSON text, write `{s}::jsonb` | text |
 | enum | `str` | binary (the label) | `str` | text |
 | domain | as its base type | as its base type | as its base type | as its base type |
-| `X[]` | `list[X']`; nested lists for multi-dim | binary arrays | `list`/`tuple` of accepted X (`str`/`bytes` are never sequences) | binary if every element encodes binary, else a text literal ([Codec](driver.md#codec-rowx-pysrccodec-rowx-pgsrcwire)) |
+| `X[]` | `list[X']`; nested lists for multi-dim | binary arrays | `list`/`tuple` of accepted X (`str`/`bytes` are never sequences) | binary if every element encodes binary, else a text literal ([Codec](driver.md#codec-rowx-postgres-pysrccodec-rowx-postgressrcwire)) |
 | `void` | `None` (tuple element only; [Rules](checker.md#rules-all-errors)) | → `None` | – | – |
 
 Decode errors (`DecodeError`, each with a hint to cast to `text`):
