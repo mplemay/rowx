@@ -38,7 +38,7 @@ def evaluate(source: str) -> object:
 def fetch_plan(t: object) -> tuple[str, int, tuple[bool, ...]]:
     impl = FakeImpl()
     conn = Connection(impl)  # ty: ignore[invalid-argument-type]
-    asyncio.run(query[t](t"SELECT 1").fetch_all(conn))  # ty: ignore[invalid-type-form]
+    asyncio.run(query[t](t"SELECT 1").all(conn))  # ty: ignore[invalid-type-form]
     ((mask, scalar, arity),) = impl.fetches
     return ("scalar" if scalar else "tuple", arity, tuple(mask))
 
@@ -77,6 +77,6 @@ def test_conformance_ok_row_against_db(schema: str, row: tuple[str, str], expect
 
     async def body() -> object:
         async with await rowx.connect(schema) as conn:
-            return await query[t](Template(sql)).fetch_one(conn)  # ty: ignore[invalid-type-form]
+            return await query[t](Template(sql)).one(conn)  # ty: ignore[invalid-type-form]
 
     assert asyncio.run(body()) == expected

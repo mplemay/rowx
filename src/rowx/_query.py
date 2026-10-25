@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Self
 
 from rowx._core import connect as connect_impl
@@ -10,6 +11,11 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from rowx._core import Connection as ConnectionImpl
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class QueryResult:
+    rows_affected: int
 
 
 class Connection:
@@ -67,18 +73,23 @@ class _BaseQuery[T]:
             plan.arity,
         )
 
-    async def fetch_one(self, conn: Connection, /) -> T:
+    async def one(self, conn: Connection, /) -> T:
         rows = await self._rows(conn, limit_one=True)
         if not rows:
             msg = "query returned no rows"
             raise RowNotFound(msg)
         return rows[0]  # ty: ignore[invalid-return-type]
 
-    async def fetch_all(self, conn: Connection, /) -> list[T]:
+    async def optional(self, conn: Connection, /) -> T | None:
+        rows = await self._rows(conn, limit_one=True)
+        return rows[0] if rows else None  # ty: ignore[invalid-return-type]
+
+    async def all(self, conn: Connection, /) -> list[T]:
         return await self._rows(conn, limit_one=False)  # ty: ignore[invalid-return-type]
 
-    async def execute(self, conn: Connection, /) -> int:
-        return await conn._impl._execute(self._compiled.sql, self._params)  # ruff: ignore[private-member-access]
+    async def execute(self, conn: Connection, /) -> QueryResult:
+        rows_affected = await conn._impl._execute(self._compiled.sql, self._params)  # ruff: ignore[private-member-access]
+        return QueryResult(rows_affected=rows_affected)
 
 
 class query[T = None](_BaseQuery[T]):  # ruff: ignore[invalid-class-name]

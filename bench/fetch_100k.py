@@ -51,7 +51,7 @@ async def main(dsn: str) -> None:
         async with await rowx.connect(dsn) as conn:
 
             async def run_rowx() -> int:
-                return len(await select.fetch_all(conn))
+                return len(await select.all(conn))
 
             rowx_ms = await median_ms(run_rowx)
 

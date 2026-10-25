@@ -23,7 +23,7 @@ def run_with_conn[T](dsn: str, body: Callable[[rowx.Connection], Awaitable[T]]) 
 
 
 def fetch[T](dsn: str, q: query[T]) -> T:
-    return run_with_conn(dsn, q.fetch_one)
+    return run_with_conn(dsn, q.one)
 
 
 def test_one_dimension_with_null(schema: str) -> None:

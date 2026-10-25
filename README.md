@@ -18,23 +18,23 @@ type UserRow = tuple[int, str, str | None]  # id, name, email
 async def main() -> None:
     async with await rowx.connect(DSN) as conn:
         name = "alice"
-        user = await query[UserRow](t"SELECT id, name, email FROM users WHERE name = {name}").fetch_one(conn)
+        user = await query[UserRow](t"SELECT id, name, email FROM users WHERE name = {name}").one(conn)
         assert user[1] == "alice"
 
-        names = await query[str](t"SELECT name FROM users ORDER BY name").fetch_all(conn)
+        names = await query[str](t"SELECT name FROM users ORDER BY name").all(conn)
         assert names == ["alice", "bob", "carol"]
 
         ids = [user[0]]
         updated = await query(t"UPDATE users SET email = {None} WHERE id = ANY({ids})").execute(conn)
-        assert updated == 1
+        assert updated.rows_affected == 1
 
 
 asyncio.run(main())
 ```
 
 - Interpolations (`{name}`) are always bound as server-side parameters. They are never pasted into the SQL text.
-- `query[T]` states the row type. `fetch_one` returns `T`, `fetch_all` returns `list[T]`, and `execute` returns the
-  number of rows affected.
+- `query[T]` states the row type. `one` returns `T`, `optional` returns `T | None`, `all` returns `list[T]`, and
+  `execute` returns a `QueryResult` with `rows_affected`.
 - Type checkers (pyright, mypy, ty) infer all of this with no plugin.
 
 Check the queries against your database:
