@@ -1,8 +1,8 @@
 # Known limits
 
-Nullability inference limits from [design §8.5](design.md), each pinned by a test in
-`src/rowx/__tests__/integration/describe/test_known_limits.py`. A `limit` is a case where rowx is less precise than the
-database allows. A `correct` case is a hard-looking shape that rowx gets right.
+Nullability inference limits from [the design](design/nullability.md#known-limits-pinned-by-tests-documented), each
+pinned by a test in `src/rowx/__tests__/integration/describe/test_known_limits.py`. A `limit` is a case where rowx is
+less precise than the database allows. A `correct` case is a hard-looking shape that rowx gets right.
 
 | Kind | Test | Behaviour |
 |---|---|---|
@@ -13,5 +13,5 @@ database allows. A `correct` case is a hard-looking shape that rowx gets right.
 | limit | `test_view_columns_are_nullable` | View columns are always nullable (`ForeignOrView`). Use `"col!"` to narrow. |
 | limit | `test_set_operation_is_nullable` | Set operation columns have no table origin, so they default to nullable. |
 | limit | `test_recursive_cte_is_nullable` | Recursive CTE columns have no table origin, so they default to nullable. |
-| limit | `test_computed_column_is_nullable` | Computed columns are always nullable; narrowing needs a parser (design §11). |
+| limit | `test_computed_column_is_nullable` | Computed columns are always nullable; narrowing needs a parser ([dependencies](design/dependencies.md)). |
 | correct | `test_bang_narrows_computed_column` | `"col!"` forces NOT NULL on a computed column (`OverrideBang`). |

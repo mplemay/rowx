@@ -55,7 +55,7 @@ impl Connection {
         })
     }
 
-    // the argument list is fixed by the binding contract in design §7.2
+    // the argument list is fixed by the binding contract in docs/design/driver.md, execution path
     #[allow(clippy::too_many_arguments)]
     #[pyo3(name = "_fetch")]
     fn fetch<'py>(

@@ -113,10 +113,8 @@ rowx is typesafe raw SQL for Python 3.14+ with no ORM. Queries are PEP 750 t-str
 `query[tuple[int, str]](t"...")`, run by a Rust driver built on tokio-postgres. A static checker, `rowx check`,
 validates every query against a live Postgres 18 database by preparing and describing it.
 
-- [Design](docs/design.md) is the contract. Never edit it in a feature PR.
-- [Tasks](docs/tasks.md) lists the 48 implementation tasks (T00-T47) and their acceptance checks.
-- [Decisions](docs/decisions.md) logs spec gaps and deviations. If the spec is ambiguous, add an entry instead of
-  guessing silently.
+- [Design](docs/design/README.md) is the contract. Never edit it in a feature PR.
+- If the spec is ambiguous, don't guess silently: raise it in the PR description and propose a design change.
 
 ## Commands (`just`)
 
@@ -135,10 +133,10 @@ validates every query against a live Postgres 18 database by preparing and descr
 
 ## Definition of done
 
-1. The task's acceptance check passes locally and CI is green.
+1. `just check` and the relevant tests pass locally and CI is green.
 2. New tests are named in the PR description. Behaviour without a test is not done.
-3. Changes stay inside the task's **Files** list. Small wiring edits (`mod` lines, `__init__` exports, `.pyi`
-   additions) are fine and must be called out in the PR.
+3. Changes stay scoped to the feature. Small wiring edits (`mod` lines, `__init__` exports, `.pyi` additions) are
+   fine and must be called out in the PR.
 4. Errors use `thiserror` in `rowx-pg` and are mapped to Python exceptions only in `crates/rowx-py/src/errors.rs`.
 5. Public Python is fully typed, and `_core.pyi` is updated with any new binding.
 

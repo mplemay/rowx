@@ -8,7 +8,7 @@ edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# pyo3 and pyo3-async-runtimes minors always move together (design §5)
+# pyo3 and pyo3-async-runtimes minors always move together (docs/design/architecture.md)
 pyo3 = { version = "0.28", features = ["abi3-py314"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }

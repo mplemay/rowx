@@ -203,7 +203,7 @@ rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text
 
 The checker never imports or executes your code. It parses your files, finds every `query[T](t"...")` call, resolves `T`
 statically, and asks Postgres to prepare and describe the SQL. Then it compares the columns and parameters with your
-types. See design §9.5 for the rules.
+types. See [the checker rules](design/checker.md#rules-all-errors) for the rules.
 
 | Exit code | Meaning |
 |---|---|

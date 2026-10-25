@@ -277,7 +277,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         Format::Binary,
     )
     .codecs(Codec::Uuid, Codec::Uuid),
-    // json/jsonb results take the user's annotation (design §9.5), so the leaf is `object`
+    // json/jsonb results take the user's annotation (docs/design/checker.md, rules), so the leaf is `object`
     row(
         "json",
         Matcher::Oid(114),
