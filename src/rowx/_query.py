@@ -2,7 +2,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Final, Self
 
-from rowx._core import connect as connect_impl
+from rowx._core.postgres import connect as connect_impl
 from rowx._rowplan import NO_ROWS, RowPlan, row_plan
 from rowx._template import Compiled, compile_template
 from rowx.errors import InterfaceError, RowNotFound
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from string.templatelib import Template
     from types import TracebackType
 
-    from rowx._core import Connection as ConnectionImpl, RowStream as RowStreamImpl
+    from rowx._core.postgres import Connection as ConnectionImpl, RowStream as RowStreamImpl
 
 DEFAULT_BATCH_SIZE: Final[int] = 1024
 

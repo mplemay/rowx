@@ -66,7 +66,8 @@
     - Types/classes: `FooImpl` (e.g. `from rowx._core import Foo as FooImpl`, then `Foo = FooImpl` or a thin wrapper).
     - Functions: `foo_impl` (snake_case with `_impl` suffix).
   - Do not use leading-underscore import aliases (`_Foo`, `_foo`) for this re-export pattern.
-  - Keep [`_core.pyi`](src/rowx/_core.pyi) in sync with the rust `#[pymodule]`.
+  - Keep [`_core/__init__.pyi`](src/rowx/_core/__init__.pyi) and [`_core/postgres.pyi`](src/rowx/_core/postgres.pyi) in
+    sync with the rust modules.
 - **Don't use** docstrings, instead add inline comments only in places where there is complex or easily breakable logic
 - **No file-wide suppressions** in source: do not use a first-line or module-wide pragma such as `# ruff: noqa: ...` for
   the whole file, a blanket `# type: ignore` on a module, or equivalent file-scoped ignores.
@@ -140,7 +141,7 @@ validates every query against a live Postgres 18 database by preparing and descr
 4. Errors use `thiserror` in `rowx-core` and `rowx-postgres`. They are mapped to Python exceptions only in an
    `errors.rs`: the shared exception-class registry is in `crates/rowx-py-core/src/errors.rs`, and each backend maps its
    own enum (`crates/rowx-postgres-py/src/errors.rs`).
-5. Public Python is fully typed, and `_core.pyi` is updated with any new binding.
+5. Public Python is fully typed, and the `_core` stubs are updated with any new binding.
 
 ## Architecture conventions
 

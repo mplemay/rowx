@@ -7,7 +7,7 @@ from re import DOTALL, IGNORECASE, VERBOSE, compile as re_compile
 from typing import TYPE_CHECKING, Final
 from urllib.parse import unquote, urlparse
 
-from rowx._core import ColumnInfo, Connection, Describe, connect_checker, describe as describe_impl
+from rowx._core.postgres import ColumnInfo, Connection, Describe, connect_checker, describe as describe_impl
 from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
 from rowx.check.discover import discover_source
 from rowx.check.model import Diagnostic, Rule, Span

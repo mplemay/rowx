@@ -7,7 +7,7 @@ import rowx
 from rowx.errors import ConnectionBusyError, DatabaseError
 
 if TYPE_CHECKING:
-    from rowx._core import Connection as ConnectionImpl
+    from rowx._core.postgres import Connection as ConnectionImpl
 
 pytestmark = [pytest.mark.integration, pytest.mark.db, pytest.mark.timing]
 

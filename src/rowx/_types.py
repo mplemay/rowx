@@ -1,7 +1,7 @@
 from functools import cache
 from typing import TYPE_CHECKING
 
-from rowx._core import TypeInfo, type_table
+from rowx._core.postgres import TypeInfo, type_table
 
 if TYPE_CHECKING:
     from rowx._vocab import PyResultName
