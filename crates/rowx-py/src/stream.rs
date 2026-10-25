@@ -253,6 +253,10 @@ async fn receive(
         }
         None => {
             shared.finish();
+            // the producer also ends without a message when the connection is closed under it
+            if cancel.state.is_closed() {
+                return Err(crate::errors::PgError(Error::Closed).into());
+            }
             Ok(empty())
         }
     }

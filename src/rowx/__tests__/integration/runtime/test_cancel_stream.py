@@ -7,7 +7,7 @@ from typing import Final
 import pytest
 
 import rowx
-from rowx import Connection, query
+from rowx import Connection, InterfaceError, query
 
 pytestmark = [pytest.mark.integration, pytest.mark.db, pytest.mark.timing]
 
@@ -75,6 +75,22 @@ def test_cancelled_stream_that_stays_referenced_ends_and_frees_the_connection(sc
             await observer.close()
 
     assert asyncio.run(run()) == (1, True)
+
+
+def test_close_during_a_pending_anext_raises_interface_error(schema: str) -> None:
+    async def run() -> None:
+        conn = await rowx.connect(schema)
+        observer = await rowx.connect(schema)
+        try:
+            pending = asyncio.create_task(anext(query[str](t"SELECT pg_sleep(3)::text").fetch(conn)))
+            assert await wait_for_sleep(observer, present=True, limit=GONE_WITHIN)
+            await conn.close()
+            with pytest.raises(InterfaceError):
+                await pending
+        finally:
+            await observer.close()
+
+    asyncio.run(run())
 
 
 def test_stream_cancel_stress_follow_up_query_never_fails(schema: str) -> None:

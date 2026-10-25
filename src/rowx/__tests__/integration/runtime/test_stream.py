@@ -143,6 +143,17 @@ def test_close_while_streaming_then_anext_raises_interface_error(schema: str) ->
     run_with_conn(schema, body)
 
 
+def test_close_while_rows_are_buffered_then_anext_raises_interface_error(schema: str) -> None:
+    async def body(conn: Connection) -> None:
+        rows = numbers(10).fetch(conn)
+        await anext(rows)
+        await conn.close()
+        with pytest.raises(InterfaceError):
+            await anext(rows)
+
+    run_with_conn(schema, body)
+
+
 def test_null_in_non_nullable_column_yields_prior_rows_then_row_shape_error_and_idle(schema: str) -> None:
     async def body(conn: Connection) -> tuple[list[int], int]:
         q = query[int](t"SELECT CASE WHEN g = 3 THEN NULL ELSE g END FROM generate_series(1, 5) g")

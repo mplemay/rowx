@@ -23,8 +23,9 @@ class QueryResult:
 
 
 class RowStream[T]:
-    def __init__(self, open_stream: Callable[[], RowStreamImpl], /) -> None:
+    def __init__(self, open_stream: Callable[[], RowStreamImpl], connection_closed: Callable[[], bool], /) -> None:
         self._open_stream = open_stream
+        self._connection_closed = connection_closed
         self._impl: RowStreamImpl | None = None
         self._buffer: deque[object] = deque()
         self._done = False
@@ -35,6 +36,12 @@ class RowStream[T]:
 
     async def __anext__(self) -> T:
         while True:
+            # rows buffered from an earlier batch must not outlive the connection
+            if not self._done and self._connection_closed():
+                self._done = True
+                self._buffer.clear()
+                msg = "connection is closed"
+                raise InterfaceError(msg)
             if self._buffer:
                 return self._buffer.popleft()  # ty: ignore[invalid-return-type]
             if self._done:
@@ -158,7 +165,7 @@ class _BaseQuery[T]:
                 batch_size,
             )
 
-        return RowStream(open_stream)
+        return RowStream(open_stream, lambda: conn.closed)
 
     async def execute(self, conn: Connection, /) -> QueryResult:
         rows_affected = await conn._impl._execute(self._compiled.sql, self._params)  # ruff: ignore[private-member-access]
