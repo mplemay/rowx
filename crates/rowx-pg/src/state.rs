@@ -63,6 +63,19 @@ impl State {
         }
     }
 
+    /// Resolves once `close()` has run, so a task that waits on something else can give up.
+    pub async fn wait_closed(&self) {
+        loop {
+            let notified = self.settled.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_closed() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Busy → Settling, for a cancelled operation whose request is still on the wire.
     /// Returns `false` when the connection was not busy, for example because it was closed.
     pub fn settle(&self) -> bool {

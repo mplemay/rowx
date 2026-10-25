@@ -148,16 +148,21 @@ pub fn fail(state: &State, err: Error) -> PgError {
 fn build(py: Python<'_>, rows: &[Row], scalar: bool) -> PyResult<Py<PyAny>> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        if scalar {
-            out.push(cell(py, row, 0)?);
-        } else {
-            let cells = (0..row.len())
-                .map(|index| cell(py, row, index))
-                .collect::<PyResult<Vec<_>>>()?;
-            out.push(PyTuple::new(py, cells)?.into_any());
-        }
+        out.push(decode_row(py, row, scalar)?);
     }
     Ok(PyList::new(py, out)?.into_any().unbind())
+}
+
+/// # Errors
+/// `DecodeError` for a value that cannot be decoded.
+pub fn decode_row<'py>(py: Python<'py>, row: &Row, scalar: bool) -> PyResult<Bound<'py, PyAny>> {
+    if scalar {
+        return cell(py, row, 0);
+    }
+    let cells = (0..row.len())
+        .map(|index| cell(py, row, index))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyTuple::new(py, cells)?.into_any())
 }
 
 fn cell<'py>(py: Python<'py>, row: &Row, index: usize) -> PyResult<Bound<'py, PyAny>> {

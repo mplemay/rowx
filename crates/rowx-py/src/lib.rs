@@ -4,6 +4,7 @@ pub mod describe;
 pub mod errors;
 pub mod exec;
 pub mod runtime;
+pub mod stream;
 pub mod types;
 
 use pyo3::prelude::*;
@@ -16,6 +17,8 @@ mod _core {
     use crate::conn::{Connection, connect};
     #[pymodule_export]
     use crate::describe::{ColumnInfo, Describe, ParamInfo, connect_checker, describe};
+    #[pymodule_export]
+    use crate::stream::RowStream;
     #[pymodule_export]
     use crate::types::{TypeInfo, type_table};
 
