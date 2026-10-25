@@ -32,10 +32,111 @@ asyncio.run(main())
 | `one` | `T` | The first row. Raises `RowNotFound` if there are none. Extra rows are not an error. |
 | `optional` | `T \| None` | The first row, or `None` if there are none. Extra rows are not an error. |
 | `all` | `list[T]` | Every row. |
+| `fetch` | `RowStream[T]` | Streams the rows. See [Streaming](#streaming). |
 | `execute` | `QueryResult` | `rows_affected` is the count of rows affected. Allowed on `query[T]`; the rows are discarded. |
 
 `one` and `optional` discard the rest of the result, but DML side effects (`INSERT ... RETURNING`) always run to
-completion. Add `LIMIT 1` to large selects.
+completion. Add `LIMIT 1` to large selects: the server still sends the remaining rows, and the connection reads and
+discards them before the next operation runs.
+
+`optional` on a nullable scalar is ambiguous. For `query[int | None]`, `None` means either "no row" or a NULL value.
+Use a tuple row type (`query[tuple[int | None]]`) when the difference matters. The checker does not report this.
+
+```python test
+import asyncio
+
+import rowx
+from rowx import query
+
+
+async def main() -> None:
+    async with await rowx.connect(DSN) as conn:
+        no_row = await query[int | None](t"SELECT 1 WHERE false").optional(conn)
+        null_value = await query[int | None](t"SELECT NULL::int").optional(conn)
+        assert no_row is None
+        assert null_value is None
+
+        assert await query[tuple[int | None]](t"SELECT 1 WHERE false").optional(conn) is None
+        assert await query[tuple[int | None]](t"SELECT NULL::int").optional(conn) == (None,)
+
+
+asyncio.run(main())
+```
+
+## Streaming
+
+`fetch` returns a single-use `RowStream[T]` for results without a known upper bound. It is an async iterator, and an
+async context manager for callers that don't want release to depend on garbage collection. The rows cross into Python
+`batch_size` at a time (default 1024).
+
+```python test
+import asyncio
+
+import rowx
+from rowx import query
+
+
+async def main() -> None:
+    async with await rowx.connect(DSN) as conn:
+        users = query[tuple[int, str]](t"SELECT id, name FROM users ORDER BY id")
+
+        names = [name async for _, name in users.fetch(conn)]
+        assert names == ["alice", "bob", "carol"]
+
+        async with users.fetch(conn, batch_size=2) as rows:
+            assert rows.result is None
+            seen = [row async for row in rows]
+            assert len(seen) == 3
+            # set once the stream is exhausted
+            assert rows.result is not None
+            assert rows.result.rows_affected == 3
+
+
+asyncio.run(main())
+```
+
+- **No IO until iteration.** `fetch` itself does nothing. The first `async for` step claims the connection, so
+  `ConnectionBusyError` and parameter errors are raised there.
+- **`.result`** is `None` until the stream is exhausted, then a `QueryResult`. It stays `None` after an early exit,
+  an error or a cancellation.
+- **The connection is Busy while the stream is open.** From the first row until the stream ends, any other operation on
+  that connection raises `ConnectionBusyError`, so a loop body can't query the connection it is streaming from. (A
+  result that fits in one batch ends as soon as it arrives, so the stream is already closed by the first row.)
+- **`break` drains.** Stopping early does not cancel the statement: the server finishes it, and the connection
+  discards the remaining rows, so DML side effects (`INSERT ... RETURNING`) complete. Prefer `async with`: a stream that
+  is still referenced after a `break` stays open until it is collected. Bound large reads with `LIMIT`, or cancel the
+  task, when stopping early has to be fast.
+- **Cancellation.** Cancelling the task while it waits for a row sends a cancel to the server, as for the other
+  methods. A cancelled stream is over: the next step raises `StopAsyncIteration`.
+
+```python test
+import asyncio
+
+import rowx
+from rowx import query
+from rowx.errors import ConnectionBusyError
+
+
+async def main() -> None:
+    async with await rowx.connect(DSN) as conn:
+        numbers = query[int](t"SELECT generate_series(1, 100000)")
+
+        async with numbers.fetch(conn, batch_size=1) as rows:
+            async for _ in rows:
+                try:
+                    await query[int](t"SELECT 1").one(conn)
+                except ConnectionBusyError:
+                    pass
+                else:
+                    raise AssertionError
+                break
+
+        # the stream was closed by `async with`, so the connection is usable again
+        assert await query[int](t"SELECT 1").one(conn) == 1
+
+
+asyncio.run(main())
+```
 
 `rowx.connect(dsn, connect_timeout=None, statement_cache_size=256)` returns a `Connection`. Use it as an async context
 manager, or call `close()`.
@@ -301,7 +402,9 @@ falls back to plaintext when the server doesn't support TLS. Use `sslmode=verify
   values with a months component, raise `DecodeError`. Cast to `text`.
 - **Array elements.** Element types and nullability inside `list[...]` are not checked at runtime; a NULL element
   decodes to `None`.
-- **One operation per connection.** There is no pool, transaction helper or pipelining yet.
+- **One operation per connection.** There is no pool, transaction helper or pipelining yet. An open `fetch` stream
+  holds the connection until it ends.
+- **No multi-statement execution** and **no command tag** in `QueryResult`. See [known-limits.md](known-limits.md).
 - **Cancellation.** A cancelled statement inside a transaction aborts it (25P02), and a future cancelled during prepare
   can leak a named server statement until the connection closes.
 - **Schema changes.** If the schema changes inside a transaction, a retried statement can fail with 25P02. `ROLLBACK`

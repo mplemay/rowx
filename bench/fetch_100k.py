@@ -55,6 +55,11 @@ async def main(dsn: str) -> None:
 
             rowx_ms = await median_ms(run_rowx)
 
+            async def run_rowx_fetch() -> int:
+                return len([row async for row in select.fetch(conn)])
+
+            fetch_ms = await median_ms(run_rowx_fetch)
+
         async with asyncpg.create_pool(dsn, min_size=1, max_size=1) as pool:
 
             async def run_asyncpg() -> int:
@@ -65,8 +70,10 @@ async def main(dsn: str) -> None:
         await setup.execute(DROP_SQL)
         await setup.close()
 
-    print("rowx_ms asyncpg_ms ratio")  # ruff: ignore[print]
-    print(f"{rowx_ms:.1f} {asyncpg_ms:.1f} {rowx_ms / asyncpg_ms:.2f}")  # ruff: ignore[print]
+    print("rowx_ms asyncpg_ms ratio fetch_ms fetch_vs_all")  # ruff: ignore[print]
+    print(  # ruff: ignore[print]
+        f"{rowx_ms:.1f} {asyncpg_ms:.1f} {rowx_ms / asyncpg_ms:.2f} {fetch_ms:.1f} {fetch_ms / rowx_ms:.2f}",
+    )
 
 
 if __name__ == "__main__":
