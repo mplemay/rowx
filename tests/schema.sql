@@ -86,3 +86,11 @@ CREATE FOREIGN TABLE foreign_users (
     id integer NOT NULL,
     name text
 ) SERVER rowx_files OPTIONS (filename '/dev/null', format 'csv');
+
+-- a procedure with an INOUT parameter, so CALL returns a column (sqlx test_call_procedure)
+CREATE PROCEDURE forty_two(INOUT answer integer DEFAULT NULL)
+LANGUAGE plpgsql AS $$
+BEGIN
+    answer := 42;
+END;
+$$;
