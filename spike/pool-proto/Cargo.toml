@@ -1,0 +1,18 @@
+[package]
+name = "pool-proto"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+deadpool = { version = "0.12", default-features = false, features = ["managed", "rt_tokio_1"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "test-util"] }
+
+[profile.release]
+debug = false
+
+[[bench]]
+name = "acquire_release"
+harness = false
