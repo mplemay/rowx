@@ -90,6 +90,12 @@ async def transaction_is_an_executor(tx: Transaction) -> None:
     reveal_type(scalar.fetch(tx))  # reveal: RowStream[int]
 
 
+async def pool_transaction_is_an_executor(pool: Pool) -> None:
+    async with pool.transaction() as tx:
+        reveal_type(tx)  # reveal: Transaction
+        reveal_type(await query[int](t"SELECT 1").one(tx))  # reveal: int
+
+
 def negative() -> None:
     query("SELECT 1")  # error  # ty: ignore[invalid-argument-type]
     name = "users"

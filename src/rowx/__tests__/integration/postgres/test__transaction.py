@@ -5,7 +5,7 @@ import pytest
 
 from rowx import query
 from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError
-from rowx.postgres import Connection, connect
+from rowx.postgres import Connection, Pool, connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -347,3 +347,68 @@ def test_ending_on_a_busy_connection_leaves_the_transaction_open(schema: str) ->
         return await count_users(observer, "busy_end")
 
     assert run_with_two(schema, body) == 0
+
+
+def test_a_pool_transaction_releases_its_connection(schema: str) -> None:
+    async def body() -> tuple[int, int]:
+        async with Pool(schema, max_size=1) as pool:
+            async with pool.transaction() as tx:
+                await query(t"INSERT INTO users (name) VALUES ('pooled')").execute(tx)
+            with pytest.raises(InterfaceError):
+                await query[int](t"SELECT 1").one(tx)
+            return await query[int](t"SELECT 1").one(pool), await count_users_pool(pool, "pooled")
+
+    assert asyncio.run(body()) == (1, 1)
+
+
+async def count_users_pool(pool: Pool, name: str) -> int:
+    return await query[int](t"SELECT count(*) FROM users WHERE name = {name}").one(pool)
+
+
+def test_an_exception_in_a_pool_transaction_rolls_back(schema: str) -> None:
+    async def body(observer: Connection) -> int:
+        async with Pool(schema, max_size=1) as pool:
+
+            async def work() -> None:
+                async with pool.transaction() as tx:
+                    await query(t"INSERT INTO users (name) VALUES ('pool_rolled_back')").execute(tx)
+                    raise BoomError
+
+            with pytest.raises(BoomError):
+                await work()
+            assert await query[int](t"SELECT 1").one(pool) == 1
+        return await count_users(observer, "pool_rolled_back")
+
+    async def run() -> int:
+        async with await connect(schema) as observer:
+            return await body(observer)
+
+    assert asyncio.run(run()) == 0
+
+
+@pytest.mark.timing
+def test_cancelling_in_a_pool_transaction_rolls_back(schema: str) -> None:
+    async def run() -> tuple[int, int]:
+        async with await connect(schema) as observer, Pool(schema, max_size=1) as pool:
+
+            async def work() -> None:
+                async with pool.transaction() as tx:
+                    await query(t"INSERT INTO users (name) VALUES ('pool_cancelled')").execute(tx)
+                    await query(t"SELECT pg_sleep(30)").execute(tx)
+
+            task = asyncio.create_task(work())
+            for _ in range(POLL_LIMIT):
+                active = await query[bool](
+                    t"SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE query LIKE '%pg_sleep(30)%' AND state = 'active')"
+                ).one(observer)
+                if active:
+                    break
+                await asyncio.sleep(0.001)
+            else:
+                pytest.fail("the sleeping statement never became active")
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return await query[int](t"SELECT 1").one(pool), await count_users(observer, "pool_cancelled")
+
+    assert asyncio.run(run()) == (1, 0)
