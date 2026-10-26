@@ -50,12 +50,12 @@ declared.
 | `cidr` | `ipaddress.IPv4Network \| ipaddress.IPv6Network` (one leaf) | binary | `IPv4Network`, `IPv6Network`, `str` | binary |
 | `macaddr`, `macaddr8` | `str` (`08:00:2b:01:02:03`, lower case) | binary | `str` | binary |
 | `int4range`, `int8range`, `numrange`, `daterange`, `tsrange`, `tstzrange` | `rowx.postgres.Range[T]`, with `T` the leaf of the subtype | binary | `Range[T]` with `T` accepted by the subtype | binary |
-| `money` | `str`, exactly as the server renders it under the session's `lc_monetary` | text | `str` | text |
+| `money` | `rowx.postgres.Money` (`minor_units: int`; no scale) | binary (int8) | `Money` | binary |
 | `bit(n)`, `varbit` | `str` of `0` and `1` | binary | `str` of `0` and `1` (`bit(n)` length checked by the server) | binary |
 | `point`, `line`, `lseg`, `box`, `path`, `polygon`, `circle` | frozen dataclasses `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle` in `rowx.postgres` | binary | the matching dataclass | binary |
 | `hstore` (extension) | `dict[str, str \| None]` | binary | `dict[str, str \| None]` | binary |
 | `ltree`, `lquery` (extensions) | `str` | binary | `str` | binary |
-| `cube` (extension) | `tuple[float, ...]` (a point is a one-sided cube) | binary | `tuple[float, ...]`, `list[float]` | binary |
+| `cube` (extension) | `rowx.postgres.Cube` (`lower_left` and `upper_right`, each a `tuple[float, ...]` of the same length; a point has equal corners) | binary | `Cube` | binary |
 | `uuid` | `uuid.UUID` | binary | `UUID`, `str` | binary (`UUID`), text (`str`) |
 | `json`, `jsonb` | any annotation ([Rules](checker.md#rules-all-errors)) | `json.loads` (jsonb: strip the `0x01` version byte) | any JSON-serialisable value, always `json.dumps`-ed. A `str` becomes a JSON **string**; to bind raw JSON text, write `{s}::jsonb` | text |
 | enum | `str` | binary (the label) | `str` | text |
@@ -82,9 +82,14 @@ Decode errors (`DecodeError`, each with a hint to cast to `text`):
 - **Ranges.** `Range[T]` is `@dataclass(frozen=True, slots=True)` with `lower`, `upper`, `lower_inc`, `upper_inc` and
   an `empty` flag, modelled on psycopg. Canonical forms follow the server, so `[1,5]` of `int4range` decodes as
   `[1, 6)`. `T` must equal the subtype's leaf. Arrays of ranges are `list[Range[T]]`.
-- **Money.** Decoded and encoded as text, never as binary minor units. The server applies `lc_monetary`, so rowx holds
-  no scale that can go stale mid-session. A caller who needs a number casts to `numeric`.
-- **Geometric types** and **`cube`** are fixed-layout binary. `Path` and `Polygon` hold `tuple[Point, ...]`, and `Path`
+- **Money.** The result format is always binary ([Driver](driver.md)),
+  so `money` decodes as the int8 minor units that `cash_send` writes. rowx holds **no scale**, because `lc_monetary` can
+  change mid-session. `Money.to_decimal(scale: int)` takes the scale explicitly, so the caller owns the
+  interpretation, as with sqlx's `PgMoney`. A caller who wants a rendered string casts to `text`.
+- **`cube`.** `Cube(lower_left, upper_right)` keeps both corners and the dimension. The codec writes the point flag
+  when the corners are equal and decodes a point to two equal corners, so a point and a box are never confused. Corners
+  of different lengths are an `EncodeError`.
+- **Geometric types** are fixed-layout binary. `Path` and `Polygon` hold `tuple[Point, ...]`, and `Path`
   has a `closed` flag.
 - **Extension types** match by name **and** owner. A `NamedSimple` row also carries the extension name. The describe
   step (`describe.rs`) resolves, once per connection and OID, `pg_depend` (`deptype = 'e'`) → `pg_extension.extname`,
@@ -95,9 +100,9 @@ Decode errors (`DecodeError`, each with a hint to cast to `text`):
   `Network`, `Mac`, `Range`, `Money`, `Bits`, `Geometric` and `Extension` (one per module under `wire/` and `codec/`).
   The `Interval` leaf is a second `py_result` form on the `interval` row. These are enum changes, so the feature PRs
   (#99–#103) call them out as wiring.
-- **Encoding format.** Binary wherever the server has a `*_send`/`*_recv` pair. The text fallbacks are `money` and
-  composites of unsupported subtypes. The `typsend = 0` rule below still applies, and an extension type without binary
-  I/O stays `unsupported-type`.
+- **Encoding format.** Binary wherever the server has a `*_send`/`*_recv` pair, because results are always binary, so a
+  type with no binary I/O cannot be read at all. The `typsend = 0` rule below still applies, and an extension type
+  without binary I/O stays `unsupported-type`.
 
 **Unsupported types.** Any other type is `unsupported-type` in the checker and `DecodeError`
 at runtime. Examples: records and composites, multiranges, `xml`, `tsvector`/`tsquery`, `pg_lsn`, `xid`/`xid8`/`tid`,

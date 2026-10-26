@@ -44,7 +44,7 @@
   - **`*_send` comparison** (#95): the bytes rowx writes equal the server's `*_send` output, with `proptest` properties
     and `cargo fuzz` decoders in a nightly job outside the workspace lints.
   - **psycopg differential** (#108): the same values decode and encode identically in psycopg, including edge cases and
-    session settings for text-encoded parameters (`money`, `lc_monetary`).
+    session settings for text-encoded parameters, and `money` minor units under a changed `lc_monetary`.
   - **Nullability fuzzer** (#109): a NOT NULL verdict that a NULL contradicts fails CI. Over-promotion is reported, not
     gated.
   - A new type family also adds its goldens, grammar conformance rows (`Range[T]`, the network unions, `hstore`) and

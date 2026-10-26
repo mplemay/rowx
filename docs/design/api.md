@@ -208,7 +208,7 @@ class Transaction:                                         # an Executor
 | Module | Exports |
 |---|---|
 | `rowx` | `query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor`, errors |
-| `rowx.postgres` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `RESET_QUERY`, and the value types `Range`, `Interval`, `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle` (added by the type-parity features, [Type mapping](type-mapping.md)) |
+| `rowx.postgres` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `RESET_QUERY`, and the value types `Range`, `Interval`, `Money`, `Cube`, `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle` (added by the type-parity features, [Type mapping](type-mapping.md)) |
 | `rowx.errors` | adds `PoolTimeoutError(InterfaceError)` |
 
 - **Hard move, no aliases.** `rowx.connect` and `rowx.Connection` are removed, and `rowx.ping` is removed
@@ -340,9 +340,8 @@ LEAF  := int | float | str | bool | bytes
        | datetime.timedelta | uuid.UUID
        | ipaddress.IPv4Interface | ipaddress.IPv6Interface   # inet: the pair is ONE leaf
        | ipaddress.IPv4Network | ipaddress.IPv6Network       # cidr: the pair is ONE leaf
-       | rowx.postgres.Interval | Point | Line | LineSegment | Box | Path | Polygon | Circle
+       | rowx.postgres.Interval | Money | Cube | Point | Line | LineSegment | Box | Path | Polygon | Circle
        | rowx.postgres.Range[RLEAF]            # ranges; RLEAF is the range's subtype leaf
-       | tuple[float, ...]                     # cube only: the one place a variadic tuple is admitted
        | dict[str, str | None]                 # hstore only
        | list[ELEM]                            # arrays; nested lists = multi-dim
 RLEAF := int | decimal.Decimal | datetime.date | datetime.datetime
@@ -360,8 +359,8 @@ RLEAF := int | decimal.Decimal | datetime.date | datetime.datetime
     `IPv4Interface | IPv6Interface` and `IPv4Network | IPv6Network` and resolve to one leaf each (any other mix, for
     example `IPv4Interface | IPv6Network`, is rejected). The resolver treats a union whose member set equals one of
     these two sets, in either order, as that leaf;
-  - `Literal`, any `dict` other than `dict[str, str | None]`, any `tuple[X, ...]` other than `tuple[float, ...]` in a
-    column position (the row-level bare-tuple rule above is unchanged), classes other than the listed `rowx.postgres`
+  - `Literal`, any `dict` other than `dict[str, str | None]`, `tuple[X, ...]` in a column position (the row-level
+    bare-tuple rule above is unchanged), classes other than the listed `rowx.postgres`
     leaves, and anything else not derivable from the grammar.
 - **Each new leaf needs four things**, and a feature PR is not done without them: a grammar line here, a `_rowplan`
   rule, a `check/resolve.py` rule, and rows in `tests/conformance/row_types.py`. `Range[T]` is checked against the
