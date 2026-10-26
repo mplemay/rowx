@@ -65,6 +65,9 @@ CREATE TABLE all_types (
     c_daterange daterange,
     c_tsrange tsrange,
     c_tstzrange tstzrange,
+    c_money money,
+    c_bit bit(8),
+    c_varbit varbit(16),
     c_json json,
     c_jsonb jsonb,
     c_mood mood,
@@ -82,13 +85,17 @@ CREATE TABLE all_types (
     c_numrange_array numrange[],
     c_tstzrange_array tstzrange[],
     c_custom_range rowx_intrange,
-    c_custom_range_array rowx_intrange[]
+    c_custom_range_array rowx_intrange[],
+    c_money_array money[],
+    c_bit_array bit(8)[],
+    c_varbit_array varbit[],
+    c_interval_array interval[]
 );
 
 -- unsupported types, for unsupported-type cases
 CREATE TABLE unsupported_types (
     id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-    c_money money,
+    c_xml xml,
     c_tsvector tsvector,
     c_int4multirange int4multirange,
     c_floatrange rowx_floatrange

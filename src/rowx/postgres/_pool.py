@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import Awaitable, Callable, Generator, Sequence
 from typing import TYPE_CHECKING, Any, Final, Self
 
 from rowx._core.postgres import Pool as PoolImpl
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from rowx.postgres._transaction import Transaction
 
 type Hook = Callable[[Connection], Awaitable[None]]
-type StreamArgs = tuple[str, list[object], list[bool] | None, bool, int | None, int]
+type StreamArgs = tuple[str, list[object], Sequence[int] | None, bool, int | None, int]
 
 DEFAULT_MAX_SIZE: Final[int] = 10
 DEFAULT_ACQUIRE_TIMEOUT: Final[float] = 30.0
@@ -329,7 +329,7 @@ class Pool:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
@@ -343,7 +343,7 @@ class Pool:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,

@@ -1,9 +1,9 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from ipaddress import IPv4Interface, IPv4Network, IPv6Interface, IPv6Network
 
 from rowx import query
-from rowx.postgres import Range
+from rowx.postgres import Interval, Money, Range
 
 
 def run() -> None:
@@ -31,4 +31,12 @@ def run() -> None:
     ](t"SELECT c_int4range_array, c_numrange_array, c_tstzrange_array FROM all_types")
     query[tuple[Range[int] | None, list[Range[int] | None] | None]](
         t"SELECT c_custom_range, c_custom_range_array FROM all_types"
+    )
+    query[tuple[Money | None, str | None, str | None]](t"SELECT c_money, c_bit, c_varbit FROM all_types")
+    query[tuple[list[Money | None] | None, list[str | None] | None, list[str | None] | None]](
+        t"SELECT c_money_array, c_bit_array, c_varbit_array FROM all_types"
+    )
+    query[tuple[timedelta | None, Interval | None]](t"SELECT c_interval, c_interval FROM all_types")
+    query[tuple[list[timedelta | None] | None, list[Interval | None] | None]](
+        t"SELECT c_interval_array, c_interval_array FROM all_types"
     )

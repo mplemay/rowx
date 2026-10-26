@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx.postgres._types import accepts, by_key, result_type
+from rowx.postgres._types import accepts, by_key, result_type, result_types
 from rowx.postgres._vocab import NullReasonName, TypeKey
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ def _array_matches(column: ColumnDesc, elem: Elem) -> bool:
         item = item.item
     if item is None:
         return False
-    return item.leaf == "any" or column.element_key in JSON_KEYS or item.leaf == result_type(column.element_key)
+    return item.leaf == "any" or column.element_key in JSON_KEYS or item.leaf in result_types(column.element_key)
 
 
 # a range column's help names its subtype, since `Range[T]` is checked against it
@@ -107,7 +107,7 @@ def _leaf_matches(column: ColumnDesc, elem: Elem) -> bool:
         case key if key in JSON_KEYS:
             return True
         case key:
-            return elem.leaf == result_type(key)
+            return elem.leaf in result_types(key)
 
 
 def _unsupported(column: ColumnDesc, index: int, element: int | None) -> Finding:

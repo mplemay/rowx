@@ -4,10 +4,13 @@ use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
 };
 
+use crate::codec::money::money_class;
 use crate::codec::network::read as read_ip;
 use crate::codec::numeric::decimal_class;
 use crate::codec::range::range_class;
-use crate::codec::temporal::{date_class, datetime_class, time_class, timedelta_class};
+use crate::codec::temporal::{
+    date_class, datetime_class, interval_class, time_class, timedelta_class,
+};
 use crate::codec::temporal_enc::Ymd;
 use crate::codec::uuid::uuid_class;
 use crate::errors::encode_error;
@@ -57,6 +60,14 @@ pub enum PyParam {
         days: i64,
         micros: i64,
     },
+    // a `rowx.postgres.Interval`, with the microseconds as one field
+    Interval {
+        months: i64,
+        days: i64,
+        micros: i64,
+    },
+    // a `rowx.postgres.Money`: its minor units
+    Money(i64),
     // a `rowx.postgres.Range`; a `None` bound is an infinite side
     Range {
         lower: Option<Box<Self>>,
@@ -100,6 +111,8 @@ impl PyParam {
             Self::Time { .. } => "time",
             Self::DateTime { .. } => "datetime",
             Self::Timedelta { .. } => "timedelta",
+            Self::Interval { .. } => "Interval",
+            Self::Money(_) => "Money",
             Self::Range { .. } => "Range",
             Self::Bytes(_, name) | Self::Seq(_, _, name) | Self::Other(_, name) => name,
         }
@@ -165,6 +178,36 @@ fn range_param(
         upper_inc: obj.getattr("upper_inc")?.extract()?,
         empty: obj.getattr("empty")?.extract()?,
     })
+}
+
+// the `rowx.postgres` value classes
+fn value_class(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<Option<PyParam>> {
+    let overflow = |what: &str| {
+        encode_error(
+            py,
+            &format!("${}: {what} is outside the int8 range", index + 1),
+        )
+    };
+    if obj.is_instance(interval_class(py)?)? {
+        let field = |name: &str| {
+            obj.getattr(name)?
+                .extract::<i64>()
+                .map_err(|_| overflow(&format!("the interval {name}")))
+        };
+        return Ok(Some(PyParam::Interval {
+            months: field("months")?,
+            days: field("days")?,
+            micros: field("microseconds")?,
+        }));
+    }
+    if obj.is_instance(money_class(py)?)? {
+        return obj
+            .getattr("minor_units")?
+            .extract::<i64>()
+            .map(|minor| Some(PyParam::Money(minor)))
+            .map_err(|_| overflow("the money amount"));
+    }
+    Ok(None)
 }
 
 fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> PyResult<PyParam> {
@@ -235,6 +278,9 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
     if obj.is_instance(timedelta_class(py)?)? {
         let (days, micros) = delta_micros(obj)?;
         return Ok(PyParam::Timedelta { days, micros });
+    }
+    if let Some(param) = value_class(py, index, obj)? {
+        return Ok(param);
     }
     if let Ok(text) = obj.cast::<PyString>() {
         return text

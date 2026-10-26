@@ -4,7 +4,7 @@ import uuid
 from decimal import Decimal
 
 from rowx import query
-from rowx.postgres import Range
+from rowx.postgres import Interval, Money, Range
 
 type Inet = ipaddress.IPv4Interface | ipaddress.IPv6Interface
 type Cidr = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -50,3 +50,34 @@ def run() -> None:
     query[list[Range[Decimal]]](t'''SELECT ARRAY['[1,5)'::int4range] AS "r!"''')  # error: [type-mismatch]
     query[Range[int]](t'''SELECT '[1,5]'::rowx_intrange AS "r!"''')
     query[Range[Decimal]](t'''SELECT '[1,5]'::rowx_intrange AS "r!"''')  # error: [type-mismatch]
+
+
+def run_money_bit_interval() -> None:
+    query[Money](t'''SELECT 1::money AS "m!"''')
+    query[Money | None](t'''SELECT 1::money AS "m?"''')
+    query[int](t'''SELECT 1::money AS "m!"''')  # error: [type-mismatch]
+    query[Decimal](t'''SELECT 1::money AS "m!"''')  # error: [type-mismatch]
+    query[str](t'''SELECT 1::money AS "m!"''')  # error: [type-mismatch]
+    query[Money](t'''SELECT 1 AS "n!"''')  # error: [type-mismatch]
+    query[Money](t'''SELECT '1 day'::interval AS "i!"''')  # error: [type-mismatch]
+    query[list[Money | None]](t'''SELECT ARRAY[1::money] AS "m!"''')
+    query[list[Decimal]](t'''SELECT ARRAY[1::money] AS "m!"''')  # error: [type-mismatch]
+    query[str](t'''SELECT B'101'::bit(3) AS "b!"''')
+    query[str](t'''SELECT B'101'::varbit AS "b!"''')
+    query[int](t'''SELECT B'101'::bit(3) AS "b!"''')  # error: [type-mismatch]
+    query[bytes](t'''SELECT B'101'::varbit AS "b!"''')  # error: [type-mismatch]
+    query[Money](t'''SELECT B'101'::varbit AS "b!"''')  # error: [type-mismatch]
+    query[list[str | None]](t'''SELECT ARRAY[B'101'::bit(3)] AS "b!"''')
+    query[list[int]](t'''SELECT ARRAY[B'101'::varbit] AS "b!"''')  # error: [type-mismatch]
+    query[dt.timedelta](t'''SELECT '1 day'::interval AS "i!"''')
+    query[Interval](t'''SELECT '1 mon'::interval AS "i!"''')
+    query[Interval | None](t'''SELECT '1 mon'::interval AS "i?"''')
+    query[tuple[Interval, dt.timedelta | None]](t'''SELECT '1 mon'::interval AS "i!", NULL::interval AS "d?"''')
+    query[list[Interval | None]](t'''SELECT ARRAY['1 mon'::interval] AS "i!"''')
+    query[list[dt.timedelta]](t'''SELECT ARRAY['1 day'::interval] AS "i!"''')
+    query[Interval](t'''SELECT now() AS "n!"''')  # error: [type-mismatch]
+    query[Interval](t'''SELECT 1 AS "n!"''')  # error: [type-mismatch]
+    query[Interval](t'''SELECT 1::money AS "m!"''')  # error: [type-mismatch]
+    query[Interval](t'''SELECT now()::time AS "t!"''')  # error: [type-mismatch]
+    query[dt.timedelta](t'''SELECT now()::time AS "t!"''')  # error: [type-mismatch]
+    query[list[Interval]](t'''SELECT ARRAY[1] AS "n!"''')  # error: [type-mismatch]

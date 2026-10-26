@@ -40,8 +40,16 @@ FOOTER: Final[str] = """
   of `int4range` is `[1, 6)`). A `None` bound is an infinite side, and `Range(empty=True)` is the empty range. A
   user-defined range over `int4`, `int8`, `numeric`, `date`, `timestamp` or `timestamptz` decodes like the built-in
   range of that subtype and keeps whatever form its own canonical function gives it.
+- `interval` decodes to `datetime.timedelta`, which raises `DecodeError` for a month component or ±infinity. Annotating
+  the column `rowx.postgres.Interval` reads it losslessly as `months`, `days` and `microseconds` instead, and ±infinity
+  keeps the server's sentinel fields (the maximum or minimum of each). A parameter takes either class.
+- `money` decodes to `rowx.postgres.Money(minor_units)`, the int8 the server sends. rowx holds no scale, because
+  `lc_monetary` can change mid-session; `Money.to_decimal(scale)` takes it explicitly. To read the formatted text, cast
+  the column to `text`.
+- `bit` and `varbit` decode to a `str` of `0` and `1`. A `bit(n)` parameter of any other length is rejected by the
+  server.
 - Any type not listed here is `unsupported-type` in the checker and raises `DecodeError` at runtime (for example
-  `money`, multiranges, composites and `xml`).
+  multiranges, composites and `xml`).
 
 ## Differences from psycopg
 
@@ -53,7 +61,8 @@ that this list matches the one it checks.
 - `float4`: rowx widens the exact 32-bit value to a `float`, while psycopg parses the shortest decimal text; the values
   are equal after rounding to 32 bits.
 - `char`: A non-ASCII `"char"` is cut to one byte by the server, which is not valid UTF-8, so rowx raises `DecodeError`.
-- `interval`: An interval with a month or year part raises `DecodeError`, while psycopg approximates a month as 30 days.
+- `interval`: An interval with a month or year part raises `DecodeError` unless the annotation is
+  `rowx.postgres.Interval`, while psycopg approximates a month as 30 days.
 - `date`: An infinite date raises `DecodeError`, while psycopg raises its own `DataError`.
 - `timestamp`: An infinite timestamp raises `DecodeError`, while psycopg raises its own `DataError`.
 - `void`: `void` decodes to `None`, while psycopg returns an empty string.
@@ -68,6 +77,8 @@ that this list matches the one it checks.
   infinite bound of this subtype raises `DecodeError`, while psycopg raises its own `DataError`.
 - `tstzrange`: rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal as
   instants, but an infinite bound of this subtype raises `DecodeError`, while psycopg raises its own `DataError`.
+- `money`: rowx returns `rowx.postgres.Money`, the int8 minor units with no scale, while psycopg returns the text the
+  server formats under `lc_monetary`.
 """
 
 TZ_LABELS: Final[dict[str, str]] = {"none": "", "aware": "aware", "naive": "naive"}
@@ -83,6 +94,8 @@ def _code_list(items: list[str]) -> str:
 
 def _row(info: TypeInfo) -> str:
     result = f"`{info.py_result}`" if info.py_result else "base type"
+    if info.alt_py_results:
+        result += "; or " + _code_list(list(info.alt_py_results)) + " by annotation"
     accepted = _code_list(info.accepted_params)
     encoding = info.encode_format
     match info.key:

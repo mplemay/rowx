@@ -147,3 +147,34 @@ pub fn decode_interval<'py>(py: Python<'py>, raw: &[u8]) -> PyResult<Bound<'py, 
             )
         })
 }
+
+static INTERVAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+/// The `rowx.postgres.Interval` class.
+///
+/// # Errors
+/// An import failure of `rowx.postgres`.
+pub fn interval_class(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    let cls = INTERVAL.get_or_try_init(py, || {
+        Ok::<_, PyErr>(
+            py.import("rowx.postgres")?
+                .getattr("Interval")?
+                .cast_into::<PyType>()?
+                .unbind(),
+        )
+    })?;
+    Ok(cls.bind(py))
+}
+
+/// Lossless: months, days and microseconds as stored, so ±infinity keeps its sentinel fields.
+///
+/// # Errors
+/// `DecodeError` for a value that is not 16 bytes.
+pub fn decode_interval_leaf<'py>(py: Python<'py>, raw: &[u8]) -> PyResult<Bound<'py, PyAny>> {
+    let span = temporal::decode_span(raw).map_err(|e| decode_error(py, &e.to_string()))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("months", span.months)?;
+    kwargs.set_item("days", span.days)?;
+    kwargs.set_item("microseconds", span.microseconds)?;
+    interval_class(py)?.call((), Some(&kwargs))
+}

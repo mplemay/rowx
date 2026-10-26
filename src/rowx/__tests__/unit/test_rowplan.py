@@ -77,3 +77,41 @@ def test_range_is_a_non_nullable_leaf_for_each_subtype(subtype: str) -> None:
 def test_range_subtype_is_looked_through_aliases() -> None:
     plan = row_plan(evaluate("type N = Annotated[int, 1]\nT = Range[N]"))
     assert plan == RowPlan(kind="scalar", arity=1, nullable_mask=(False,))
+
+
+def test_money_and_interval_are_non_nullable_leaves() -> None:
+    assert row_plan(evaluate("T = Money")).nullable_mask == (False,)
+    assert row_plan(evaluate("T = Interval | None")).nullable_mask == (True,)
+    assert row_plan(evaluate("T = list[list[Money]]")).nullable_mask == (False,)
+
+
+@pytest.mark.parametrize(
+    ("source", "spans"),
+    [
+        ("T = Interval", (True,)),
+        ("T = Interval | None", (True,)),
+        ("T = list[Interval | None]", (True,)),
+        ("T = list[list[Interval]]", (True,)),
+        ("T = list[Interval] | None", (True,)),
+        ("T = list[list[Interval] | None]", (True,)),
+        ("T = list[datetime.timedelta] | None", (False,)),
+        ("T = datetime.timedelta", (False,)),
+        ("T = Any", (False,)),
+        ("T = Money", (False,)),
+        ("T = tuple[Interval, datetime.timedelta | None, list[Interval], int]", (True, False, True, False)),
+        ("type I = Interval\nT = tuple[I | None, str]", (True, False)),
+    ],
+)
+def test_interval_leaf_is_marked_per_column(source: str, spans: tuple[bool, ...]) -> None:
+    assert row_plan(evaluate(source)).interval_mask == spans
+
+
+def test_flags_pack_nullability_and_the_interval_leaf() -> None:
+    plan = row_plan(evaluate("T = tuple[Interval, datetime.timedelta | None, Interval | None, int]"))
+    assert plan.flags == [0b10, 0b01, 0b11, 0b00]
+
+
+def test_interval_and_money_are_rejected_in_unions() -> None:
+    for source in ("T = Interval | Money", "T = Interval | datetime.timedelta"):
+        with pytest.raises(InterfaceError):
+            row_plan(evaluate(source))

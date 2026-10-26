@@ -100,7 +100,7 @@ class _BaseQuery[T]:
         return await conn._fetch(  # ruff: ignore[private-member-access]
             self._compiled.sql,
             self._params,
-            list(plan.nullable_mask),
+            plan.flags,
             plan.kind == "scalar",
             limit_one,
             plan.arity,
@@ -130,7 +130,7 @@ class _BaseQuery[T]:
             return conn._stream(  # ruff: ignore[private-member-access]
                 self._compiled.sql,
                 self._params,
-                list(plan.nullable_mask),
+                plan.flags,
                 plan.kind == "scalar",
                 plan.arity,
                 batch_size,

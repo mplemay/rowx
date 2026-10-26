@@ -24,3 +24,9 @@ def accepts(py_type_name: str, key: str) -> bool:
 
 def result_type(key: str) -> PyResultName:
     return by_key(key).py_result
+
+
+def result_types(key: str) -> frozenset[str]:
+    # the leaves a column may be annotated with: the default and any alternative the annotation can pick
+    info = by_key(key)
+    return frozenset({info.py_result, *info.alt_py_results})

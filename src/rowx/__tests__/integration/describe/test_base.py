@@ -79,9 +79,9 @@ def test_multiple_statements_rejected(schema: str) -> None:
 
 
 def test_unsupported_types(schema: str) -> None:
-    d = run_describe(schema, "SELECT c_money, NULL::aclitem AS acl, c_tsvector FROM unsupported_types")
+    d = run_describe(schema, "SELECT c_xml, NULL::aclitem AS acl, c_tsvector FROM unsupported_types")
     assert [c.type_key for c in d.columns] == [None, None, None]
-    assert [c.type_name for c in d.columns] == ["money", "aclitem", "tsvector"]
+    assert [c.type_name for c in d.columns] == ["xml", "aclitem", "tsvector"]
 
 
 def test_enum_citext_domain_resolve(schema: str) -> None:

@@ -9,7 +9,7 @@ import pytest
 
 from rowx._core.postgres import type_table
 from rowx.errors import DatabaseError, DecodeError
-from rowx.postgres import Range, connect
+from rowx.postgres import Money, Range, connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -57,6 +57,9 @@ DECODE_GOLDENS: Final[dict[str, tuple[str, str, Any]]] = {
         "[2024-01-02 03:04:05+00,2024-01-03 03:04:05+00)",
         Range(dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC), dt.datetime(2024, 1, 3, 3, 4, 5, tzinfo=UTC)),
     ),
+    "money": ("money", "12.34", Money(1234)),
+    "bit": ("bit(9)", "101010101", "101010101"),
+    "varbit": ("varbit", "1011", "1011"),
     "json": ("json", '{"a": [1, null]}', {"a": [1, None]}),
     "jsonb": ("jsonb", '{"a": [1, null]}', {"a": [1, None]}),
     "enum": ("mood", "happy", "happy"),
@@ -98,6 +101,9 @@ ENCODE_GOLDENS: Final[dict[str, tuple[str, Any]]] = {
     "daterange": ("daterange", Range(dt.date(1, 1, 1), dt.date(9999, 12, 31))),
     "tsrange": ("tsrange", Range(dt.datetime(2024, 1, 2, 3, 4, 5, 6), None)),  # ruff: ignore[call-datetime-without-tzinfo]
     "tstzrange": ("tstzrange", Range(None, dt.datetime(2024, 1, 2, 3, 4, 5, 6, tzinfo=UTC))),
+    "money": ("money", Money(-1234)),
+    "bit": ("bit(9)", "101010101"),
+    "varbit": ("varbit", "1011"),
     "json": ("json", {"a": [1, None]}),
     "jsonb": ("jsonb", {"a": [1, None]}),
     "enum": ("mood", "ok"),
@@ -109,7 +115,7 @@ ENCODE_EXEMPT: Final[frozenset[str]] = frozenset({"void"})
 
 # type -> literal that parses; none has a codec so reading one must fail cleanly
 UNSUPPORTED_DECODE: Final[dict[str, str]] = {
-    "money": "1.00",
+    "xml": "<a/>",
     "tsvector": "a",
     "int4multirange": "{[1,5)}",
 }

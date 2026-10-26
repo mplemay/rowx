@@ -19,10 +19,41 @@ use crate::errors::{PgError, to_py_err};
 #[derive(Debug)]
 pub struct FetchArgs {
     pub sql: String,
-    pub mask: Option<Vec<bool>>,
+    // one flag byte per column: bit 0 is nullable, bit 1 reads an `interval` as `rowx.postgres.Interval`
+    pub mask: Option<Vec<u8>>,
     pub scalar: bool,
     pub limit_one: bool,
     pub arity: Option<usize>,
+}
+
+const NULLABLE: u8 = 1;
+const SPAN: u8 = 2;
+
+/// How a row becomes Python: a bare value or a tuple, and which columns read an `interval` losslessly.
+#[derive(Debug, Clone, Default)]
+pub struct Layout {
+    pub scalar: bool,
+    pub spans: Vec<bool>,
+}
+
+impl Layout {
+    #[must_use]
+    pub fn new(scalar: bool, flags: Option<&[u8]>) -> Self {
+        Self {
+            scalar,
+            spans: flags
+                .unwrap_or_default()
+                .iter()
+                .map(|flag| flag & SPAN != 0)
+                .collect(),
+        }
+    }
+}
+
+/// The nullability half of the per-column flags.
+#[must_use]
+pub fn nullable_mask(flags: &[u8]) -> Vec<bool> {
+    flags.iter().map(|flag| flag & NULLABLE != 0).collect()
 }
 
 /// How a call reaches its connection: the lease of a pooled connection (a released one can no longer
@@ -109,12 +140,13 @@ pub async fn run_fetch(
     // here and not in the callers, so a pool's fast path records a hand-written BEGIN as well
     note_sql(&cancel.state, &args.sql);
     let inner = Arc::clone(&cancel.backend.conn);
-    let scalar = args.scalar;
+    let layout = Layout::new(args.scalar, args.mask.as_deref());
+    let nullable = args.mask.as_deref().map(nullable_mask);
     // the operation owns the request; dropping this future while it runs cancels it
     let pending = cancel::spawn(&cancel, claim, &hook, async move {
         let mut conn = inner.lock().await;
         let shape = Shape {
-            mask: args.mask.as_deref(),
+            mask: nullable.as_deref(),
             scalar: args.scalar,
             limit_one: args.limit_one,
             arity: args.arity,
@@ -134,7 +166,7 @@ pub async fn run_fetch(
         .await
         .map_err(|e| PgError(e.into()))?
         .map_err(|e| access.fail(&cancel.state, e))?;
-    Python::attach(|py| build(py, &rows, scalar))
+    Python::attach(|py| build(py, &rows, &layout))
 }
 
 /// # Errors
@@ -419,30 +451,36 @@ pub fn fail(state: &State, err: Error) -> PgError {
     PgError(err)
 }
 
-fn build(py: Python<'_>, rows: &[Row], scalar: bool) -> PyResult<Py<PyAny>> {
+fn build(py: Python<'_>, rows: &[Row], layout: &Layout) -> PyResult<Py<PyAny>> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        out.push(decode_row(py, row, scalar)?);
+        out.push(decode_row(py, row, layout)?);
     }
     Ok(PyList::new(py, out)?.into_any().unbind())
 }
 
 /// # Errors
 /// `DecodeError` for a value that cannot be decoded.
-pub fn decode_row<'py>(py: Python<'py>, row: &Row, scalar: bool) -> PyResult<Bound<'py, PyAny>> {
-    if scalar {
-        return cell(py, row, 0);
+pub fn decode_row<'py>(py: Python<'py>, row: &Row, layout: &Layout) -> PyResult<Bound<'py, PyAny>> {
+    if layout.scalar {
+        return cell(py, row, 0, layout);
     }
     let cells = (0..row.len())
-        .map(|index| cell(py, row, index))
+        .map(|index| cell(py, row, index, layout))
         .collect::<PyResult<Vec<_>>>()?;
     Ok(PyTuple::new(py, cells)?.into_any())
 }
 
-fn cell<'py>(py: Python<'py>, row: &Row, index: usize) -> PyResult<Bound<'py, PyAny>> {
+fn cell<'py>(
+    py: Python<'py>,
+    row: &Row,
+    index: usize,
+    layout: &Layout,
+) -> PyResult<Bound<'py, PyAny>> {
     let raw = row
         .try_get::<_, Raw>(index)
         .map_err(|e| to_py_err(py, &Error::from(e)))?;
     let ty = row.columns()[index].type_();
-    codec::decode(py, ty, raw.0)
+    let as_span = layout.spans.get(index).copied().unwrap_or(false);
+    codec::decode_with(py, ty, raw.0, as_span)
 }

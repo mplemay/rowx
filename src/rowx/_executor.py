@@ -1,4 +1,7 @@
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class StreamHandle(Protocol):
@@ -13,7 +16,7 @@ class Executor(Protocol):
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
@@ -23,7 +26,7 @@ class Executor(Protocol):
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,

@@ -1,7 +1,8 @@
+import datetime as dt
 import ipaddress
 
 from rowx import query
-from rowx.postgres import Range
+from rowx.postgres import Interval, Money, Range
 
 
 def run() -> None:
@@ -14,3 +15,6 @@ def run() -> None:
     query[Range[str]](t"SELECT 1")  # error: [invalid-row-type]
     query[Range[float]](t"SELECT 1")  # error: [invalid-row-type]
     query[Range[int | None]](t"SELECT 1")  # error: [invalid-row-type]
+    query[Interval | Money](t"SELECT 1")  # error: [invalid-row-type]
+    query[Interval | dt.timedelta](t"SELECT 1")  # error: [invalid-row-type]
+    query[tuple[Interval | Money, int]](t"SELECT 1, 2")  # error: [invalid-row-type]

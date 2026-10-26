@@ -13,22 +13,28 @@ fn build<'py>(
     dims: &[usize],
     elements: &[Option<&[u8]>],
     cursor: &mut usize,
+    as_span: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let Some((&len, rest)) = dims.split_first() else {
         let raw = elements.get(*cursor).copied().flatten();
         *cursor += 1;
-        return codec::decode(py, elem_ty, raw);
+        return codec::decode_with(py, elem_ty, raw, as_span);
     };
     let list = PyList::empty(py);
     for _ in 0..len {
-        list.append(build(py, elem_ty, rest, elements, cursor)?)?;
+        list.append(build(py, elem_ty, rest, elements, cursor, as_span)?)?;
     }
     Ok(list.into_any())
 }
 
 /// # Errors
 /// `DecodeError` when the array is malformed or an element cannot be decoded.
-pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: &[u8]) -> PyResult<Bound<'py, PyAny>> {
+pub fn decode<'py>(
+    py: Python<'py>,
+    ty: &Type,
+    raw: &[u8],
+    as_span: bool,
+) -> PyResult<Bound<'py, PyAny>> {
     let Kind::Array(elem_ty) = ty.kind() else {
         return Err(decode_error(
             py,
@@ -41,5 +47,12 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: &[u8]) -> PyResult<Bound<'py
         return Ok(PyList::empty(py).into_any());
     }
     let mut cursor = 0;
-    build(py, elem_ty, &parsed.dims, &parsed.elements, &mut cursor)
+    build(
+        py,
+        elem_ty,
+        &parsed.dims,
+        &parsed.elements,
+        &mut cursor,
+        as_span,
+    )
 }

@@ -311,3 +311,62 @@ def test_range_array_parameter_takes_a_list_of_ranges() -> None:
     finding = compare_param(0, "_int4range", "array", bad, "int4range")
     assert finding is not None
     assert "whose element" in finding.message
+
+
+def test_interval_column_matches_either_leaf_and_no_other() -> None:
+    assert run(scalar(Elem("datetime.timedelta", nullable=False)), col("interval")) == []
+    assert run(scalar(Elem("rowx.postgres.Interval", nullable=False)), col("interval")) == []
+    for leaf in ("datetime.time", "rowx.postgres.Money", "int", "str"):
+        assert rules(run(scalar(Elem(leaf, nullable=False)), col("interval"))) == ["type-mismatch"], leaf
+
+
+def test_interval_leaf_matches_no_other_column() -> None:
+    interval = Elem("rowx.postgres.Interval", nullable=False)
+    for key in ("int4", "timetz", "money", "text", "date"):
+        assert rules(run(scalar(interval), col(key))) == ["type-mismatch"], key
+
+
+def test_interval_array_accepts_either_element_leaf() -> None:
+    column = ColumnDesc(name="c", type_name="_interval", type_key="array", nullable=False, element_key="interval")
+    for leaf in ("datetime.timedelta", "rowx.postgres.Interval"):
+        elem = Elem("list", nullable=False, item=Elem(leaf, nullable=True))
+        assert run(scalar(elem), column) == [], leaf
+    wrong = Elem("list", nullable=False, item=Elem("rowx.postgres.Money", nullable=False))
+    assert rules(run(scalar(wrong), column)) == ["type-mismatch"]
+
+
+def test_money_matches_only_money() -> None:
+    assert run(scalar(Elem("rowx.postgres.Money", nullable=False)), col("money")) == []
+    for leaf in ("int", "decimal.Decimal", "str", "float", "rowx.postgres.Interval"):
+        assert rules(run(scalar(Elem(leaf, nullable=False)), col("money"))) == ["type-mismatch"], leaf
+    [finding] = run(scalar(Elem("decimal.Decimal", nullable=False)), col("money", name="m"))
+    assert "`rowx.postgres.Money`" in finding.message
+
+
+@pytest.mark.parametrize("key", ["bit", "varbit"])
+def test_bit_strings_match_only_str(key: str) -> None:
+    assert run(scalar(Elem("str", nullable=False)), col(key)) == []
+    for leaf in ("int", "bytes", "rowx.postgres.Money"):
+        assert rules(run(scalar(Elem(leaf, nullable=False)), col(key))) == ["type-mismatch"], leaf
+
+
+def test_money_parameter_takes_only_money() -> None:
+    assert compare_param(0, "money", "money", ParamType("Money")) is None
+    for name in ("int", "str", "float", "Decimal", "Interval"):
+        finding = compare_param(0, "money", "money", ParamType(name))
+        assert finding is not None, name
+        assert finding.rule == "param-type-mismatch"
+
+
+def test_interval_parameter_takes_interval_or_timedelta() -> None:
+    for name in ("Interval", "timedelta"):
+        assert compare_param(0, "interval", "interval", ParamType(name)) is None, name
+    for name in ("int", "str", "Money", "date"):
+        assert compare_param(0, "interval", "interval", ParamType(name)) is not None, name
+
+
+def test_bit_parameter_takes_only_str() -> None:
+    for key in ("bit", "varbit"):
+        assert compare_param(0, key, key, ParamType("str")) is None
+        for name in ("int", "bytes", "Money"):
+            assert compare_param(0, key, key, ParamType(name)) is not None, (key, name)

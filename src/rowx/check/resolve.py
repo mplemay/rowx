@@ -35,6 +35,10 @@ LEAVES: Final[dict[str, LeafName]] = {
     "ipaddress.IPv6Interface": "ipaddress.IPv6Interface",
     "ipaddress.IPv4Network": "ipaddress.IPv4Network",
     "ipaddress.IPv6Network": "ipaddress.IPv6Network",
+    "rowx.postgres.Money": "rowx.postgres.Money",
+    "rowx.postgres._money.Money": "rowx.postgres.Money",
+    "rowx.postgres.Interval": "rowx.postgres.Interval",
+    "rowx.postgres._interval.Interval": "rowx.postgres.Interval",
 }
 # a pair of classes is ONE leaf, and a member alone is not a leaf
 NETWORK_PAIRS: Final[dict[frozenset[str], LeafName]] = {

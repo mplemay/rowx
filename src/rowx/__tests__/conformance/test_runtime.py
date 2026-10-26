@@ -13,13 +13,13 @@ from rowx.postgres import Connection, connect
 
 @dataclass(slots=True)
 class FakeImpl:
-    fetches: list[tuple[list[bool], bool, int]] = field(default_factory=list)
+    fetches: list[tuple[list[int], bool, int]] = field(default_factory=list)
 
     async def _fetch(
         self,
         _sql: str,
         _params: list[object],
-        mask: list[bool],
+        mask: list[int],
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         _limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int,
@@ -39,7 +39,8 @@ def fetch_plan(t: object) -> tuple[str, int, tuple[bool, ...]]:
     conn = Connection(impl)  # ty: ignore[invalid-argument-type]
     asyncio.run(query[t](t"SELECT 1").all(conn))  # ty: ignore[invalid-type-form]
     ((mask, scalar, arity),) = impl.fetches
-    return ("scalar" if scalar else "tuple", arity, tuple(mask))
+    # bit 0 of each flag is the nullability the table lists
+    return ("scalar" if scalar else "tuple", arity, tuple(bool(flag & 1) for flag in mask))
 
 
 @pytest.mark.parametrize(("source", "expected", "_verdict"), ROWS)
@@ -57,6 +58,15 @@ def test_conformance_row_at_first_fetch(
             fetch_plan(t)
     else:
         assert fetch_plan(t) == expected
+
+
+def test_interval_leaf_reaches_the_driver_as_flag_bit_one() -> None:
+    impl = FakeImpl()
+    conn = Connection(impl)  # ty: ignore[invalid-argument-type]
+    row = evaluate("T = tuple[Interval, datetime.timedelta, Interval | None]")
+    asyncio.run(query[row](t"SELECT 1").all(conn))  # ty: ignore[invalid-type-form]
+    ((mask, _, _),) = impl.fetches
+    assert mask == [0b10, 0b00, 0b11]
 
 
 DB_ROWS: Final[list[tuple[str, str]]] = [

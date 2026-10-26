@@ -68,6 +68,14 @@ pub struct Interval {
     pub microseconds: i64,
 }
 
+/// An interval as the server stores it. Infinity is the maximum (or minimum) of every field, kept as is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub months: i32,
+    pub days: i32,
+    pub microseconds: i64,
+}
+
 fn array<const N: usize>(ty: &'static str, raw: &[u8]) -> Result<[u8; N], TemporalError> {
     <[u8; N]>::try_from(raw).map_err(|_| TemporalError::Length {
         ty,
@@ -162,9 +170,11 @@ pub fn decode_timestamp(ty: &'static str, raw: &[u8]) -> Result<DateTime, Tempor
     })
 }
 
+/// Every field of an interval, lossless; ±infinity comes back as the sentinel fields.
+///
 /// # Errors
-/// `TemporalError` for a bad length, ±infinity or a non-zero months component.
-pub fn decode_interval(raw: &[u8]) -> Result<Interval, TemporalError> {
+/// `TemporalError::Length` for a value that is not 16 bytes.
+pub fn decode_span(raw: &[u8]) -> Result<Span, TemporalError> {
     let raw: [u8; 16] = array("interval", raw)?;
     let [
         m0,
@@ -184,19 +194,36 @@ pub fn decode_interval(raw: &[u8]) -> Result<Interval, TemporalError> {
         n2,
         n3,
     ] = raw;
-    let microseconds = i64::from_be_bytes([m0, m1, m2, m3, m4, m5, m6, m7]);
-    let days = i32::from_be_bytes([d0, d1, d2, d3]);
-    let months = i32::from_be_bytes([n0, n1, n2, n3]);
+    Ok(Span {
+        months: i32::from_be_bytes([n0, n1, n2, n3]),
+        days: i32::from_be_bytes([d0, d1, d2, d3]),
+        microseconds: i64::from_be_bytes([m0, m1, m2, m3, m4, m5, m6, m7]),
+    })
+}
+
+impl Span {
     // infinity is stored as the maximum (or minimum) of every field; one extreme field alone is finite
-    if (microseconds, days, months) == (i64::MAX, i32::MAX, i32::MAX)
-        || (microseconds, days, months) == (i64::MIN, i32::MIN, i32::MIN)
-    {
+    #[must_use]
+    pub const fn is_infinite(&self) -> bool {
+        (self.microseconds == i64::MAX && self.days == i32::MAX && self.months == i32::MAX)
+            || (self.microseconds == i64::MIN && self.days == i32::MIN && self.months == i32::MIN)
+    }
+}
+
+/// # Errors
+/// `TemporalError` for a bad length, ±infinity or a non-zero months component.
+pub fn decode_interval(raw: &[u8]) -> Result<Interval, TemporalError> {
+    let span = decode_span(raw)?;
+    if span.is_infinite() {
         return Err(TemporalError::Infinite { ty: "interval" });
     }
-    if months != 0 {
+    if span.months != 0 {
         return Err(TemporalError::IntervalMonths);
     }
-    Ok(Interval { days, microseconds })
+    Ok(Interval {
+        days: span.days,
+        microseconds: span.microseconds,
+    })
 }
 
 // postgres rejects a timetz offset beyond ±15:59:59
@@ -279,6 +306,17 @@ pub fn encode_interval(days: i64, micros: i64) -> Result<Vec<u8>, TemporalError>
     let mut out = micros.to_be_bytes().to_vec();
     out.extend_from_slice(&days.to_be_bytes());
     out.extend_from_slice(&0_i32.to_be_bytes());
+    Ok(out)
+}
+
+/// # Errors
+/// `OutOfRange` when `months` or `days` does not fit an `i32`.
+pub fn encode_span(months: i64, days: i64, micros: i64) -> Result<Vec<u8>, TemporalError> {
+    let months = i32::try_from(months).map_err(|_| TemporalError::OutOfRange("months"))?;
+    let days = i32::try_from(days).map_err(|_| TemporalError::OutOfRange("days"))?;
+    let mut out = micros.to_be_bytes().to_vec();
+    out.extend_from_slice(&days.to_be_bytes());
+    out.extend_from_slice(&months.to_be_bytes());
     Ok(out)
 }
 
@@ -473,6 +511,32 @@ mod tests {
     }
 
     #[test]
+    fn span_keeps_months_and_infinity() {
+        assert_eq!(
+            decode_span(&interval(7, 2, 14)),
+            Ok(Span {
+                months: 14,
+                days: 2,
+                microseconds: 7
+            })
+        );
+        let infinity = decode_span(&interval(i64::MAX, i32::MAX, i32::MAX));
+        assert_eq!(infinity.map(|s| s.is_infinite()), Ok(true));
+        assert_eq!(
+            encode_span(i64::from(i32::MAX), i64::from(i32::MAX), i64::MAX),
+            Ok(interval(i64::MAX, i32::MAX, i32::MAX))
+        );
+        assert_eq!(
+            encode_span(i64::from(i32::MAX) + 1, 0, 0),
+            Err(TemporalError::OutOfRange("months"))
+        );
+        assert_eq!(
+            encode_span(0, i64::from(i32::MIN) - 1, 0),
+            Err(TemporalError::OutOfRange("days"))
+        );
+    }
+
+    #[test]
     fn interval_with_one_extreme_field_is_finite() {
         for micros in [i64::MAX, i64::MIN] {
             assert_eq!(
@@ -616,6 +680,12 @@ mod proptests {
         fn interval_encode_then_decode_is_the_identity(days in any::<i32>(), micros in any::<i64>()) {
             let raw = encode_interval(i64::from(days), micros).unwrap_or_default();
             prop_assert_eq!(decode_interval(&raw), Ok(Interval { days, microseconds: micros }));
+        }
+
+        #[test]
+        fn span_encode_then_decode_is_the_identity(months in any::<i32>(), days in any::<i32>(), micros in any::<i64>()) {
+            let raw = encode_span(i64::from(months), i64::from(days), micros).unwrap_or_default();
+            prop_assert_eq!(decode_span(&raw), Ok(Span { months, days, microseconds: micros }));
         }
 
         #[test]
