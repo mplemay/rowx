@@ -1,9 +1,10 @@
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
+from typing import Final
 
 import rowx
 
-SCRIPT = (
+SCRIPT: Final[str] = (
     "import sys, rowx\n"
     "loaded = [m for m in ('rowx.postgres', 'rowx._core', 'rowx._core.postgres') if m in sys.modules]\n"
     "assert not loaded, loaded\n"
