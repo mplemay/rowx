@@ -158,6 +158,19 @@ impl State {
         }
     }
 
+    /// Resolves once nothing holds a claim any more (the phase is no longer `Busy`).
+    pub async fn wait_unclaimed(&self) {
+        loop {
+            let notified = self.settled.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.phase() != Phase::Busy {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Resolves once `close()` has run, so a task that waits on something else can give up.
     pub async fn wait_closed(&self) {
         loop {
@@ -265,7 +278,14 @@ impl Drop for Claim {
             return;
         }
         // a failed swap means the state moved on (Settling, Broken or Closed), which must stay
-        let _ = self.state.update(|phase| (phase == BUSY).then_some(IDLE));
+        if self
+            .state
+            .update(|phase| (phase == BUSY).then_some(IDLE))
+            .is_ok()
+        {
+            // a release waiting for the operation to end
+            self.state.settled.notify_waiters();
+        }
     }
 }
 
@@ -477,5 +497,19 @@ mod tests {
         assert!(!waiter.is_finished());
         state.settled(false);
         assert_eq!(waiter.await.ok(), Some(Err(CoreError::Broken)));
+    }
+
+    #[tokio::test]
+    async fn wait_unclaimed_resolves_when_the_claim_drops() {
+        let state = Arc::new(State::default());
+        let claim = claimed(&state);
+        let waiter = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.wait_unclaimed().await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished());
+        drop(claim);
+        assert!(waiter.await.is_ok());
     }
 }

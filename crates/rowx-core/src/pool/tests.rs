@@ -9,7 +9,7 @@ use tokio::time::Instant;
 
 use super::*;
 use crate::cancel::Backend;
-use crate::state::Phase;
+use crate::state::{Phase, State};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -25,6 +25,10 @@ struct Shared {
     failing_connects: AtomicUsize,
     fail_reset: AtomicBool,
     pings: AtomicUsize,
+    cancels: AtomicUsize,
+    // how long connects and pings take, in milliseconds
+    connect_ms: AtomicU64,
+    ping_ms: AtomicU64,
     forgets: AtomicUsize,
     resets: Mutex<Vec<(u64, bool)>>,
     closed: Mutex<Vec<u64>>,
@@ -41,12 +45,13 @@ struct FakeConn {
 }
 
 #[derive(Debug, Clone)]
-struct FakeBackend;
+struct FakeBackend(Arc<Shared>);
 
 impl Backend for FakeBackend {
     type Error = FakeError;
 
     fn send_cancel(&self) -> impl Future<Output = Result<(), FakeError>> + Send {
+        self.0.cancels.fetch_add(1, Ordering::AcqRel);
         ready(Ok(()))
     }
 
@@ -60,8 +65,12 @@ impl Manage for Fake {
     type Error = FakeError;
     type Backend = FakeBackend;
 
-    fn connect(&self) -> impl Future<Output = Result<FakeConn, FakeError>> + Send {
+    async fn connect(&self) -> Result<FakeConn, FakeError> {
         self.0.attempts.fetch_add(1, Ordering::AcqRel);
+        let delay = self.0.connect_ms.load(Ordering::Acquire);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         let failing = self.0.failing_connects.load(Ordering::Acquire);
         if failing > 0 {
             if failing != usize::MAX {
@@ -69,13 +78,13 @@ impl Manage for Fake {
                     .failing_connects
                     .store(failing - 1, Ordering::Release);
             }
-            return ready(Err(FakeError));
+            return Err(FakeError);
         }
-        ready(Ok(FakeConn {
+        Ok(FakeConn {
             id: self.0.next_id.fetch_add(1, Ordering::AcqRel) + 1,
             state: Arc::new(State::default()),
             broken: AtomicBool::new(false),
-        }))
+        })
     }
 
     fn state<'a>(&self, conn: &'a FakeConn) -> &'a Arc<State> {
@@ -83,12 +92,16 @@ impl Manage for Fake {
     }
 
     fn backend(&self, _conn: &FakeConn) -> FakeBackend {
-        FakeBackend
+        FakeBackend(Arc::clone(&self.0))
     }
 
-    fn ping(&self, _conn: &FakeConn) -> impl Future<Output = Result<(), FakeError>> + Send {
+    async fn ping(&self, _conn: &FakeConn) -> Result<(), FakeError> {
         self.0.pings.fetch_add(1, Ordering::AcqRel);
-        ready(Ok(()))
+        let delay = self.0.ping_ms.load(Ordering::Acquire);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        Ok(())
     }
 
     fn reset(
@@ -230,6 +243,7 @@ async fn max_lifetime_retires() -> TestResult {
     tokio::time::advance(Duration::from_secs(11)).await;
     let second = id(&pool.acquire().await?)?;
     assert_ne!(first, second);
+    flush().await;
     assert_eq!(closed(&shared), [first]);
     Ok(())
 }
@@ -246,6 +260,7 @@ async fn max_queries_retires() -> TestResult {
     flush().await;
     // two checkouts have completed, so the connection is closed instead of reused
     assert_ne!(id(&pool.acquire().await?)?, first);
+    flush().await;
     assert_eq!(closed(&shared), [first]);
     Ok(())
 }
@@ -393,13 +408,21 @@ async fn release_of_busy_settles() -> TestResult {
     let held_id = id(&held)?;
     let state = Arc::clone(&held.conn()?.state);
     let claim = state.claim_leased(held.lease())?.ok_or("settling")?;
-    // an abandoned operation: the claim is handed off and the connection stays Busy
-    claim.hand_off();
-    assert_eq!(state.phase(), Phase::Busy);
+    // an operation that only ends once it is cancelled, like a statement that is running
+    let operation = {
+        let shared = Arc::clone(&shared);
+        tokio::spawn(async move {
+            while shared.cancels.load(Ordering::Acquire) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            drop(claim);
+        })
+    };
     drop(held);
+    operation.await?;
     flush().await;
     assert_eq!(state.phase(), Phase::Idle);
-    // a cancelled operation may have left a transaction open, so the reset rolls back
+    // the reset waited for the operation to end, and rolls back because it was cut short
     assert_eq!(*lock(&shared.resets), [(held_id, true)]);
     assert_eq!(id(&pool.acquire().await?)?, held_id);
     Ok(())
@@ -477,10 +500,16 @@ async fn close_timeout_terminates() -> TestResult {
     let held = pool.acquire().await?;
     let held_id = id(&held)?;
     let state = Arc::clone(&held.conn()?.state);
+    // a statement is running on the connection
+    let claim = state.claim_leased(held.lease())?.ok_or("settling")?;
     let start = Instant::now();
     pool.close(Some(Duration::from_secs(1))).await;
     assert!(start.elapsed() >= Duration::from_secs(1));
     assert!(state.is_closed());
+    // terminating also stops the running statement
+    flush().await;
+    assert_eq!(shared.cancels.load(Ordering::Acquire), 1);
+    drop(claim);
     // the lease holder's connection is closed for good when it is released
     drop(held);
     flush().await;
@@ -536,6 +565,67 @@ async fn ping_runs_only_after_idling() -> TestResult {
     tokio::time::advance(Duration::from_secs(31)).await;
     drop(pool.acquire().await?);
     assert_eq!(shared.pings.load(Ordering::Acquire), 1);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn ping_is_bounded_by_the_acquire_deadline() -> TestResult {
+    let (pool, shared) = pool(PoolOptions {
+        ping_after: Some(Duration::from_secs(30)),
+        acquire_timeout: Duration::from_secs(5),
+        ..options()
+    })?;
+    drop(pool.acquire().await?);
+    flush().await;
+    shared.ping_ms.store(60_000, Ordering::Release);
+    tokio::time::advance(Duration::from_secs(31)).await;
+    let start = Instant::now();
+    let err = pool.acquire().await.err();
+    assert!(matches!(err, Some(PoolError::Core(CoreError::PoolTimeout))));
+    assert!(start.elapsed() < Duration::from_secs(10));
+    // the unresponsive connection was discarded and its permit is back
+    flush().await;
+    assert_eq!(pool.size(), 0);
+    shared.ping_ms.store(0, Ordering::Release);
+    assert!(pool.acquire().await.is_ok());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_acquire_discards_the_popped_connection() -> TestResult {
+    let (pool, shared) = pool(PoolOptions {
+        ping_after: Some(Duration::from_secs(30)),
+        ..options()
+    })?;
+    let first = id(&pool.acquire().await?)?;
+    flush().await;
+    shared.ping_ms.store(60_000, Ordering::Release);
+    tokio::time::advance(Duration::from_secs(31)).await;
+    // the caller gives up while the ping is in flight
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), pool.acquire())
+            .await
+            .is_err()
+    );
+    flush().await;
+    assert_eq!(pool.size(), 0);
+    assert_eq!(closed(&shared), [first]);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn overlapping_opens_never_exceed_the_limit() -> TestResult {
+    let (pool, shared) = pool(PoolOptions {
+        min_size: 2,
+        max_size: 2,
+        ..options()
+    })?;
+    shared.connect_ms.store(1000, Ordering::Release);
+    let (a, b) = tokio::join!(pool.open(), pool.open());
+    a?;
+    b?;
+    assert_eq!((pool.size(), pool.idle()), (2, 2));
+    assert_eq!(shared.attempts.load(Ordering::Acquire), 2);
     Ok(())
 }
 

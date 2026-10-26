@@ -35,33 +35,29 @@ impl<M: Manage> Inner<M> {
         if self.manager.is_broken(conn) {
             return false;
         }
-        // Busy → Settling: an operation (or stream) is still running and must be stopped
-        let abandoned = state.settle();
-        if !abandoned && !self.manager.settled(conn).await {
+        if state.is_busy() {
+            // an operation or stream still holds the connection. It must end before the reset takes
+            // over, or it could run SQL afterwards and its claim drop would clear a later borrower's
+            // Busy state; a cancel request only stops a statement that is running, so it is resent
+            state.mark_maybe_in_txn();
+            let backend = self.manager.backend(conn);
+            while tokio::time::timeout(RECANCEL_EVERY, state.wait_unclaimed())
+                .await
+                .is_err()
+            {
+                // a failed request is fine: the next round tries again
+                let _ = backend.send_cancel().await;
+            }
+        }
+        // a cancelled operation settles on its own (Settling → Idle) before the reset may run
+        if !self.manager.settled(conn).await {
             return false;
         }
         let rollback = state.maybe_in_txn();
-        let backend = self.manager.backend(conn);
-        let reset = self.manager.reset(conn, rollback);
-        tokio::pin!(reset);
-        // an abandoned operation holds the connection until it ends, which the reset waits for
-        let result = loop {
-            match tokio::time::timeout(RECANCEL_EVERY, &mut reset).await {
-                Ok(result) => break result,
-                Err(_) => {
-                    if abandoned {
-                        // a failed request is fine: the next round or the reset will notice
-                        let _ = backend.send_cancel().await;
-                    }
-                }
-            }
-        };
+        let result = self.manager.reset(conn, rollback).await;
         let ok = result.is_ok() && !self.manager.is_broken(conn);
         if ok {
             state.clear_maybe_in_txn();
-        }
-        if abandoned {
-            state.settled(ok);
         }
         ok
     }

@@ -139,11 +139,12 @@ impl Manage for PgManager {
     }
 
     async fn close(&self, conn: PgConn) {
-        let running = conn.state().is_busy();
+        // a locked connection has an operation running (even when `terminate` already closed its
+        // state), which would hold the lock for its full length
+        let running = conn.cancel.backend.conn.try_lock().is_err();
         conn.state().close();
         if running {
-            // an operation that is still running holds the lock for its full length; a failed
-            // request is fine because dropping the client ends the query anyway
+            // a failed request is fine because dropping the client ends the query anyway
             let _ = conn.cancel.backend.target.request().await;
         }
         conn.cancel.backend.conn.lock().await.close().await;

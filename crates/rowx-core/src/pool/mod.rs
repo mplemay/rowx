@@ -22,8 +22,9 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::cancel::Backend;
 use crate::error::CoreError;
-use crate::state::State;
+use crate::state::Phase;
 
 pub use manage::Manage;
 pub use options::{OptionsError, PoolOptions};
@@ -38,6 +39,8 @@ pub enum PoolError<E> {
     #[error(transparent)]
     Manage(E),
 }
+
+type Terminate = Arc<dyn Fn() + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -89,7 +92,7 @@ struct Inner<M: Manage> {
     epoch: AtomicU64,
     expire_gen: AtomicU64,
     // the states of checked-out connections, so `terminate` can close what is still in use
-    live: Mutex<HashMap<u64, Arc<State>>>,
+    live: Mutex<HashMap<u64, Terminate>>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -187,8 +190,24 @@ impl<M: Manage> Inner<M> {
         self.size.fetch_sub(1, Ordering::AcqRel);
     }
 
-    fn register(&self, id: u64, state: &Arc<State>) {
-        lock(&self.live).insert(id, Arc::clone(state));
+    // what `terminate` does to a checked-out connection: close it for its holder and stop whatever
+    // is running, so a long query does not keep its locks
+    fn register(&self, id: u64, conn: &M::Conn) {
+        let state = Arc::clone(self.manager.state(conn));
+        let backend = self.manager.backend(conn);
+        let handle = self.handle.clone();
+        let terminate: Terminate = Arc::new(move || {
+            let running = state.phase() != Phase::Idle;
+            state.close();
+            if running {
+                let backend = backend.clone();
+                handle.spawn(async move {
+                    // a failed request is fine: closing the connection ends the query anyway
+                    let _ = backend.send_cancel().await;
+                });
+            }
+        });
+        lock(&self.live).insert(id, terminate);
     }
 
     fn unregister(&self, id: u64) {
@@ -254,7 +273,6 @@ impl<M: Manage> Inner<M> {
             None => attempt.await,
         }
         .map_err(PoolError::Manage)?;
-        self.size.fetch_add(1, Ordering::AcqRel);
         Ok(Parts {
             conn,
             meta: self.meta(true),
@@ -289,9 +307,9 @@ impl<M: Manage> Inner<M> {
     }
 
     fn terminate_checked_out(&self) {
-        let states: Vec<Arc<State>> = lock(&self.live).values().cloned().collect();
-        for state in states {
-            state.close();
+        let all: Vec<Terminate> = lock(&self.live).values().cloned().collect();
+        for terminate in all {
+            terminate();
         }
     }
 
@@ -307,19 +325,60 @@ impl<M: Manage> Inner<M> {
         }
     }
 
-    // opens connections until `min_size` is reached, as far as free permits allow
+    // adds one to `size` unless it has reached `limit`, in one step
+    fn count_below(&self, limit: usize) -> bool {
+        let mut size = self.size.load(Ordering::Acquire);
+        while size < limit {
+            match self.size.compare_exchange_weak(
+                size,
+                size + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => size = actual,
+            }
+        }
+        false
+    }
+
+    // opens connections until `min_size` is reached, as far as free permits allow; each connection is
+    // counted before it is made, so overlapping fills cannot overshoot
     async fn fill(self: &Arc<Self>) -> Result<(), PoolError<M::Error>> {
-        while !self.closed() && self.size.load(Ordering::Acquire) < self.options.min_size {
+        let min = self.options.min_size;
+        while !self.closed() {
+            if !self.count_below(min) {
+                break;
+            }
+            let mut reservation = Reservation {
+                size: &self.size,
+                armed: true,
+            };
             let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
                 break;
             };
             let _slot = self.slot(permit);
             let parts = self.connect_once().await?;
+            reservation.armed = false;
             if let Err(parts) = self.push_idle(parts) {
                 self.discard(parts.conn).await;
             }
         }
         Ok(())
+    }
+}
+
+// a counted-but-unfinished connection; dropped (even by a cancelled future) it gives its count back
+struct Reservation<'a> {
+    size: &'a AtomicUsize,
+    armed: bool,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.size.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -414,22 +473,35 @@ impl<M: Manage> Pool<M> {
             return Err(CoreError::PoolClosed.into());
         }
         loop {
-            let Some(mut parts) = inner.pop_idle() else {
+            let Some(parts) = inner.pop_idle() else {
                 held.parts = Some(inner.connect_until(deadline).await?);
                 break;
             };
-            if inner.usable(&mut parts).await {
-                held.parts = Some(parts);
+            // owned by the guard from here on, so a cancelled acquire still closes it
+            held.parts = Some(parts);
+            let usable = match held.parts.as_mut() {
+                Some(parts) => matches!(
+                    tokio::time::timeout_at(deadline, inner.usable(parts)).await,
+                    Ok(true)
+                ),
+                None => false,
+            };
+            if usable {
                 break;
             }
-            inner.discard(parts.conn).await;
+            if let Some(parts) = held.parts.take() {
+                // in the background, so cancelling this acquire cannot lose the count
+                let inner = Arc::clone(inner);
+                inner.handle.clone().spawn(async move {
+                    inner.discard(parts.conn).await;
+                });
+            }
         }
         let Some(parts) = held.parts.as_ref() else {
             return Err(CoreError::Closed.into());
         };
-        let state = inner.manager.state(&parts.conn);
-        held.lease = state.renew_lease();
-        inner.register(parts.meta.id, state);
+        held.lease = inner.manager.state(&parts.conn).renew_lease();
+        inner.register(parts.meta.id, &parts.conn);
         held.discard_on_drop = false;
         Ok(held)
     }
