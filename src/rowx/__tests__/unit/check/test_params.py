@@ -1,8 +1,21 @@
 import ast
 from textwrap import dedent
+from typing import Final
 
 import pytest
 
+from rowx.__tests__.paramgen import (
+    DECOYS,
+    POISONS,
+    build,
+    direct,
+    infer as infer_case,
+    run,
+    runtime_shown,
+    shown,
+    unknown_expression,
+)
+from rowx.__tests__.sourcegen import seeded
 from rowx.check.params import ParamInference, ParamType
 
 
@@ -443,3 +456,31 @@ def test_type_parameter_does_not_leak_to_default_or_decorator_scope() -> None:
 )
 def test_qualified_builtin_annotations(imports: str, annotation: str, expected: str) -> None:
     assert infer(f'{imports}\ndef f(x: {annotation}):\n    q(t"{{x}}")') == [expected]
+
+
+SEEDS: Final = range(300)
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_inferred_type_is_the_runtime_type(seed: int) -> None:
+    rng = seeded(seed)
+    decoy = rng.choice(DECOYS) if seed % 2 else None
+    case = direct(rng) if seed % 5 == 0 else build(rng, decoy=decoy)
+    found = shown(infer_case(case.source))
+    # an evident type is the exact type of the evaluated expression, and a decoy does not hide it
+    assert found == runtime_shown(run(case.source)), case.source
+    assert found == case.expected, case.source
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_unknown_binding_forms_are_never_reported(seed: int) -> None:
+    rng = seeded(seed)
+    poison = POISONS[seed % len(POISONS)]
+    case = build(rng, poison=poison, decoy=rng.choice(DECOYS) if seed % 2 else None)
+    assert infer_case(case.source) is None, case.source
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_unknown_expressions_are_never_reported(seed: int) -> None:
+    case = unknown_expression(seeded(seed))
+    assert infer_case(case.source) is None, case.source
