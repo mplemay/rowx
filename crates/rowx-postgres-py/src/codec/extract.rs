@@ -4,11 +4,20 @@ use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
 };
 
+use crate::codec::network::read as read_ip;
 use crate::codec::numeric::decimal_class;
 use crate::codec::temporal::{date_class, datetime_class, time_class, timedelta_class};
 use crate::codec::temporal_enc::Ymd;
 use crate::codec::uuid::uuid_class;
 use crate::errors::encode_error;
+use rowx_postgres::wire::network::Addr;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpKind {
+    Interface,
+    Address,
+    Network,
+}
 
 /// A Python parameter copied out under the GIL so encoding can run without it.
 pub enum PyParam {
@@ -24,6 +33,12 @@ pub enum PyParam {
     // bytes, bytearray or memoryview contents, with the Python type name
     Bytes(Vec<u8>, String),
     Uuid([u8; 16]),
+    // an `ipaddress` object: its address, prefix length and which class it was
+    Ip {
+        kind: IpKind,
+        addr: Addr,
+        bits: u8,
+    },
     // a `date` that is not a `datetime`
     Date(Ymd),
     // microseconds since midnight, and the UTC offset in microseconds when aware
@@ -64,6 +79,14 @@ impl PyParam {
             Self::Decimal(_) => "Decimal",
             Self::Str(_) => "str",
             Self::Uuid(_) => "UUID",
+            Self::Ip { kind, addr, .. } => match (kind, addr) {
+                (IpKind::Interface, Addr::V4(_)) => "IPv4Interface",
+                (IpKind::Interface, Addr::V6(_)) => "IPv6Interface",
+                (IpKind::Address, Addr::V4(_)) => "IPv4Address",
+                (IpKind::Address, Addr::V6(_)) => "IPv6Address",
+                (IpKind::Network, Addr::V4(_)) => "IPv4Network",
+                (IpKind::Network, Addr::V6(_)) => "IPv6Network",
+            },
             Self::Date(_) => "date",
             Self::Time { .. } => "time",
             Self::DateTime { .. } => "datetime",
@@ -154,6 +177,11 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
         if let Ok(bytes) = <[u8; 16]>::try_from(raw) {
             return Ok(PyParam::Uuid(bytes));
         }
+    }
+    if let Some((kind, addr, bits)) =
+        read_ip(py, obj).map_err(|e| encode_error(py, &format!("${}: {e}", index + 1)))?
+    {
+        return Ok(PyParam::Ip { kind, addr, bits });
     }
     // datetime subclasses date, so it has to be checked first
     if obj.is_instance(datetime_class(py)?)? {

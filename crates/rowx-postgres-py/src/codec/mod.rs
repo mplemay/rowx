@@ -5,6 +5,8 @@ pub mod extract;
 pub mod float;
 pub mod int;
 pub mod json;
+pub mod mac;
+pub mod network;
 pub mod numeric;
 pub mod temporal;
 pub mod temporal_enc;
@@ -51,6 +53,8 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: Option<&[u8]>) -> PyResult<B
         Type::CHAR => text::decode_char(py, raw),
         Type::BYTEA => Ok(bytes::decode(py, raw)),
         Type::UUID => uuid::decode(py, raw),
+        Type::INET | Type::CIDR => network::decode(py, ty, raw),
+        Type::MACADDR | Type::MACADDR8 => mac::decode(py, ty, raw),
         Type::JSON | Type::JSONB => json::decode(py, ty, raw),
         Type::DATE => temporal::decode_date(py, raw),
         Type::TIME => temporal::decode_time(py, raw),
@@ -110,6 +114,8 @@ pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         Type::CHAR => text::encode_char(param).map(Param::binary),
         Type::BYTEA => bytes::encode(param).map(Param::binary),
         Type::UUID => uuid::encode(param),
+        Type::INET | Type::CIDR => network::encode(ty, param),
+        Type::MACADDR | Type::MACADDR8 => mac::encode(ty, param),
         Type::JSON | Type::JSONB => json::encode(param).map(Param::text),
         Type::DATE => temporal_enc::encode_date(param).map(Param::binary),
         Type::TIME => temporal_enc::encode_time(param).map(Param::binary),

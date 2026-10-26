@@ -10,6 +10,8 @@ use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 use rowx_postgres::exec::Param;
 use rowx_postgres::wire::array;
+use rowx_postgres::wire::mac::{self, MAC_LEN, MAC8_LEN};
+use rowx_postgres::wire::network::{self, Addr, Network};
 use rowx_postgres::wire::numeric::{self, Numeric};
 use rowx_postgres::wire::temporal::{self, Date, TimeOfDay};
 use tokio_postgres::Client;
@@ -610,6 +612,102 @@ async fn text_array_literals_are_read_back_by_the_server() -> TestResult {
         let shown = read_back(&client, "text[]", Param::text(literal.clone().into_bytes())).await?;
         let canonical = literal_text(&client, "text[]", &literal).await?;
         assert_eq!(shown, canonical, "{literal}");
+    }
+    schema.drop().await
+}
+
+fn ipv4_text(addr: [u8; 4], bits: u8) -> String {
+    let [a, b, c, d] = addr;
+    format!("{a}.{b}.{c}.{d}/{bits}")
+}
+
+fn ipv6_text(addr: [u8; 16], bits: u8) -> String {
+    let groups: Vec<String> = addr
+        .chunks(2)
+        .map(|pair| format!("{:x}", u16::from_be_bytes([pair[0], pair[1]])))
+        .collect();
+    format!("{}/{bits}", groups.join(":"))
+}
+
+// clears every bit past the prefix, which is what a cidr value requires
+fn masked_v4(addr: [u8; 4], bits: u8) -> [u8; 4] {
+    let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
+    (u32::from_be_bytes(addr) & mask).to_be_bytes()
+}
+
+fn masked_v6(addr: [u8; 16], bits: u8) -> [u8; 16] {
+    let mask = u128::MAX.checked_shl(128 - u32::from(bits)).unwrap_or(0);
+    (u128::from_be_bytes(addr) & mask).to_be_bytes()
+}
+
+fn networks() -> impl Strategy<Value = Network> {
+    prop_oneof![
+        (any::<[u8; 4]>(), 0u8..=32).prop_map(|(addr, bits)| Network {
+            addr: Addr::V4(addr),
+            bits,
+            is_cidr: false
+        }),
+        (any::<[u8; 16]>(), 0u8..=128).prop_map(|(addr, bits)| Network {
+            addr: Addr::V6(addr),
+            bits,
+            is_cidr: false
+        }),
+    ]
+}
+
+fn text_of(network: &Network) -> String {
+    match network.addr {
+        Addr::V4(addr) => ipv4_text(addr, network.bits),
+        Addr::V6(addr) => ipv6_text(addr, network.bits),
+    }
+}
+
+#[tokio::test]
+async fn inet_and_cidr_match_the_server_send_functions() -> TestResult {
+    let (schema, client) = connect!();
+    for network in samples(networks(), CASES) {
+        let text = text_of(&network);
+        let sent = send(&client, "inet_send", "inet", &text).await?;
+        assert_eq!(network::encode(&network), Ok(sent.clone()), "inet {text}");
+        assert_eq!(network::decode(&sent), Ok(network), "inet {text}");
+
+        let masked = Network {
+            addr: match network.addr {
+                Addr::V4(addr) => Addr::V4(masked_v4(addr, network.bits)),
+                Addr::V6(addr) => Addr::V6(masked_v6(addr, network.bits)),
+            },
+            is_cidr: true,
+            ..network
+        };
+        let text = text_of(&masked);
+        let sent = send(&client, "cidr_send", "cidr", &text).await?;
+        assert_eq!(network::encode(&masked), Ok(sent.clone()), "cidr {text}");
+        assert_eq!(network::decode(&sent), Ok(masked), "cidr {text}");
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn macaddr_and_macaddr8_match_the_server_send_functions() -> TestResult {
+    let (schema, client) = connect!();
+    for raw in samples(any::<[u8; MAC_LEN]>(), CASES) {
+        let text = mac::decode(&raw, MAC_LEN)?;
+        let sent = send(&client, "macaddr_send", "macaddr", &text).await?;
+        assert_eq!(sent, raw.to_vec(), "macaddr {text}");
+        assert_eq!(mac::encode(&text, MAC_LEN), Ok(sent), "macaddr {text}");
+        // six bytes into a macaddr8 are widened exactly as the server does
+        let sent = send(&client, "macaddr8_send", "macaddr8", &text).await?;
+        assert_eq!(
+            mac::encode(&text, MAC8_LEN),
+            Ok(sent),
+            "macaddr8 from {text}"
+        );
+    }
+    for raw in samples(any::<[u8; MAC8_LEN]>(), CASES) {
+        let text = mac::decode(&raw, MAC8_LEN)?;
+        let sent = send(&client, "macaddr8_send", "macaddr8", &text).await?;
+        assert_eq!(sent, raw.to_vec(), "macaddr8 {text}");
+        assert_eq!(mac::encode(&text, MAC8_LEN), Ok(sent), "macaddr8 {text}");
     }
     schema.drop().await
 }

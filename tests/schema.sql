@@ -50,6 +50,10 @@ CREATE TABLE all_types (
     c_timestamptz timestamptz,
     c_interval interval,
     c_uuid uuid,
+    c_inet inet,
+    c_cidr cidr,
+    c_macaddr macaddr,
+    c_macaddr8 macaddr8,
     c_json json,
     c_jsonb jsonb,
     c_mood mood,
@@ -58,14 +62,18 @@ CREATE TABLE all_types (
     c_int4_array integer[],
     c_text_array text[],
     c_int4_matrix integer[][],
-    c_mood_array mood[]
+    c_mood_array mood[],
+    c_inet_array inet[],
+    c_cidr_array cidr[],
+    c_macaddr_array macaddr[],
+    c_macaddr8_array macaddr8[]
 );
 
 -- unsupported types, for unsupported-type cases
 CREATE TABLE unsupported_types (
     id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
     c_money money,
-    c_inet inet,
+    c_tsvector tsvector,
     c_int4range int4range
 );
 

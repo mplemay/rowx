@@ -1,3 +1,5 @@
+from ipaddress import IPv4Interface, IPv4Network, IPv6Interface, IPv6Network
+
 from rowx import query
 
 
@@ -14,3 +16,6 @@ def run() -> None:
     query[tuple[str, int]](t'SELECT coalesce(email, \'none\') AS "e!", 1 AS "n!" FROM users')
     query[str](t'SELECT c_text AS "t!" FROM all_types WHERE c_text IS NOT NULL')
     query(t"SELECT pg_sleep(0)")
+    query[tuple[IPv4Interface | IPv6Interface | None, IPv4Network | IPv6Network | None, str | None, str | None]](
+        t"SELECT c_inet, c_cidr, c_macaddr, c_macaddr8 FROM all_types"
+    )

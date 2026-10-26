@@ -59,6 +59,7 @@ fn to_object<'py>(py: Python<'py>, param: &PyParam) -> Result<Bound<'py, PyAny>,
         PyParam::Null
         | PyParam::Bytes(..)
         | PyParam::Uuid(_)
+        | PyParam::Ip { .. }
         | PyParam::Date(_)
         | PyParam::Time { .. }
         | PyParam::DateTime { .. }

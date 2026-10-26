@@ -34,6 +34,10 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 | `timestamptz` | `datetime.datetime` | aware | `datetime` | binary |
 | `interval` | `datetime.timedelta` |  | `timedelta` | binary |
 | `uuid` | `uuid.UUID` |  | `UUID`, `str` | binary |
+| `inet` | `ipaddress.IPv4Interface \| ipaddress.IPv6Interface` |  | `IPv4Interface`, `IPv6Interface`, `IPv4Address`, `IPv6Address`, `str` | binary |
+| `cidr` | `ipaddress.IPv4Network \| ipaddress.IPv6Network` |  | `IPv4Network`, `IPv6Network`, `str` | binary |
+| `macaddr` | `str` |  | `str` | binary |
+| `macaddr8` | `str` |  | `str` | binary |
 | `json` | any value (`json.loads`) |  | any JSON-serialisable value | text |
 | `jsonb` | any value (`json.loads`) |  | any JSON-serialisable value | text |
 | `enum` | `str` |  | `str` | text |
@@ -55,7 +59,7 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
   both match, at every nesting level.
 - `void` decodes to `None` and is only valid as a tuple element.
 - Any type not listed here is `unsupported-type` in the checker and raises `DecodeError` at runtime (for example
-  `money`, `inet`, ranges, composites and `xml`).
+  `money`, ranges, composites and `xml`).
 
 ## Differences from psycopg
 
@@ -71,3 +75,5 @@ that this list matches the one it checks.
 - `date`: An infinite date raises `DecodeError`, while psycopg raises its own `DataError`.
 - `timestamp`: An infinite timestamp raises `DecodeError`, while psycopg raises its own `DataError`.
 - `void`: `void` decodes to `None`, while psycopg returns an empty string.
+- `inet`: rowx always returns an interface, even for a full-width mask, while psycopg returns an address for `/32` and
+  `/128`; the interface's `ip` is that address.

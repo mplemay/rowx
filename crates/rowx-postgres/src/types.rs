@@ -29,6 +29,8 @@ pub enum Codec {
     Text,
     Bytes,
     Uuid,
+    Network,
+    Mac,
     Json,
     Temporal,
     Array,
@@ -277,6 +279,48 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         Format::Binary,
     )
     .codecs(Codec::Uuid, Codec::Uuid),
+    row(
+        "inet",
+        Matcher::Oid(869),
+        "ipaddress.IPv4Interface | ipaddress.IPv6Interface",
+        TzRule::None,
+        &[
+            "IPv4Interface",
+            "IPv6Interface",
+            "IPv4Address",
+            "IPv6Address",
+            "str",
+        ],
+        Format::Binary,
+    )
+    .codecs(Codec::Network, Codec::Network),
+    row(
+        "cidr",
+        Matcher::Oid(650),
+        "ipaddress.IPv4Network | ipaddress.IPv6Network",
+        TzRule::None,
+        &["IPv4Network", "IPv6Network", "str"],
+        Format::Binary,
+    )
+    .codecs(Codec::Network, Codec::Network),
+    row(
+        "macaddr",
+        Matcher::Oid(829),
+        "str",
+        TzRule::None,
+        STR,
+        Format::Binary,
+    )
+    .codecs(Codec::Mac, Codec::Mac),
+    row(
+        "macaddr8",
+        Matcher::Oid(774),
+        "str",
+        TzRule::None,
+        STR,
+        Format::Binary,
+    )
+    .codecs(Codec::Mac, Codec::Mac),
     // json/jsonb results take the user's annotation (docs/design/checker.md, rules), so the leaf is `object`
     row(
         "json",

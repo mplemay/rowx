@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import ipaddress
 import struct
 from dataclasses import dataclass
 from decimal import Decimal
@@ -21,8 +22,8 @@ TYPES_DOC: Final[Path] = Path(__file__).resolve().parents[6] / "docs" / "types.m
 DOC_HEADING: Final[str] = "## Differences from psycopg"
 
 # how a case may differ from psycopg: equal as instants, equal after rounding to float32, rowx raising DecodeError,
-# or rowx returning None for void
-type Difference = Literal["instant", "float32", "decode-error", "void"]
+# rowx returning None for void, or rowx returning an interface where psycopg returns the bare host address
+type Difference = Literal["instant", "float32", "decode-error", "void", "host-address"]
 
 # the same list the generator writes into docs/types.md; test_difference_list_matches_doc keeps them in step
 DIFFERENCES: Final[dict[str, str]] = {
@@ -40,6 +41,10 @@ DIFFERENCES: Final[dict[str, str]] = {
     "date": "An infinite date raises `DecodeError`, while psycopg raises its own `DataError`.",
     "timestamp": "An infinite timestamp raises `DecodeError`, while psycopg raises its own `DataError`.",
     "void": "`void` decodes to `None`, while psycopg returns an empty string.",
+    "inet": (
+        "rowx always returns an interface, even for a full-width mask, while psycopg returns an address for `/32` and "
+        "`/128`; the interface's `ip` is that address."
+    ),
 }
 
 
@@ -123,6 +128,11 @@ CORPUS: Final[list[Case]] = [
     ),
     *_cases("interval", "interval", "1 mon", "1 year", "-178000000 years", "1 mon 1 day", difference="decode-error"),
     *_cases("uuid", "uuid", "00000000-0000-0000-0000-000000000000", "ffffffff-ffff-ffff-ffff-ffffffffffff"),
+    *_cases("inet", "inet", "10.0.0.1/24", "0.0.0.0/0", "::/0", "2001:db8::1/64", "255.255.255.255/31"),
+    *_cases("inet", "inet", "127.0.0.1", "::1", "::ffff:1.2.3.4", "1.2.3.4/32", difference="host-address"),
+    *_cases("cidr", "cidr", "10.0.0.0/8", "0.0.0.0/0", "::/0", "2001:db8::/32", "192.168.1.1/32", "::1/128"),
+    *_cases("macaddr", "macaddr", "08:00:2b:01:02:03", "FF-FF-FF-FF-FF-FF", "08002b010203", "0800.2b01.0203"),
+    *_cases("macaddr8", "macaddr8", "08:00:2b:01:02:03:04:05", "08:00:2b:01:02:03", "0800.2b01.0203.0405"),
     *_cases("json", "json", "null", "[]", '{"a": [1, null, "x"]}', '"é"', "1.5e3", "  [ 1 , 2 ]  "),
     *_cases("jsonb", "jsonb", "null", "[]", '{"a": [1, null, "x"], "b": {}}', "12345678901234567890", "1.50"),
     *_cases("enum", "mood", "happy", "ok"),
@@ -147,6 +157,10 @@ CORPUS: Final[list[Case]] = [
     *_cases("array", "timestamptz[]", '{"2024-01-02 03:04:05+00",NULL}', difference="instant"),
     *_cases("array", "jsonb[]", '{"{\\"a\\": 1}",NULL}'),
     *_cases("array", "float8[]", "{NaN,Infinity,-0}"),
+    *_cases("array", "cidr[]", "{10.0.0.0/8,NULL,2001:db8::/32}"),
+    *_cases("array", "macaddr[]", "{08:00:2b:01:02:03,NULL}"),
+    *_cases("array", "macaddr8[]", "{08:00:2b:01:02:03:04:05,NULL}"),
+    *_cases("array", "inet[]", "{{10.0.0.1/24,NULL},{2001:db8::1/64,10.0.0.2/24}}"),
     *_cases("void", "void", "", difference="void"),
 ]
 
@@ -243,6 +257,13 @@ def test_decode_matches_psycopg(schema: str, case: Case) -> None:
             assert float32_equal(rowx_value, psycopg_value), (rowx_value, psycopg_value)
         case "decode-error":
             assert status == "error", rowx_value
+        case "host-address":
+            _, psycopg_value = _psycopg_outcome(schema, sql)
+            assert status == "ok", rowx_value
+            assert isinstance(rowx_value, ipaddress.IPv4Interface | ipaddress.IPv6Interface)
+            assert isinstance(psycopg_value, ipaddress.IPv4Address | ipaddress.IPv6Address)
+            assert rowx_value.ip == psycopg_value
+            assert rowx_value.network.num_addresses == 1
         case "void":
             assert (status, rowx_value) == ("ok", None)
             assert _psycopg_outcome(schema, sql) == ("ok", "")

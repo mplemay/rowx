@@ -37,7 +37,7 @@ FOOTER: Final[str] = """
   both match, at every nesting level.
 - `void` decodes to `None` and is only valid as a tuple element.
 - Any type not listed here is `unsupported-type` in the checker and raises `DecodeError` at runtime (for example
-  `money`, `inet`, ranges, composites and `xml`).
+  `money`, ranges, composites and `xml`).
 
 ## Differences from psycopg
 
@@ -53,6 +53,8 @@ that this list matches the one it checks.
 - `date`: An infinite date raises `DecodeError`, while psycopg raises its own `DataError`.
 - `timestamp`: An infinite timestamp raises `DecodeError`, while psycopg raises its own `DataError`.
 - `void`: `void` decodes to `None`, while psycopg returns an empty string.
+- `inet`: rowx always returns an interface, even for a full-width mask, while psycopg returns an address for `/32` and
+  `/128`; the interface's `ip` is that address.
 """
 
 TZ_LABELS: Final[dict[str, str]] = {"none": "", "aware": "aware", "naive": "naive"}
