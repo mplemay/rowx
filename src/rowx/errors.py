@@ -7,6 +7,7 @@ __all__: Final[list[str]] = [
     "EncodeError",
     "Error",
     "InterfaceError",
+    "PoolTimeoutError",
     "RowNotFound",
     "RowShapeError",
 ]
@@ -21,6 +22,10 @@ class InterfaceError(Error):
 
 
 class ConnectionBusyError(InterfaceError):
+    pass
+
+
+class PoolTimeoutError(InterfaceError):
     pass
 
 

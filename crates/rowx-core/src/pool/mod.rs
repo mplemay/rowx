@@ -253,9 +253,10 @@ impl<M: Manage> Inner<M> {
                 .map_or(remaining, |each| each.min(remaining));
             if let Ok(Ok(conn)) = tokio::time::timeout(limit, self.manager.connect()).await {
                 self.size.fetch_add(1, Ordering::AcqRel);
+                // no caller has initialised it yet either, so the `init` hook still has to run
                 return Ok(Parts {
                     conn,
-                    meta: self.meta(false),
+                    meta: self.meta(true),
                 });
             }
             tokio::time::sleep_until((Instant::now() + pause).min(deadline)).await;

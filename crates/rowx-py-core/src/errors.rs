@@ -5,6 +5,7 @@ use rowx_core::error::CoreError;
 
 static INTERFACE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DATABASE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static POOL_TIMEOUT_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static BUSY_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ROW_SHAPE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DECODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -34,6 +35,7 @@ pub fn init(py: Python<'_>) -> PyResult<()> {
     class(py, &INTERFACE_ERROR, "InterfaceError")?;
     class(py, &DATABASE_ERROR, "DatabaseError")?;
     class(py, &BUSY_ERROR, "ConnectionBusyError")?;
+    class(py, &POOL_TIMEOUT_ERROR, "PoolTimeoutError")?;
     class(py, &ROW_SHAPE_ERROR, "RowShapeError")?;
     class(py, &DECODE_ERROR, "DecodeError")?;
     class(py, &ENCODE_ERROR, "EncodeError")?;
@@ -64,6 +66,11 @@ pub fn interface_error(py: Python<'_>, message: &str) -> PyErr {
 #[must_use]
 pub fn busy_error(py: Python<'_>, message: &str) -> PyErr {
     build(py, &BUSY_ERROR, "ConnectionBusyError", (message,))
+}
+
+#[must_use]
+pub fn pool_timeout_error(py: Python<'_>, message: &str) -> PyErr {
+    build(py, &POOL_TIMEOUT_ERROR, "PoolTimeoutError", (message,))
 }
 
 #[must_use]
@@ -103,10 +110,9 @@ pub fn database_error(
 pub fn core_to_py_err(py: Python<'_>, err: CoreError) -> PyErr {
     match err {
         CoreError::Busy => busy_error(py, &err.to_string()),
-        // PoolTimeoutError (#77) will get its own class; until then the pool errors are interface errors
+        CoreError::PoolTimeout => pool_timeout_error(py, &err.to_string()),
         CoreError::Closed
         | CoreError::Broken
-        | CoreError::PoolTimeout
         | CoreError::PoolClosed
         | CoreError::StaleLease
         | CoreError::Forked => interface_error(py, &err.to_string()),

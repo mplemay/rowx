@@ -1,21 +1,23 @@
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
-use rowx_core::state::State;
+use rowx_core::state::{Claim, State};
 use rowx_postgres::Type;
 use rowx_postgres::cancel::{self, Cancel, Hook, StreamHandle};
 use rowx_postgres::conn::Connection as PgConnection;
 use rowx_postgres::error::Error;
 use rowx_postgres::exec::{self as pg, Batch, Shape};
+use rowx_postgres::pool::{Pool as PgPool, Pooled};
 use tokio::sync::{Notify, mpsc};
 
 use crate::codec::{self, PyParam};
-use crate::errors::to_py_err;
-use crate::exec::{decode_row, fail, note_sql, settle_claim, watch};
+use crate::errors::{PgError, to_py_err};
+use crate::exec::{Access, decode_row, note_sql, watch};
 
 type Msg = Result<Batch, Error>;
 
@@ -26,6 +28,13 @@ pub struct StreamArgs {
     pub scalar: bool,
     pub arity: Option<usize>,
     pub batch_size: usize,
+}
+
+// how the first `_next` gets its connection
+#[derive(Debug)]
+enum Starting {
+    Claimed(Start, Option<Claim>),
+    Acquire(Start),
 }
 
 #[derive(Debug)]
@@ -47,6 +56,10 @@ struct Shared {
     rows_affected: Mutex<Option<u64>>,
     // the error of a batch whose earlier rows were already handed over
     pending: Mutex<Option<PyErr>>,
+    // a pool's checkout, held until the stream is over; dropping it releases the connection
+    // type-erased: dropping it releases the checkout, and clippy would otherwise treat every
+    // `RowStream` as holding a significant drop
+    pooled: Mutex<Option<Box<dyn Any + Send>>>,
 }
 
 impl Shared {
@@ -60,6 +73,16 @@ impl Shared {
         }
         if let Some(handle) = self.handle.lock().ok().and_then(|mut slot| slot.take()) {
             handle.release();
+        }
+        // after the claim, so the release finds the connection no longer claimed; it still waits
+        // for a producer that is draining what is left
+        let pooled = self.pooled.lock().ok().and_then(|mut slot| slot.take());
+        drop(pooled);
+    }
+
+    fn hold(&self, pooled: Pooled) {
+        if let Ok(mut slot) = self.pooled.lock() {
+            *slot = Some(Box::new(pooled));
         }
     }
 
@@ -75,7 +98,9 @@ impl Shared {
 #[pyclass(frozen, module = "rowx._core.postgres", name = "RowStream")]
 #[derive(Debug)]
 pub struct RowStream {
-    cancel: Cancel,
+    // known from the start for a connection; a pool's stream learns it at its first `_next`
+    target: Arc<OnceLock<(Cancel, Access)>>,
+    pool: Option<PgPool>,
     hook: Hook,
     scalar: bool,
     start: Mutex<Option<Start>>,
@@ -89,13 +114,40 @@ impl RowStream {
     pub fn new(
         py: Python<'_>,
         cancel: &Cancel,
+        access: &Access,
+        params: &Bound<'_, PyList>,
+        args: StreamArgs,
+    ) -> PyResult<Self> {
+        let target = Arc::new(OnceLock::new());
+        let _ = target.set((cancel.clone(), access.clone()));
+        Self::build(py, target, None, params, args)
+    }
+
+    /// A stream on a pool: the connection is acquired by the first `_next`.
+    ///
+    /// # Errors
+    /// `EncodeError`/`InterfaceError` when a parameter cannot be extracted.
+    pub fn for_pool(
+        py: Python<'_>,
+        pool: PgPool,
+        params: &Bound<'_, PyList>,
+        args: StreamArgs,
+    ) -> PyResult<Self> {
+        Self::build(py, Arc::new(OnceLock::new()), Some(pool), params, args)
+    }
+
+    fn build(
+        py: Python<'_>,
+        target: Arc<OnceLock<(Cancel, Access)>>,
+        pool: Option<PgPool>,
         params: &Bound<'_, PyList>,
         args: StreamArgs,
     ) -> PyResult<Self> {
         let params = codec::extract(py, params)?;
         let (tx, rx) = mpsc::channel(1);
         Ok(Self {
-            cancel: cancel.clone(),
+            target,
+            pool,
             hook: Hook::default(),
             scalar: args.scalar,
             start: Mutex::new(Some(Start { args, params, tx })),
@@ -122,32 +174,67 @@ impl RowStream {
             return Err(err);
         }
         if self.shared.is_finished() || self.shared.is_cancelled() {
+            // a cancelled stream is over, so a pool's connection goes back now
+            self.shared.finish();
             return future_into_py(py, async { Ok(empty()) });
         }
         let first = self.start.lock().ok().and_then(|mut slot| slot.take());
+        let known = self.target.get().cloned();
         // claimed synchronously so a second call made before the first is awaited fails immediately
-        let starting = match first {
-            Some(start) => match self.cancel.state.claim() {
+        let starting = match (first, &known) {
+            (Some(start), Some((cancel, access))) => match access.claim(&cancel.state) {
                 Ok(claim) => {
-                    note_sql(&self.cancel.state, &start.args.sql);
-                    Some((start, claim))
+                    note_sql(&cancel.state, &start.args.sql);
+                    Some(Starting::Claimed(start, claim))
                 }
                 Err(e) => {
                     self.shared.finish();
                     return Err(to_py_err(py, &e.into()));
                 }
             },
-            None => None,
+            (Some(start), None) => Some(Starting::Acquire(start)),
+            (None, _) => None,
         };
-        let cancel = self.cancel.clone();
+        // a later call made while a pool's first call is still acquiring finds no connection yet
+        if starting.is_none() && known.is_none() {
+            return Err(to_py_err(py, &CoreError::Busy.into()));
+        }
+        let target = Arc::clone(&self.target);
+        let pool = self.pool.clone();
         let hook = self.hook.clone();
         let rx = Arc::clone(&self.rx);
         let shared = Arc::clone(&self.shared);
         let scalar = self.scalar;
         let future = future_into_py(py, async move {
-            if let Some((start, claim)) = starting {
-                let claim = settle_claim(&cancel.state, claim).await?;
+            if let Some(starting) = starting {
+                let (start, claim, cancel, access) = match starting {
+                    Starting::Claimed(start, claim) => {
+                        let Some((cancel, access)) = target.get().cloned() else {
+                            return Err(PgError(Error::Core(CoreError::Closed)).into());
+                        };
+                        (start, claim, cancel, access)
+                    }
+                    Starting::Acquire(start) => {
+                        let Some(pool) = pool else {
+                            return Err(PgError(Error::Core(CoreError::Closed)).into());
+                        };
+                        let Some((cancel, access)) =
+                            acquire(pool, &shared, &target, &start).await?
+                        else {
+                            return Ok(empty());
+                        };
+                        (start, None, cancel, access)
+                    }
+                };
+                let claim = match access.settle_claim(&cancel.state, claim).await {
+                    Ok(claim) => claim,
+                    Err(e) => {
+                        shared.finish();
+                        return Err(e.into());
+                    }
+                };
                 if shared.is_finished() {
+                    shared.finish();
                     return Ok(empty());
                 }
                 let inner = Arc::clone(&cancel.backend.conn);
@@ -165,7 +252,10 @@ impl RowStream {
                     return Ok(empty());
                 }
             }
-            receive(&cancel, &rx, &shared, scalar).await
+            let Some((cancel, access)) = target.get().cloned() else {
+                return Err(PgError(Error::Core(CoreError::Closed)).into());
+            };
+            receive(&cancel, &access, &rx, &shared, scalar).await
         })?;
         watch(&future, self.hook.clone())?;
         watch_cancelled(&future, Arc::clone(&self.shared))?;
@@ -180,6 +270,44 @@ impl RowStream {
     fn close(&self) {
         self.shared.finish();
     }
+}
+
+// takes a connection from the pool for the first `_next` and keeps the checkout in `shared`, so the
+// end of the stream releases it; `None` when the stream was closed or cancelled while it waited
+async fn acquire(
+    pool: PgPool,
+    shared: &Shared,
+    target: &OnceLock<(Cancel, Access)>,
+    start: &Start,
+) -> PyResult<Option<(Cancel, Access)>> {
+    match pool.acquire().await {
+        Ok(pooled) => adopt(pooled, pool, shared, target, start),
+        Err(e) => {
+            shared.finish();
+            Err(PgError(e.into()).into())
+        }
+    }
+}
+
+fn adopt(
+    pooled: Pooled,
+    pool: PgPool,
+    shared: &Shared,
+    target: &OnceLock<(Cancel, Access)>,
+    start: &Start,
+) -> PyResult<Option<(Cancel, Access)>> {
+    if shared.is_finished() || shared.is_cancelled() {
+        return Ok(None);
+    }
+    let cancel = pooled.conn().map_err(PgError::from)?.cancel.clone();
+    let access = Access {
+        lease: Some(pooled.lease()),
+        pool: Some(pool),
+    };
+    let _ = target.set((cancel.clone(), access.clone()));
+    shared.hold(pooled);
+    note_sql(&cancel.state, &start.args.sql);
+    Ok(Some((cancel, access)))
 }
 
 // registered after `watch`, so the cancel path has started when the flag is seen; a cancelled
@@ -204,6 +332,7 @@ fn empty() -> Py<PyAny> {
 
 async fn receive(
     cancel: &Cancel,
+    access: &Access,
     rx: &tokio::sync::Mutex<mpsc::Receiver<Msg>>,
     shared: &Shared,
     scalar: bool,
@@ -253,7 +382,7 @@ async fn receive(
             } else {
                 err
             };
-            Err(fail(&cancel.state, err).into())
+            Err(access.fail(&cancel.state, err).into())
         }
         None => {
             shared.finish();

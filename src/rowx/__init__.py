@@ -7,6 +7,7 @@ from rowx.errors import (
     EncodeError,
     Error,
     InterfaceError,
+    PoolTimeoutError,
     RowNotFound,
     RowShapeError,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "Error",
     "Executor",
     "InterfaceError",
+    "PoolTimeoutError",
     "QueryResult",
     "RowNotFound",
     "RowShapeError",
