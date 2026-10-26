@@ -2,11 +2,12 @@ import ast
 import warnings
 from pathlib import Path
 from textwrap import dedent
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
-from rowx._template import compile_template
+from rowx.__tests__.sourcegen import Case, Placed, build_case, line_col, random_atoms, seeded
+from rowx._template import compile_parts, compile_template
 from rowx.check.discover import discover_source
 from rowx.check.sourcemap import SourceMap, SourceMapper
 
@@ -229,3 +230,65 @@ def test_unknown_escape_keeps_backslash() -> None:
         sm, src = build(source)
     assert sm.sql == "a\\q b"
     assert [text_at(src, sm.locate(i + 1)) for i in range(len(sm.sql))] == ["a", "\\", "q", " ", "b"]
+
+
+SEEDS: Final = range(400)
+
+
+def generated_sql(source: str) -> str:
+    with warnings.catch_warnings():
+        # a generated unknown escape is a SyntaxWarning, which pytest turns into an error
+        warnings.simplefilter("ignore", SyntaxWarning)
+        tree = ast.parse(source)
+    call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and n.args)
+    code = compile(ast.Expression(call.args[0]), "<case>", "eval")
+    namespace = {"x": 1, "y": 2, "f": lambda *_: 3}
+    compiled, _ = compile_template(eval(code, namespace), dynamic=False)  # ruff: ignore[suspicious-eval-usage]
+    return compiled.sql
+
+
+def assert_span(case: Case, span: Span, placed: Placed) -> None:
+    assert (span.line, span.col) == line_col(case.source, placed.offset), placed
+    # `{{` and `}}` are two source characters for one decoded one
+    if not placed.loose:
+        assert (span.end_line, span.end_col) == line_col(case.source, placed.offset + placed.length), placed
+
+
+def map_case(case: Case) -> SourceMap:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        result = discover_source(Path("m.py"), case.source.encode())
+    assert not result.diagnostics
+    template = result.calls[0].template
+    assert template is not None
+    return SourceMapper(case.source).build(template)
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_generated_sql_and_carets_match_the_runtime(seed: int) -> None:
+    rng = seeded(seed)
+    case = build_case(rng, random_atoms(rng), safe=False)
+    sm = map_case(case)
+    # the compiled SQL is what the runtime builds from the evaluated t-string
+    assert sm.sql == generated_sql(case.source), case.source
+    assert all(sm.exact), case.source
+    assert len(sm.spans) == len(sm.sql)
+    assert len(sm.holes) == len(case.holes)
+    compiled = compile_parts(["".join(p.text for p in segment) for segment in case.segments])
+    assert compiled.sql == sm.sql
+    for index, (segment, (begin, finish)) in enumerate(zip(case.segments, compiled.segments, strict=True)):
+        text = "".join(p.text for p in segment)
+        # a space is inserted before an identifier character that follows a placeholder
+        lead = 0 if sm.sql[begin : begin + len(text)] == text else 1
+        for offset in range(begin, finish):
+            span = sm.spans[offset]
+            slot = offset - begin - lead
+            if 0 <= slot < len(segment):
+                assert_span(case, span, segment[slot])
+            elif slot < 0:
+                assert_span(case, span, case.holes[index - 1])
+            else:
+                assert_span(case, span, case.holes[index])
+    for hole, (begin, finish) in zip(case.holes, compiled.placeholders, strict=True):
+        for offset in range(begin, finish):
+            assert_span(case, sm.spans[offset], hole)
