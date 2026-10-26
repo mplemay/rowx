@@ -1,0 +1,79 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Grouping Sets": [
+        {
+          "Group Keys": [
+            [
+              "t0.id"
+            ],
+            []
+          ]
+        }
+      ],
+      "Node Type": "Aggregate",
+      "Output": [
+        "t0.id",
+        "count(*)"
+      ],
+      "Parallel Aware": false,
+      "Partial Mode": "Simple",
+      "Plans": [
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Inner Unique": false,
+          "Join Type": "Left",
+          "Node Type": "Nested Loop",
+          "Output": [
+            "t0.id"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Plans": [
+            {
+              "Alias": "t0",
+              "Async Capable": false,
+              "Disabled": false,
+              "Filter": "(t0.email IS NOT NULL)",
+              "Index Name": "users_pkey",
+              "Node Type": "Index Scan",
+              "Output": [
+                "t0.id",
+                "t0.name",
+                "t0.email"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer",
+              "Relation Name": "users",
+              "Scan Direction": "Forward",
+              "Schema": "probe"
+            },
+            {
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Materialize",
+              "Parallel Aware": false,
+              "Parent Relationship": "Inner",
+              "Plans": [
+                {
+                  "Alias": "t2",
+                  "Async Capable": false,
+                  "Disabled": false,
+                  "Node Type": "Seq Scan",
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Relation Name": "users",
+                  "Schema": "probe"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "Strategy": "Sorted"
+    }
+  }
+]

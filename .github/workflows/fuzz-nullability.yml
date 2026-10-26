@@ -1,0 +1,85 @@
+name: Fuzz nullability
+
+# nightly-only and non-blocking: it never runs on pull requests and no branch protection depends on it. The seeded
+# soundness run that gates pull requests is part of `just test-py`
+on:
+  schedule:
+    - cron: "47 4 * * *"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: Statements to generate
+        default: "5000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-nullability
+  cancel-in-progress: true
+
+env:
+  UV_NO_SYNC: "1"
+
+jobs:
+  fuzz:
+    name: Fuzz nullability
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: rowx
+          POSTGRES_PASSWORD: rowx
+          POSTGRES_DB: rowx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rowx -d rowx"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ROWX_REQUIRE_DB: "1"
+      ROWX_TEST_DSN: postgresql://rowx:rowx@localhost:5432/rowx
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install the dependencies
+        run: uv sync --all-groups --no-install-project
+
+      - name: Build the extension
+        run: uv run maturin develop
+
+      # a random seed per run: a failure prints it, and ROWX_FUZZ_SEED replays it
+      - name: Fuzz and report precision
+        env:
+          ROWX_FUZZ_REPORT: "1"
+          ROWX_FUZZ_COUNT: ${{ inputs.count || '5000' }}
+        run: |
+          ROWX_FUZZ_SEED="$RANDOM"
+          export ROWX_FUZZ_SEED
+          echo "seed: $ROWX_FUZZ_SEED"
+          uv run pytest src/rowx/__tests__/integration/describe/test_nullability_fuzz.py -s

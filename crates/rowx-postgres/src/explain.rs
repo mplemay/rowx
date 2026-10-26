@@ -63,7 +63,9 @@ fn children(node: &Value) -> impl Iterator<Item = &Value> {
 fn null_extends(join_type: Option<&str>, child: &Value) -> bool {
     matches!(
         (join_type, str_key(child, "Parent Relationship")),
-        (Some("Full"), _) | (Some("Left"), Some("Inner")) | (Some("Right"), Some("Outer"))
+        (Some("Full"), _)
+            | (Some("Left" | "Anti"), Some("Inner"))
+            | (Some("Right" | "Right Anti"), Some("Outer"))
     )
 }
 
@@ -185,6 +187,24 @@ mod join {
     #[test]
     fn anti_join_does_not_null_extend() {
         assert_eq!(nullable_flags("join_anti", 1), [false]);
+    }
+
+    // the executor feeds a null tuple for the inner side of an anti join, so its columns are NULL in the output
+    #[test]
+    fn anti_join_null_extends_the_inner_columns_it_outputs() {
+        assert_eq!(nullable_flags("join_anti_null_extended", 1), [true]);
+    }
+
+    // a sorted rollup chain is one "Grouping Sets" entry that lists every set under "Group Keys"
+    #[test]
+    fn sorted_cube_chain_marks_grouping_sets() {
+        assert_eq!(
+            reasons("grouping_cube_chain", 2),
+            [
+                Some(NullReason::GroupingSets),
+                Some(NullReason::GroupingSets)
+            ]
+        );
     }
 
     #[test]

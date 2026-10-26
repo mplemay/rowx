@@ -1,0 +1,60 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Hash Cond": "(t1.email = t0.email)",
+      "Inner Unique": false,
+      "Join Type": "Anti",
+      "Node Type": "Hash Join",
+      "Output": [
+        "t0.name"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Alias": "t1",
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Seq Scan",
+          "Output": [
+            "t1.id",
+            "t1.name",
+            "t1.email"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Relation Name": "users",
+          "Schema": "probe"
+        },
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Hash",
+          "Output": [
+            "t0.name",
+            "t0.email"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Inner",
+          "Plans": [
+            {
+              "Alias": "t0",
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Seq Scan",
+              "Output": [
+                "t0.name",
+                "t0.email"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer",
+              "Relation Name": "users",
+              "Schema": "probe"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]
