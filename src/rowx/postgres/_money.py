@@ -8,4 +8,5 @@ class Money:
     minor_units: int
 
     def to_decimal(self, scale: int) -> Decimal:
-        return Decimal(self.minor_units).scaleb(-scale)
+        # built from text so the active decimal context never rounds the digits
+        return Decimal(f"{self.minor_units}E{-scale}")

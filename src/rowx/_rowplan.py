@@ -151,11 +151,14 @@ def _elem(t: object) -> bool:
 
 def _is_interval_elem(t: object) -> bool:
     # `Interval` and `Interval | None`, also inside lists, since the codec choice covers array elements
-    t = _unwrap(t)
-    if get_origin(t) is list:
-        return _is_interval_elem(get_args(t)[0])
-    members, _ = _flatten(t)
-    return len(members) == 1 and _is_interval(members[0])
+    members, _ = _flatten(_unwrap(t))
+    if len(members) != 1:
+        return False
+    # flatten first so `list[Interval] | None` is seen as the list it wraps
+    (member,) = members
+    if get_origin(member) is list:
+        return _is_interval_elem(get_args(member)[0])
+    return _is_interval(member)
 
 
 def _build(t: object) -> RowPlan:

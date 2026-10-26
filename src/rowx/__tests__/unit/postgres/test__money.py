@@ -1,5 +1,5 @@
 import dataclasses
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -21,6 +21,13 @@ def test_to_decimal_places_the_point_at_the_callers_scale(minor_units: int, scal
     got = Money(minor_units).to_decimal(scale)
     assert got == expected
     assert got.as_tuple().exponent == -scale
+
+
+def test_to_decimal_ignores_the_active_decimal_precision() -> None:
+    with localcontext() as ctx:
+        ctx.prec = 6
+        assert Money(123_456_789).to_decimal(2) == Decimal("1234567.89")
+        assert Money(2**63 - 1).to_decimal(2).as_tuple().digits == tuple(int(c) for c in str(2**63 - 1))
 
 
 def test_money_has_no_scale_of_its_own() -> None:
