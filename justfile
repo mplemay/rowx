@@ -28,6 +28,12 @@ bench:
     uv run --no-sync maturin develop --release
     uv run --no-sync python bench/fetch_100k.py
 
+# release build plus bench/fetch_drivers.py; needs ROWX_TEST_DSN
+bench-drivers:
+    uv sync --group bench-drivers --no-install-project
+    uv run --no-sync maturin develop --release
+    uv run --no-sync python bench/fetch_drivers.py
+
 # format rust, python, and shell through prek
 fmt:
     uv run prek run cargo-fmt --all-files
