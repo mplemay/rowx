@@ -99,6 +99,74 @@ pub fn decode(raw: &[u8]) -> Result<Array<'_>, ArrayError> {
     })
 }
 
+/// Binary form of an array; an empty `dims` is the zero-dimensional empty array.
+///
+/// # Errors
+/// `TooLarge` when a count or an element length does not fit the 4-byte wire fields.
+pub fn encode(
+    element_oid: u32,
+    dims: &[usize],
+    elements: &[Option<&[u8]>],
+) -> Result<Vec<u8>, ArrayError> {
+    let wide = |n: usize| i32::try_from(n).map_err(|_| ArrayError::TooLarge);
+    let has_null = elements.iter().any(Option::is_none);
+    let mut out = Vec::new();
+    out.extend_from_slice(&wide(dims.len())?.to_be_bytes());
+    out.extend_from_slice(&i32::from(has_null).to_be_bytes());
+    out.extend_from_slice(&element_oid.to_be_bytes());
+    for &len in dims {
+        out.extend_from_slice(&wide(len)?.to_be_bytes());
+        out.extend_from_slice(&1_i32.to_be_bytes());
+    }
+    for element in elements {
+        match element {
+            None => out.extend_from_slice(&(-1_i32).to_be_bytes()),
+            Some(raw) => {
+                out.extend_from_slice(&wide(raw.len())?.to_be_bytes());
+                out.extend_from_slice(raw);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Text literal of a row-major element list, every element quoted; `None` is `NULL`.
+#[must_use]
+pub fn encode_literal(dims: &[usize], elements: &[Option<&[u8]>]) -> String {
+    fn level(out: &mut String, elements: &mut std::slice::Iter<'_, Option<&[u8]>>, dims: &[usize]) {
+        let Some((&len, rest)) = dims.split_first() else {
+            return;
+        };
+        out.push('{');
+        for index in 0..len {
+            if index > 0 {
+                out.push(',');
+            }
+            if rest.is_empty() {
+                match elements.next().copied().flatten() {
+                    None => out.push_str("NULL"),
+                    Some(raw) => {
+                        out.push('"');
+                        for ch in String::from_utf8_lossy(raw).chars() {
+                            if matches!(ch, '"' | '\\') {
+                                out.push('\\');
+                            }
+                            out.push(ch);
+                        }
+                        out.push('"');
+                    }
+                }
+            } else {
+                level(out, elements, rest);
+            }
+        }
+        out.push('}');
+    }
+    let mut out = String::new();
+    level(&mut out, &mut elements.iter(), dims);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +298,148 @@ mod tests {
         raw.extend(dim(i32::MAX, 1));
         raw.extend(dim(i32::MAX, 1));
         assert!(decode(&raw).is_err());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    type Elements = Vec<Option<Vec<u8>>>;
+
+    // rectangular shapes of up to three dimensions, each length 0..=3, with a matching flat element list
+    fn shaped() -> impl Strategy<Value = (Vec<usize>, Elements)> {
+        prop::collection::vec(0usize..4, 0..=3).prop_flat_map(|dims| {
+            let total = if dims.is_empty() {
+                0
+            } else {
+                dims.iter().product()
+            };
+            let elements = prop::collection::vec(
+                prop::option::of(prop::collection::vec(any::<u8>(), 0..6)),
+                total,
+            );
+            (Just(dims), elements)
+        })
+    }
+
+    fn borrowed(elements: &Elements) -> Vec<Option<&[u8]>> {
+        elements.iter().map(Option::as_deref).collect()
+    }
+
+    proptest! {
+        #[test]
+        fn encode_then_decode_is_the_identity(
+            oid in any::<u32>(),
+            (dims, elements) in shaped(),
+        ) {
+            let raw = encode(oid, &dims, &borrowed(&elements));
+            prop_assert!(raw.is_ok());
+            let raw = raw.unwrap_or_default();
+            let decoded = decode(&raw);
+            prop_assert!(decoded.is_ok());
+            let decoded = decoded.unwrap_or(Array { element_oid: 0, dims: vec![], elements: vec![] });
+            prop_assert_eq!(decoded.element_oid, oid);
+            prop_assert_eq!(decoded.dims, dims);
+            prop_assert_eq!(decoded.elements, borrowed(&elements));
+        }
+
+        #[test]
+        fn the_null_flag_follows_the_elements((dims, elements) in shaped()) {
+            let raw = encode(23, &dims, &borrowed(&elements)).unwrap_or_default();
+            let flag = i32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]);
+            prop_assert_eq!(flag, i32::from(elements.iter().any(Option::is_none)));
+        }
+
+        #[test]
+        fn any_lower_bounds_decode_to_the_same_array(
+            (dims, elements) in shaped(),
+            lower in any::<i32>(),
+        ) {
+            let mut raw = encode(23, &dims, &borrowed(&elements)).unwrap_or_default();
+            for index in 0..dims.len() {
+                let at = HEADER_LEN + index * 8 + 4;
+                raw.splice(at..at + 4, lower.to_be_bytes());
+            }
+            let decoded = decode(&raw);
+            prop_assert_eq!(decoded.map(|a| (a.dims, a.elements.len())), Ok((dims, elements.len())));
+        }
+
+        #[test]
+        fn every_strict_prefix_of_an_encoding_is_rejected(
+            (dims, elements) in shaped(),
+            cut in 0usize..256,
+        ) {
+            let raw = encode(23, &dims, &borrowed(&elements)).unwrap_or_default();
+            let cut = cut % raw.len().max(1);
+            prop_assert!(decode(&raw[..cut]).is_err());
+        }
+
+        #[test]
+        fn a_ragged_encoding_is_rejected(
+            (dims, elements) in shaped(),
+            extra in 1usize..3,
+        ) {
+            // claim more elements than the body carries
+            prop_assume!(!dims.is_empty() && dims.iter().all(|&d| d > 0));
+            let mut bigger = dims;
+            bigger[0] += extra;
+            let raw = encode(23, &bigger, &borrowed(&elements)).unwrap_or_default();
+            prop_assert!(decode(&raw).is_err());
+        }
+
+        #[test]
+        fn decoding_random_bytes_never_panics(raw in prop::collection::vec(any::<u8>(), 0..96)) {
+            let _ = decode(&raw);
+        }
+
+        #[test]
+        fn decoding_a_valid_header_with_random_body_never_panics(
+            ndim in 0i32..=6,
+            body in prop::collection::vec(any::<u8>(), 0..96),
+        ) {
+            let mut raw = Vec::new();
+            raw.extend_from_slice(&ndim.to_be_bytes());
+            raw.extend_from_slice(&0i32.to_be_bytes());
+            raw.extend_from_slice(&23i32.to_be_bytes());
+            raw.extend_from_slice(&body);
+            let _ = decode(&raw);
+        }
+
+        #[test]
+        fn the_literal_has_one_brace_pair_per_level((dims, _) in shaped()) {
+            prop_assume!(!dims.is_empty());
+            // NULL elements keep braces in the payload out of the count
+            let total = dims.iter().product();
+            let nulls: Vec<Option<&[u8]>> = vec![None; total];
+            let text = encode_literal(&dims, &nulls);
+            let mut groups = 1;
+            let mut level = 1;
+            for &d in &dims[..dims.len() - 1] {
+                level *= d;
+                groups += level;
+            }
+            prop_assert_eq!(text.matches('{').count(), groups);
+            prop_assert_eq!(text.matches('}').count(), groups);
+            prop_assert_eq!(text.matches("NULL").count(), total);
+        }
+    }
+
+    #[test]
+    fn zero_dimensions_encode_the_empty_array() {
+        assert_eq!(
+            encode(25, &[], &[]).map(|raw| decode(&raw).map(|a| a.dims)),
+            Ok(Ok(vec![]))
+        );
+    }
+
+    #[test]
+    fn a_literal_quotes_and_escapes_elements() {
+        let elements: Vec<Option<&[u8]>> = vec![Some(b"a\"b\\c"), None, Some(b"NULL"), Some(b"")];
+        assert_eq!(
+            encode_literal(&[4], &elements),
+            "{\"a\\\"b\\\\c\",NULL,\"NULL\",\"\"}"
+        );
     }
 }

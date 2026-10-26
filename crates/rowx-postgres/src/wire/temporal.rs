@@ -26,6 +26,12 @@ pub enum TemporalError {
     Offset(i32),
     #[error("interval has a non-zero months component, which a timedelta cannot hold; {HINT}")]
     IntervalMonths,
+    #[error("the {0} is out of range")]
+    OutOfRange(&'static str),
+    #[error("the UTC offset must be a whole number of seconds")]
+    OffsetFraction,
+    #[error("the UTC offset is out of range for timetz")]
+    OffsetRange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +197,89 @@ pub fn decode_interval(raw: &[u8]) -> Result<Interval, TemporalError> {
         return Err(TemporalError::IntervalMonths);
     }
     Ok(Interval { days, microseconds })
+}
+
+// postgres rejects a timetz offset beyond ±15:59:59
+const MAX_TIMETZ_OFFSET_SECONDS: i64 = 15 * 3600 + 59 * 60 + 59;
+// days from 1970-01-01 to the postgres epoch, 2000-01-01
+const PG_EPOCH_DAYS: i64 = 10_957;
+
+/// Days since 2000-01-01 in the proleptic Gregorian calendar.
+#[must_use]
+pub fn pg_days(year: i32, month: u32, day: u32) -> i64 {
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let shifted_month = (i64::from(month) + 9) % 12;
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468 - PG_EPOCH_DAYS
+}
+
+/// # Errors
+/// `OutOfRange` when the day count does not fit the 4-byte wire form.
+pub fn encode_date(year: i32, month: u32, day: u32) -> Result<Vec<u8>, TemporalError> {
+    i32::try_from(pg_days(year, month, day))
+        .map(|days| days.to_be_bytes().to_vec())
+        .map_err(|_| TemporalError::OutOfRange("date"))
+}
+
+#[must_use]
+pub fn encode_time(micros: i64) -> Vec<u8> {
+    micros.to_be_bytes().to_vec()
+}
+
+/// Text form (`HH:MM:SS.ffffff+HH:MM:SS`), because the binary zone is seconds west and the text sign is not.
+///
+/// # Errors
+/// `OffsetFraction` for a sub-second offset, `OffsetRange` beyond ±15:59:59.
+pub fn encode_timetz_text(micros: i64, offset_micros: i64) -> Result<String, TemporalError> {
+    if offset_micros % MICROS_PER_SECOND != 0 {
+        return Err(TemporalError::OffsetFraction);
+    }
+    let offset_seconds = offset_micros / MICROS_PER_SECOND;
+    if offset_seconds.abs() > MAX_TIMETZ_OFFSET_SECONDS {
+        return Err(TemporalError::OffsetRange);
+    }
+    let seconds = micros / MICROS_PER_SECOND;
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let abs = offset_seconds.abs();
+    Ok(format!(
+        "{:02}:{:02}:{:02}.{:06}{sign}{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60,
+        micros % MICROS_PER_SECOND,
+        abs / 3600,
+        abs / 60 % 60,
+        abs % 60,
+    ))
+}
+
+/// `micros` is the time of day; `offset_micros` is the UTC offset, zero for a naive timestamp.
+#[must_use]
+pub fn encode_timestamp(
+    year: i32,
+    month: u32,
+    day: u32,
+    micros: i64,
+    offset_micros: i64,
+) -> Vec<u8> {
+    (pg_days(year, month, day) * MICROS_PER_DAY + micros - offset_micros)
+        .to_be_bytes()
+        .to_vec()
+}
+
+/// The months component is always zero.
+///
+/// # Errors
+/// `OutOfRange` when `days` does not fit an `i32`.
+pub fn encode_interval(days: i64, micros: i64) -> Result<Vec<u8>, TemporalError> {
+    let days = i32::try_from(days).map_err(|_| TemporalError::OutOfRange("timedelta"))?;
+    let mut out = micros.to_be_bytes().to_vec();
+    out.extend_from_slice(&days.to_be_bytes());
+    out.extend_from_slice(&0_i32.to_be_bytes());
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -401,5 +490,201 @@ mod tests {
                 microseconds: i64::MAX
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    const MAX_DAYS: i32 = 2_921_939;
+    const MIN_DAYS: i32 = -730_119;
+
+    fn is_leap(year: i32) -> bool {
+        (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    }
+
+    fn days_in_month(year: i32, month: u32) -> u32 {
+        match month {
+            2 if is_leap(year) => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        }
+    }
+
+    fn civil_date() -> impl Strategy<Value = (i32, u32, u32)> {
+        (1i32..=9999, 1u32..=12, 1u32..=31)
+            .prop_map(|(year, month, day)| (year, month, day.min(days_in_month(year, month))))
+    }
+
+    fn as_date((year, month, day): (i32, u32, u32)) -> Date {
+        Date {
+            year: u16::try_from(year).unwrap_or(0),
+            month: u8::try_from(month).unwrap_or(0),
+            day: u8::try_from(day).unwrap_or(0),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn date_encode_then_decode_is_the_identity(ymd in civil_date()) {
+            let raw = encode_date(ymd.0, ymd.1, ymd.2).unwrap_or_default();
+            prop_assert_eq!(decode_date(&raw), Ok(as_date(ymd)));
+        }
+
+        #[test]
+        fn date_day_counts_decode_exactly_inside_the_year_bounds(days in any::<i32>()) {
+            let decoded = decode_date(&days.to_be_bytes());
+            if days == i32::MAX || days == i32::MIN {
+                prop_assert_eq!(decoded, Err(TemporalError::Infinite { ty: "date" }));
+            } else if (MIN_DAYS..=MAX_DAYS).contains(&days) {
+                let date = decoded.unwrap_or_else(|_| as_date((0, 0, 0)));
+                let again = encode_date(i32::from(date.year), u32::from(date.month), u32::from(date.day));
+                prop_assert_eq!(again, Ok(days.to_be_bytes().to_vec()));
+            } else {
+                prop_assert_eq!(decoded, Err(TemporalError::YearRange { ty: "date" }));
+            }
+        }
+
+        #[test]
+        fn time_encode_then_decode_splits_the_micros(micros in 0..MICROS_PER_DAY) {
+            let decoded = decode_time(&encode_time(micros));
+            let total = decoded.map(|t| {
+                ((i64::from(t.hour) * 60 + i64::from(t.minute)) * 60 + i64::from(t.second))
+                    * MICROS_PER_SECOND
+                    + i64::from(t.microsecond)
+            });
+            prop_assert_eq!(total, Ok(micros));
+        }
+
+        #[test]
+        fn times_outside_one_day_are_rejected(micros in prop_oneof![i64::MIN..0, MICROS_PER_DAY..i64::MAX]) {
+            prop_assert_eq!(
+                decode_time(&encode_time(micros)),
+                Err(TemporalError::TimeOfDay { ty: "time" })
+            );
+        }
+
+        #[test]
+        fn timestamp_encode_then_decode_is_the_identity(
+            ymd in civil_date(),
+            micros in 0..MICROS_PER_DAY,
+        ) {
+            let raw = encode_timestamp(ymd.0, ymd.1, ymd.2, micros, 0);
+            let decoded = decode_timestamp("timestamp", &raw);
+            prop_assert_eq!(decoded.as_ref().map(|d| d.date), Ok(as_date(ymd)));
+            let time = decoded.map_or(TimeOfDay { hour: 0, minute: 0, second: 0, microsecond: 0 }, |d| d.time);
+            prop_assert_eq!(
+                (i64::from(time.hour) * 3600 + i64::from(time.minute) * 60 + i64::from(time.second))
+                    * MICROS_PER_SECOND
+                    + i64::from(time.microsecond),
+                micros
+            );
+        }
+
+        #[test]
+        fn timestamptz_subtracts_the_offset(
+            ymd in civil_date(),
+            micros in 0..MICROS_PER_DAY,
+            offset in -57_599i64..=57_599,
+        ) {
+            let offset_micros = offset * MICROS_PER_SECOND;
+            let local = encode_timestamp(ymd.0, ymd.1, ymd.2, micros, 0);
+            let zoned = encode_timestamp(ymd.0, ymd.1, ymd.2, micros, offset_micros);
+            let local = i64::from_be_bytes(<[u8; 8]>::try_from(local.as_slice()).unwrap_or([0; 8]));
+            let zoned = i64::from_be_bytes(<[u8; 8]>::try_from(zoned.as_slice()).unwrap_or([0; 8]));
+            prop_assert_eq!(local - zoned, offset_micros);
+        }
+
+        #[test]
+        fn timestamp_micros_outside_the_year_bounds_are_rejected(micros in any::<i64>()) {
+            let decoded = decode_timestamp("timestamp", &micros.to_be_bytes());
+            let first = i64::from(MIN_DAYS) * MICROS_PER_DAY;
+            let last = i64::from(MAX_DAYS) * MICROS_PER_DAY + MICROS_PER_DAY - 1;
+            if micros == i64::MAX || micros == i64::MIN {
+                prop_assert_eq!(decoded, Err(TemporalError::Infinite { ty: "timestamp" }));
+            } else if (first..=last).contains(&micros) {
+                prop_assert!(decoded.is_ok());
+            } else {
+                prop_assert_eq!(decoded, Err(TemporalError::YearRange { ty: "timestamp" }));
+            }
+        }
+
+        #[test]
+        fn interval_encode_then_decode_is_the_identity(days in any::<i32>(), micros in any::<i64>()) {
+            let raw = encode_interval(i64::from(days), micros).unwrap_or_default();
+            prop_assert_eq!(decode_interval(&raw), Ok(Interval { days, microseconds: micros }));
+        }
+
+        #[test]
+        fn interval_days_beyond_i32_cannot_be_encoded(days in prop_oneof![i64::MIN..i64::from(i32::MIN), (i64::from(i32::MAX) + 1)..i64::MAX]) {
+            prop_assert_eq!(encode_interval(days, 0), Err(TemporalError::OutOfRange("timedelta")));
+        }
+
+        #[test]
+        fn timetz_text_names_every_field(
+            micros in 0..MICROS_PER_DAY,
+            offset in -57_599i64..=57_599,
+        ) {
+            let text = encode_timetz_text(micros, offset * MICROS_PER_SECOND).unwrap_or_default();
+            let sign = if offset < 0 { '-' } else { '+' };
+            prop_assert_eq!(text.len(), 15 + 9);
+            prop_assert_eq!(text.chars().nth(15), Some(sign));
+        }
+
+        #[test]
+        fn a_fractional_or_oversized_timetz_offset_is_rejected(
+            seconds in 57_600i64..1_000_000,
+            fraction in 1i64..MICROS_PER_SECOND,
+        ) {
+            prop_assert_eq!(
+                encode_timetz_text(0, seconds * MICROS_PER_SECOND),
+                Err(TemporalError::OffsetRange)
+            );
+            prop_assert_eq!(encode_timetz_text(0, fraction), Err(TemporalError::OffsetFraction));
+        }
+
+        #[test]
+        fn decoding_random_bytes_never_panics(raw in prop::collection::vec(any::<u8>(), 0..24)) {
+            let _ = decode_date(&raw);
+            let _ = decode_time(&raw);
+            let _ = decode_timetz(&raw);
+            let _ = decode_timestamp("timestamp", &raw);
+            let _ = decode_timestamp("timestamptz", &raw);
+            let _ = decode_interval(&raw);
+        }
+
+        #[test]
+        fn decoding_exact_width_random_bytes_never_panics(
+            four in any::<[u8; 4]>(),
+            eight in any::<[u8; 8]>(),
+            twelve in any::<[u8; 12]>(),
+            sixteen in any::<[u8; 16]>(),
+        ) {
+            let _ = decode_date(&four);
+            let _ = decode_time(&eight);
+            let _ = decode_timestamp("timestamp", &eight);
+            let _ = decode_timetz(&twelve);
+            let _ = decode_interval(&sixteen);
+        }
+
+        #[test]
+        fn a_wrong_length_is_always_a_length_error(len in (0usize..32).prop_filter("not 4", |n| *n != 4)) {
+            let raw = vec![0u8; len];
+            let is_length = matches!(decode_date(&raw), Err(TemporalError::Length { .. }));
+            prop_assert!(is_length);
+        }
+    }
+
+    #[test]
+    fn the_year_bounds_encode_to_the_documented_day_counts() {
+        assert_eq!(encode_date(1, 1, 1), Ok(MIN_DAYS.to_be_bytes().to_vec()));
+        assert_eq!(
+            encode_date(9999, 12, 31),
+            Ok(MAX_DAYS.to_be_bytes().to_vec())
+        );
+        assert_eq!(encode_date(2000, 1, 1), Ok(0i32.to_be_bytes().to_vec()));
     }
 }

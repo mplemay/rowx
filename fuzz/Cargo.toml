@@ -1,0 +1,73 @@
+[package]
+name = "rowx-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rowx-postgres = { path = "../crates/rowx-postgres" }
+
+# the workspace forbids unsafe code, and `fuzz_target!` expands to some, so this crate sits outside it
+[workspace]
+
+[lints.rust]
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[[bin]]
+name = "array"
+path = "fuzz_targets/array.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "numeric"
+path = "fuzz_targets/numeric.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "date"
+path = "fuzz_targets/date.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "time"
+path = "fuzz_targets/time.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "timetz"
+path = "fuzz_targets/timetz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "timestamp"
+path = "fuzz_targets/timestamp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interval"
+path = "fuzz_targets/interval.rs"
+test = false
+doc = false
+bench = false

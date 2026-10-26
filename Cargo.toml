@@ -7,6 +7,8 @@ members = [
     "crates/rowx-postgres-py",
     "crates/rowx-py",
 ]
+# cargo-fuzz targets need nightly and unsafe code, so they stay out of the workspace and its lints
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,4 +1,5 @@
 use rowx_postgres::exec::Param;
+use rowx_postgres::wire::array;
 use rowx_postgres::{Kind, Type};
 
 use crate::codec::encode_one;
@@ -42,65 +43,8 @@ fn flatten<'a>(
     Ok(())
 }
 
-fn push_literal(out: &mut String, elements: &mut std::slice::Iter<'_, Param>, dims: &[usize]) {
-    let Some((&len, rest)) = dims.split_first() else {
-        return;
-    };
-    out.push('{');
-    for index in 0..len {
-        if index > 0 {
-            out.push(',');
-        }
-        if rest.is_empty() {
-            match elements.next().and_then(Param::value) {
-                None => out.push_str("NULL"),
-                Some(raw) => {
-                    out.push('"');
-                    for ch in String::from_utf8_lossy(raw).chars() {
-                        if matches!(ch, '"' | '\\') {
-                            out.push('\\');
-                        }
-                        out.push(ch);
-                    }
-                    out.push('"');
-                }
-            }
-        } else {
-            push_literal(out, elements, rest);
-        }
-    }
-    out.push('}');
-}
-
-fn binary(elem_oid: u32, dims: &[usize], elements: &[Param]) -> Result<Vec<u8>, String> {
-    let too_big = || "the array is too large".to_owned();
-    let has_null = elements.iter().any(|e| e.value().is_none());
-    let mut out = Vec::new();
-    out.extend_from_slice(
-        &i32::try_from(dims.len())
-            .map_err(|_| too_big())?
-            .to_be_bytes(),
-    );
-    out.extend_from_slice(&i32::from(has_null).to_be_bytes());
-    out.extend_from_slice(&elem_oid.to_be_bytes());
-    for &len in dims {
-        out.extend_from_slice(&i32::try_from(len).map_err(|_| too_big())?.to_be_bytes());
-        out.extend_from_slice(&1_i32.to_be_bytes());
-    }
-    for element in elements {
-        match element.value() {
-            None => out.extend_from_slice(&(-1_i32).to_be_bytes()),
-            Some(raw) => {
-                out.extend_from_slice(
-                    &i32::try_from(raw.len())
-                        .map_err(|_| too_big())?
-                        .to_be_bytes(),
-                );
-                out.extend_from_slice(raw);
-            }
-        }
-    }
-    Ok(out)
+fn raw_elements(elements: &[Param]) -> Vec<Option<&[u8]>> {
+    elements.iter().map(Param::value).collect()
 }
 
 /// Binary when every element encodes as binary, otherwise a text literal.
@@ -126,7 +70,8 @@ pub fn encode(ty: &Type, param: &PyParam) -> Result<Param, String> {
     flatten(items, &dims, &mut leaves)?;
     // an empty list at any level makes the whole array empty, once the shape is known to be regular
     if dims.contains(&0) {
-        return Ok(Param::binary(binary(elem_ty.oid(), &[], &[])?));
+        let empty = array::encode(elem_ty.oid(), &[], &[]).map_err(|e| e.to_string())?;
+        return Ok(Param::binary(empty));
     }
     let mut elements = leaves
         .iter()
@@ -143,9 +88,10 @@ pub fn encode(ty: &Type, param: &PyParam) -> Result<Param, String> {
                 *element = Param::text(uuid::to_text(bytes).into_bytes());
             }
         }
-        let mut literal = String::new();
-        push_literal(&mut literal, &mut elements.iter(), &dims);
+        let literal = array::encode_literal(&dims, &raw_elements(&elements));
         return Ok(Param::text(literal.into_bytes()));
     }
-    binary(elem_ty.oid(), &dims, &elements).map(Param::binary)
+    array::encode(elem_ty.oid(), &dims, &raw_elements(&elements))
+        .map(Param::binary)
+        .map_err(|e| e.to_string())
 }
