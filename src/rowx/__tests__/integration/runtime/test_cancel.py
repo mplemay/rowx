@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
-import rowx
 from rowx._core.postgres import _cancel_requests_sent
 from rowx.errors import DatabaseError
+from rowx.postgres import connect
 
 if TYPE_CHECKING:
     from rowx._core.postgres import Connection as ConnectionImpl
@@ -49,8 +49,8 @@ async def wait_for_sleep(observer: ConnectionImpl, *, present: bool, limit: floa
 
 def test_cancelled_sleep_frees_the_backend_and_the_next_query_succeeds(schema: str) -> None:
     async def run() -> list[object]:
-        conn = await rowx.connect(schema)
-        observer = await rowx.connect(schema)
+        conn = await connect(schema)
+        observer = await connect(schema)
         try:
             slow = asyncio.create_task(fetch(conn._impl, "SELECT pg_sleep(3)"))
             assert await wait_for_sleep(observer._impl, present=True, limit=GONE_WITHIN)
@@ -68,7 +68,7 @@ def test_cancelled_sleep_frees_the_backend_and_the_next_query_succeeds(schema: s
 
 def test_timeout_cancel_after_100ms(schema: str) -> None:
     async def run() -> list[object]:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         try:
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(fetch(conn._impl, "SELECT pg_sleep(3)"), 0.1)
@@ -81,7 +81,7 @@ def test_timeout_cancel_after_100ms(schema: str) -> None:
 
 def test_stress_cancel_then_query_never_fails_with_57014(schema: str) -> None:
     async def run() -> list[str]:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         failures: list[str] = []
         rng = random.Random(22)  # ruff: ignore[suspicious-non-cryptographic-random-usage]
         try:
@@ -101,7 +101,7 @@ def test_stress_cancel_then_query_never_fails_with_57014(schema: str) -> None:
 
 def test_sql_error_sends_no_cancel_request(schema: str) -> None:
     async def run() -> int:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         try:
             before = _cancel_requests_sent()
             with pytest.raises(DatabaseError):
@@ -116,7 +116,7 @@ def test_sql_error_sends_no_cancel_request(schema: str) -> None:
 
 def test_cancelling_a_large_fetch_leaves_the_connection_usable(schema: str) -> None:
     async def run() -> list[object]:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         try:
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(fetch(conn._impl, "SELECT g FROM generate_series(1, 1000000) g"), 0.01)
@@ -129,8 +129,8 @@ def test_cancelling_a_large_fetch_leaves_the_connection_usable(schema: str) -> N
 
 def test_close_during_a_long_query_returns_quickly(schema: str) -> None:
     async def run() -> float:
-        conn = await rowx.connect(schema)
-        observer = await rowx.connect(schema)
+        conn = await connect(schema)
+        observer = await connect(schema)
         try:
             slow = asyncio.create_task(fetch(conn._impl, "SELECT pg_sleep(3)"))
             assert await wait_for_sleep(observer._impl, present=True, limit=GONE_WITHIN)

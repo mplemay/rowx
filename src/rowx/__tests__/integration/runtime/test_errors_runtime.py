@@ -3,9 +3,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-import rowx
 from rowx import query
 from rowx.errors import DatabaseError, DecodeError, EncodeError, InterfaceError, RowShapeError
+from rowx.postgres import Connection, connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -13,9 +13,9 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
 
-def run_with_conn[T](dsn: str, body: Callable[[rowx.Connection], Awaitable[T]]) -> T:
+def run_with_conn[T](dsn: str, body: Callable[[Connection], Awaitable[T]]) -> T:
     async def run() -> T:
-        async with await rowx.connect(dsn) as conn:
+        async with await connect(dsn) as conn:
             return await body(conn)
 
     return asyncio.run(run())
@@ -32,7 +32,7 @@ def test_database_error_unique_violation(schema: str) -> None:
     q = query(t"INSERT INTO users (name) VALUES ('a'), ('b')")
     uniq = query(t"CREATE UNIQUE INDEX ON users (name)")
 
-    async def body(conn: rowx.Connection) -> None:
+    async def body(conn: Connection) -> None:
         await uniq.execute(conn)
         await q.execute(conn)
         await q.execute(conn)
@@ -60,7 +60,7 @@ def test_decode_error_interval_months(schema: str) -> None:
 
 def test_interface_error_closed_connection(schema: str) -> None:
     async def body() -> None:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         await conn.close()
         assert conn.closed
         await query[int](t"SELECT 1").one(conn)

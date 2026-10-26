@@ -5,11 +5,10 @@ from typing import Final
 
 import pytest
 
-import rowx
 from rowx import query
 from rowx.__tests__.conformance.row_types import PRELUDE, ROWS
-from rowx._query import Connection
 from rowx.errors import InterfaceError
+from rowx.postgres import Connection, connect
 
 
 @dataclass(slots=True)
@@ -76,7 +75,7 @@ def test_conformance_ok_row_against_db(schema: str, row: tuple[str, str], expect
     t = evaluate(source)
 
     async def body() -> object:
-        async with await rowx.connect(schema) as conn:
+        async with await connect(schema) as conn:
             return await query[t](Template(sql)).one(conn)  # ty: ignore[invalid-type-form]
 
     assert asyncio.run(body()) == expected

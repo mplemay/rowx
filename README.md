@@ -9,14 +9,14 @@ a live Postgres 18 database before you ship.
 ```python test
 import asyncio
 
-import rowx
+from rowx.postgres import connect
 from rowx import query
 
 type UserRow = tuple[int, str, str | None]  # id, name, email
 
 
 async def main() -> None:
-    async with await rowx.connect(DSN) as conn:
+    async with await connect(DSN) as conn:
         name = "alice"
         user = await query[UserRow](t"SELECT id, name, email FROM users WHERE name = {name}").one(conn)
         assert user[1] == "alice"

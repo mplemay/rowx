@@ -3,9 +3,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-import rowx
 from rowx import query
 from rowx.errors import EncodeError, InterfaceError
+from rowx.postgres import Connection, connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -13,9 +13,9 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
 
-def run_with_conn[T](dsn: str, body: Callable[[rowx.Connection], Awaitable[T]]) -> T:
+def run_with_conn[T](dsn: str, body: Callable[[Connection], Awaitable[T]]) -> T:
     async def run() -> T:
-        async with await rowx.connect(dsn) as conn:
+        async with await connect(dsn) as conn:
             return await body(conn)
 
     return asyncio.run(run())
@@ -92,7 +92,7 @@ def test_interpolation_inside_literal_is_count_mismatch(schema: str) -> None:
 
 
 def test_connection_usable_after_encode_error(schema: str) -> None:
-    async def body(conn: rowx.Connection) -> int:
+    async def body(conn: Connection) -> int:
         x = 40000
         with pytest.raises(EncodeError):
             await query[int](t"SELECT {x}::int2").one(conn)

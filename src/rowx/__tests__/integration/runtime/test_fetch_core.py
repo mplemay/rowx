@@ -3,8 +3,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-import rowx
 from rowx.errors import DecodeError, InterfaceError, RowShapeError
+from rowx.postgres import connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -33,7 +33,7 @@ async def execute(conn: ConnectionImpl, sql: str) -> int:
 
 def run_with_conn[T](dsn: str, body: Callable[[ConnectionImpl], Awaitable[T]]) -> T:
     async def run() -> T:
-        conn = await rowx.connect(dsn)
+        conn = await connect(dsn)
         try:
             return await body(conn._impl)
         finally:
@@ -142,7 +142,7 @@ def test_sequential_awaits_never_see_busy(schema: str) -> None:
 
 def test_closed_connection_is_interface_error(schema: str) -> None:
     async def run() -> None:
-        conn = await rowx.connect(schema)
+        conn = await connect(schema)
         await conn.close()
         await fetch(conn._impl, "SELECT 1", scalar=True, arity=1)
 

@@ -7,8 +7,8 @@ from sys import stdlib_module_names
 from tokenize import detect_encoding
 from typing import TYPE_CHECKING, Final, Literal, get_args
 
-from rowx._vocab import LeafName
 from rowx.check.model import Diagnostic, QueryCall, Rule, Span
+from rowx.postgres._vocab import LeafName
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

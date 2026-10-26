@@ -11,14 +11,14 @@ The `python test` blocks on this page are executed against a seeded database (us
 ```python test
 import asyncio
 
-import rowx
+from rowx.postgres import connect
 from rowx import query
 
 type UserRow = tuple[int, str, str | None]
 
 
 async def main() -> None:
-    async with await rowx.connect(DSN) as conn:
+    async with await connect(DSN) as conn:
         uid = await query[int](t"SELECT id FROM users WHERE name = {'alice'}").one(conn)
         user = await query[UserRow](t"SELECT id, name, email FROM users WHERE id = {uid}").one(conn)
         assert user == (uid, "alice", "alice@example.com")
@@ -45,12 +45,12 @@ Use a tuple row type (`query[tuple[int | None]]`) when the difference matters. T
 ```python test
 import asyncio
 
-import rowx
+from rowx.postgres import connect
 from rowx import query
 
 
 async def main() -> None:
-    async with await rowx.connect(DSN) as conn:
+    async with await connect(DSN) as conn:
         no_row = await query[int | None](t"SELECT 1 WHERE false").optional(conn)
         null_value = await query[int | None](t"SELECT NULL::int").optional(conn)
         assert no_row is None
@@ -76,12 +76,12 @@ Use `all()` when the result is known to be small, and `fetch` when it is large o
 ```python test
 import asyncio
 
-import rowx
+from rowx.postgres import connect
 from rowx import query
 
 
 async def main() -> None:
-    async with await rowx.connect(DSN) as conn:
+    async with await connect(DSN) as conn:
         users = query[tuple[int, str]](t"SELECT id, name FROM users ORDER BY id")
 
         names = [name async for _, name in users.fetch(conn)]
@@ -117,13 +117,13 @@ asyncio.run(main())
 ```python test
 import asyncio
 
-import rowx
+from rowx.postgres import connect
 from rowx import query
 from rowx.errors import ConnectionBusyError
 
 
 async def main() -> None:
-    async with await rowx.connect(DSN) as conn:
+    async with await connect(DSN) as conn:
         numbers = query[int](t"SELECT generate_series(1, 100000)")
 
         async with numbers.fetch(conn, batch_size=1) as rows:
@@ -143,8 +143,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`rowx.connect(dsn, connect_timeout=None, statement_cache_size=256)` returns a `Connection`. Use it as an async context
-manager, or call `close()`.
+`rowx.postgres.connect(dsn, connect_timeout=None, statement_cache_size=256)` returns a `Connection`. Use it as an async
+context manager, or call `close()`.
 
 ## Row types
 
@@ -162,14 +162,14 @@ nullability. `type` aliases and `Annotated[...]` are followed.
 import asyncio
 from decimal import Decimal
 
-import rowx
+from rowx.postgres import connect
 from rowx import query
 
 type OrderRow = tuple[int, Decimal, str | None]
 
 
 async def main() -> None:
-    async with await rowx.connect(DSN) as conn:
+    async with await connect(DSN) as conn:
         rows = await query[OrderRow](t"SELECT id, amount, note FROM orders ORDER BY id").all(conn)
         assert rows
         total = await query[Decimal](t'SELECT sum(amount) AS "total!" FROM orders').one(conn)
@@ -191,12 +191,12 @@ so every interpolation is a bound parameter. Use `query_unchecked` for dynamic S
 ```python test
 import asyncio
 
-import rowx
+from rowx.postgres import connect
 from rowx import query, query_unchecked
 
 
 async def main() -> None:
-    async with await rowx.connect(DSN) as conn:
+    async with await connect(DSN) as conn:
         # IN-lists: bind a list as an array with = ANY(...)
         wanted = ["alice", "bob"]
         found = await query[str](t"SELECT name FROM users WHERE name = ANY({wanted}) ORDER BY name").all(conn)
@@ -255,12 +255,12 @@ truncates identifiers at 63 bytes, which would drop the suffix; the checker repo
 ```python test
 import asyncio
 
-import rowx
+from rowx.postgres import connect
 from rowx import query
 
 
 async def main() -> None:
-    async with await rowx.connect(DSN) as conn:
+    async with await connect(DSN) as conn:
         n = await query[int](t'SELECT count(*) AS "n!" FROM users').one(conn)
         assert n == 3
         email = await query[str | None](t'SELECT email AS "email?" FROM users WHERE name = {"carol"}').one(conn)
@@ -278,12 +278,12 @@ task**: a connection runs one operation at a time, and a second concurrent call 
 ```python test
 import asyncio
 
-import rowx
+from rowx.postgres import connect
 from rowx import query
 
 
 async def main() -> None:
-    async with await rowx.connect(DSN) as conn:
+    async with await connect(DSN) as conn:
         await query(t"BEGIN").execute(conn)
         try:
             await query(t"DELETE FROM orders").execute(conn)
@@ -391,7 +391,9 @@ server connection than the one that prepared it. Either connect with `statement_
 newer with `max_prepared_statements` set.
 
 ```python
-conn = await rowx.connect("postgresql://app@pooler:6432/app", statement_cache_size=0)
+from rowx.postgres import connect
+
+conn = await connect("postgresql://app@pooler:6432/app", statement_cache_size=0)
 ```
 
 TLS defaults to `prefer`, as in libpq: it uses TLS when the server offers it, without verifying the certificate, and

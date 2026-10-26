@@ -1,6 +1,6 @@
 from typing import Literal
 
-from rowx._vocab import AcceptedParam, CodecName, NullReasonName, PyResultName, TypeKey
+from rowx.postgres._vocab import AcceptedParam, CodecName, NullReasonName, PyResultName, TypeKey
 
 class TypeInfo:
     @property

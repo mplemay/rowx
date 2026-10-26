@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Final
 import asyncpg
 
 import rowx
+from rowx.postgres import connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -48,7 +49,7 @@ async def main(dsn: str) -> None:
     try:
         select = rowx.query[tuple[int, str, datetime]](t"SELECT id, body, created_at FROM rowx_bench_100k")
 
-        async with await rowx.connect(dsn) as conn:
+        async with await connect(dsn) as conn:
 
             async def run_rowx() -> int:
                 return len(await select.all(conn))
