@@ -13,7 +13,7 @@ pub struct ColumnInfo {
     pub nullable: bool,                   // final, after defaulting
     pub reason: NullReason,
 }
-pub enum NullReason { NotNullColumn, NullableColumn, NotValidatedConstraint, ForeignOrView,
+pub enum NullReason { NotNullColumn, NullableColumn, NotValidatedConstraint, ForeignOrView, ViewColumn,
     OuterJoin { node: String }, GroupingSets, ScanBoundary { alias: String },
     ReturningOldNew, Computed, ExplainFailed, OverrideBang, OverrideQuestion }
 ```
@@ -56,7 +56,9 @@ rejects the SQL it raises `DatabaseError` with `.position` set.
      - `NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = a.attrelid AND k.contype = 'n'
        AND NOT k.convalidated AND k.conkey = ARRAY[a.attnum])`.
        PG18 `NOT VALID` NOT NULL constraints set `attnotnull` even though NULL rows still exist.
-   - A foreign table or view gets `ForeignOrView` (Nullable). A non-validated constraint
+   - A foreign table gets `ForeignOrView` (Nullable). A view column (`relkind = 'v'`) is resolved by
+     [View columns](#view-columns); when that does not prove NOT NULL it stays Nullable, with `ForeignOrView` for a
+     fallback and `ViewColumn` when the definition was analysed. A non-validated constraint
      gets `NotValidatedConstraint` (Nullable). Any other column with a table origin gets
      `NullableColumn`.
    - A column with no table origin gets `Computed` (Unknown).
@@ -93,7 +95,8 @@ promotions for each top-level column position.
   `CTE x`.
   - If that source subtree contains any null-extending join, or a grouping-sets aggregate,
     every top output that starts with `x.` is promoted (`ScanBoundary`).
-  - This is deliberately conservative. Mapping positions precisely is future work.
+  - This is the **conservative rule**. It is refined by the [mapping rule](#scan-boundary-mapping) below, which can
+    only remove promotions the conservative rule would add.
 - **Grouping sets.** An `Aggregate` node with a `"Grouping Sets"` key holding more than
   one set marks its own `Output` (`GroupingSets`).
 - **RETURNING old/new (PG18).** On a `ModifyTable` top node:
@@ -102,6 +105,75 @@ promotions for each top-level column position.
 
   If a `RETURNING WITH (OLD AS o, NEW AS n)` alias makes the prefix ambiguous, promote
   every output for Merge, and promote by the declared aliases otherwise.
+
+### Scan-boundary mapping
+
+A `Subquery Scan` or `CTE Scan` has no column-alias list in the plan JSON, and its `Output` is pruned to the columns
+the parent uses (in `cte_materialized.json`, `CTE Scan c` outputs only `c.title`, while the source `Hash Join` outputs
+`u.name` and `p.title`). A boundary output can therefore be traced to its source **only by name**.
+
+**Rule.** For a boundary alias `x` whose source subtree contains a null-extending join or grouping-sets aggregate, a top
+output `x.col` is promoted (`ScanBoundary`) unless all of these hold, in which case it is not promoted:
+
+1. the source node's `Output` has exactly one entry whose column name is `col` (the part after the last `.` of a
+   qualified entry, or the whole entry when unqualified);
+2. that entry is a plain column reference `rel.col`, not an expression, function call, cast or constant;
+3. the entry, by the ordinary walk of the source subtree, is not marked nullable (`OuterJoin`, `GroupingSets`);
+4. the entry's identity is proven: the entry `rel.col` resolves to the same base column the describe origin reports for
+   the top column (`table_oid`, `attnum`), that is, `rel` is a scan alias of that table in the source subtree and `col`
+   is that attribute's name.
+
+Step 4 is needed because the plan carries no alias mapping, so name equality alone does not establish identity. A
+subquery or CTE can rename columns: in `WITH c AS MATERIALIZED (SELECT p.title AS name, u.name AS title FROM users u
+LEFT JOIN posts p ON …) SELECT name FROM c`, `c.name` is `p.title`, but the source outputs `p.title` and `u.name`
+match `c.name` by name only to `u.name`. The origin of `c.name` is `posts.title`, which differs from `users.name`, so
+step 4 fails and the column is promoted. A top column with no origin (`table_oid = 0`) always fails step 4.
+
+Any other case uses the conservative rule: promote. The mapping never promotes an output the conservative rule would
+not, and the walk stays promote-only.
+
+| Case | Result |
+|---|---|
+| Source output is a computed expression (`upper(p.title)`, `p.title \|\| ''`) | Promote. Rule step 2 fails. |
+| Two source outputs share a name (`u.id`, `p.id`) | Promote every `x.id`. Rule step 1 fails. |
+| A `MATERIALIZED` CTE referenced twice (`CTE Scan a`, `CTE Scan b`) | Each alias is mapped independently against the one `CTE c` InitPlan. The source nullability is the same, so each result is also the same. |
+| The planner replaced an unused column with a NULL constant | Promote. It is a constant, so step 2 fails. |
+| The source node has no `Output` entry for `col` (pruned differently) | Promote. Step 1 fails. |
+| Columns renamed by the subquery or CTE (swapped aliases) | Promote. The name match points at a different column than the origin. Step 4 fails. |
+| Nested boundaries (a CTE over a subquery) | Map one boundary at a time. Resolve the inner boundary first, and treat an entry it promotes as marked in step 3. |
+
+### View columns
+
+A view column has `attnotnull = false`, so base nullability alone is always Nullable. rowx analyses the view's
+definition and gives the column NOT NULL only when the definition proves it.
+
+1. **Eligibility.** The column's table has `relkind = 'v'`. The following are always Nullable (`ForeignOrView`),
+   without analysis:
+   - the view has any `pg_rewrite` rule other than its own `_RETURN` rule (`rulename <> '_RETURN'`), such as an
+     `INSTEAD` rule;
+   - `security_invoker` is set and the checker's role cannot `SELECT` every underlying relation (otherwise the
+     definition cannot be planned the way the query would);
+   - the resolution depth exceeds 8, or the view was already visited in this chain (a cycle, which Postgres rejects at
+     `CREATE VIEW` but the check is cheap and keeps the walk total).
+
+   `security_barrier` and `WITH CHECK OPTION` do not change which rows are returned, and need no fallback.
+2. **Definition resolution.** Read `pg_get_viewdef(oid, false)`. Its text is schema-qualified only as needed for the
+   *current* `search_path`, so describing it under the checker's `search_path` could resolve a name to a different
+   table. rowx therefore runs `SET LOCAL search_path = pg_catalog` in one transaction that is rolled back afterwards,
+   and calls `pg_get_viewdef` **and** describes the text inside it. Only `pg_catalog` is searched, so `pg_get_viewdef`
+   qualifies every other name and an unqualified one cannot resolve. A definition that fails to describe falls back to
+   Nullable. Building the query from `pg_rewrite` (`ev_action`) is rejected: that is an internal node tree with no
+   stable, supported text form.
+3. **Recursion.** The definition is described like any query: base nullability (which resolves view columns inside it
+   with the same algorithm) and the plan pass. Its per-column verdict is cached per view OID for the checker run and
+   dropped with the statement cache on a schema epoch change.
+4. **Mapping.** The view's column with `attnum = n` (live, non-dropped columns, counted in order) maps to output
+   position `n'` of its definition, where `n'` is the rank of `attnum` among the view's non-dropped columns. The
+   verdict of that position becomes the verdict of the column, with reason `ViewColumn`. Only NOT NULL results change
+   anything: a Nullable or Unknown definition column stays Nullable.
+5. **Invariant.** The definition ends with `;`. It is concatenated into the simple-protocol `EXPLAIN` only after it has
+   passed Parse as a single statement, and with the trailing `;` stripped. A definition that fails Parse, or contains
+   a second statement, is Nullable (`ForeignOrView`). A test feeds a crafted definition.
 
 ## Overrides
 
@@ -144,7 +216,13 @@ Its `describe` is also `#[doc(hidden)]` and feature-gated. rowx keeps sqlx's **m
 - Matching expression strings is heuristic. LATERAL, window functions over outer joins,
   and nested CTE chains are covered by the conservative scan-boundary rule. They are
   pinned by `tests/describe/test_known_limits.py`.
-- **Views** are always Nullable, because `attnotnull` is false for view columns.
+- **Views.** A view column is NOT NULL only when its definition proves it ([View columns](#view-columns)). Views with
+  extra rules, unreadable `security_invoker` views, definitions that fail to describe, cycles and chains deeper than 8
+  stay Nullable.
+- **Scan boundaries.** A boundary column is not promoted only on an exact, unique name match to a plain,
+  non-null-extended source column that resolves to the origin column
+  ([Scan-boundary mapping](#scan-boundary-mapping)). Computed, duplicate-named, constant and renamed (swapped-alias)
+  outputs still promote.
 - **Set operations and recursive CTEs** have `table_oid = 0`, so they are Unknown →
   Nullable. That is safe.
 - **Computed columns** are always Unknown → Nullable. NOT NULL narrowing for computed

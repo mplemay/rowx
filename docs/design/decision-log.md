@@ -120,6 +120,20 @@
 | T15 | Encoding | Binary where a `*_send` exists (results are always binary). `typsend = 0` rule unchanged | Existing rule |
 | T16 | Testing | Every family joins the #94, #95, #108 and #109 oracles through `type_table()` | [Testing](testing.md) |
 
+## Nullability precision (#111)
+
+| # | Topic | Decision | Why |
+|---|---|---|---|
+| N1 | Scan-boundary mapping | A boundary output `x.col` is left alone only on an exact, unique name match to a plain, non-null-extended source column that resolves to the same base column as the describe origin (`table_oid`, `attnum`). Anything else promotes (the conservative rule) | The plan JSON has no alias list and prunes `Output`, so a name locates the candidate, but only the origin check proves identity (a swapped-alias CTE matches the wrong column by name) |
+| N2 | Boundary edge cases | Computed outputs, duplicate names, planner NULL constants and missing entries promote. A twice-referenced `MATERIALIZED` CTE is mapped per alias | Each is a case where a name match could be wrong |
+| N3 | Promote-only | The mapping can only remove promotions that the conservative rule would add; the walk never makes a column NOT NULL on its own | Keeps the existing soundness argument; gated by #109 |
+| N4 | View verdicts | New `NullReason::ViewColumn`. A view column is NOT NULL only when its definition proves it | Replaces the blanket `ForeignOrView` for analysed views |
+| N5 | Definition resolution | `pg_get_viewdef` and the describe both run under `SET LOCAL search_path = pg_catalog` in a rolled-back transaction. Building the query from `pg_rewrite` is rejected | A definition qualified for another `search_path` could resolve to a different table; `ev_action` has no supported text form |
+| N6 | View column mapping | `attnum` maps to the output position by its rank among non-dropped columns | Dropped columns leave gaps in `attnum` |
+| N7 | View fallbacks | Rules other than `_RETURN`, an unreadable `security_invoker` view, a cycle, depth over 8 and a definition that fails to describe are Nullable. `security_barrier` and `WITH CHECK OPTION` need none | They do not change the returned rows |
+| N8 | Multi-statement invariant | The definition is concatenated into the simple-protocol `EXPLAIN` only after passing Parse as one statement, with the trailing `;` stripped; a test covers a crafted definition | Extends the existing security invariant |
+| N9 | Spike #107 | No up-front decision; its recommendation returns as its own design change | Needs measurement first |
+
 ### Pool spike (#75)
 
 Two prototypes ran the same 12 tests with paused time: `deadpool::managed` plus our layers, and a minimal own pool. Both
