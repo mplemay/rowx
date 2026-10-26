@@ -50,6 +50,11 @@ dev = [
 bench = [
     "asyncpg>=0.31.0",
 ]
+bench-drivers = [
+    "asyncpg>=0.31.0",
+    "psycopg[binary]>=3.3.6",
+    "sqlalchemy[asyncio]>=2.0.41",
+]
 
 [tool.ruff]
 target-version = "py314"
