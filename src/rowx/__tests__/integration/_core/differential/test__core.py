@@ -17,7 +17,7 @@ from rowx.postgres import connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
-TYPES_DOC: Final[Path] = Path(__file__).resolve().parents[5] / "docs" / "types.md"
+TYPES_DOC: Final[Path] = Path(__file__).resolve().parents[6] / "docs" / "types.md"
 DOC_HEADING: Final[str] = "## Differences from psycopg"
 
 # how a case may differ from psycopg: equal as instants, equal after rounding to float32, rowx raising DecodeError,
