@@ -118,7 +118,16 @@ output `x.col` is promoted (`ScanBoundary`) unless all of these hold, in which c
 1. the source node's `Output` has exactly one entry whose column name is `col` (the part after the last `.` of a
    qualified entry, or the whole entry when unqualified);
 2. that entry is a plain column reference `rel.col`, not an expression, function call, cast or constant;
-3. the entry, by the ordinary walk of the source subtree, is not marked nullable (`OuterJoin`, `GroupingSets`).
+3. the entry, by the ordinary walk of the source subtree, is not marked nullable (`OuterJoin`, `GroupingSets`);
+4. the entry's identity is proven: the entry `rel.col` resolves to the same base column the describe origin reports for
+   the top column (`table_oid`, `attnum`), that is, `rel` is a scan alias of that table in the source subtree and `col`
+   is that attribute's name.
+
+Step 4 is needed because the plan carries no alias mapping, so name equality alone does not establish identity. A
+subquery or CTE can rename columns: in `WITH c AS MATERIALIZED (SELECT p.title AS name, u.name AS title FROM users u
+LEFT JOIN posts p ON …) SELECT name FROM c`, `c.name` is `p.title`, but the source outputs `p.title` and `u.name`
+match `c.name` by name only to `u.name`. The origin of `c.name` is `posts.title`, which differs from `users.name`, so
+step 4 fails and the column is promoted. A top column with no origin (`table_oid = 0`) always fails step 4.
 
 Any other case uses the conservative rule: promote. The mapping never promotes an output the conservative rule would
 not, and the walk stays promote-only.
@@ -130,6 +139,7 @@ not, and the walk stays promote-only.
 | A `MATERIALIZED` CTE referenced twice (`CTE Scan a`, `CTE Scan b`) | Each alias is mapped independently against the one `CTE c` InitPlan. The source nullability is the same, so each result is also the same. |
 | The planner replaced an unused column with a NULL constant | Promote. It is a constant, so step 2 fails. |
 | The source node has no `Output` entry for `col` (pruned differently) | Promote. Step 1 fails. |
+| Columns renamed by the subquery or CTE (swapped aliases) | Promote. The name match points at a different column than the origin. Step 4 fails. |
 | Nested boundaries (a CTE over a subquery) | Map one boundary at a time. Resolve the inner boundary first, and treat an entry it promotes as marked in step 3. |
 
 ### View columns

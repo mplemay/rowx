@@ -51,8 +51,9 @@
     an extension-owner case (a same-named type in another schema is `unsupported-type`).
 - **Nullability precision cases** (#105 and #106 must add these; each also runs under the #109 soundness fuzzer):
   - Scan boundary (plan fixtures plus `describe` cases): a unique plain name match (not promoted), a column from the
-    null-extended side (promoted), a computed output, duplicate source names, a planner NULL constant, a
-    `MATERIALIZED` CTE referenced twice, and a CTE over a subquery.
+    null-extended side (promoted), swapped aliases (`SELECT p.title AS name, u.name AS title`, promoted), a computed
+    output, duplicate source names, a planner NULL constant, a `MATERIALIZED` CTE referenced twice, and a CTE over a
+    subquery.
   - Views: a plain view over NOT NULL columns, a nested view, a view over an outer join, a view with a dropped column
     (`attnum` gap), a view with an extra `INSTEAD` rule, an unreadable `security_invoker` view, a `search_path` trap (a
     same-named table in another schema), a depth-limit chain, and a crafted definition that must not reach `EXPLAIN` as
