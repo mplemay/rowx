@@ -83,7 +83,7 @@
 | C8 | A backend trait in `rowx-core` for cancel and is-alive, reused by the pool's `Manage` | `Cancel` held Postgres types |
 | C9 | `ConnectOptions` is a frozen dataclass; `from_dsn` uses the Rust parser; `server_settings` travel in `options` as `-c`; other DSN keys go in `extra` | One parser; startup settings survive `RESET ALL`; nothing is dropped |
 | C10 | `Connection` gains `ping`, `reset`, `transaction` and `detach` | sqlx and asyncpg parity |
-| C11 | The pool is built by a time-boxed spike (#75): our own or `deadpool::managed`; `deadpool-postgres` is rejected | Its statement cache conflicts with rowx's cache and cancel/settle path |
+| C11 | The pool is built by a time-boxed spike (#75): our own or `deadpool::managed` (settled by C25); `deadpool-postgres` is rejected | Its statement cache conflicts with rowx's cache and cancel/settle path |
 | C12 | No IO in the constructor; the first acquire opens the pool; the pool is not loop-bound; fork use raises `InterfaceError`; background tasks hold `Weak` references | Safe at module level; no leaks |
 | C13 | Acquire is FIFO for waiters and LIFO for idle connections; `PoolTimeoutError(InterfaceError)`; connect retries with backoff until `acquire_timeout` | Fairness and hot reuse (sqlx) |
 | C14 | A cancelled waiter never runs its query (a cancelled flag checked after acquire) | pyo3-async-runtimes drops the future late |
@@ -97,3 +97,34 @@
 | C22 | Server-side poolers are documented, with no CI job | Cost |
 | C23 | Transactions: `conn.transaction`, `pool.transaction` and `SAVEPOINT rowx_sp_<n>`; a Transaction is an Executor; the ending statement runs detached; a "failed" flag; an unknown `COMMIT` outcome discards the connection | asyncpg semantics without silent rollbacks |
 | C24 | Pool performance bar: at least asyncpg `pool.fetchrow` at 64 tasks, non-gating | Matches the fetch benchmark approach |
+| C25 | The pool is our own, in `rowx-core` (a FIFO-fair semaphore, a LIFO idle stack, a release task and a maintenance loop), not `deadpool::managed` (#75) | Both met every requirement; the own pool needs no new dependency, runs the checks where rowx wants them, and is faster |
+
+### Pool spike (#75)
+
+Two prototypes ran the same 12 tests with paused time: `deadpool::managed` plus our layers, and a minimal own pool. Both
+use a fake connection with a `Settling` phase. The code is on the unmerged branch `spike/75-pool-prototypes`.
+
+| Requirement | `deadpool::managed` | Own pool |
+|---|---|---|
+| Recycle waits out `Settling`, then resets; a failed reset discards | Layered. `recycle` runs lazily on **acquire**, so the reset has to run in our release wrapper, which holds the `Object` until the reset ends and then drops it (or `Object::take`s it to discard). | Native: the release task settles, resets, then pushes to idle. |
+| `min_size`, `idle_timeout`, `max_lifetime`, `max_queries`, `expire_connections()` | Layered. A `retain` pass must evict retired idle connections eagerly, because the lazy recycle would otherwise make a `get()` eat a stale one instead of creating (the first prototype failed on this). Timestamps are our own, since `Metrics` uses `std::time::Instant` and ignores `tokio::time::pause`. | Native, in one `maintain` function (reap, then fill). |
+| FIFO waiters, LIFO idle | Yes (`QueueMode::Lifo`; waiters queue on a tokio semaphore). | Yes (tokio semaphore plus a `Vec`). |
+| `close()` waits for checked-out connections | Layered: a counter and a `Notify`, shared by both. `Pool::close` fails waiters but doesn't wait. | The same counter and `Notify`. |
+| Release is cancel-safe and works from `Drop` outside a runtime | Layered: the wrapper spawns through the stored `Handle`. | Native, the same way. |
+| Lease check inside the claim, "init pending", caller-driven release | Not provided. The per-object hooks are `create`/`recycle`, which don't fit; every one of these is extra state around the `Object`. | Added directly where the connection is handed out. |
+| New dependencies | `deadpool`, `deadpool-runtime` (and their transitives). | None. |
+
+Layering `deadpool` took about 100 lines (release wrapper, `maintain`, close wait, generation check), which is within
+the 150-line limit, so the requirements don't decide it. The deciding points are that the pool's real state machine
+(leases, the settle wait, the reset and the epoch) lives outside `deadpool`'s `Manager` either way, that lazy recycling
+puts work on the acquire path where rowx wants none, and that the own pool is smaller and faster.
+
+Benchmark: `acquire` plus release, no reset (the release still goes through a spawned task in both), release build, 4
+worker threads, `min_size = max_size = 10`, 400,000 operations, median of 5 runs, on the maintainer's macOS machine.
+
+| Tasks | `deadpool::managed` | Own pool | Own / deadpool |
+|---|---|---|---|
+| 1 | 1,354,000 ops/s (739 ns/op) | 1,823,000 ops/s (549 ns/op) | 1.35 |
+| 64 | 856,000 ops/s (1,168 ns/op) | 1,006,000 ops/s (994 ns/op) | 1.17 |
+
+Both are far below a database round trip, so the speed is a tie-breaker only. #76 builds the own pool.

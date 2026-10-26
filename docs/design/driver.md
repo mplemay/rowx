@@ -290,9 +290,10 @@ must `ROLLBACK`; this is documented. The helper rolls back after settling ([Tran
 `rowx.postgres.Pool` is backed by `rowx-core`'s pool, with a Postgres connector in `rowx-postgres`. The binding is in
 `rowx-postgres-py/src/pool.rs`.
 
-**Implementation: decided by the spike (#75).** The choice is our own pool or one built on `deadpool::managed`, checked
-against the requirements below. The decision log records the result. `deadpool-postgres` is rejected: its statement
-cache conflicts with rowx's cache and its cancel/settle path. Everything below describes behaviour only.
+**Implementation: our own pool in `rowx-core`** (a FIFO-fair semaphore, a LIFO idle stack, a release task and a
+maintenance loop), not `deadpool::managed`. The spike (#75) found both viable; the decision log (C25) has the checklist
+and the numbers. `deadpool-postgres` is rejected: its statement cache conflicts with rowx's cache and its cancel/settle
+path. Everything below describes behaviour only.
 
 ```text
 Pool(options, /, *, min_size=0, max_size=10, acquire_timeout=30.0, idle_timeout=600.0, max_lifetime=1800.0,
