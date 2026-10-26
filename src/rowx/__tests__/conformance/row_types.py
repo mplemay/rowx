@@ -8,6 +8,7 @@ import datetime
 import decimal
 import ipaddress
 import uuid
+from rowx.postgres import Range
 from typing import Annotated, Any, Literal, Optional, TypeVar, Union
 """
 
@@ -35,6 +36,12 @@ ROWS: Final[list[Row]] = [
         ("tuple", 3, (False, True, False)),
         "ok",
     ),
+    ("T = Range[int]", ("scalar", 1, (False,)), "ok"),
+    ("T = Range[decimal.Decimal] | None", ("scalar", 1, (True,)), "ok"),
+    ("T = Optional[Range[datetime.date]]", ("scalar", 1, (True,)), "ok"),
+    ("T = tuple[Range[datetime.date], Range[datetime.datetime] | None, str]", ("tuple", 3, (False, True, False)), "ok"),
+    ("T = list[Range[int] | None]", ("scalar", 1, (False,)), "ok"),
+    ("type R = Range[int]\nT = tuple[R, R | None]", ("tuple", 2, (False, True)), "ok"),
     ("T = tuple[int, str]", ("tuple", 2, (False, False)), "ok"),
     ("T = tuple[int]", ("tuple", 1, (False,)), "ok"),
     ("T = tuple[None]", ("tuple", 1, (True,)), "ok"),
@@ -58,6 +65,14 @@ ROWS: Final[list[Row]] = [
     ("T = ipaddress.IPv4Address | ipaddress.IPv6Address", "InterfaceError", "invalid-row-type"),
     ("T = ipaddress.IPv4Interface | ipaddress.IPv6Interface | int", "InterfaceError", "invalid-row-type"),
     ("T = list[ipaddress.IPv4Interface]", "InterfaceError", "invalid-row-type"),
+    ("T = Range", "InterfaceError", "invalid-row-type"),
+    ("T = Range[str]", "InterfaceError", "invalid-row-type"),
+    ("T = Range[float]", "InterfaceError", "invalid-row-type"),
+    ("T = Range[bool]", "InterfaceError", "invalid-row-type"),
+    ("T = Range[int | None]", "InterfaceError", "invalid-row-type"),
+    ("T = Range[list[int]]", "InterfaceError", "invalid-row-type"),
+    ("T = Range[Range[int]]", "InterfaceError", "invalid-row-type"),
+    ("T = list[Range]", "InterfaceError", "invalid-row-type"),
     ("T = int | str | None", "InterfaceError", "invalid-row-type"),
     ("T = 'int'", "InterfaceError", "invalid-row-type"),
     ("T = tuple['int', str]", "InterfaceError", "invalid-row-type"),

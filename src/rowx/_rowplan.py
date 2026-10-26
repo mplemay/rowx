@@ -1,6 +1,7 @@
 import datetime as dt
 import decimal
 import ipaddress
+import sys
 import types
 import uuid
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ NETWORK_PAIRS: Final[frozenset[frozenset[type]]] = frozenset(
         frozenset({ipaddress.IPv4Network, ipaddress.IPv6Network}),
     },
 )
+
+# the subtype leaves a range column can have
+RANGE_SUBTYPES: Final[frozenset[type]] = frozenset({int, decimal.Decimal, dt.date, dt.datetime})
 
 type PlanKind = Literal["none", "scalar", "tuple"]
 
@@ -89,6 +93,13 @@ def _flatten(t: object, depth: int = 0) -> tuple[list[object], bool]:
     return members, has_none
 
 
+# `rowx.postgres.Range` is looked up only when it was imported, because importing it loads the backend, and a
+# row type can only mention it after the user's own import
+def _is_range(origin: object) -> bool:
+    module = sys.modules.get("rowx.postgres._range")
+    return module is not None and origin is module.Range
+
+
 def _elem(t: object) -> bool:
     t = _unwrap(t)
     if _is_none(t) or t is Any or t is object:
@@ -105,6 +116,11 @@ def _elem(t: object) -> bool:
     if origin is list:
         (inner,) = get_args(t)
         _elem(inner)
+        return False
+    if _is_range(origin):
+        (subtype,) = get_args(t)
+        if _unwrap(subtype) not in RANGE_SUBTYPES:
+            raise _reject(t, "a range subtype must be int, Decimal, date or datetime")
         return False
     if origin is None and isinstance(t, type) and t in LEAVES:
         return False

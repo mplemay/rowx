@@ -11,10 +11,11 @@ from typing import Any, Final, Literal, LiteralString, cast
 import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.types.range import Range as PsycopgRange
 
 from rowx._core.postgres import type_table
 from rowx.errors import DecodeError
-from rowx.postgres import connect
+from rowx.postgres import Range, connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -22,8 +23,25 @@ TYPES_DOC: Final[Path] = Path(__file__).resolve().parents[6] / "docs" / "types.m
 DOC_HEADING: Final[str] = "## Differences from psycopg"
 
 # how a case may differ from psycopg: equal as instants, equal after rounding to float32, rowx raising DecodeError,
-# rowx returning None for void, or rowx returning an interface where psycopg returns the bare host address
-type Difference = Literal["instant", "float32", "decode-error", "void", "host-address"]
+# rowx returning None for void, rowx returning an interface where psycopg returns the bare host address, or rowx's
+# own `Range` class holding the bounds psycopg's `Range` holds
+type Difference = Literal["instant", "float32", "decode-error", "void", "host-address", "range"]
+
+_RANGE_CLASS: Final[str] = (
+    "rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal"
+)
+_RANGE_BOUNDS: Final[str] = (
+    "an infinite bound of this subtype raises `DecodeError`, while psycopg raises its own `DataError`"
+)
+RANGE_DIFFERENCES: Final[dict[str, str]] = {
+    "int4range": f"{_RANGE_CLASS}.",
+    "int8range": f"{_RANGE_CLASS}.",
+    "numrange": f"{_RANGE_CLASS}.",
+    "daterange": f"{_RANGE_CLASS}, but {_RANGE_BOUNDS}.",
+    "tsrange": f"{_RANGE_CLASS}, but {_RANGE_BOUNDS}.",
+    "tstzrange": f"{_RANGE_CLASS} as instants, but {_RANGE_BOUNDS}.",
+}
+
 
 # the same list the generator writes into docs/types.md; test_difference_list_matches_doc keeps them in step
 DIFFERENCES: Final[dict[str, str]] = {
@@ -45,6 +63,7 @@ DIFFERENCES: Final[dict[str, str]] = {
         "rowx always returns an interface, even for a full-width mask, while psycopg returns an address for `/32` and "
         "`/128`; the interface's `ip` is that address."
     ),
+    **RANGE_DIFFERENCES,
 }
 
 
@@ -161,6 +180,58 @@ CORPUS: Final[list[Case]] = [
     *_cases("array", "macaddr[]", "{08:00:2b:01:02:03,NULL}"),
     *_cases("array", "macaddr8[]", "{08:00:2b:01:02:03:04:05,NULL}"),
     *_cases("array", "inet[]", "{{10.0.0.1/24,NULL},{2001:db8::1/64,10.0.0.2/24}}"),
+    *_cases(
+        "int4range",
+        "int4range",
+        "[1,5]",
+        "(1,5)",
+        "(,)",
+        "empty",
+        "[1,)",
+        "(,5)",
+        "[-2147483648,2147483647)",
+        difference="range",
+    ),
+    *_cases(
+        "int8range",
+        "int8range",
+        "[1,5]",
+        "(,)",
+        "empty",
+        "[-9223372036854775808,9223372036854775807)",
+        difference="range",
+    ),
+    *_cases("numrange", "numrange", "[1.5,2.5)", "(0,1e100]", "(,)", "empty", "[0,)", "(-1.50,)", difference="range"),
+    *_cases(
+        "daterange",
+        "daterange",
+        "[2024-01-01,2024-02-01)",
+        "[0001-01-01,)",
+        "(,9999-12-30]",
+        "empty",
+        difference="range",
+    ),
+    *_cases("daterange", "daterange", "[2024-01-01,infinity)", "[-infinity,2024-01-01)", difference="decode-error"),
+    *_cases(
+        "tsrange",
+        "tsrange",
+        "[2024-01-02 03:04:05,2024-01-02 03:04:06)",
+        "(,2000-02-29 12:34:56.789012]",
+        "empty",
+        difference="range",
+    ),
+    *_cases("tsrange", "tsrange", "[2024-01-02 03:04:05,infinity)", difference="decode-error"),
+    *_cases(
+        "tstzrange",
+        "tstzrange",
+        "[2024-01-02 03:04:05+00,2024-06-30 23:59:59.999999-08)",
+        "(,)",
+        "empty",
+        difference="range",
+    ),
+    *_cases("tstzrange", "tstzrange", "[-infinity,2024-01-02 03:04:05+00)", difference="decode-error"),
+    *_cases("array", "int4range[]", '{"[1,5)",NULL,empty}', '{{"(,)"},{"[1,)"}}', difference="range"),
+    *_cases("array", "tstzrange[]", '{"[2024-01-02 03:04:05+00,)",NULL}', difference="range"),
     *_cases("void", "void", "", difference="void"),
 ]
 
@@ -233,6 +304,29 @@ def float32_equal(left: object, right: object) -> bool:
     return struct.pack("<f", left) == struct.pack("<f", right)
 
 
+# a naive bound compares by value, an aware one as an instant, since psycopg uses the session zone
+def bounds_equal(left: object, right: object) -> bool:
+    if isinstance(left, dt.datetime) and left.tzinfo is not None:
+        return instants_equal(left, right)
+    return left == right
+
+
+def ranges_equal(left: object, right: object) -> bool:
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(map(ranges_equal, left, right, strict=True))
+    if left is None or right is None:
+        return left is None and right is None
+    assert isinstance(left, Range)
+    assert isinstance(right, PsycopgRange)
+    if left.empty or right.isempty:
+        return left.empty and right.isempty
+    return (
+        bounds_equal(left.lower, right.lower)
+        and bounds_equal(left.upper, right.upper)
+        and (left.lower_inc, left.upper_inc) == (right.lower_inc, right.upper_inc)
+    )
+
+
 def test_corpus_covers_the_type_table() -> None:
     supported = {t.key for t in type_table() if t.decode != "unsupported"}
     assert {case.key for case in CORPUS} == supported
@@ -264,6 +358,10 @@ def test_decode_matches_psycopg(schema: str, case: Case) -> None:
             assert isinstance(psycopg_value, ipaddress.IPv4Address | ipaddress.IPv6Address)
             assert rowx_value.ip == psycopg_value
             assert rowx_value.network.num_addresses == 1
+        case "range":
+            _, psycopg_value = _psycopg_outcome(schema, sql)
+            assert status == "ok", rowx_value
+            assert ranges_equal(rowx_value, psycopg_value), (rowx_value, psycopg_value)
         case "void":
             assert (status, rowx_value) == ("ok", None)
             assert _psycopg_outcome(schema, sql) == ("ok", "")

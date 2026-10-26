@@ -9,7 +9,7 @@ import pytest
 
 from rowx._core.postgres import type_table
 from rowx.errors import DatabaseError, DecodeError
-from rowx.postgres import connect
+from rowx.postgres import Range, connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -43,6 +43,20 @@ DECODE_GOLDENS: Final[dict[str, tuple[str, str, Any]]] = {
     "cidr": ("cidr", "2001:db8::/32", ipaddress.IPv6Network("2001:db8::/32")),
     "macaddr": ("macaddr", "08:00:2B:01:02:03", "08:00:2b:01:02:03"),
     "macaddr8": ("macaddr8", "08:00:2b:01:02:03", "08:00:2b:ff:fe:01:02:03"),
+    "int4range": ("int4range", "[1,5]", Range(1, 6)),
+    "int8range": ("int8range", "(,9)", Range(None, 9)),
+    "numrange": ("numrange", "(1.50,2.5]", Range(Decimal("1.50"), Decimal("2.5"), lower_inc=False, upper_inc=True)),
+    "daterange": ("daterange", "[2024-02-28,2024-03-01]", Range(dt.date(2024, 2, 28), dt.date(2024, 3, 2))),
+    "tsrange": (
+        "tsrange",
+        "[2024-01-02 03:04:05,)",
+        Range(dt.datetime(2024, 1, 2, 3, 4, 5), None),  # ruff: ignore[call-datetime-without-tzinfo]
+    ),
+    "tstzrange": (
+        "tstzrange",
+        "[2024-01-02 03:04:05+00,2024-01-03 03:04:05+00)",
+        Range(dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC), dt.datetime(2024, 1, 3, 3, 4, 5, tzinfo=UTC)),
+    ),
     "json": ("json", '{"a": [1, null]}', {"a": [1, None]}),
     "jsonb": ("jsonb", '{"a": [1, null]}', {"a": [1, None]}),
     "enum": ("mood", "happy", "happy"),
@@ -78,6 +92,12 @@ ENCODE_GOLDENS: Final[dict[str, tuple[str, Any]]] = {
     "cidr": ("cidr", ipaddress.IPv4Network("10.0.0.0/8")),
     "macaddr": ("macaddr", "08:00:2b:01:02:03"),
     "macaddr8": ("macaddr8", "08:00:2b:01:02:03:04:05"),
+    "int4range": ("int4range", Range(-5, 5, upper_inc=False)),
+    "int8range": ("int8range", Range(None, None)),
+    "numrange": ("numrange", Range(Decimal("-0.0010"), Decimal("1E+3"), lower_inc=False)),
+    "daterange": ("daterange", Range(dt.date(1, 1, 1), dt.date(9999, 12, 31))),
+    "tsrange": ("tsrange", Range(dt.datetime(2024, 1, 2, 3, 4, 5, 6), None)),  # ruff: ignore[call-datetime-without-tzinfo]
+    "tstzrange": ("tstzrange", Range(None, dt.datetime(2024, 1, 2, 3, 4, 5, 6, tzinfo=UTC))),
     "json": ("json", {"a": [1, None]}),
     "jsonb": ("jsonb", {"a": [1, None]}),
     "enum": ("mood", "ok"),
@@ -91,7 +111,7 @@ ENCODE_EXEMPT: Final[frozenset[str]] = frozenset({"void"})
 UNSUPPORTED_DECODE: Final[dict[str, str]] = {
     "money": "1.00",
     "tsvector": "a",
-    "int4range": "[1,5)",
+    "int4multirange": "{[1,5)}",
 }
 
 

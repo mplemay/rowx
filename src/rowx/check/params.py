@@ -21,6 +21,7 @@ type ParamName = Literal[
     "IPv6Address",
     "IPv4Network",
     "IPv6Network",
+    "Range",
     "date",
     "datetime",
     "timedelta",
@@ -84,6 +85,8 @@ CLASS_NAMES: Final[dict[str, ParamName]] = {
     "ipaddress.IPv6Address": "IPv6Address",
     "ipaddress.IPv4Network": "IPv4Network",
     "ipaddress.IPv6Network": "IPv6Network",
+    "rowx.postgres.Range": "Range",
+    "rowx.postgres._range.Range": "Range",
     "datetime.date": "date",
     "datetime.datetime": "datetime",
     "datetime.timedelta": "timedelta",
@@ -304,7 +307,10 @@ class ParamInference:
             case ast.BinOp(op=ast.BitOr()):
                 return self._union_type(node, scope)
             case ast.Subscript(value=value, slice=item):
-                element = self._annotation_type(item, scope) if self._qualify(value, scope) == "list" else None
+                qualified = self._qualify(value, scope)
+                if qualified is not None and CLASS_NAMES.get(qualified) == "Range":
+                    return ParamType("Range")
+                element = self._annotation_type(item, scope) if qualified == "list" else None
                 return None if element is None else ParamType("list", element)
             case ast.Name() | ast.Attribute():
                 qualified = self._qualify(node, scope)

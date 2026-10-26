@@ -5,6 +5,8 @@ pub enum Matcher {
     NamedSimple(&'static str),
     ArrayKind,
     DomainKind,
+    // any range type, built-in or user-defined, whose subtype has this oid
+    RangeKind(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +33,7 @@ pub enum Codec {
     Uuid,
     Network,
     Mac,
+    Range,
     Json,
     Temporal,
     Array,
@@ -79,6 +82,7 @@ impl TypeInfo {
 
 const INT: &[&str] = &["int"];
 const STR: &[&str] = &["str"];
+const RANGE: &[&str] = &["Range"];
 
 pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
@@ -321,6 +325,60 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         Format::Binary,
     )
     .codecs(Codec::Mac, Codec::Mac),
+    row(
+        "int4range",
+        Matcher::RangeKind(23),
+        "rowx.postgres.Range[int]",
+        TzRule::None,
+        RANGE,
+        Format::Binary,
+    )
+    .codecs(Codec::Range, Codec::Range),
+    row(
+        "int8range",
+        Matcher::RangeKind(20),
+        "rowx.postgres.Range[int]",
+        TzRule::None,
+        RANGE,
+        Format::Binary,
+    )
+    .codecs(Codec::Range, Codec::Range),
+    row(
+        "numrange",
+        Matcher::RangeKind(1700),
+        "rowx.postgres.Range[decimal.Decimal]",
+        TzRule::None,
+        RANGE,
+        Format::Text,
+    )
+    .codecs(Codec::Range, Codec::Range),
+    row(
+        "daterange",
+        Matcher::RangeKind(1082),
+        "rowx.postgres.Range[datetime.date]",
+        TzRule::None,
+        RANGE,
+        Format::Binary,
+    )
+    .codecs(Codec::Range, Codec::Range),
+    row(
+        "tsrange",
+        Matcher::RangeKind(1114),
+        "rowx.postgres.Range[datetime.datetime]",
+        TzRule::Naive,
+        RANGE,
+        Format::Binary,
+    )
+    .codecs(Codec::Range, Codec::Range),
+    row(
+        "tstzrange",
+        Matcher::RangeKind(1184),
+        "rowx.postgres.Range[datetime.datetime]",
+        TzRule::Aware,
+        RANGE,
+        Format::Binary,
+    )
+    .codecs(Codec::Range, Codec::Range),
     // json/jsonb results take the user's annotation (docs/design/checker.md, rules), so the leaf is `object`
     row(
         "json",

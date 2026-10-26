@@ -1,6 +1,9 @@
+from datetime import date, datetime
+from decimal import Decimal
 from ipaddress import IPv4Interface, IPv4Network, IPv6Interface, IPv6Network
 
 from rowx import query
+from rowx.postgres import Range
 
 
 def run() -> None:
@@ -18,4 +21,14 @@ def run() -> None:
     query(t"SELECT pg_sleep(0)")
     query[tuple[IPv4Interface | IPv6Interface | None, IPv4Network | IPv6Network | None, str | None, str | None]](
         t"SELECT c_inet, c_cidr, c_macaddr, c_macaddr8 FROM all_types"
+    )
+    query[tuple[Range[int] | None, Range[int] | None, Range[Decimal] | None, Range[date] | None]](
+        t"SELECT c_int4range, c_int8range, c_numrange, c_daterange FROM all_types"
+    )
+    query[tuple[Range[datetime] | None, Range[datetime] | None]](t"SELECT c_tsrange, c_tstzrange FROM all_types")
+    query[
+        tuple[list[Range[int] | None] | None, list[Range[Decimal] | None] | None, list[Range[datetime] | None] | None]
+    ](t"SELECT c_int4range_array, c_numrange_array, c_tstzrange_array FROM all_types")
+    query[tuple[Range[int] | None, list[Range[int] | None] | None]](
+        t"SELECT c_custom_range, c_custom_range_array FROM all_types"
     )

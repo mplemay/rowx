@@ -6,6 +6,7 @@ use pyo3::types::{
 
 use crate::codec::network::read as read_ip;
 use crate::codec::numeric::decimal_class;
+use crate::codec::range::range_class;
 use crate::codec::temporal::{date_class, datetime_class, time_class, timedelta_class};
 use crate::codec::temporal_enc::Ymd;
 use crate::codec::uuid::uuid_class;
@@ -56,6 +57,14 @@ pub enum PyParam {
         days: i64,
         micros: i64,
     },
+    // a `rowx.postgres.Range`; a `None` bound is an infinite side
+    Range {
+        lower: Option<Box<Self>>,
+        upper: Option<Box<Self>>,
+        lower_inc: bool,
+        upper_inc: bool,
+        empty: bool,
+    },
     // a list or tuple, with the original object kept for json and its Python type name
     Seq(Vec<Self>, Py<PyAny>, String),
     // anything without a dedicated variant yet, with its Python type name
@@ -91,6 +100,7 @@ impl PyParam {
             Self::Time { .. } => "time",
             Self::DateTime { .. } => "datetime",
             Self::Timedelta { .. } => "timedelta",
+            Self::Range { .. } => "Range",
             Self::Bytes(_, name) | Self::Seq(_, _, name) | Self::Other(_, name) => name,
         }
     }
@@ -134,6 +144,28 @@ fn time_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 // postgres arrays have at most 6 dimensions; deeper nesting is left opaque, which also bounds
 // the recursion for a self-referential list
 const MAX_SEQ_DEPTH: usize = 16;
+
+fn range_param(
+    py: Python<'_>,
+    index: usize,
+    obj: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<PyParam> {
+    let bound = |name: &str| -> PyResult<Option<Box<PyParam>>> {
+        let value = obj.getattr(name)?;
+        if value.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(one(py, index, &value, depth + 1)?)))
+    };
+    Ok(PyParam::Range {
+        lower: bound("lower")?,
+        upper: bound("upper")?,
+        lower_inc: obj.getattr("lower_inc")?.extract()?,
+        upper_inc: obj.getattr("upper_inc")?.extract()?,
+        empty: obj.getattr("empty")?.extract()?,
+    })
+}
 
 fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> PyResult<PyParam> {
     if obj.is_none() {
@@ -214,6 +246,9 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
                     &format!("${}: the str cannot be encoded as UTF-8: {e}", index + 1),
                 )
             });
+    }
+    if depth < MAX_SEQ_DEPTH && obj.is_instance(range_class(py)?)? {
+        return range_param(py, index, obj, depth);
     }
     let name = obj.get_type().name()?.to_string();
     if depth < MAX_SEQ_DEPTH && (obj.is_instance_of::<PyList>() || obj.is_instance_of::<PyTuple>())

@@ -11,7 +11,7 @@ use rowx_postgres::types::{Codec, Format, Matcher, TYPE_TABLE, TzRule};
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
     key: String,
-    // one of "oid", "enum", "named", "array", "domain"
+    // one of "oid", "enum", "named", "array", "range", "domain"
     matcher: String,
     matcher_oid: Option<u32>,
     matcher_name: Option<String>,
@@ -36,6 +36,7 @@ const fn codec_name(codec: Codec) -> &'static str {
         Codec::Uuid => "uuid",
         Codec::Network => "network",
         Codec::Mac => "mac",
+        Codec::Range => "range",
         Codec::Json => "json",
         Codec::Temporal => "temporal",
         Codec::Array => "array",
@@ -50,6 +51,7 @@ impl From<&rowx_postgres::types::TypeInfo> for TypeInfo {
             Matcher::EnumKind => ("enum", None, None),
             Matcher::NamedSimple(name) => ("named", None, Some(name.to_owned())),
             Matcher::ArrayKind => ("array", None, None),
+            Matcher::RangeKind(oid) => ("range", Some(oid), None),
             Matcher::DomainKind => ("domain", None, None),
         };
         Self {

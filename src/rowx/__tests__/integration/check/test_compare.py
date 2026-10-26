@@ -19,7 +19,7 @@ from rowx.check.params import ParamInference
 from rowx.check.resolve import Elem, RowType
 from rowx.check.runner import describe_all
 from rowx.errors import EncodeError, Error, RowShapeError
-from rowx.postgres import connect
+from rowx.postgres import Range, connect
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -178,6 +178,20 @@ CIDR_LEAF: Final[Leaf] = pair_leaf(
     "ipaddress.IPv4Network | ipaddress.IPv6Network",
     (ipaddress.IPv4Network, ipaddress.IPv6Network),
 )
+
+
+def range_leaf(subtype: type, annotation: object, leaf: LeafName) -> Leaf:
+    return Leaf(
+        name=f"Range[{subtype.__name__}]",
+        annotation=annotation,
+        elem=Elem(leaf=leaf, nullable=False),
+        # an empty range holds no bounds, so a leaf can only be told apart by a range that has one
+        is_value=lambda value: (
+            type(value) is Range and any(type(bound) is subtype for bound in (value.lower, value.upper))
+        ),
+    )
+
+
 INT_LEAF: Final[Leaf] = scalar_leaf("int", int, "int")
 STR_LEAF: Final[Leaf] = scalar_leaf("str", str, "str")
 LIST_INT: Final[Leaf] = list_leaf("list[int]", list[int], INT_LEAF)
@@ -195,6 +209,10 @@ LEAVES: Final[list[Leaf]] = [
     scalar_leaf("UUID", UUID, "uuid.UUID"),
     INET_LEAF,
     CIDR_LEAF,
+    range_leaf(int, Range[int], "rowx.postgres.Range[int]"),
+    range_leaf(Decimal, Range[Decimal], "rowx.postgres.Range[decimal.Decimal]"),
+    range_leaf(dt.date, Range[dt.date], "rowx.postgres.Range[datetime.date]"),
+    range_leaf(dt.datetime, Range[dt.datetime], "rowx.postgres.Range[datetime.datetime]"),
     LIST_INT,
     list_leaf("list[int | None]", list[int | None], INT_LEAF, item_nullable=True),
     list_leaf("list[str]", list[str], STR_LEAF),
@@ -328,7 +346,7 @@ def natural_leaf(column: ColumnDesc) -> Leaf:
     # the fixed leaves hold only a few array shapes, so every other one-dimensional array gets its own
     candidates += [
         list_leaf(f"list[{inner.name}]", list[inner.annotation], inner)  # ty: ignore[invalid-type-form]
-        for inner in LEAVES[:13]
+        for inner in LEAVES[:17]
     ]
     for leaf in candidates:
         if not TYPE_RULES.intersection(findings_for(column, leaf, nullable=column.nullable)):
@@ -402,7 +420,9 @@ def test_nullability_matrix(schema: str) -> None:
 
 # --- parameters ---
 
-PRELUDE: Final[str] = "import datetime\nimport decimal\nimport ipaddress\nimport uuid\n"
+PRELUDE: Final[str] = (
+    "import datetime\nimport decimal\nimport ipaddress\nimport uuid\nfrom rowx.postgres import Range\n"
+)
 UUID_TEXT: Final[str] = "12345678-1234-5678-1234-567812345678"
 # python source -> value; the source is what the checker's inference reads, and the value is what the runtime binds
 PARAM_VALUES: Final[list[str]] = [
@@ -427,6 +447,7 @@ PARAM_VALUES: Final[list[str]] = [
     'ipaddress.IPv6Address("::ffff:1.2.3.4")',
     'ipaddress.IPv4Network("10.0.0.0/8")',
     'ipaddress.IPv6Network("2001:db8::/32")',
+    "Range(1, 5)",
     "None",
     "[1, 2]",
     "(1, 2)",
@@ -450,6 +471,7 @@ NOT_JSON: Final[list[str]] = [
     'ipaddress.IPv6Address("::ffff:1.2.3.4")',
     'ipaddress.IPv4Network("10.0.0.0/8")',
     'ipaddress.IPv6Network("2001:db8::/32")',
+    "Range(1, 5)",
 ]
 # the checker does not look at time zones, so the runtime rejects these where the checker stays quiet
 # and `json.dumps` and the one-character rule of "char" are value checks the checker never makes
@@ -465,6 +487,8 @@ RUNTIME_ONLY: Final[frozenset[tuple[str, str]]] = frozenset(
         # a `str` is accepted by type, but only a parseable address or MAC encodes
         *((decl, source) for decl in ("inet", "cidr", "macaddr", "macaddr8") for source in ('"ok"', f'"{UUID_TEXT}"')),
         *((f"{decl}[]", '["ok"]') for decl in ("inet", "cidr", "macaddr", "macaddr8")),
+        # the checker accepts any `Range`, but the bounds must suit the subtype, and a leaf is never inferred for them
+        *((decl, "Range(1, 5)") for decl in ("daterange", "tsrange", "tstzrange")),
     },
 )
 

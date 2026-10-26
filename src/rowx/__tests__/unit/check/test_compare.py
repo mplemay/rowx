@@ -249,3 +249,65 @@ def test_array_param_checks_elements() -> None:
     assert compare_param(0, "_int4", "array", ParamType("list", ParamType("int")), "int4") is None
     assert compare_param(0, "_uuid", "array", ParamType("list", ParamType("str")), "uuid") is None
     assert compare_param(0, "_int4", "array", ParamType("list"), "int4") is None
+
+
+RANGE_LEAVES = {
+    "int4range": "rowx.postgres.Range[int]",
+    "int8range": "rowx.postgres.Range[int]",
+    "numrange": "rowx.postgres.Range[decimal.Decimal]",
+    "daterange": "rowx.postgres.Range[datetime.date]",
+    "tsrange": "rowx.postgres.Range[datetime.datetime]",
+    "tstzrange": "rowx.postgres.Range[datetime.datetime]",
+}
+
+
+@pytest.mark.parametrize(("key", "leaf"), RANGE_LEAVES.items())
+def test_range_matches_only_its_subtype_leaf(key: str, leaf: str) -> None:
+    assert run(scalar(Elem(leaf, nullable=False)), col(key)) == []  # ty: ignore[invalid-argument-type]
+    others = {other for other in RANGE_LEAVES.values() if other != leaf}
+    for other in others:
+        findings = run(scalar(Elem(other, nullable=False)), col(key))  # ty: ignore[invalid-argument-type]
+        assert rules(findings) == ["type-mismatch"], other
+        assert findings[0].help is not None
+        assert key in findings[0].help
+        assert leaf in findings[0].help
+
+
+def test_range_mismatch_help_names_the_subtype() -> None:
+    [finding] = run(scalar(Elem("rowx.postgres.Range[decimal.Decimal]", nullable=False)), col("int4range", name="r"))
+    assert finding.help == "`int4range` is a range of `int`, so annotate it `rowx.postgres.Range[int]`"
+
+
+def test_range_array_help_names_the_subtype() -> None:
+    column = ColumnDesc(name="c", type_name="_numrange", type_key="array", nullable=False, element_key="numrange")
+    elem = Elem("list", nullable=False, item=Elem("rowx.postgres.Range[int]", nullable=False))
+    [finding] = run(scalar(elem), column)
+    assert finding.rule == "type-mismatch"
+    assert finding.help is not None
+    assert (
+        finding.help
+        == "`numrange` is a range of `decimal.Decimal`, so annotate it `rowx.postgres.Range[decimal.Decimal]`"
+    )
+
+
+def test_a_non_range_mismatch_has_no_range_help() -> None:
+    [finding] = run(scalar(Elem("str", nullable=False)), col("int4"))
+    assert finding.help is None
+
+
+def test_range_parameter_takes_only_a_range() -> None:
+    assert compare_param(0, "int4range", "int4range", ParamType("Range")) is None
+    for name in ("int", "str", "list", "Decimal"):
+        finding = compare_param(0, "int4range", "int4range", ParamType(name))
+        assert finding is not None
+        assert finding.rule == "param-type-mismatch"
+    assert compare_param(0, "int4", "int4", ParamType("Range")) is not None
+
+
+def test_range_array_parameter_takes_a_list_of_ranges() -> None:
+    ranges = ParamType("list", ParamType("Range"))
+    assert compare_param(0, "_int4range", "array", ranges, "int4range") is None
+    bad = ParamType("list", ParamType("int"))
+    finding = compare_param(0, "_int4range", "array", bad, "int4range")
+    assert finding is not None
+    assert "whose element" in finding.message

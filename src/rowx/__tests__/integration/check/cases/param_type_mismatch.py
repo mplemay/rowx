@@ -1,6 +1,8 @@
 import ipaddress
+from decimal import Decimal
 
 from rowx import query
+from rowx.postgres import Range
 
 type Inet = ipaddress.IPv4Interface | ipaddress.IPv6Interface
 type Cidr = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -25,3 +27,13 @@ def run() -> None:
     query[Inet](t'SELECT {"10.0.0.1"}::inet AS "n!"')
     query[Cidr](t'SELECT {ipaddress.IPv4Network("10.0.0.0/8")}::cidr AS "n!"')
     query[str](t'SELECT {"08:00:2b:01:02:03"}::macaddr AS "n!"')
+    query[Range[int]](t'SELECT {Range(1, 5)}::int4range AS "r!"')
+    query[Range[Decimal]](t'SELECT {Range(1, 5)}::numrange AS "r!"')
+    query[Range[int]](t'SELECT {Range(1, 5)}::rowx_intrange AS "r!"')
+    query[Range[int]](t'SELECT {1}::int4range AS "r!"')  # error: [param-type-mismatch]
+    query[Range[int]](t'SELECT {"[1,5)"}::int4range AS "r!"')  # error: [param-type-mismatch]
+    query[Range[int]](t'SELECT {(1, 5)}::int4range AS "r!"')  # error: [param-type-mismatch]
+    query[int](t'SELECT {Range(1, 5)}::int AS "n!"')  # error: [param-type-mismatch]
+    query[str](t'SELECT {Range(1, 5)}::text AS "n!"')  # error: [param-type-mismatch]
+    query[list[Range[int]]](t'SELECT {[Range(1, 5)]}::int4range[] AS "r!"')
+    query[list[Range[int]]](t'SELECT {[1]}::int4range[] AS "r!"')  # error: [param-type-mismatch]
