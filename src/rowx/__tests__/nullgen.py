@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import secrets
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Final, Literal
@@ -129,8 +130,11 @@ class FuzzReport:
         return "\n".join(lines)
 
 
+# `ROWX_FUZZ_SEED=random` draws a fresh seed, so no shell needs to generate one; the report prints it for replay
 def fuzz_settings() -> tuple[int, int]:
-    return int(os.environ.get(SEED_ENV, DEFAULT_SEED)), int(os.environ.get(COUNT_ENV, DEFAULT_COUNT))
+    raw = os.environ.get(SEED_ENV, str(DEFAULT_SEED))
+    seed = secrets.randbelow(2**31) if raw == "random" else int(raw)
+    return seed, int(os.environ.get(COUNT_ENV, DEFAULT_COUNT))
 
 
 def outputs(shape: Shape) -> list[tuple[str, ColType]]:

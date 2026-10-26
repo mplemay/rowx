@@ -15,7 +15,7 @@ test-py:
 
 # long nullability fuzz with a random seed, printing the precision report; needs ROWX_TEST_DSN
 fuzz-nullability count="5000":
-    ROWX_FUZZ_REPORT=1 ROWX_FUZZ_COUNT={{count}} ROWX_FUZZ_SEED=$RANDOM uv run pytest src/rowx/__tests__/integration/describe/test_nullability_fuzz.py -s
+    ROWX_FUZZ_REPORT=1 ROWX_FUZZ_COUNT={{count}} ROWX_FUZZ_SEED=random uv run pytest src/rowx/__tests__/integration/describe/test_nullability_fuzz.py -s
 
 # start postgres:18 and print the DSN
 db-up:

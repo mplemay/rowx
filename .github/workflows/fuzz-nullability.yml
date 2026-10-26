@@ -73,13 +73,10 @@ jobs:
       - name: Build the extension
         run: uv run maturin develop
 
-      # a random seed per run: a failure prints it, and ROWX_FUZZ_SEED replays it
+      # a random seed per run: the report and any failure print it, and ROWX_FUZZ_SEED replays it
       - name: Fuzz and report precision
         env:
           ROWX_FUZZ_REPORT: "1"
+          ROWX_FUZZ_SEED: random
           ROWX_FUZZ_COUNT: ${{ inputs.count || '5000' }}
-        run: |
-          ROWX_FUZZ_SEED="$RANDOM"
-          export ROWX_FUZZ_SEED
-          echo "seed: $ROWX_FUZZ_SEED"
-          uv run pytest src/rowx/__tests__/integration/describe/test_nullability_fuzz.py -s
+        run: uv run pytest src/rowx/__tests__/integration/describe/test_nullability_fuzz.py -s
