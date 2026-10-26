@@ -37,6 +37,18 @@
 - **Conformance.** `tests/conformance/row_types.py` runs the shared
   [Row-type grammar and runtime row plan](api.md#row-type-grammar-and-runtime-row-plan) table through `_rowplan` and the
   checker's resolver.
+- **Oracles.** Each compares rowx with something independent, and each is generated from `type_table()`, so a new
+  table row joins all of them. A meta-test fails when a row is missing from one.
+  - **Agreement matrix** (#94): types × row-type leaves, nullability and parameters. A query the checker accepts must
+    decode to the annotated leaf, and a parameter it accepts must encode.
+  - **`*_send` comparison** (#95): the bytes rowx writes equal the server's `*_send` output, with `proptest` properties
+    and `cargo fuzz` decoders in a nightly job outside the workspace lints.
+  - **psycopg differential** (#108): the same values decode and encode identically in psycopg, including edge cases and
+    session settings for text-encoded parameters, and `money` minor units under a changed `lc_monetary`.
+  - **Nullability fuzzer** (#109): a NOT NULL verdict that a NULL contradicts fails CI. Over-promotion is reported, not
+    gated.
+  - A new type family also adds its goldens, grammar conformance rows (`Range[T]`, the network unions, `hstore`) and
+    an extension-owner case (a same-named type in another schema is `unsupported-type`).
 - **Checker cases.**
   - `tests/check/cases/<rule>.py` files carry inline markers: `# error: [rule]` or
     `# error: [rule1, rule2]` on the line where the diagnostic starts.

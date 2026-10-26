@@ -99,6 +99,27 @@
 | C24 | Pool performance bar: at least asyncpg `pool.fetchrow` at 64 tasks, non-gating | Matches the fetch benchmark approach |
 | C25 | The pool is our own, in `rowx-core` (a FIFO-fair semaphore, a LIFO idle stack, a release task and a maintenance loop), not `deadpool::managed` (#75) | Both met every requirement; the own pool needs no new dependency, runs the checks where rowx wants them, and is faster |
 
+## Type parity (#98)
+
+| # | Topic | Decision | Why |
+|---|---|---|---|
+| T1 | Target | The set sqlx's `query!` type-checks, as built-in codecs. Records, multiranges, `xml`, `tsvector`, `pg_lsn`, `xid`, `reg*` and `jsonpath` stay unsupported | Bounded scope; records need named row types |
+| T2 | Roadmap item 6 | Ranges, `inet` and `money` become built-in. Overrides and user codecs for domains and composites stay deferred | Built-ins need no override API |
+| T3 | `inet`, `cidr` leaves | `IPv4Interface \| IPv6Interface` and `IPv4Network \| IPv6Network`, each one leaf and the only multi-member unions the grammar admits | The stdlib already models both; no new address type |
+| T4 | `macaddr`, `macaddr8` | `str`, lower case, colon separated. `macaddr8` is beyond sqlx | No stdlib type |
+| T5 | Ranges | `rowx.postgres.Range[T]`, a frozen dataclass modelled on psycopg; `T` is checked against the subtype; arrays of ranges included | Needs bounds, inclusivity and empty |
+| T6 | `money` | `rowx.postgres.Money(minor_units)`, binary int8, with `to_decimal(scale)` taking the scale explicitly | Results are always binary, so a text path is not available; `lc_monetary` can change mid-session, so rowx holds no scale |
+| T7 | Bit strings | `str` of `0`/`1` | Lossless and stdlib only |
+| T8 | Interval months | `timedelta` stays and raises on months. `rowx.postgres.Interval` is an opt-in second leaf on the same column | No silent lossy conversion |
+| T9 | Geometric | Frozen dataclasses in `rowx.postgres` | sqlx and asyncpg both have types |
+| T10 | Extensions | `hstore` → `dict[str, str \| None]`, `ltree`/`lquery` → `str`, `cube` → `rowx.postgres.Cube(lower_left, upper_right)` | A flat tuple cannot tell a box from a higher-dimensional point |
+| T11 | Extension matching | By name and owning extension (`pg_depend` → `pg_extension`), resolved in `describe.rs`, cached per connection with the statement cache, reused by runtime dispatch. Applies to `citext` too | A same-named user type must not be treated as the extension type |
+| T12 | Wiring | `Matcher::ExtNamed` and `Matcher::RangeKind`, plus one `Codec` variant per family. Each feature PR calls these out | Enum change, not an appended row |
+| T13 | Grammar | Each leaf needs a grammar line, a `_rowplan` rule, a resolver rule and conformance rows. Also admitted: `dict[str, str \| None]` (hstore) | Keeps both implementations in step |
+| T14 | Parameters | Each type accepts the values in the [type table](type-mapping.md); subclasses are checked before their bases | Matches existing extraction order |
+| T15 | Encoding | Binary where a `*_send` exists (results are always binary). `typsend = 0` rule unchanged | Existing rule |
+| T16 | Testing | Every family joins the #94, #95, #108 and #109 oracles through `type_table()` | [Testing](testing.md) |
+
 ### Pool spike (#75)
 
 Two prototypes ran the same 12 tests with paused time: `deadpool::managed` plus our layers, and a minimal own pool. Both

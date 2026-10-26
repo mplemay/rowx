@@ -7,8 +7,8 @@
 4. **Multi-statement execution** over the simple protocol (sqlx's `fetch_many` results),
    and the `CommandComplete` tag on `QueryResult`.
 5. `--fix`, warnings and ignore comments.
-6. **Type overrides** (`"col: T"`) and custom codecs (domains, composites, ranges, `inet`,
-   `money`).
+6. **Type overrides** (`"col: T"`) and user-supplied custom codecs (domains and composites). Ranges, `inet` and
+   `money` are no longer here: they are built-in codecs ([Type mapping](type-mapping.md)).
 7. Parser-based nullability narrowing ([Dependency evaluation](dependencies.md#dependency-evaluation)), and a
    cross-version `breaking --against` check.
 8. LISTEN/NOTIFY, COPY, client-cert TLS, `PG*` env vars and `.pgpass`, and a free-threaded
