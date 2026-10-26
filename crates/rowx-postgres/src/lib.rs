@@ -5,6 +5,7 @@ pub mod dsn;
 pub mod error;
 pub mod exec;
 pub mod explain;
+pub mod pool;
 pub mod stmt_cache;
 pub mod tls;
 pub mod types;

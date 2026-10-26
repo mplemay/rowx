@@ -9,7 +9,7 @@ use tokio_postgres::{Client, Statement};
 use rowx_core::error::CoreError;
 
 use crate::cancel::CancelTarget;
-use crate::dsn::ConnectOptions;
+use crate::dsn::{ConnectOptions, ParsedDsn};
 use crate::error::Error;
 use crate::stmt_cache::StmtCache;
 
@@ -26,7 +26,18 @@ impl Connection {
     /// # Errors
     /// `Interface` for DSN, IO or TLS problems, `Db` for a server rejection.
     pub async fn connect(options: &ConnectOptions, handle: &Handle) -> Result<Self, Error> {
-        let parsed = options.build()?;
+        Self::connect_parsed(&options.build()?, options.statement_cache_size, handle).await
+    }
+
+    /// Connects from options that were parsed already, which a pool does once for all its connections.
+    ///
+    /// # Errors
+    /// As `connect`, minus the DSN problems that parsing already reported.
+    pub async fn connect_parsed(
+        parsed: &ParsedDsn,
+        statement_cache_size: usize,
+        handle: &Handle,
+    ) -> Result<Self, Error> {
         let connector = parsed.tls.connector()?;
         let (client, connection) = parsed.config.connect(connector.clone()).await?;
         let cancel = CancelTarget::new(client.cancel_token(), &parsed.config, connector)?;
@@ -41,7 +52,7 @@ impl Connection {
             client: Some(client),
             task: Some(task),
             broken,
-            cache: StmtCache::new(options.statement_cache_size),
+            cache: StmtCache::new(statement_cache_size),
             cancel,
         })
     }
