@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use tokio::sync::Notify;
 
@@ -30,6 +30,8 @@ pub struct State {
     word: AtomicU64,
     // conservative: set whenever the session may be inside a transaction, cleared by a reset
     maybe_in_txn: AtomicBool,
+    // open helper transactions and savepoints on the session (the outermost transaction counts as 1)
+    txn_depth: AtomicU32,
     settled: Notify,
 }
 
@@ -201,13 +203,42 @@ impl State {
         self.maybe_in_txn.store(true, Ordering::Release);
     }
 
+    /// Clears the flag and the helper depth, which is what a reset or a finished transaction does.
     pub fn clear_maybe_in_txn(&self) {
         self.maybe_in_txn.store(false, Ordering::Release);
+        self.txn_depth.store(0, Ordering::Release);
     }
 
     #[must_use]
     pub fn maybe_in_txn(&self) -> bool {
-        self.maybe_in_txn.load(Ordering::Acquire)
+        self.txn_depth() > 0 || self.maybe_in_txn.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn txn_depth(&self) -> u32 {
+        self.txn_depth.load(Ordering::Acquire)
+    }
+
+    /// Records a transaction or savepoint that was opened; returns the new depth.
+    pub fn enter_txn(&self) -> u32 {
+        self.txn_depth.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Records a savepoint that was released; returns the new depth.
+    pub fn leave_txn(&self) -> u32 {
+        let mut cur = self.txn_depth.load(Ordering::Acquire);
+        loop {
+            let next = cur.saturating_sub(1);
+            match self.txn_depth.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return next,
+                Err(actual) => cur = actual,
+            }
+        }
     }
 
     /// Settling → Idle (or Broken after an IO error) and wakes every waiting call.
@@ -364,6 +395,19 @@ mod tests {
         assert!(state.maybe_in_txn());
         state.clear_maybe_in_txn();
         assert!(!state.maybe_in_txn());
+    }
+
+    #[test]
+    fn the_depth_feeds_maybe_in_txn() {
+        let state = State::default();
+        assert_eq!(state.enter_txn(), 1);
+        assert_eq!(state.enter_txn(), 2);
+        assert!(state.maybe_in_txn());
+        assert_eq!(state.leave_txn(), 1);
+        state.clear_maybe_in_txn();
+        assert_eq!(state.txn_depth(), 0);
+        assert!(!state.maybe_in_txn());
+        assert_eq!(state.leave_txn(), 0);
     }
 
     #[test]

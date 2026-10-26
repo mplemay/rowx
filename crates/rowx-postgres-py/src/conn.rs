@@ -10,7 +10,10 @@ use rowx_core::cancel::Backend;
 use rowx_core::error::CoreError;
 use rowx_core::state::State;
 use rowx_postgres::cancel::{Cancel, PgBackend};
-use rowx_postgres::conn::Connection as PgConnection;
+use rowx_postgres::conn::{
+    Connection as PgConnection, begin_sql, release_savepoint_sql, rollback_to_savepoint_sql,
+    savepoint_sql,
+};
 use rowx_postgres::dsn::ConnectOptions;
 use rowx_postgres::error::Error;
 use rowx_postgres::pool::{Pool as PgPool, Pooled};
@@ -18,7 +21,7 @@ use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
 use crate::errors::{PgError, interface_error, to_py_err};
-use crate::exec::{self, Access, FetchArgs};
+use crate::exec::{self, Access, Depth, FetchArgs};
 use crate::stream::{RowStream, StreamArgs};
 use rowx_py_core::runtime;
 
@@ -192,6 +195,62 @@ impl Connection {
 
     fn reset<'py>(&self, py: Python<'py>, query: String) -> PyResult<Bound<'py, PyAny>> {
         exec::simple(py, &self.cancel, &self.access, query, true)
+    }
+
+    #[pyo3(name = "_begin")]
+    fn begin<'py>(
+        &self,
+        py: Python<'py>,
+        isolation: Option<&str>,
+        readonly: bool,
+        deferrable: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if self.cancel.state.txn_depth() > 0 {
+            return Err(interface_error(
+                py,
+                "the connection is already in a transaction; use Transaction.transaction() for a savepoint",
+            ));
+        }
+        let sql = begin_sql(isolation, readonly, deferrable).map_err(|e| to_py_err(py, &e))?;
+        exec::txn_step(py, &self.cancel, &self.access, sql, Depth::Enter)
+    }
+
+    // resolves to the depth, which names the savepoint
+    #[pyo3(name = "_savepoint")]
+    fn savepoint<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let depth = self.cancel.state.txn_depth();
+        if depth == 0 {
+            return Err(interface_error(py, "there is no open transaction"));
+        }
+        let sql = savepoint_sql(depth + 1);
+        exec::txn_step(py, &self.cancel, &self.access, sql, Depth::Enter)
+    }
+
+    #[pyo3(name = "_release_savepoint")]
+    fn release_savepoint<'py>(&self, py: Python<'py>, n: u32) -> PyResult<Bound<'py, PyAny>> {
+        exec::txn_step(
+            py,
+            &self.cancel,
+            &self.access,
+            release_savepoint_sql(n),
+            Depth::Leave,
+        )
+    }
+
+    #[pyo3(name = "_rollback_to_savepoint")]
+    fn rollback_to_savepoint<'py>(&self, py: Python<'py>, n: u32) -> PyResult<Bound<'py, PyAny>> {
+        exec::txn_step(
+            py,
+            &self.cancel,
+            &self.access,
+            rollback_to_savepoint_sql(n),
+            Depth::Keep,
+        )
+    }
+
+    #[pyo3(name = "_end_transaction")]
+    fn end_transaction<'py>(&self, py: Python<'py>, commit: bool) -> PyResult<Bound<'py, PyAny>> {
+        exec::end_transaction(py, &self.cancel, &self.access, commit)
     }
 
     #[getter]

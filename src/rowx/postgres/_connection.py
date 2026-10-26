@@ -1,15 +1,17 @@
 from typing import TYPE_CHECKING, Final, Self
 
 from rowx._core.postgres import connect as connect_impl
-from rowx.errors import InterfaceError
+from rowx.errors import ConnectionBusyError, InterfaceError
 from rowx.postgres._options import ConnectOptions
+from rowx.postgres._transaction import TrackedStream, Transaction
 
 RESET_QUERY: Final[str] = "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;"
 
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from rowx._core.postgres import Connection as ConnectionImpl, RowStream as RowStreamImpl
+    from rowx._core.postgres import Connection as ConnectionImpl
+    from rowx._executor import StreamHandle
     from rowx.postgres._pool import Pool
 
 
@@ -18,6 +20,8 @@ class Connection:
         self._inner: ConnectionImpl | None = impl
         # set while the connection is checked out of a pool
         self._pool = pool
+        # the innermost open transaction; failures of statements run on this connection mark it failed
+        self._tx: Transaction | None = None
 
     @property
     def _impl(self) -> ConnectionImpl:
@@ -46,7 +50,14 @@ class Connection:
         limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
     ) -> list[object]:
-        return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity)  # ruff: ignore[private-member-access]
+        try:
+            return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity)  # ruff: ignore[private-member-access]
+        except ConnectionBusyError:
+            # nothing ran, so a transaction is untouched
+            raise
+        except BaseException:
+            self._note_failure()
+            raise
 
     def _stream(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         self,
@@ -56,17 +67,38 @@ class Connection:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,
-    ) -> RowStreamImpl:
-        return self._impl._stream(sql, params, mask, scalar, arity, batch_size)  # ruff: ignore[private-member-access]
+    ) -> StreamHandle:
+        stream = self._impl._stream(sql, params, mask, scalar, arity, batch_size)  # ruff: ignore[private-member-access]
+        # a plain connection keeps the bare stream, so only a transaction pays for the wrapper
+        return TrackedStream(stream, self._note_failure) if self._tx is not None else stream
 
     async def _execute(self, sql: str, params: list[object]) -> int:
-        return await self._impl._execute(sql, params)  # ruff: ignore[private-member-access]
+        try:
+            return await self._impl._execute(sql, params)  # ruff: ignore[private-member-access]
+        except ConnectionBusyError:
+            raise
+        except BaseException:
+            self._note_failure()
+            raise
+
+    def _note_failure(self) -> None:
+        if self._tx is not None:
+            self._tx._failed = True  # ruff: ignore[private-member-access]
 
     async def ping(self) -> None:
         await self._impl.ping()
 
     async def reset(self) -> None:
         await self._impl.reset(RESET_QUERY)
+
+    def transaction(
+        self,
+        *,
+        isolation: str | None = None,
+        readonly: bool = False,
+        deferrable: bool = False,
+    ) -> Transaction:
+        return Transaction(self, isolation=isolation, readonly=readonly, deferrable=deferrable)
 
     def detach(self) -> None:
         self._impl.detach()

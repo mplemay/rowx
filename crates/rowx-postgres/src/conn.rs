@@ -137,6 +137,58 @@ impl Connection {
     }
 }
 
+const ISOLATION_LEVELS: [&str; 4] = [
+    "read uncommitted",
+    "read committed",
+    "repeatable read",
+    "serializable",
+];
+
+/// The `BEGIN` for the transaction helper.
+///
+/// # Errors
+/// `Interface` for an isolation level Postgres does not have.
+pub fn begin_sql(
+    isolation: Option<&str>,
+    readonly: bool,
+    deferrable: bool,
+) -> Result<String, Error> {
+    let mut sql = String::from("BEGIN");
+    if let Some(level) = isolation {
+        let level = level.split_whitespace().collect::<Vec<_>>().join(" ");
+        let level = level.to_ascii_lowercase();
+        if !ISOLATION_LEVELS.contains(&level.as_str()) {
+            return Err(Error::Interface(format!(
+                "unknown isolation level {level:?}; use one of {ISOLATION_LEVELS:?}"
+            )));
+        }
+        sql.push_str(" ISOLATION LEVEL ");
+        sql.push_str(&level.to_ascii_uppercase());
+    }
+    if readonly {
+        sql.push_str(" READ ONLY");
+    }
+    if deferrable {
+        sql.push_str(" DEFERRABLE");
+    }
+    Ok(sql)
+}
+
+#[must_use]
+pub fn savepoint_sql(n: u32) -> String {
+    format!("SAVEPOINT rowx_sp_{n}")
+}
+
+#[must_use]
+pub fn release_savepoint_sql(n: u32) -> String {
+    format!("RELEASE SAVEPOINT rowx_sp_{n}")
+}
+
+#[must_use]
+pub fn rollback_to_savepoint_sql(n: u32) -> String {
+    format!("ROLLBACK TO SAVEPOINT rowx_sp_{n}")
+}
+
 /// Whether `sql` opens a transaction or savepoint by hand, judged from its first keyword.
 #[must_use]
 pub fn opens_transaction(sql: &str) -> bool {
@@ -184,7 +236,27 @@ fn skip_block_comment(after: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::opens_transaction;
+    use super::{begin_sql, opens_transaction, release_savepoint_sql, savepoint_sql};
+
+    #[test]
+    fn builds_begin_statements() {
+        assert_eq!(begin_sql(None, false, false).as_deref(), Ok("BEGIN"));
+        assert_eq!(
+            begin_sql(Some("Repeatable  Read"), true, false).as_deref(),
+            Ok("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        );
+        assert_eq!(
+            begin_sql(Some("serializable"), true, true).as_deref(),
+            Ok("BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE")
+        );
+        assert!(begin_sql(Some("x; DROP TABLE t"), false, false).is_err());
+    }
+
+    #[test]
+    fn builds_savepoint_statements() {
+        assert_eq!(savepoint_sql(2), "SAVEPOINT rowx_sp_2");
+        assert_eq!(release_savepoint_sql(2), "RELEASE SAVEPOINT rowx_sp_2");
+    }
 
     #[test]
     fn detects_the_transaction_keywords() {
