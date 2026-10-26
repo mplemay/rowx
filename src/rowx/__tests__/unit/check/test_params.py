@@ -152,6 +152,16 @@ def test_annotation_lists() -> None:
     assert infer(source) == ["list[int]", "list[int]", None, None, "list[list[str]]"]
 
 
+def test_annotation_parameterized_range() -> None:
+    source = """
+        from rowx.postgres import Range
+
+        def f(a: Range[int], b: list[Range[int]], c: Range[int] | None):
+            q(t"{a} {b} {c}")
+    """
+    assert infer(source) == ["Range", "list[Range]", "Range"]
+
+
 def test_annotation_imports() -> None:
     source = """
         import datetime
