@@ -16,9 +16,19 @@ pub(super) fn collect_ctes<'a>(node: &'a Value, ctes: &mut Ctes<'a>) {
 }
 
 pub(super) fn has_multiple_grouping_sets(node: &Value) -> bool {
+    // a rollup chain is one entry whose "Group Keys" lists several sets, so count the sets, not the entries
     node.get("Grouping Sets")
         .and_then(Value::as_array)
-        .is_some_and(|sets| sets.len() > 1)
+        .is_some_and(|entries| {
+            let sets: usize = entries
+                .iter()
+                .flat_map(|entry| ["Group Keys", "Hash Keys"].map(|key| entry.get(key)))
+                .flatten()
+                .filter_map(Value::as_array)
+                .map(Vec::len)
+                .sum();
+            sets > 1 || entries.len() > 1
+        })
 }
 
 // True when anything under `node` can introduce NULLs: a null-extending join or a grouping-sets aggregate.

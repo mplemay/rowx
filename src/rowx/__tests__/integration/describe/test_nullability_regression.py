@@ -138,3 +138,20 @@ def test_reason_detail_names_node_or_alias(schema: str) -> None:
     assert (boundary.reason, boundary.reason_detail) == ("ScanBoundary", "x")
     (plain,) = run_describe(schema, "SELECT id FROM users").columns
     assert plain.reason_detail is None
+
+
+# found by the fuzzer (#109): the planner turns a right join filtered by `IS NULL` on its nullable side into an anti
+# join, and the executor feeds a null tuple for the inner side, so the columns it outputs are NULL
+def test_anti_join_output_from_the_null_extended_side_is_nullable(schema: str) -> None:
+    sql = "SELECT t0.name FROM users t0 RIGHT JOIN users t1 ON t1.email = t0.email WHERE t0.email IS NULL"
+    assert verdicts(schema, sql) == [(True, "OuterJoin")]
+
+
+# found by the fuzzer (#109): a sorted CUBE or ROLLUP chain is one "Grouping Sets" entry that lists every set
+@pytest.mark.parametrize("grouping", ["CUBE (t0.id)", "ROLLUP (t0.id)"])
+def test_sorted_grouping_set_chain_is_nullable(schema: str, grouping: str) -> None:
+    sql = (
+        "SELECT t0.id, count(*) FROM users t0 FULL JOIN users t2 ON true "  # ruff: ignore[hardcoded-sql-expression]
+        f"WHERE t0.email IS NOT NULL GROUP BY {grouping}"
+    )
+    assert verdicts(schema, sql) == [(True, "GroupingSets")] * 2
