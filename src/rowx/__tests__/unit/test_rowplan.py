@@ -50,3 +50,19 @@ def test_network_pair_in_either_order_is_one_leaf() -> None:
     backward = evaluate("T = ipaddress.IPv6Network | ipaddress.IPv4Network")
     assert row_plan(forward) == RowPlan(kind="scalar", arity=1, nullable_mask=(True,))
     assert row_plan(backward) == RowPlan(kind="scalar", arity=1, nullable_mask=(False,))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "type V4 = ipaddress.IPv4Interface | None\ntype V6 = ipaddress.IPv6Interface\nT = V4 | V6",
+        "type V4 = Annotated[ipaddress.IPv4Interface | None, 1]\nT = Annotated[V4 | ipaddress.IPv6Interface, 2]",
+    ],
+)
+def test_network_pair_split_across_nested_unions_is_one_nullable_leaf(source: str) -> None:
+    assert row_plan(evaluate(source)) == RowPlan(kind="scalar", arity=1, nullable_mask=(True,))
+
+
+def test_cyclic_union_alias_is_rejected() -> None:
+    with pytest.raises(InterfaceError):
+        row_plan(evaluate("type A = A | int\nT = A"))

@@ -265,3 +265,9 @@ def test_a_lone_network_class_or_mixed_pair_is_invalid(tmp_path: Path) -> None:
         diagnostic = resolve(tmp_path, f"main{index}.py").diagnostic
         assert diagnostic is not None, annotation
         assert diagnostic.rule == "invalid-row-type", annotation
+
+
+def test_network_pair_split_across_nested_aliases_is_one_nullable_leaf(tmp_path: Path) -> None:
+    source = "import ipaddress\ntype V4 = ipaddress.IPv4Interface | None\ntype V6 = ipaddress.IPv6Interface\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="V4 | V6")})
+    assert leaves(resolve(tmp_path, "main.py")) == [("ipaddress.IPv4Interface | ipaddress.IPv6Interface", True)]
