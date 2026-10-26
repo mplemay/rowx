@@ -44,8 +44,19 @@ NETWORK_PAIRS: Final[dict[frozenset[str], LeafName]] = {
     frozenset({"ipaddress.IPv4Network", "ipaddress.IPv6Network"}): "ipaddress.IPv4Network | ipaddress.IPv6Network",
 }
 NETWORK_MEMBERS: Final[frozenset[str]] = frozenset(member for pair in NETWORK_PAIRS for member in pair)
-# `LeafName` is this map plus the three structural markers; keep the two in lockstep
-assert set(LEAVES.values()) | set(NETWORK_PAIRS.values()) | {"list", "any", "none"} == set(get_args(LeafName.__value__))  # ruff: ignore[assert]
+# `Range[T]` is one leaf per subtype leaf a range column can have
+RANGE_LEAVES: Final[dict[str, LeafName]] = {
+    "int": "rowx.postgres.Range[int]",
+    "decimal.Decimal": "rowx.postgres.Range[decimal.Decimal]",
+    "datetime.date": "rowx.postgres.Range[datetime.date]",
+    "datetime.datetime": "rowx.postgres.Range[datetime.datetime]",
+}
+RANGE_CLASSES: Final[frozenset[str]] = frozenset({"rowx.postgres.Range", "rowx.postgres._range.Range"})
+# `LeafName` is these maps plus the three structural markers; keep them in lockstep
+assert (  # ruff: ignore[assert]
+    set(LEAVES.values()) | set(NETWORK_PAIRS.values()) | set(RANGE_LEAVES.values()) | {"list", "any", "none"}
+    == set(get_args(LeafName.__value__))
+)
 NEUTRAL: Final[frozenset[str]] = frozenset({"typing.Any", "builtins.object"})
 
 SCOPE_TYPES: Final = (
@@ -637,7 +648,10 @@ class _Resolver:
             raise _invalid(msg)
         slice_ = expr.slice
         elts = slice_.elts if isinstance(slice_, ast.Tuple) else [slice_]
-        match self._normalize(base.qualname):
+        qualname = self._normalize(base.qualname)
+        if qualname in RANGE_CLASSES and len(elts) == 1 and not isinstance(slice_, ast.Tuple):
+            return self._eval_range(slice_, module, chain)
+        match qualname:
             case "typing.Optional" if len(elts) == 1 and not isinstance(slice_, ast.Tuple):
                 return _union(self._eval(slice_, module, chain), _Node((), none=True))
             case "typing.Union" if elts:
@@ -656,6 +670,13 @@ class _Resolver:
                 return _Node((_Tuple(elems),), none=False)
         msg = f"`{base.qualname}` can't be subscripted this way in a row type"
         raise _invalid(msg)
+
+    def _eval_range(self, subtype: ast.expr, module: _Module, chain: tuple[tuple[Path, str], ...]) -> _Node:
+        inner = _to_elem(self._eval(subtype, module, chain), allow_none=False)
+        if inner.nullable or inner.leaf not in RANGE_LEAVES:
+            msg = f"`Range[{inner.leaf}]` isn't a range subtype; use one of {', '.join(f'`{leaf}`' for leaf in RANGE_LEAVES)}"
+            raise _invalid(msg)
+        return _Node((Elem(RANGE_LEAVES[inner.leaf], nullable=False),), none=False)
 
     def resolve(self, call: QueryCall) -> RowType:
         if call.row_type is None:

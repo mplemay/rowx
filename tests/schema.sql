@@ -5,6 +5,11 @@ CREATE SERVER IF NOT EXISTS rowx_files FOREIGN DATA WRAPPER file_fdw;
 CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
 CREATE DOMAIN positive_int AS integer CHECK (VALUE > 0);
 CREATE DOMAIN positive_ints AS positive_int[];
+-- a user-defined range over a supported subtype decodes like the built-in range of that subtype
+CREATE TYPE rowx_intrange AS RANGE (subtype = integer);
+CREATE DOMAIN rowx_short_range AS int4range;
+-- its subtype has no range codec, so the range is unsupported
+CREATE TYPE rowx_floatrange AS RANGE (subtype = double precision);
 
 CREATE TABLE users (
     id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
@@ -54,6 +59,12 @@ CREATE TABLE all_types (
     c_cidr cidr,
     c_macaddr macaddr,
     c_macaddr8 macaddr8,
+    c_int4range int4range,
+    c_int8range int8range,
+    c_numrange numrange,
+    c_daterange daterange,
+    c_tsrange tsrange,
+    c_tstzrange tstzrange,
     c_json json,
     c_jsonb jsonb,
     c_mood mood,
@@ -66,7 +77,12 @@ CREATE TABLE all_types (
     c_inet_array inet[],
     c_cidr_array cidr[],
     c_macaddr_array macaddr[],
-    c_macaddr8_array macaddr8[]
+    c_macaddr8_array macaddr8[],
+    c_int4range_array int4range[],
+    c_numrange_array numrange[],
+    c_tstzrange_array tstzrange[],
+    c_custom_range rowx_intrange,
+    c_custom_range_array rowx_intrange[]
 );
 
 -- unsupported types, for unsupported-type cases
@@ -74,7 +90,8 @@ CREATE TABLE unsupported_types (
     id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
     c_money money,
     c_tsvector tsvector,
-    c_int4range int4range
+    c_int4multirange int4multirange,
+    c_floatrange rowx_floatrange
 );
 
 -- a NOT VALID not-null constraint: attnotnull is set, but existing rows are not guaranteed to comply

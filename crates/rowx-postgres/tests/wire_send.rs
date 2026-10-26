@@ -13,6 +13,7 @@ use rowx_postgres::wire::array;
 use rowx_postgres::wire::mac::{self, MAC_LEN, MAC8_LEN};
 use rowx_postgres::wire::network::{self, Addr, Network};
 use rowx_postgres::wire::numeric::{self, Numeric};
+use rowx_postgres::wire::range::{self, Bound, Range};
 use rowx_postgres::wire::temporal::{self, Date, TimeOfDay};
 use tokio_postgres::Client;
 
@@ -709,5 +710,169 @@ async fn macaddr_and_macaddr8_match_the_server_send_functions() -> TestResult {
         assert_eq!(sent, raw.to_vec(), "macaddr8 {text}");
         assert_eq!(mac::encode(&text, MAC8_LEN), Ok(sent), "macaddr8 {text}");
     }
+    schema.drop().await
+}
+
+// an int4range literal's bound, as the server writes it
+const fn int4_bytes(value: i32) -> [u8; 4] {
+    value.to_be_bytes()
+}
+
+#[tokio::test]
+async fn int4range_matches_range_send() -> TestResult {
+    let (schema, client) = connect!();
+    // lower < upper keeps the range non-empty, and `[lo,hi)` is already the canonical form
+    let bounds = samples(
+        (any::<i32>(), any::<i32>()).prop_filter("a non-empty range", |(low, high)| low < high),
+        CASES,
+    );
+    for (low, high) in bounds {
+        let text = format!("[{low},{high})");
+        let sent = send(&client, "range_send", "int4range", &text).await?;
+        let (lower, upper) = (int4_bytes(low), int4_bytes(high));
+        let ours = Range::Bounds {
+            lower: Bound::Inclusive(&lower),
+            upper: Bound::Exclusive(&upper),
+        };
+        assert_eq!(range::encode(&ours), Ok(sent.clone()), "{text}");
+        assert_eq!(range::decode(&sent), Ok(ours), "{text}");
+        let back = read_back(&client, "int4range", Param::binary(sent)).await?;
+        assert_eq!(back, literal_text(&client, "int4range", &text).await?);
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn range_flags_match_range_send() -> TestResult {
+    let (schema, client) = connect!();
+    let five = int4_bytes(5);
+    let nine = int4_bytes(9);
+    // inclusive upper bounds are rewritten by the canonical function, so only open-ended forms use `]`
+    let cases: [(&str, Range<'_>); 6] = [
+        ("empty", Range::Empty),
+        (
+            "(,)",
+            Range::Bounds {
+                lower: Bound::Unbounded,
+                upper: Bound::Unbounded,
+            },
+        ),
+        (
+            "[5,)",
+            Range::Bounds {
+                lower: Bound::Inclusive(&five),
+                upper: Bound::Unbounded,
+            },
+        ),
+        (
+            "(,9)",
+            Range::Bounds {
+                lower: Bound::Unbounded,
+                upper: Bound::Exclusive(&nine),
+            },
+        ),
+        (
+            "[5,9)",
+            Range::Bounds {
+                lower: Bound::Inclusive(&five),
+                upper: Bound::Exclusive(&nine),
+            },
+        ),
+        // the server turns `(5,9)` into `[6,9)`, and `[3,3)` into the empty range
+        ("[3,3)", Range::Empty),
+    ];
+    for (text, ours) in cases {
+        let sent = send(&client, "range_send", "int4range", text).await?;
+        assert_eq!(range::encode(&ours), Ok(sent), "{text}");
+    }
+    // a non-canonical binary range is canonicalised by range_recv
+    let (lower, upper) = (int4_bytes(5), int4_bytes(9));
+    let open = Range::Bounds {
+        lower: Bound::Exclusive(&lower),
+        upper: Bound::Inclusive(&upper),
+    };
+    let shown = read_back(&client, "int4range", Param::binary(range::encode(&open)?)).await?;
+    assert_eq!(shown, "[6,10)");
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn date_and_timestamp_ranges_use_the_subtype_bounds() -> TestResult {
+    let (schema, client) = connect!();
+    for (ymd, other) in samples((civil_date(), civil_date()), CASES) {
+        if ymd >= other {
+            continue;
+        }
+        let text = format!("[{},{})", date_text(ymd), date_text(other));
+        let sent = send(&client, "range_send", "daterange", &text).await?;
+        let (low, high) = (
+            temporal::encode_date(ymd.0, ymd.1, ymd.2)?,
+            temporal::encode_date(other.0, other.1, other.2)?,
+        );
+        let ours = Range::Bounds {
+            lower: Bound::Inclusive(&low),
+            upper: Bound::Exclusive(&high),
+        };
+        assert_eq!(range::encode(&ours), Ok(sent), "{text}");
+    }
+    for micros in samples(micros_of_day(), CASES) {
+        let low_text = format!("2000-01-01 {}", time_text(micros));
+        let text = format!("[{low_text},infinity)");
+        let sent = send(&client, "range_send", "tsrange", &text).await?;
+        let low = temporal::encode_timestamp(2000, 1, 1, micros, 0);
+        let ours = Range::Bounds {
+            lower: Bound::Inclusive(&low),
+            upper: Bound::Unbounded,
+        };
+        // `infinity` is a bound value, not an unbounded side, so only the lower half is compared
+        assert_eq!(sent[0], 0x02, "{text}");
+        assert_eq!(sent[1..9], range::encode(&ours)?[1..9], "{text}");
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn numrange_text_literals_are_read_back_by_the_server() -> TestResult {
+    let (schema, client) = connect!();
+    let cases = [
+        (
+            Range::Bounds {
+                lower: Bound::Inclusive(b"1.50"),
+                upper: Bound::Exclusive(b"2.5"),
+            },
+            "[1.50,2.5)",
+        ),
+        (
+            Range::Bounds {
+                lower: Bound::Unbounded,
+                upper: Bound::Inclusive(b"-0.001"),
+            },
+            "(,-0.001]",
+        ),
+        (Range::Empty, "empty"),
+    ];
+    for (ours, expected) in cases {
+        let literal = range::encode_literal(&ours);
+        let shown = read_back(
+            &client,
+            "numrange",
+            Param::text(literal.clone().into_bytes()),
+        )
+        .await?;
+        assert_eq!(
+            shown,
+            literal_text(&client, "numrange", expected).await?,
+            "{literal}"
+        );
+    }
+    // a literal inside a text array survives the array quoting
+    let inner = range::encode_literal(&Range::Bounds {
+        lower: Bound::Inclusive(b"1"),
+        upper: Bound::Exclusive(b"2"),
+    });
+    let elements: Vec<Option<&[u8]>> = vec![Some(inner.as_bytes()), None, Some(b"empty")];
+    let literal = array::encode_literal(&[3], &elements);
+    let shown = read_back(&client, "numrange[]", Param::text(literal.into_bytes())).await?;
+    assert_eq!(shown, "{\"[1,2)\",NULL,empty}");
     schema.drop().await
 }

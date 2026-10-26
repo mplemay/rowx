@@ -100,8 +100,8 @@ def _render_elem(elem: Elem) -> str:
                 return "list[Any]"
             base = f"list[{_render_elem(elem.item)}]"
         case leaf:
-            # a network pair is one leaf, written as its two classes
-            base = " | ".join(member.rsplit(".", maxsplit=1)[-1] for member in leaf.split(" | "))
+            # a network pair is one leaf written as its two classes, and a range as `Range[<subtype>]`
+            base = MODULE_PREFIX.sub("", leaf)
     return f"{base} | None" if elem.nullable else base
 
 

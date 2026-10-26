@@ -8,6 +8,7 @@ pub mod json;
 pub mod mac;
 pub mod network;
 pub mod numeric;
+pub mod range;
 pub mod temporal;
 pub mod temporal_enc;
 pub mod text;
@@ -29,6 +30,13 @@ fn resolve(ty: &Type) -> &Type {
         Kind::Domain(base) => resolve(base),
         _ => ty,
     }
+}
+
+// a range is supported when the table has a row for its subtype's range
+fn is_supported_range(ty: &Type) -> bool {
+    matches!(ty.kind(), Kind::Range(subtype) if TYPE_TABLE
+        .iter()
+        .any(|info| info.matcher == Matcher::RangeKind(subtype.oid())))
 }
 
 fn is_citext(ty: &Type) -> bool {
@@ -63,6 +71,7 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: Option<&[u8]>) -> PyResult<B
         Type::INTERVAL => temporal::decode_interval(py, raw),
         _ if matches!(ty.kind(), Kind::Enum(_)) || is_citext(ty) => text::decode(py, ty, raw),
         _ if matches!(ty.kind(), Kind::Array(_)) => array::decode(py, ty, raw),
+        _ if is_supported_range(ty) => range::decode(py, ty, raw),
         // void arrives as an empty, non-NULL value
         Type::VOID => Ok(py.None().into_bound(py)),
         _ => Err(decode_error(
@@ -86,6 +95,9 @@ pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
             Matcher::EnumKind => is_enum,
             Matcher::ArrayKind => is_array,
             Matcher::NamedSimple(name) => is_citext(ty) && name == ty.name(),
+            Matcher::RangeKind(oid) => {
+                matches!(ty.kind(), Kind::Range(subtype) if subtype.oid() == oid)
+            }
             Matcher::DomainKind => false,
         })
         // json takes any value; json.dumps is the arbiter
@@ -128,6 +140,7 @@ pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         _ if is_enum => text::encode(ty, param).map(Param::text),
         _ if is_citext(ty) => text::encode(ty, param).map(Param::binary),
         _ if is_array => array_enc::encode(ty, param),
+        _ if is_supported_range(ty) => range::encode(ty, param),
         _ => Err(format!("no encoder for the postgres type {}", ty.name())),
     }
 }

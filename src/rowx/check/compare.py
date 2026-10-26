@@ -83,6 +83,16 @@ def _array_matches(column: ColumnDesc, elem: Elem) -> bool:
     return item.leaf == "any" or column.element_key in JSON_KEYS or item.leaf == result_type(column.element_key)
 
 
+# a range column's help names its subtype, since `Range[T]` is checked against it
+def _range_help(column: ColumnDesc) -> str | None:
+    key = column.element_key if column.type_key == "array" else column.type_key
+    if key is None or by_key(key).matcher != "range":
+        return None
+    leaf = result_type(key)
+    name = column.type_name.removeprefix("_") if column.type_key == "array" else column.type_name
+    return f"`{name}` is a range of `{leaf[leaf.index('[') + 1 : -1]}`, so annotate it `{leaf}`"
+
+
 def _leaf_matches(column: ColumnDesc, elem: Elem) -> bool:
     if elem.leaf == "any":
         return True
@@ -159,7 +169,7 @@ def _compare_element(column: ColumnDesc, index: int, elem: Elem, element: int | 
         message = (
             f"{_label(column, index)}: column type is `{_expected(column)}` but the annotation is `{_shown(elem)}`"
         )
-        return [Finding(rule="type-mismatch", message=message, column=index, element=element)]
+        return [Finding(rule="type-mismatch", message=message, column=index, element=element, help=_range_help(column))]
     return _nullability_finding(column, index, elem, element)
 
 

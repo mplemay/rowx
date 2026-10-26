@@ -2,6 +2,8 @@ import sys
 from textwrap import dedent
 from typing import TYPE_CHECKING
 
+import pytest
+
 from rowx.check.discover import discover_file
 from rowx.check.resolve import ModuleGraph, Resolution, RowType, resolve_row_type
 
@@ -271,3 +273,37 @@ def test_network_pair_split_across_nested_aliases_is_one_nullable_leaf(tmp_path:
     source = "import ipaddress\ntype V4 = ipaddress.IPv4Interface | None\ntype V6 = ipaddress.IPv6Interface\n"
     write(tmp_path, {"main.py": source + QUERY.format(t="V4 | V6")})
     assert leaves(resolve(tmp_path, "main.py")) == [("ipaddress.IPv4Interface | ipaddress.IPv6Interface", True)]
+
+
+def test_range_leaf_per_subtype_through_an_alias_and_optional(tmp_path: Path) -> None:
+    source = "import datetime\nfrom rowx.postgres import Range\ntype Dates = Range[datetime.date]\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="tuple[Dates | None, Range[datetime.datetime], Range[int]]")})
+    assert leaves(resolve(tmp_path, "main.py")) == [
+        ("rowx.postgres.Range[datetime.date]", True),
+        ("rowx.postgres.Range[datetime.datetime]", False),
+        ("rowx.postgres.Range[int]", False),
+    ]
+
+
+def test_range_through_its_defining_module_and_a_list(tmp_path: Path) -> None:
+    source = "from rowx.postgres._range import Range\nimport decimal\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="list[Range[decimal.Decimal] | None]")})
+    [elem] = row_type(resolve(tmp_path, "main.py")).elements
+    assert elem.leaf == "list"
+    assert elem.item is not None
+    assert (elem.item.leaf, elem.item.nullable) == ("rowx.postgres.Range[decimal.Decimal]", True)
+
+
+@pytest.mark.parametrize("subtype", ["str", "float", "bool", "int | None", "list[int]", "Range[int]", "bytes"])
+def test_range_of_an_unsupported_subtype_is_invalid(tmp_path: Path, subtype: str) -> None:
+    source = "from rowx.postgres import Range\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t=f"Range[{subtype}]")})
+    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+
+
+def test_bare_range_and_a_range_with_two_arguments_are_invalid(tmp_path: Path) -> None:
+    source = "from rowx.postgres import Range\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="Range")})
+    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+    write(tmp_path, {"main.py": source + QUERY.format(t="Range[int, int]")})
+    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]

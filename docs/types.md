@@ -38,6 +38,12 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 | `cidr` | `ipaddress.IPv4Network \| ipaddress.IPv6Network` |  | `IPv4Network`, `IPv6Network`, `str` | binary |
 | `macaddr` | `str` |  | `str` | binary |
 | `macaddr8` | `str` |  | `str` | binary |
+| `int4range` | `rowx.postgres.Range[int]` |  | `Range` | binary |
+| `int8range` | `rowx.postgres.Range[int]` |  | `Range` | binary |
+| `numrange` | `rowx.postgres.Range[decimal.Decimal]` |  | `Range` | text |
+| `daterange` | `rowx.postgres.Range[datetime.date]` |  | `Range` | binary |
+| `tsrange` | `rowx.postgres.Range[datetime.datetime]` | naive | `Range` | binary |
+| `tstzrange` | `rowx.postgres.Range[datetime.datetime]` | aware | `Range` | binary |
 | `json` | any value (`json.loads`) |  | any JSON-serialisable value | text |
 | `jsonb` | any value (`json.loads`) |  | any JSON-serialisable value | text |
 | `enum` | `str` |  | `str` | text |
@@ -58,8 +64,12 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 - An array column decodes to `list[X]` (nested lists for multi-dimensional arrays). `list[X]` and `list[X | None]`
   both match, at every nesting level.
 - `void` decodes to `None` and is only valid as a tuple element.
+- A range decodes to `rowx.postgres.Range[T]`, with `T` the leaf of its subtype, in the server's canonical form (`[1,5]`
+  of `int4range` is `[1, 6)`). A `None` bound is an infinite side, and `Range(empty=True)` is the empty range. A
+  user-defined range over `int4`, `int8`, `numeric`, `date`, `timestamp` or `timestamptz` decodes like the built-in
+  range of that subtype and keeps whatever form its own canonical function gives it.
 - Any type not listed here is `unsupported-type` in the checker and raises `DecodeError` at runtime (for example
-  `money`, ranges, composites and `xml`).
+  `money`, multiranges, composites and `xml`).
 
 ## Differences from psycopg
 
@@ -77,3 +87,12 @@ that this list matches the one it checks.
 - `void`: `void` decodes to `None`, while psycopg returns an empty string.
 - `inet`: rowx always returns an interface, even for a full-width mask, while psycopg returns an address for `/32` and
   `/128`; the interface's `ip` is that address.
+- `int4range`: rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal.
+- `int8range`: rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal.
+- `numrange`: rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal.
+- `daterange`: rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal, but an
+  infinite bound of this subtype raises `DecodeError`, while psycopg raises its own `DataError`.
+- `tsrange`: rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal, but an
+  infinite bound of this subtype raises `DecodeError`, while psycopg raises its own `DataError`.
+- `tstzrange`: rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal as
+  instants, but an infinite bound of this subtype raises `DecodeError`, while psycopg raises its own `DataError`.

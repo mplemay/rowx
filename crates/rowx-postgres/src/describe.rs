@@ -99,6 +99,10 @@ fn key_of(matcher: Matcher) -> Option<&'static str> {
         .map(|t| t.key)
 }
 
+fn range_key(subtype: &Type) -> Option<&'static str> {
+    key_of(Matcher::RangeKind(subtype.oid()))
+}
+
 fn table_key(ty: &Type) -> Option<&'static str> {
     TYPE_TABLE
         .iter()
@@ -115,6 +119,7 @@ fn unresolved_leaf(ty: &Type) -> Option<u32> {
     match ty.kind() {
         Kind::Enum(_) => None,
         Kind::Array(inner) | Kind::Domain(inner) => unresolved_leaf(inner),
+        Kind::Range(subtype) => range_key(subtype).is_none().then(|| ty.oid()),
         _ => table_key(ty).is_none().then(|| ty.oid()),
     }
 }
@@ -128,6 +133,10 @@ fn resolve(ty: &Type, sends: &HashMap<u32, String>) -> TypeKey {
         Kind::Array(inner) => resolve(inner, sends).and_then(|_| wrapper(Matcher::ArrayKind)),
         // the runtime encodes and decodes a domain as its base type, so it takes the base key
         Kind::Domain(base) => resolve(base, sends),
+        // a user-defined range over a supported subtype decodes like the built-in range of that subtype
+        Kind::Range(subtype) => range_key(subtype).ok_or_else(|| Unsupported {
+            typsend: sends.get(&ty.oid()).cloned(),
+        }),
         _ => table_key(ty).ok_or_else(|| Unsupported {
             typsend: sends.get(&ty.oid()).cloned(),
         }),
@@ -414,5 +423,65 @@ mod tests {
         );
         assert_eq!(unresolved_leaf(&array), Some(90_002));
         assert!(resolve(&array, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn builtin_ranges_resolve_by_subtype() {
+        assert_eq!(resolve(&Type::INT4_RANGE, &HashMap::new()), Ok("int4range"));
+        assert_eq!(resolve(&Type::TSTZ_RANGE, &HashMap::new()), Ok("tstzrange"));
+        assert_eq!(unresolved_leaf(&Type::NUM_RANGE), None);
+    }
+
+    #[test]
+    fn user_defined_range_resolves_like_the_range_of_its_subtype() {
+        let custom = Type::new(
+            "myrange".to_owned(),
+            90_010,
+            Kind::Range(Type::INT4),
+            "public".to_owned(),
+        );
+        assert_eq!(resolve(&custom, &HashMap::new()), Ok("int4range"));
+        assert_eq!(unresolved_leaf(&custom), None);
+    }
+
+    #[test]
+    fn range_over_an_unsupported_subtype_is_unsupported() {
+        let custom = Type::new(
+            "floatrange".to_owned(),
+            90_011,
+            Kind::Range(Type::FLOAT8),
+            "public".to_owned(),
+        );
+        assert_eq!(unresolved_leaf(&custom), Some(90_011));
+        let sends = HashMap::from([(90_011, "range_send".to_owned())]);
+        assert_eq!(
+            resolve(&custom, &sends),
+            Err(Unsupported {
+                typsend: Some("range_send".to_owned())
+            })
+        );
+        // an array of the unsupported range is unsupported too
+        let array = Type::new(
+            "_floatrange".to_owned(),
+            90_012,
+            Kind::Array(custom),
+            "public".to_owned(),
+        );
+        assert!(resolve(&array, &sends).is_err());
+    }
+
+    #[test]
+    fn array_of_ranges_resolves_to_an_array_of_the_range_key() {
+        let array = Type::new(
+            "_int4range".to_owned(),
+            3905,
+            Kind::Array(Type::INT4_RANGE),
+            "pg_catalog".to_owned(),
+        );
+        assert_eq!(resolve(&array, &HashMap::new()), Ok("array"));
+        assert_eq!(
+            super::element_key(&array, &HashMap::new()),
+            Some("int4range")
+        );
     }
 }

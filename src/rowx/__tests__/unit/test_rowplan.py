@@ -66,3 +66,14 @@ def test_network_pair_split_across_nested_unions_is_one_nullable_leaf(source: st
 def test_cyclic_union_alias_is_rejected() -> None:
     with pytest.raises(InterfaceError):
         row_plan(evaluate("type A = A | int\nT = A"))
+
+
+@pytest.mark.parametrize("subtype", ["int", "decimal.Decimal", "datetime.date", "datetime.datetime"])
+def test_range_is_a_non_nullable_leaf_for_each_subtype(subtype: str) -> None:
+    assert row_plan(evaluate(f"T = Range[{subtype}]")) == RowPlan(kind="scalar", arity=1, nullable_mask=(False,))
+    assert row_plan(evaluate(f"T = Range[{subtype}] | None")) == RowPlan(kind="scalar", arity=1, nullable_mask=(True,))
+
+
+def test_range_subtype_is_looked_through_aliases() -> None:
+    plan = row_plan(evaluate("type N = Annotated[int, 1]\nT = Range[N]"))
+    assert plan == RowPlan(kind="scalar", arity=1, nullable_mask=(False,))
