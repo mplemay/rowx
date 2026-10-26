@@ -19,7 +19,7 @@ from rowx.check.params import ParamInference
 from rowx.check.resolve import Elem, RowType
 from rowx.check.runner import describe_all
 from rowx.errors import EncodeError, Error, RowShapeError
-from rowx.postgres import Range, connect
+from rowx.postgres import Interval, Money, Range, connect
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -213,6 +213,8 @@ LEAVES: Final[list[Leaf]] = [
     range_leaf(Decimal, Range[Decimal], "rowx.postgres.Range[decimal.Decimal]"),
     range_leaf(dt.date, Range[dt.date], "rowx.postgres.Range[datetime.date]"),
     range_leaf(dt.datetime, Range[dt.datetime], "rowx.postgres.Range[datetime.datetime]"),
+    scalar_leaf("Money", Money, "rowx.postgres.Money"),
+    scalar_leaf("Interval", Interval, "rowx.postgres.Interval"),
     LIST_INT,
     list_leaf("list[int | None]", list[int | None], INT_LEAF, item_nullable=True),
     list_leaf("list[str]", list[str], STR_LEAF),
@@ -346,7 +348,7 @@ def natural_leaf(column: ColumnDesc) -> Leaf:
     # the fixed leaves hold only a few array shapes, so every other one-dimensional array gets its own
     candidates += [
         list_leaf(f"list[{inner.name}]", list[inner.annotation], inner)  # ty: ignore[invalid-type-form]
-        for inner in LEAVES[:17]
+        for inner in LEAVES[:19]
     ]
     for leaf in candidates:
         if not TYPE_RULES.intersection(findings_for(column, leaf, nullable=column.nullable)):
@@ -421,7 +423,7 @@ def test_nullability_matrix(schema: str) -> None:
 # --- parameters ---
 
 PRELUDE: Final[str] = (
-    "import datetime\nimport decimal\nimport ipaddress\nimport uuid\nfrom rowx.postgres import Range\n"
+    "import datetime\nimport decimal\nimport ipaddress\nimport uuid\nfrom rowx.postgres import Interval, Money, Range\n"
 )
 UUID_TEXT: Final[str] = "12345678-1234-5678-1234-567812345678"
 # python source -> value; the source is what the checker's inference reads, and the value is what the runtime binds
@@ -448,6 +450,8 @@ PARAM_VALUES: Final[list[str]] = [
     'ipaddress.IPv4Network("10.0.0.0/8")',
     'ipaddress.IPv6Network("2001:db8::/32")',
     "Range(1, 5)",
+    "Money(100)",
+    "Interval(months=1)",
     "None",
     "[1, 2]",
     "(1, 2)",
@@ -472,6 +476,8 @@ NOT_JSON: Final[list[str]] = [
     'ipaddress.IPv4Network("10.0.0.0/8")',
     'ipaddress.IPv6Network("2001:db8::/32")',
     "Range(1, 5)",
+    "Money(100)",
+    "Interval(months=1)",
 ]
 # the checker does not look at time zones, so the runtime rejects these where the checker stays quiet
 # and `json.dumps` and the one-character rule of "char" are value checks the checker never makes
@@ -487,6 +493,9 @@ RUNTIME_ONLY: Final[frozenset[tuple[str, str]]] = frozenset(
         # a `str` is accepted by type, but only a parseable address or MAC encodes
         *((decl, source) for decl in ("inet", "cidr", "macaddr", "macaddr8") for source in ('"ok"', f'"{UUID_TEXT}"')),
         *((f"{decl}[]", '["ok"]') for decl in ("inet", "cidr", "macaddr", "macaddr8")),
+        # a `str` is accepted by type, but only the digits `0` and `1` encode
+        *((decl, source) for decl in ("bit(9)", "varbit") for source in ('"ok"', f'"{UUID_TEXT}"')),
+        *((f"{decl}[]", '["ok"]') for decl in ("bit(9)", "varbit")),
         # the checker accepts any `Range`, but the bounds must suit the subtype, and a leaf is never inferred for them
         *((decl, "Range(1, 5)") for decl in ("daterange", "tsrange", "tstzrange")),
     },

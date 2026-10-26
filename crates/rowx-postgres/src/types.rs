@@ -34,6 +34,8 @@ pub enum Codec {
     Network,
     Mac,
     Range,
+    Money,
+    Bits,
     Json,
     Temporal,
     Array,
@@ -45,6 +47,8 @@ pub struct TypeInfo {
     pub key: &'static str,
     pub matcher: Matcher,
     pub py_result: &'static str,
+    // further leaves the checker accepts for the same column; the annotation picks the codec
+    pub alt_py_results: &'static [&'static str],
     pub tz: TzRule,
     pub accepted_params: &'static [&'static str],
     pub decode: Codec,
@@ -64,6 +68,7 @@ const fn row(
         key,
         matcher,
         py_result,
+        alt_py_results: &[],
         tz,
         accepted_params,
         decode: Codec::Unsupported,
@@ -73,6 +78,11 @@ const fn row(
 }
 
 impl TypeInfo {
+    const fn also_result(mut self, alt: &'static [&'static str]) -> Self {
+        self.alt_py_results = alt;
+        self
+    }
+
     const fn codecs(mut self, decode: Codec, encode: Codec) -> Self {
         self.decode = decode;
         self.encode = encode;
@@ -270,9 +280,10 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         Matcher::Oid(1186),
         "datetime.timedelta",
         TzRule::None,
-        &["timedelta"],
+        &["timedelta", "Interval"],
         Format::Binary,
     )
+    .also_result(&["rowx.postgres.Interval"])
     .codecs(Codec::Temporal, Codec::Temporal),
     row(
         "uuid",
@@ -379,6 +390,33 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         Format::Binary,
     )
     .codecs(Codec::Range, Codec::Range),
+    row(
+        "money",
+        Matcher::Oid(790),
+        "rowx.postgres.Money",
+        TzRule::None,
+        &["Money"],
+        Format::Binary,
+    )
+    .codecs(Codec::Money, Codec::Money),
+    row(
+        "bit",
+        Matcher::Oid(1560),
+        "str",
+        TzRule::None,
+        STR,
+        Format::Binary,
+    )
+    .codecs(Codec::Bits, Codec::Bits),
+    row(
+        "varbit",
+        Matcher::Oid(1562),
+        "str",
+        TzRule::None,
+        STR,
+        Format::Binary,
+    )
+    .codecs(Codec::Bits, Codec::Bits),
     // json/jsonb results take the user's annotation (docs/design/checker.md, rules), so the leaf is `object`
     row(
         "json",

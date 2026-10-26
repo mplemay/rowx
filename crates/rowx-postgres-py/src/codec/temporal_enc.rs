@@ -100,8 +100,15 @@ pub fn encode_timestamptz(param: &PyParam) -> Result<Vec<u8>, String> {
 /// # Errors
 /// A description of why the value cannot be encoded as `interval`.
 pub fn encode_interval(param: &PyParam) -> Result<Vec<u8>, String> {
-    let PyParam::Timedelta { days, micros } = param else {
-        return Err(mismatch(param, "interval"));
-    };
-    temporal::encode_interval(*days, *micros).map_err(|e| failed(&e))
+    match param {
+        PyParam::Timedelta { days, micros } => {
+            temporal::encode_interval(*days, *micros).map_err(|e| failed(&e))
+        }
+        PyParam::Interval {
+            months,
+            days,
+            micros,
+        } => temporal::encode_span(*months, *days, *micros).map_err(|e| failed(&e)),
+        _ => Err(mismatch(param, "interval")),
+    }
 }

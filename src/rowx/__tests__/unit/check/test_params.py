@@ -162,6 +162,25 @@ def test_annotation_parameterized_range() -> None:
     assert infer(source) == ["Range", "list[Range]", "Range"]
 
 
+def test_annotation_money_and_interval() -> None:
+    source = """
+        from rowx.postgres import Interval, Money
+
+        def f(a: Money, b: Interval | None, c: list[Interval], d: list[Money | None]):
+            q(t"{a} {b} {c} {d}")
+    """
+    assert infer(source) == ["Money", "Interval", "list[Interval]", "list[Money]"]
+
+
+def test_calls_to_money_and_interval_have_evident_types() -> None:
+    source = """
+        from rowx.postgres import Interval, Money
+
+        q(t"{Money(100)} {Interval(months=1)}")
+    """
+    assert infer(source) == ["Money", "Interval"]
+
+
 def test_annotation_imports() -> None:
     source = """
         import datetime

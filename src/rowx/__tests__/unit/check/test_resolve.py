@@ -307,3 +307,36 @@ def test_bare_range_and_a_range_with_two_arguments_are_invalid(tmp_path: Path) -
     assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
     write(tmp_path, {"main.py": source + QUERY.format(t="Range[int, int]")})
     assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+
+
+def test_money_and_interval_leaves_through_aliases_and_optional(tmp_path: Path) -> None:
+    source = "import datetime\nfrom rowx.postgres import Interval, Money\ntype Span = Interval\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="tuple[Span | None, Money, datetime.timedelta]")})
+    assert leaves(resolve(tmp_path, "main.py")) == [
+        ("rowx.postgres.Interval", True),
+        ("rowx.postgres.Money", False),
+        ("datetime.timedelta", False),
+    ]
+
+
+def test_money_and_interval_through_their_defining_modules_and_a_list(tmp_path: Path) -> None:
+    source = "from rowx.postgres._money import Money\nfrom rowx.postgres._interval import Interval\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="tuple[list[Money | None], list[Interval]]")})
+    first, second = row_type(resolve(tmp_path, "main.py")).elements
+    assert first.item is not None
+    assert (first.item.leaf, first.item.nullable) == ("rowx.postgres.Money", True)
+    assert second.item is not None
+    assert (second.item.leaf, second.item.nullable) == ("rowx.postgres.Interval", False)
+
+
+@pytest.mark.parametrize("annotation", ["Interval | Money", "Interval | datetime.timedelta", "Money | int"])
+def test_money_and_interval_cannot_be_unioned_with_another_leaf(tmp_path: Path, annotation: str) -> None:
+    source = "import datetime\nfrom rowx.postgres import Interval, Money\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t=annotation)})
+    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+
+
+def test_money_and_interval_cannot_be_subscripted(tmp_path: Path) -> None:
+    source = "from rowx.postgres import Interval\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="Interval[int]")})
+    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]

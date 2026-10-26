@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from rowx.postgres._options import ConnectOptions
@@ -14,6 +15,8 @@ class TypeInfo:
     def matcher_name(self) -> str | None: ...
     @property
     def py_result(self) -> PyResultName: ...
+    @property
+    def alt_py_results(self) -> list[PyResultName]: ...
     @property
     def tz(self) -> Literal["none", "aware", "naive"]: ...
     @property
@@ -78,7 +81,7 @@ class Connection:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,
         limit_one: bool,
         arity: int | None,
@@ -87,7 +90,7 @@ class Connection:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,
         arity: int | None,
         batch_size: int,
@@ -138,7 +141,7 @@ class Pool:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,
         limit_one: bool,
         arity: int | None,
@@ -147,7 +150,7 @@ class Pool:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,
         arity: int | None,
         batch_size: int,

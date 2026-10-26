@@ -49,7 +49,7 @@ def _names(alias: TypeAliasType) -> set[str]:
 def test_vocab_matches_the_type_table() -> None:
     rows = type_table()
     assert {row.key for row in rows} == _names(TypeKey)
-    assert {row.py_result for row in rows} == _names(PyResultName)
+    assert {name for row in rows for name in (row.py_result, *row.alt_py_results)} == _names(PyResultName)
     assert {name for row in rows for name in row.accepted_params} == _names(AcceptedParam)
     assert {codec for row in rows for codec in (row.decode, row.encode)} == _names(CodecName)
 

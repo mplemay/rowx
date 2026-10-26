@@ -8,7 +8,7 @@ import datetime
 import decimal
 import ipaddress
 import uuid
-from rowx.postgres import Range
+from rowx.postgres import Interval, Money, Range
 from typing import Annotated, Any, Literal, Optional, TypeVar, Union
 """
 
@@ -42,6 +42,13 @@ ROWS: Final[list[Row]] = [
     ("T = tuple[Range[datetime.date], Range[datetime.datetime] | None, str]", ("tuple", 3, (False, True, False)), "ok"),
     ("T = list[Range[int] | None]", ("scalar", 1, (False,)), "ok"),
     ("type R = Range[int]\nT = tuple[R, R | None]", ("tuple", 2, (False, True)), "ok"),
+    ("T = Money", ("scalar", 1, (False,)), "ok"),
+    ("T = Money | None", ("scalar", 1, (True,)), "ok"),
+    ("T = Interval", ("scalar", 1, (False,)), "ok"),
+    ("T = Optional[Interval]", ("scalar", 1, (True,)), "ok"),
+    ("T = tuple[Interval, datetime.timedelta | None, Money]", ("tuple", 3, (False, True, False)), "ok"),
+    ("T = list[Interval | None]", ("scalar", 1, (False,)), "ok"),
+    ("T = list[list[Money]]", ("scalar", 1, (False,)), "ok"),
     ("T = tuple[int, str]", ("tuple", 2, (False, False)), "ok"),
     ("T = tuple[int]", ("tuple", 1, (False,)), "ok"),
     ("T = tuple[None]", ("tuple", 1, (True,)), "ok"),
@@ -73,6 +80,8 @@ ROWS: Final[list[Row]] = [
     ("T = Range[list[int]]", "InterfaceError", "invalid-row-type"),
     ("T = Range[Range[int]]", "InterfaceError", "invalid-row-type"),
     ("T = list[Range]", "InterfaceError", "invalid-row-type"),
+    ("T = Interval | Money", "InterfaceError", "invalid-row-type"),
+    ("T = Interval | datetime.timedelta", "InterfaceError", "invalid-row-type"),
     ("T = int | str | None", "InterfaceError", "invalid-row-type"),
     ("T = 'int'", "InterfaceError", "invalid-row-type"),
     ("T = tuple['int', str]", "InterfaceError", "invalid-row-type"),

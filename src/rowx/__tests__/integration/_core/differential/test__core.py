@@ -15,7 +15,7 @@ from psycopg.types.range import Range as PsycopgRange
 
 from rowx._core.postgres import type_table
 from rowx.errors import DecodeError
-from rowx.postgres import Range, connect
+from rowx.postgres import Money, Range, connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -24,8 +24,9 @@ DOC_HEADING: Final[str] = "## Differences from psycopg"
 
 # how a case may differ from psycopg: equal as instants, equal after rounding to float32, rowx raising DecodeError,
 # rowx returning None for void, rowx returning an interface where psycopg returns the bare host address, or rowx's
-# own `Range` class holding the bounds psycopg's `Range` holds
-type Difference = Literal["instant", "float32", "decode-error", "void", "host-address", "range"]
+# own `Range` class holding the bounds psycopg's `Range` holds, or rowx returning the minor units of a money value
+# where psycopg returns its formatted text
+type Difference = Literal["instant", "float32", "decode-error", "void", "host-address", "range", "money"]
 
 _RANGE_CLASS: Final[str] = (
     "rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal"
@@ -54,7 +55,8 @@ DIFFERENCES: Final[dict[str, str]] = {
     ),
     "char": 'A non-ASCII `"char"` is cut to one byte by the server, which is not valid UTF-8, so rowx raises `DecodeError`.',
     "interval": (
-        "An interval with a month or year part raises `DecodeError`, while psycopg approximates a month as 30 days."
+        "An interval with a month or year part raises `DecodeError` unless the annotation is `rowx.postgres.Interval`, "
+        "while psycopg approximates a month as 30 days."
     ),
     "date": "An infinite date raises `DecodeError`, while psycopg raises its own `DataError`.",
     "timestamp": "An infinite timestamp raises `DecodeError`, while psycopg raises its own `DataError`.",
@@ -64,6 +66,10 @@ DIFFERENCES: Final[dict[str, str]] = {
         "`/128`; the interface's `ip` is that address."
     ),
     **RANGE_DIFFERENCES,
+    "money": (
+        "rowx returns `rowx.postgres.Money`, the int8 minor units with no scale, while psycopg returns the text the "
+        "server formats under `lc_monetary`."
+    ),
 }
 
 
@@ -152,6 +158,25 @@ CORPUS: Final[list[Case]] = [
     *_cases("cidr", "cidr", "10.0.0.0/8", "0.0.0.0/0", "::/0", "2001:db8::/32", "192.168.1.1/32", "::1/128"),
     *_cases("macaddr", "macaddr", "08:00:2b:01:02:03", "FF-FF-FF-FF-FF-FF", "08002b010203", "0800.2b01.0203"),
     *_cases("macaddr8", "macaddr8", "08:00:2b:01:02:03:04:05", "08:00:2b:01:02:03", "0800.2b01.0203.0405"),
+    *_cases(
+        "money",
+        "money",
+        "0",
+        "1.00",
+        "-1.00",
+        "0.01",
+        "92233720368547758.07",
+        "-92233720368547758.08",
+        difference="money",
+    ),
+    *_cases("array", "money[]", "{1.00,NULL,-2.50}", difference="money"),
+    *_cases("bit", "bit(1)", "0", "1"),
+    *_cases("bit", "bit(8)", "00000000", "10101010", "11111111"),
+    *_cases("bit", "bit(9)", "101010101", "000000001"),
+    *_cases("bit", "bit(70)", "1" * 70, "10" * 35),
+    *_cases("varbit", "varbit", "", "0", "1", "1010101", "10101010", "101010101", "1" * 200),
+    *_cases("array", "bit(3)[]", "{101,NULL,000}"),
+    *_cases("array", "varbit[]", '{"",1,NULL,10101010101}'),
     *_cases("json", "json", "null", "[]", '{"a": [1, null, "x"]}', '"é"', "1.5e3", "  [ 1 , 2 ]  "),
     *_cases("jsonb", "jsonb", "null", "[]", '{"a": [1, null, "x"], "b": {}}', "12345678901234567890", "1.50"),
     *_cases("enum", "mood", "happy", "ok"),
@@ -327,6 +352,16 @@ def ranges_equal(left: object, right: object) -> bool:
     )
 
 
+# the server's own numeric reading of the same literal, at the scale lc_monetary gives it (two places here)
+def _money_matches(dsn: str, case: Case, value: object) -> bool:
+    if isinstance(value, list):
+        scaled = f"SELECT array(SELECT (e::numeric * 100)::int8 FROM unnest('{case.literal}'::money[]) e)"  # ruff: ignore[hardcoded-sql-expression]
+        _, expected = _psycopg_outcome(dsn, scaled)
+        return [item.minor_units if isinstance(item, Money) else None for item in value] == expected
+    _, expected = _psycopg_outcome(dsn, f"SELECT ('{case.literal}'::money::numeric * 100)::int8")
+    return value == Money(expected)
+
+
 def test_corpus_covers_the_type_table() -> None:
     supported = {t.key for t in type_table() if t.decode != "unsupported"}
     assert {case.key for case in CORPUS} == supported
@@ -362,6 +397,9 @@ def test_decode_matches_psycopg(schema: str, case: Case) -> None:
             _, psycopg_value = _psycopg_outcome(schema, sql)
             assert status == "ok", rowx_value
             assert ranges_equal(rowx_value, psycopg_value), (rowx_value, psycopg_value)
+        case "money":
+            assert status == "ok", rowx_value
+            assert _money_matches(schema, case, rowx_value)
         case "void":
             assert (status, rowx_value) == ("ok", None)
             assert _psycopg_outcome(schema, sql) == ("ok", "")

@@ -64,6 +64,8 @@ fn to_object<'py>(py: Python<'py>, param: &PyParam) -> Result<Bound<'py, PyAny>,
         | PyParam::Date(_)
         | PyParam::Time { .. }
         | PyParam::DateTime { .. }
+        | PyParam::Money(_)
+        | PyParam::Interval { .. }
         | PyParam::Timedelta { .. } => {
             return Err(format!(
                 "a Python {} is not JSON serialisable",

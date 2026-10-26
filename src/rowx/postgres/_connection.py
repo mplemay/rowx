@@ -8,6 +8,7 @@ from rowx.postgres._transaction import TrackedStream, Transaction
 RESET_QUERY: Final[str] = "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;"
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from types import TracebackType
 
     from rowx._core.postgres import Connection as ConnectionImpl
@@ -45,7 +46,7 @@ class Connection:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
@@ -63,7 +64,7 @@ class Connection:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,

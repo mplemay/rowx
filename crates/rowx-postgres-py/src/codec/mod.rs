@@ -1,11 +1,13 @@
 pub mod array;
 pub mod array_enc;
+pub mod bits;
 pub mod bytes;
 pub mod extract;
 pub mod float;
 pub mod int;
 pub mod json;
 pub mod mac;
+pub mod money;
 pub mod network;
 pub mod numeric;
 pub mod range;
@@ -43,11 +45,25 @@ fn is_citext(ty: &Type) -> bool {
     matches!(ty.kind(), Kind::Simple) && ty.name() == "citext"
 }
 
-/// One arm per type family.
+/// One arm per type family; an `interval` becomes a `timedelta`.
 ///
 /// # Errors
 /// `DecodeError` for an unsupported type or a malformed value.
 pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: Option<&[u8]>) -> PyResult<Bound<'py, PyAny>> {
+    decode_with(py, ty, raw, false)
+}
+
+/// `as_span` is the annotation's choice for an `interval`, also inside an array: a lossless
+/// `rowx.postgres.Interval` instead of a `timedelta`.
+///
+/// # Errors
+/// `DecodeError` for an unsupported type or a malformed value.
+pub fn decode_with<'py>(
+    py: Python<'py>,
+    ty: &Type,
+    raw: Option<&[u8]>,
+    as_span: bool,
+) -> PyResult<Bound<'py, PyAny>> {
     let Some(raw) = raw else {
         return Ok(py.None().into_bound(py));
     };
@@ -68,9 +84,12 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: Option<&[u8]>) -> PyResult<B
         Type::TIME => temporal::decode_time(py, raw),
         Type::TIMETZ => temporal::decode_timetz(py, raw),
         Type::TIMESTAMP | Type::TIMESTAMPTZ => temporal::decode_timestamp(py, ty, raw),
+        Type::INTERVAL if as_span => temporal::decode_interval_leaf(py, raw),
         Type::INTERVAL => temporal::decode_interval(py, raw),
+        Type::MONEY => money::decode(py, raw),
+        Type::BIT | Type::VARBIT => bits::decode(py, ty, raw),
         _ if matches!(ty.kind(), Kind::Enum(_)) || is_citext(ty) => text::decode(py, ty, raw),
-        _ if matches!(ty.kind(), Kind::Array(_)) => array::decode(py, ty, raw),
+        _ if matches!(ty.kind(), Kind::Array(_)) => array::decode(py, ty, raw, as_span),
         _ if is_supported_range(ty) => range::decode(py, ty, raw),
         // void arrives as an empty, non-NULL value
         Type::VOID => Ok(py.None().into_bound(py)),
@@ -136,6 +155,8 @@ pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         Type::TIMESTAMP => temporal_enc::encode_timestamp(param).map(Param::binary),
         Type::TIMESTAMPTZ => temporal_enc::encode_timestamptz(param).map(Param::binary),
         Type::INTERVAL => temporal_enc::encode_interval(param).map(Param::binary),
+        Type::MONEY => money::encode(param),
+        Type::BIT | Type::VARBIT => bits::encode(ty, param),
         // an enum label is sent as text so the server resolves it
         _ if is_enum => text::encode(ty, param).map(Param::text),
         _ if is_citext(ty) => text::encode(ty, param).map(Param::binary),

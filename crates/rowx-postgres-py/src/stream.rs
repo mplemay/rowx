@@ -17,14 +17,15 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::codec::{self, PyParam};
 use crate::errors::{PgError, to_py_err};
-use crate::exec::{Access, decode_row, note_sql, watch};
+use crate::exec::{Access, Layout, decode_row, note_sql, nullable_mask, watch};
 
 type Msg = Result<Batch, Error>;
 
 #[derive(Debug)]
 pub struct StreamArgs {
     pub sql: String,
-    pub mask: Option<Vec<bool>>,
+    // per-column flags, see `FetchArgs`
+    pub mask: Option<Vec<u8>>,
     pub scalar: bool,
     pub arity: Option<usize>,
     pub batch_size: usize,
@@ -102,7 +103,7 @@ pub struct RowStream {
     target: Arc<OnceLock<(Cancel, Access)>>,
     pool: Option<PgPool>,
     hook: Hook,
-    scalar: bool,
+    layout: Layout,
     start: Mutex<Option<Start>>,
     rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Msg>>>,
     shared: Arc<Shared>,
@@ -149,7 +150,7 @@ impl RowStream {
             target,
             pool,
             hook: Hook::default(),
-            scalar: args.scalar,
+            layout: Layout::new(args.scalar, args.mask.as_deref()),
             start: Mutex::new(Some(Start { args, params, tx })),
             rx: Arc::new(tokio::sync::Mutex::new(rx)),
             shared: Arc::new(Shared::default()),
@@ -204,7 +205,7 @@ impl RowStream {
         let hook = self.hook.clone();
         let rx = Arc::clone(&self.rx);
         let shared = Arc::clone(&self.shared);
-        let scalar = self.scalar;
+        let layout = self.layout.clone();
         let future = future_into_py(py, async move {
             if let Some(starting) = starting {
                 let (start, claim, cancel, access) = match starting {
@@ -255,7 +256,7 @@ impl RowStream {
             let Some((cancel, access)) = target.get().cloned() else {
                 return Err(PgError(Error::Core(CoreError::Closed)).into());
             };
-            receive(&cancel, &access, &rx, &shared, scalar).await
+            receive(&cancel, &access, &rx, &shared, &layout).await
         })?;
         watch(&future, self.hook.clone())?;
         watch_cancelled(&future, Arc::clone(&self.shared))?;
@@ -335,7 +336,7 @@ async fn receive(
     access: &Access,
     rx: &tokio::sync::Mutex<mpsc::Receiver<Msg>>,
     shared: &Shared,
-    scalar: bool,
+    layout: &Layout,
 ) -> PyResult<Py<PyAny>> {
     if cancel.state.is_closed() {
         shared.finish();
@@ -350,7 +351,7 @@ async fn receive(
         Some(Ok(Batch::Rows(rows))) => Python::attach(|py| {
             let mut out = Vec::with_capacity(rows.len());
             for (index, row) in rows.iter().enumerate() {
-                match decode_row(py, row, scalar) {
+                match decode_row(py, row, layout) {
                     Ok(value) => out.push(value),
                     Err(err) => {
                         shared.finish();
@@ -415,10 +416,11 @@ async fn run(
     handle: &StreamHandle,
 ) {
     let Start { args, params, tx } = start;
+    let nullable = args.mask.as_deref().map(nullable_mask);
     let opened = match conn.parts() {
         Ok((client, cache)) => {
             let shape = Shape {
-                mask: args.mask.as_deref(),
+                mask: nullable.as_deref(),
                 scalar: args.scalar,
                 limit_one: false,
                 arity: args.arity,

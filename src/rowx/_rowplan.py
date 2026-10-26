@@ -4,7 +4,7 @@ import ipaddress
 import sys
 import types
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, Literal, TypeAliasType, Union, get_args, get_origin
 
 from rowx.errors import InterfaceError
@@ -46,6 +46,15 @@ class RowPlan:
     kind: PlanKind
     arity: int
     nullable_mask: tuple[bool, ...]
+    # per element, whether it is `rowx.postgres.Interval`, which reads an `interval` losslessly
+    # (left out of equality so a plan compares by its shape and nullability)
+    interval_mask: tuple[bool, ...] = field(default=(), compare=False)
+
+    @property
+    def flags(self) -> list[int]:
+        # one int per column for the driver: bit 0 is nullable, bit 1 is the `Interval` leaf
+        spans = self.interval_mask or (False,) * len(self.nullable_mask)
+        return [int(null) | (int(span) << 1) for null, span in zip(self.nullable_mask, spans, strict=True)]
 
 
 NO_ROWS: Final[RowPlan] = RowPlan(kind="none", arity=0, nullable_mask=())
@@ -100,6 +109,19 @@ def _is_range(origin: object) -> bool:
     return module is not None and origin is module.Range
 
 
+def _is_value_class(t: object, module_name: str, name: str) -> bool:
+    module = sys.modules.get(module_name)
+    return module is not None and t is getattr(module, name)
+
+
+def _is_interval(t: object) -> bool:
+    return _is_value_class(t, "rowx.postgres._interval", "Interval")
+
+
+def _is_money(t: object) -> bool:
+    return _is_value_class(t, "rowx.postgres._money", "Money")
+
+
 def _elem(t: object) -> bool:
     t = _unwrap(t)
     if _is_none(t) or t is Any or t is object:
@@ -122,9 +144,18 @@ def _elem(t: object) -> bool:
         if _unwrap(subtype) not in RANGE_SUBTYPES:
             raise _reject(t, "a range subtype must be int, Decimal, date or datetime")
         return False
-    if origin is None and isinstance(t, type) and t in LEAVES:
+    if origin is None and isinstance(t, type) and (t in LEAVES or _is_interval(t) or _is_money(t)):
         return False
     raise _reject(t, "not derivable from the row type grammar")
+
+
+def _is_interval_elem(t: object) -> bool:
+    # `Interval` and `Interval | None`, also inside lists, since the codec choice covers array elements
+    t = _unwrap(t)
+    if get_origin(t) is list:
+        return _is_interval_elem(get_args(t)[0])
+    members, _ = _flatten(t)
+    return len(members) == 1 and _is_interval(members[0])
 
 
 def _build(t: object) -> RowPlan:
@@ -136,8 +167,14 @@ def _build(t: object) -> RowPlan:
         if not args or Ellipsis in args:
             raise _reject(t, "a tuple needs fixed arity of at least 1")
         mask = tuple(_elem(a) for a in args)
-        return RowPlan(kind="tuple", arity=len(mask), nullable_mask=mask)
-    return RowPlan(kind="scalar", arity=1, nullable_mask=(_elem(t),))
+        spans = tuple(_is_interval_elem(a) for a in args)
+        return RowPlan(kind="tuple", arity=len(mask), nullable_mask=mask, interval_mask=spans)
+    return RowPlan(
+        kind="scalar",
+        arity=1,
+        nullable_mask=(_elem(t),),
+        interval_mask=(_is_interval_elem(t),),
+    )
 
 
 def row_plan(t: object) -> RowPlan:

@@ -10,7 +10,9 @@ use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 use rowx_postgres::exec::Param;
 use rowx_postgres::wire::array;
+use rowx_postgres::wire::bits;
 use rowx_postgres::wire::mac::{self, MAC_LEN, MAC8_LEN};
+use rowx_postgres::wire::money;
 use rowx_postgres::wire::network::{self, Addr, Network};
 use rowx_postgres::wire::numeric::{self, Numeric};
 use rowx_postgres::wire::range::{self, Bound, Range};
@@ -350,6 +352,119 @@ async fn interval_matches_interval_send() -> TestResult {
             (days, micros),
             "{text}"
         );
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn interval_with_months_matches_interval_send() -> TestResult {
+    let (schema, client) = connect!();
+    let micros_range = -1_000_000_000_000_000i64..=1_000_000_000_000_000;
+    for (months, days, micros) in samples((any::<i32>(), any::<i32>(), micros_range), CASES) {
+        let text = format!("{months} months {days} days {micros} microseconds");
+        let sent = send(&client, "interval_send", "interval", &text).await?;
+        assert_eq!(
+            temporal::encode_span(i64::from(months), i64::from(days), micros),
+            Ok(sent.clone()),
+            "{text}"
+        );
+        let decoded = temporal::decode_span(&sent)?;
+        assert_eq!(
+            (decoded.months, decoded.days, decoded.microseconds),
+            (months, days, micros),
+            "{text}"
+        );
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn infinite_intervals_keep_the_servers_sentinel_fields() -> TestResult {
+    let (schema, client) = connect!();
+    for (text, months, days, micros) in [
+        ("infinity", i32::MAX, i32::MAX, i64::MAX),
+        ("-infinity", i32::MIN, i32::MIN, i64::MIN),
+    ] {
+        let sent = send(&client, "interval_send", "interval", text).await?;
+        let span = temporal::decode_span(&sent)?;
+        assert!(span.is_infinite(), "{text}");
+        assert_eq!(
+            temporal::encode_span(i64::from(months), i64::from(days), micros),
+            Ok(sent),
+            "{text}"
+        );
+    }
+    schema.drop().await
+}
+
+fn money_text(minor_units: i64) -> String {
+    let sign = if minor_units < 0 { "-" } else { "" };
+    let magnitude = minor_units.unsigned_abs();
+    format!("{sign}{}.{:02}", magnitude / 100, magnitude % 100)
+}
+
+// the text is read as numeric and cast, so it parses the same under any `lc_monetary`
+#[tokio::test]
+async fn money_matches_cash_send() -> TestResult {
+    let (schema, client) = connect!();
+    let edges = [0, 1, -1, 99, 100, i64::MAX, i64::MIN];
+    let sampled = samples(any::<i64>(), CASES);
+    for minor_units in edges.into_iter().chain(sampled) {
+        let sql = "SELECT cash_send($1::text::numeric::money)";
+        let text = money_text(minor_units);
+        let sent: Vec<u8> = client.query_one(sql, &[&text]).await?.get(0);
+        assert_eq!(money::encode(minor_units), sent, "{text}");
+        assert_eq!(money::decode(&sent), Ok(minor_units), "{text}");
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn money_parameters_are_read_back_by_the_server() -> TestResult {
+    let (schema, client) = connect!();
+    for minor_units in samples(-1_000_000_000_000i64..1_000_000_000_000, CASES) {
+        let sql = "SELECT $1::money::numeric::text";
+        let shown: String = client
+            .query_one(sql, &[&Param::binary(money::encode(minor_units))])
+            .await?
+            .get(0);
+        assert_eq!(shown, money_text(minor_units), "{minor_units}");
+    }
+    schema.drop().await
+}
+
+fn bit_string(max: usize) -> impl Strategy<Value = String> {
+    proptest::collection::vec(prop_oneof![Just('0'), Just('1')], 0..=max)
+        .prop_map(|digits| digits.into_iter().collect())
+}
+
+#[tokio::test]
+async fn varbit_matches_varbit_send() -> TestResult {
+    let (schema, client) = connect!();
+    let fixed = ["", "0", "1", "1010101", "10101010", "101010101"].map(str::to_owned);
+    for text in fixed.into_iter().chain(samples(bit_string(200), CASES)) {
+        let sent = send(&client, "varbit_send", "varbit", &text).await?;
+        assert_eq!(bits::encode(&text), Ok(sent.clone()), "{text}");
+        assert_eq!(bits::decode(&sent), Ok(text.clone()), "{text}");
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn bit_matches_bit_send() -> TestResult {
+    let (schema, client) = connect!();
+    for width in [1usize, 7, 8, 9, 15, 16, 17, 64, 65, 130] {
+        for text in samples(
+            proptest::collection::vec(prop_oneof![Just('0'), Just('1')], width),
+            8,
+        )
+        .into_iter()
+        .map(|digits| digits.into_iter().collect::<String>())
+        {
+            let sent = send(&client, "bit_send", &format!("bit({width})"), &text).await?;
+            assert_eq!(bits::encode(&text), Ok(sent.clone()), "{text}");
+            assert_eq!(bits::decode(&sent), Ok(text.clone()), "{text}");
+        }
     }
     schema.drop().await
 }

@@ -1,8 +1,9 @@
+import datetime as dt
 import ipaddress
 from decimal import Decimal
 
 from rowx import query
-from rowx.postgres import Range
+from rowx.postgres import Interval, Money, Range
 
 type Inet = ipaddress.IPv4Interface | ipaddress.IPv6Interface
 type Cidr = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -37,3 +38,31 @@ def run() -> None:
     query[str](t'SELECT {Range(1, 5)}::text AS "n!"')  # error: [param-type-mismatch]
     query[list[Range[int]]](t'SELECT {[Range(1, 5)]}::int4range[] AS "r!"')
     query[list[Range[int]]](t'SELECT {[1]}::int4range[] AS "r!"')  # error: [param-type-mismatch]
+
+
+def run_money_bit_interval() -> None:
+    query[Money](t'SELECT {Money(100)}::money AS "m!"')
+    query[Money](t'SELECT {1}::money AS "m!"')  # error: [param-type-mismatch]
+    query[Money](t'SELECT {"1.00"}::money AS "m!"')  # error: [param-type-mismatch]
+    query[Money](t'SELECT {Decimal("1.00")}::money AS "m!"')  # error: [param-type-mismatch]
+    query[Money](t'SELECT {1.5}::money AS "m!"')  # error: [param-type-mismatch]
+    query[int](t'SELECT {Money(100)}::int AS "n!"')  # error: [param-type-mismatch]
+    query[str](t'SELECT {Money(100)}::text AS "n!"')  # error: [param-type-mismatch]
+    query[Interval](t'SELECT {Money(100)}::interval AS "i!"')  # error: [param-type-mismatch]
+    query[list[Money]](t'SELECT {[Money(1)]}::money[] AS "m!"')
+    query[list[Money]](t'SELECT {[1]}::money[] AS "m!"')  # error: [param-type-mismatch]
+    query[str](t'SELECT {"101"}::varbit AS "b!"')
+    query[str](t'SELECT {"101"}::bit(3) AS "b!"')
+    query[str](t'SELECT {101}::varbit AS "b!"')  # error: [param-type-mismatch]
+    query[str](t'SELECT {b"101"}::bit(3) AS "b!"')  # error: [param-type-mismatch]
+    query[str](t'SELECT {Money(1)}::varbit AS "b!"')  # error: [param-type-mismatch]
+    query[list[str]](t'SELECT {["101"]}::varbit[] AS "b!"')
+    query[list[str]](t'SELECT {[101]}::varbit[] AS "b!"')  # error: [param-type-mismatch]
+    query[Interval](t'SELECT {Interval(months=1)}::interval AS "i!"')
+    query[dt.timedelta](t'SELECT {dt.timedelta(days=1)}::interval AS "i!"')
+    query[Interval](t'SELECT {1}::interval AS "i!"')  # error: [param-type-mismatch]
+    query[Interval](t'SELECT {"1 mon"}::interval AS "i!"')  # error: [param-type-mismatch]
+    query[Interval](t'SELECT {dt.date(2024, 1, 1)}::interval AS "i!"')  # error: [param-type-mismatch]
+    query[int](t'SELECT {Interval(months=1)}::int AS "n!"')  # error: [param-type-mismatch]
+    query[list[Interval]](t'SELECT {[Interval(days=1)]}::interval[] AS "i!"')
+    query[list[Interval]](t'SELECT {[1]}::interval[] AS "i!"')  # error: [param-type-mismatch]

@@ -16,6 +16,7 @@ pub struct TypeInfo {
     matcher_oid: Option<u32>,
     matcher_name: Option<String>,
     py_result: String,
+    alt_py_results: Vec<String>,
     // one of "none", "aware", "naive"
     tz: String,
     accepted_params: Vec<String>,
@@ -37,6 +38,8 @@ const fn codec_name(codec: Codec) -> &'static str {
         Codec::Network => "network",
         Codec::Mac => "mac",
         Codec::Range => "range",
+        Codec::Money => "money",
+        Codec::Bits => "bits",
         Codec::Json => "json",
         Codec::Temporal => "temporal",
         Codec::Array => "array",
@@ -60,6 +63,7 @@ impl From<&rowx_postgres::types::TypeInfo> for TypeInfo {
             matcher_oid,
             matcher_name,
             py_result: t.py_result.to_owned(),
+            alt_py_results: t.alt_py_results.iter().map(|s| (*s).to_owned()).collect(),
             tz: match t.tz {
                 TzRule::None => "none",
                 TzRule::Aware => "aware",

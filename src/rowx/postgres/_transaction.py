@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Self
 from rowx.errors import ConnectionBusyError, InterfaceError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from types import TracebackType
 
     from rowx._core.postgres import RowStream as RowStreamImpl
@@ -69,7 +69,7 @@ class Transaction:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
@@ -82,7 +82,7 @@ class Transaction:
         self,
         sql: str,
         params: list[object],
-        mask: list[bool] | None,
+        mask: Sequence[int] | None,
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,
