@@ -220,8 +220,9 @@ Its `describe` is also `#[doc(hidden)]` and feature-gated. rowx keeps sqlx's **m
   extra rules, unreadable `security_invoker` views, definitions that fail to describe, cycles and chains deeper than 8
   stay Nullable.
 - **Scan boundaries.** A boundary column is not promoted only on an exact, unique name match to a plain,
-  non-null-extended source column ([Scan-boundary mapping](#scan-boundary-mapping)). Computed, duplicate-named and
-  constant outputs still promote.
+  non-null-extended source column that resolves to the origin column
+  ([Scan-boundary mapping](#scan-boundary-mapping)). Computed, duplicate-named, constant and renamed (swapped-alias)
+  outputs still promote.
 - **Set operations and recursive CTEs** have `table_oid = 0`, so they are Unknown →
   Nullable. That is safe.
 - **Computed columns** are always Unknown → Nullable. NOT NULL narrowing for computed
