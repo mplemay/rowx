@@ -23,6 +23,8 @@ pub enum NumericError {
     Digit(u16),
     #[error("a Decimal sNaN cannot be stored in numeric")]
     SignalingNan,
+    #[error("numeric has {0} digit groups, more than the wire format can count")]
+    TooManyDigits(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +108,44 @@ fn padded(group: u16) -> impl Iterator<Item = char> {
 }
 
 impl Numeric {
+    /// The binary wire form, as `numeric_send` produces it.
+    ///
+    /// # Errors
+    /// `TooManyDigits` when the digit groups do not fit the unsigned 16-bit count.
+    pub fn encode(&self) -> Result<Vec<u8>, NumericError> {
+        let (sign, weight, scale, digits): (u16, i16, u16, &[u16]) = match self {
+            Self::NaN => (SIGN_NAN, 0, 0, &[]),
+            Self::PosInfinity => (SIGN_POS_INF, 0, 0, &[]),
+            Self::NegInfinity => (SIGN_NEG_INF, 0, 0, &[]),
+            Self::Finite {
+                negative,
+                weight,
+                scale,
+                digits,
+            } => (
+                if *negative {
+                    SIGN_NEGATIVE
+                } else {
+                    SIGN_POSITIVE
+                },
+                *weight,
+                *scale,
+                digits,
+            ),
+        };
+        let count =
+            u16::try_from(digits.len()).map_err(|_| NumericError::TooManyDigits(digits.len()))?;
+        let mut out = Vec::with_capacity(HEADER_LEN + digits.len() * 2);
+        out.extend_from_slice(&count.to_be_bytes());
+        out.extend_from_slice(&weight.to_be_bytes());
+        out.extend_from_slice(&sign.to_be_bytes());
+        out.extend_from_slice(&scale.to_be_bytes());
+        for digit in digits {
+            out.extend_from_slice(&digit.to_be_bytes());
+        }
+        Ok(out)
+    }
+
     /// The value as text that `decimal.Decimal` parses, keeping the display scale.
     #[must_use]
     pub fn to_decimal_string(&self) -> String {
@@ -300,5 +340,132 @@ mod tests {
         let digits = vec![1; 32_768];
         let decoded = decode(&wire(32_767, SIGN_POSITIVE, 0, &digits));
         assert!(matches!(decoded, Ok(Numeric::Finite { digits, .. }) if digits.len() == 32_768));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn finite() -> impl Strategy<Value = Numeric> {
+        (
+            any::<bool>(),
+            prop_oneof![Just(i16::MIN), Just(i16::MAX), any::<i16>()],
+            prop_oneof![Just(0u16), Just(1000), Just(MAX_SCALE), 0..=MAX_SCALE],
+            prop::collection::vec(0..BASE, 0..12),
+        )
+            .prop_map(|(negative, weight, scale, digits)| Numeric::Finite {
+                negative,
+                weight,
+                scale,
+                digits,
+            })
+    }
+
+    fn any_numeric() -> impl Strategy<Value = Numeric> {
+        prop_oneof![
+            Just(Numeric::NaN),
+            Just(Numeric::PosInfinity),
+            Just(Numeric::NegInfinity),
+            finite(),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn encode_then_decode_is_the_identity(value in any_numeric()) {
+            let raw = value.encode();
+            prop_assert!(raw.is_ok());
+            prop_assert_eq!(decode(&raw.unwrap_or_default()), Ok(value));
+        }
+
+        #[test]
+        fn every_strict_prefix_of_an_encoding_is_rejected(value in any_numeric(), cut in 0usize..64) {
+            let raw = value.encode().unwrap_or_default();
+            let cut = cut % raw.len().max(1);
+            prop_assert!(decode(&raw[..cut]).is_err());
+        }
+
+        #[test]
+        fn decoding_random_bytes_never_panics(raw in prop::collection::vec(any::<u8>(), 0..64)) {
+            if let Ok(value) = decode(&raw) {
+                // the text form of anything the decoder accepts must also be computable
+                let _ = value.to_decimal_string();
+            }
+        }
+
+        #[test]
+        fn random_headers_with_consistent_bodies_never_panic(
+            weight in any::<i16>(),
+            sign in any::<u16>(),
+            scale in any::<u16>(),
+            digits in prop::collection::vec(any::<u16>(), 0..8),
+        ) {
+            let mut raw = Vec::new();
+            raw.extend_from_slice(&u16::try_from(digits.len()).unwrap_or(0).to_be_bytes());
+            raw.extend_from_slice(&weight.to_be_bytes());
+            raw.extend_from_slice(&sign.to_be_bytes());
+            raw.extend_from_slice(&scale.to_be_bytes());
+            for digit in &digits {
+                raw.extend_from_slice(&digit.to_be_bytes());
+            }
+            if let Ok(value) = decode(&raw) {
+                let _ = value.to_decimal_string();
+            }
+        }
+
+        #[test]
+        fn decimal_text_shape_follows_the_scale(
+            negative in any::<bool>(),
+            weight in -3i16..6,
+            scale in 0u16..40,
+            digits in prop::collection::vec(0..BASE, 0..6),
+        ) {
+            let text = Numeric::Finite { negative, weight, scale, digits }.to_decimal_string();
+            let frac = text.split_once('.').map_or(0, |(_, frac)| frac.len());
+            prop_assert_eq!(frac, usize::from(scale));
+            prop_assert_eq!(text.starts_with('-'), negative);
+        }
+    }
+
+    #[test]
+    fn the_extreme_scales_and_weights_decode() {
+        for (weight, scale) in [(0, 0), (0, MAX_SCALE), (i16::MIN, 0), (i16::MAX, 0)] {
+            let value = Numeric::Finite {
+                negative: false,
+                weight,
+                scale,
+                digits: vec![1],
+            };
+            let raw = value.encode().unwrap_or_default();
+            assert_eq!(decode(&raw), Ok(value));
+        }
+    }
+
+    #[test]
+    fn a_scale_past_the_maximum_is_rejected() {
+        let value = Numeric::Finite {
+            negative: false,
+            weight: 0,
+            scale: MAX_SCALE + 1,
+            digits: vec![],
+        };
+        let raw = value.encode().unwrap_or_default();
+        assert_eq!(decode(&raw), Err(NumericError::Scale(MAX_SCALE + 1)));
+    }
+
+    #[test]
+    fn too_many_digit_groups_cannot_be_encoded() {
+        let value = Numeric::Finite {
+            negative: false,
+            weight: 0,
+            scale: 0,
+            digits: vec![0; usize::from(u16::MAX) + 1],
+        };
+        assert_eq!(
+            value.encode(),
+            Err(NumericError::TooManyDigits(usize::from(u16::MAX) + 1))
+        );
     }
 }
