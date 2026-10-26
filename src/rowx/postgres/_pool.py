@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from rowx._core.postgres import Connection as ConnectionImpl, RowStream as RowStreamImpl
+    from rowx._executor import StreamHandle
 
 type Hook = Callable[[Connection], Awaitable[None]]
 type StreamArgs = tuple[str, list[object], list[bool] | None, bool, int | None, int]
@@ -83,7 +84,7 @@ class PooledStream:
         self._pool = pool
         self._args = args
         self._conn: Connection | None = None
-        self._inner: RowStreamImpl | None = None
+        self._inner: StreamHandle | None = None
         self._closed = False
 
     async def _next(self) -> list[object]:

@@ -166,6 +166,7 @@ def test_a_serialization_failure_on_commit_raises_and_the_connection_survives(sc
     assert run_with_two(schema, body) == 1
 
 
+@pytest.mark.timing
 def test_cancelling_inside_the_block_rolls_back(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> tuple[int, int]:
         pid = await backend_pid(conn)
@@ -194,6 +195,7 @@ def test_cancelling_inside_the_block_rolls_back(schema: str) -> None:
     assert run_with_two(schema, body) == (1, 0)
 
 
+@pytest.mark.timing
 def test_a_second_cancel_during_aexit_still_ends_the_transaction(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> tuple[str, int]:
         pid = await backend_pid(conn)
@@ -225,6 +227,7 @@ def test_a_second_cancel_during_aexit_still_ends_the_transaction(schema: str) ->
     assert run_with_two(schema, body) == ("idle", 0)
 
 
+@pytest.mark.timing
 def test_a_timeout_during_the_commit_discards_the_connection(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> None:
         await query(t"CREATE TABLE slow (id int)").execute(conn)
@@ -314,3 +317,33 @@ def test_a_second_transaction_on_a_busy_connection_is_an_interface_error(schema:
         assert await query[int](t"SELECT 1").one(conn) == 1
 
     run_with_two(schema, body)
+
+
+def test_a_swallowed_error_from_a_query_on_the_connection_raises(schema: str) -> None:
+    async def body(conn: Connection, observer: Connection) -> int:
+        async def work() -> None:
+            async with conn.transaction() as tx:
+                await query(t"INSERT INTO users (name) VALUES ('direct')").execute(tx)
+                with pytest.raises(DatabaseError):
+                    await query(t"SELECT 1 / 0").execute(conn)
+
+        with pytest.raises(InterfaceError):
+            await work()
+        return await count_users(observer, "direct")
+
+    assert run_with_two(schema, body) == 0
+
+
+def test_ending_on_a_busy_connection_leaves_the_transaction_open(schema: str) -> None:
+    async def body(conn: Connection, observer: Connection) -> int:
+        async with conn.transaction() as tx:
+            await query(t"INSERT INTO users (name) VALUES ('busy_end')").execute(tx)
+            stream = query[int](t"SELECT generate_series(1, 10)").fetch(tx, batch_size=1)
+            assert await anext(stream) == 1
+            with pytest.raises(ConnectionBusyError):
+                await tx.commit()
+            await stream.aclose()
+            await tx.rollback()
+        return await count_users(observer, "busy_end")
+
+    assert run_with_two(schema, body) == 0

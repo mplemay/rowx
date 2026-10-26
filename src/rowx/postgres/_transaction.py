@@ -3,22 +3,27 @@ from typing import TYPE_CHECKING, Self
 from rowx.errors import ConnectionBusyError, InterfaceError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import TracebackType
 
     from rowx._core.postgres import RowStream as RowStreamImpl
+    from rowx._executor import StreamHandle
     from rowx.postgres._connection import Connection
 
 
 class TrackedStream:
-    def __init__(self, inner: RowStreamImpl, owner: Transaction, /) -> None:
+    def __init__(self, inner: RowStreamImpl, on_failure: Callable[[], None], /) -> None:
         self._inner = inner
-        self._owner = owner
+        self._on_failure = on_failure
 
     async def _next(self) -> list[object]:
         try:
             return await self._inner._next()  # ruff: ignore[private-member-access]
+        except ConnectionBusyError:
+            # nothing ran, so the transaction is untouched
+            raise
         except BaseException:
-            self._owner._note_failure()  # ruff: ignore[private-member-access]
+            self._on_failure()
             raise
 
     def close(self) -> None:
@@ -51,10 +56,6 @@ class Transaction:
         self._active = False
         self._ended = False
         self._failed = False
-        self._parent_failed = False
-
-    def _note_failure(self) -> None:
-        self._failed = True
 
     def _check_active(self) -> None:
         if self._ended:
@@ -74,14 +75,8 @@ class Transaction:
         arity: int | None,
     ) -> list[object]:
         self._check_active()
-        try:
-            return await self._conn._fetch(sql, params, mask, scalar, limit_one, arity)  # ruff: ignore[private-member-access]
-        except ConnectionBusyError:
-            # nothing ran, so the transaction is untouched
-            raise
-        except BaseException:
-            self._failed = True
-            raise
+        # the connection records failures, so queries run on it directly are tracked as well
+        return await self._conn._fetch(sql, params, mask, scalar, limit_one, arity)  # ruff: ignore[private-member-access]
 
     def _stream(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         self,
@@ -91,19 +86,13 @@ class Transaction:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,
-    ) -> TrackedStream:
+    ) -> StreamHandle:
         self._check_active()
-        return TrackedStream(self._conn._stream(sql, params, mask, scalar, arity, batch_size), self)  # ruff: ignore[private-member-access]
+        return self._conn._stream(sql, params, mask, scalar, arity, batch_size)  # ruff: ignore[private-member-access]
 
     async def _execute(self, sql: str, params: list[object]) -> int:
         self._check_active()
-        try:
-            return await self._conn._execute(sql, params)  # ruff: ignore[private-member-access]
-        except ConnectionBusyError:
-            raise
-        except BaseException:
-            self._failed = True
-            raise
+        return await self._conn._execute(sql, params)  # ruff: ignore[private-member-access]
 
     @property
     def closed(self) -> bool:
@@ -136,9 +125,10 @@ class Transaction:
                 msg = "a savepoint is already open in this transaction"
                 raise InterfaceError(msg)
             self._savepoint = await impl._savepoint()  # ruff: ignore[private-member-access]
-            self._parent_failed = parent._failed  # ruff: ignore[private-member-access]
             parent._child = self  # ruff: ignore[private-member-access]
         self._active = True
+        # the innermost open transaction is the one a failing statement aborts
+        self._conn._tx = self  # ruff: ignore[private-member-access]
         return self
 
     async def __aexit__(
@@ -181,19 +171,28 @@ class Transaction:
             msg = "end the open savepoint first"
             raise InterfaceError(msg)
 
-    async def _end(self, *, commit: bool) -> None:
+    def _finish(self) -> None:
         # marked first, so nothing can reuse the transaction while the ending statement runs
         self._ended = True
-        parent = self._parent
-        if parent is not None:
-            parent._child = None  # ruff: ignore[private-member-access]
+        self._conn._tx = self._parent  # ruff: ignore[private-member-access]
+        if self._parent is not None:
+            self._parent._child = None  # ruff: ignore[private-member-access]
+
+    async def _end(self, *, commit: bool) -> None:
         impl = self._conn._impl  # ruff: ignore[private-member-access]
-        # a cancelled statement may still be settling; each ending statement waits for it
+        # each call claims the connection before it returns, so a busy connection raises here and the
+        # transaction stays open; a cancelled statement that is still settling is waited for
         if self._savepoint is None:
-            await impl._end_transaction(commit)  # ruff: ignore[private-member-access]
+            pending = impl._end_transaction(commit)  # ruff: ignore[private-member-access]
+            self._finish()
+            await pending
             return
+        first = (
+            impl._release_savepoint(self._savepoint)  # ruff: ignore[private-member-access]
+            if commit
+            else impl._rollback_to_savepoint(self._savepoint)  # ruff: ignore[private-member-access]
+        )
+        self._finish()
+        await first
         if not commit:
-            await impl._rollback_to_savepoint(self._savepoint)  # ruff: ignore[private-member-access]
-            if parent is not None:
-                parent._failed = self._parent_failed  # ruff: ignore[private-member-access]
-        await impl._release_savepoint(self._savepoint)  # ruff: ignore[private-member-access]
+            await impl._release_savepoint(self._savepoint)  # ruff: ignore[private-member-access]
