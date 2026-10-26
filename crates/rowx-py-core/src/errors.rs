@@ -103,6 +103,12 @@ pub fn database_error(
 pub fn core_to_py_err(py: Python<'_>, err: CoreError) -> PyErr {
     match err {
         CoreError::Busy => busy_error(py, &err.to_string()),
-        CoreError::Closed | CoreError::Broken => interface_error(py, &err.to_string()),
+        // PoolTimeoutError (#77) will get its own class; until then the pool errors are interface errors
+        CoreError::Closed
+        | CoreError::Broken
+        | CoreError::PoolTimeout
+        | CoreError::PoolClosed
+        | CoreError::StaleLease
+        | CoreError::Forked => interface_error(py, &err.to_string()),
     }
 }

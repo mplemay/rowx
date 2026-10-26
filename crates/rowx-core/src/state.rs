@@ -1,15 +1,19 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::Notify;
 
 use crate::error::CoreError;
 
-const IDLE: u8 = 0;
-const BUSY: u8 = 1;
-const SETTLING: u8 = 2;
-const BROKEN: u8 = 3;
-const CLOSED: u8 = 4;
+const IDLE: u64 = 0;
+const BUSY: u64 = 1;
+const SETTLING: u64 = 2;
+const BROKEN: u64 = 3;
+const CLOSED: u64 = 4;
+
+// the phase and the lease share one word so that a claim checks both in a single compare-and-swap
+const PHASE_MASK: u64 = 0xff;
+const LEASE_SHIFT: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -22,13 +26,34 @@ pub enum Phase {
 
 #[derive(Debug, Default)]
 pub struct State {
-    phase: AtomicU8,
+    // low byte: phase; the rest: the current lease generation (0 for a connection outside a pool)
+    word: AtomicU64,
     // conservative: set whenever the session may be inside a transaction, cleared by a reset
     maybe_in_txn: AtomicBool,
     settled: Notify,
 }
 
 impl State {
+    // applies `next` to the phase while leaving the lease alone; `Err` carries the phase that refused
+    fn update(&self, next: impl Fn(u64) -> Option<u64>) -> Result<u64, u64> {
+        let mut cur = self.word.load(Ordering::Acquire);
+        loop {
+            let phase = cur & PHASE_MASK;
+            let Some(to) = next(phase) else {
+                return Err(phase);
+            };
+            match self.word.compare_exchange_weak(
+                cur,
+                (cur & !PHASE_MASK) | to,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(phase),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
     /// Idle → Busy by compare-and-swap; the returned guard moves Busy → Idle when dropped.
     /// `None` means a cancelled operation is still settling, so the caller should use `claim_settled`.
     ///
@@ -36,16 +61,53 @@ impl State {
     /// `Busy` when another operation holds the connection, `Closed` after `close()`,
     /// `Broken` after an IO failure.
     pub fn claim(self: &Arc<Self>) -> Result<Option<Claim>, CoreError> {
-        match self
-            .phase
-            .compare_exchange(IDLE, BUSY, Ordering::AcqRel, Ordering::Acquire)
-        {
-            Ok(_) => Ok(Some(Claim::new(self))),
-            Err(BUSY) => Err(CoreError::Busy),
-            Err(SETTLING) => Ok(None),
-            Err(BROKEN) => Err(CoreError::Broken),
-            Err(_) => Err(CoreError::Closed),
+        self.claim_with(None)
+    }
+
+    /// `claim`, but only while `lease` is still the current lease; the check and Idle → Busy are one
+    /// compare-and-swap, so a released lease can never claim a connection that was handed on.
+    ///
+    /// # Errors
+    /// `StaleLease` when the lease was revoked, otherwise as `claim`.
+    pub fn claim_leased(self: &Arc<Self>, lease: u64) -> Result<Option<Claim>, CoreError> {
+        self.claim_with(Some(lease))
+    }
+
+    fn claim_with(self: &Arc<Self>, lease: Option<u64>) -> Result<Option<Claim>, CoreError> {
+        let mut cur = self.word.load(Ordering::Acquire);
+        loop {
+            if lease.is_some_and(|lease| cur >> LEASE_SHIFT != lease) {
+                return Err(CoreError::StaleLease);
+            }
+            match cur & PHASE_MASK {
+                IDLE => {
+                    match self.word.compare_exchange_weak(
+                        cur,
+                        (cur & !PHASE_MASK) | BUSY,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return Ok(Some(Claim::new(self))),
+                        Err(actual) => cur = actual,
+                    }
+                }
+                BUSY => return Err(CoreError::Busy),
+                SETTLING => return Ok(None),
+                BROKEN => return Err(CoreError::Broken),
+                _ => return Err(CoreError::Closed),
+            }
         }
+    }
+
+    /// Starts a new lease and returns it, which revokes the previous one.
+    pub fn renew_lease(&self) -> u64 {
+        (self.word.fetch_add(1 << LEASE_SHIFT, Ordering::AcqRel) >> LEASE_SHIFT).wrapping_add(1)
+    }
+
+    /// The current lease generation.
+    #[must_use]
+    pub fn lease(&self) -> u64 {
+        self.word.load(Ordering::Acquire) >> LEASE_SHIFT
     }
 
     /// Waits out `Settling`, then retries the claim.
@@ -53,13 +115,44 @@ impl State {
     /// # Errors
     /// The same as `claim`, evaluated after the connection has settled.
     pub async fn claim_settled(self: &Arc<Self>) -> Result<Claim, CoreError> {
+        self.claim_settled_with(None).await
+    }
+
+    /// `claim_settled` for a leased connection.
+    ///
+    /// # Errors
+    /// `StaleLease` when the lease was revoked, otherwise as `claim_settled`.
+    pub async fn claim_settled_leased(self: &Arc<Self>, lease: u64) -> Result<Claim, CoreError> {
+        self.claim_settled_with(Some(lease)).await
+    }
+
+    async fn claim_settled_with(self: &Arc<Self>, lease: Option<u64>) -> Result<Claim, CoreError> {
         loop {
             // registered before the claim so a settle between the two is not missed
             let notified = self.settled.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(claim) = self.claim()? {
+            if let Some(claim) = self.claim_with(lease)? {
                 return Ok(claim);
+            }
+            notified.await;
+        }
+    }
+
+    /// Resolves once the connection is no longer `Settling`, without claiming it.
+    ///
+    /// # Errors
+    /// `Broken` or `Closed` when the connection did not survive.
+    pub async fn wait_settled(&self) -> Result<(), CoreError> {
+        loop {
+            let notified = self.settled.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match self.phase() {
+                Phase::Settling => {}
+                Phase::Broken => return Err(CoreError::Broken),
+                Phase::Closed => return Err(CoreError::Closed),
+                Phase::Idle | Phase::Busy => return Ok(()),
             }
             notified.await;
         }
@@ -82,8 +175,7 @@ impl State {
     /// Returns `false` when the connection was not busy, for example because it was closed.
     pub fn settle(&self) -> bool {
         let settling = self
-            .phase
-            .compare_exchange(BUSY, SETTLING, Ordering::AcqRel, Ordering::Acquire)
+            .update(|phase| (phase == BUSY).then_some(SETTLING))
             .is_ok();
         if settling {
             // a cancelled operation may have left a transaction open or aborted
@@ -109,35 +201,24 @@ impl State {
     pub fn settled(&self, ok: bool) {
         let next = if ok { IDLE } else { BROKEN };
         // a failed swap means the connection was closed meanwhile, which must stay closed
-        let _ = self
-            .phase
-            .compare_exchange(SETTLING, next, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.update(|phase| (phase == SETTLING).then_some(next));
         self.settled.notify_waiters();
     }
 
     /// Any live state → Broken; `Closed` is terminal and stays.
     pub fn mark_broken(&self) {
-        let mut current = self.phase.load(Ordering::Acquire);
-        while current != CLOSED && current != BROKEN {
-            match self
-                .phase
-                .compare_exchange(current, BROKEN, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
-        }
+        let _ = self.update(|phase| (phase != CLOSED && phase != BROKEN).then_some(BROKEN));
         self.settled.notify_waiters();
     }
 
     pub fn close(&self) {
-        self.phase.store(CLOSED, Ordering::Release);
+        let _ = self.update(|_| Some(CLOSED));
         self.settled.notify_waiters();
     }
 
     #[must_use]
     pub fn phase(&self) -> Phase {
-        match self.phase.load(Ordering::Acquire) {
+        match self.word.load(Ordering::Acquire) & PHASE_MASK {
             IDLE => Phase::Idle,
             BUSY => Phase::Busy,
             SETTLING => Phase::Settling,
@@ -184,10 +265,7 @@ impl Drop for Claim {
             return;
         }
         // a failed swap means the state moved on (Settling, Broken or Closed), which must stay
-        let _ = self
-            .state
-            .phase
-            .compare_exchange(BUSY, IDLE, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.state.update(|phase| (phase == BUSY).then_some(IDLE));
     }
 }
 
@@ -198,9 +276,7 @@ mod tests {
     use super::*;
 
     fn claimed(state: &Arc<State>) -> Claim {
-        let swapped = state
-            .phase
-            .compare_exchange(IDLE, BUSY, Ordering::AcqRel, Ordering::Acquire);
+        let swapped = state.update(|phase| (phase == IDLE).then_some(BUSY));
         assert!(swapped.is_ok(), "state must be idle");
         Claim::new(state)
     }
@@ -362,5 +438,44 @@ mod tests {
             };
             assert_eq!(waiter.await.ok(), Some(Err(expected)));
         }
+    }
+
+    #[test]
+    fn a_revoked_lease_cannot_claim() {
+        let state = Arc::new(State::default());
+        let lease = state.renew_lease();
+        assert!(matches!(state.claim_leased(lease), Ok(Some(_))));
+        assert_eq!(state.phase(), Phase::Idle);
+        let next = state.renew_lease();
+        assert_ne!(lease, next);
+        assert_eq!(state.claim_leased(lease).err(), Some(CoreError::StaleLease));
+        assert!(matches!(state.claim_leased(next), Ok(Some(_))));
+    }
+
+    #[test]
+    fn the_lease_survives_phase_changes() {
+        let state = Arc::new(State::default());
+        let lease = state.renew_lease();
+        let claim = claimed(&state);
+        assert!(state.settle());
+        drop(claim);
+        state.settled(true);
+        state.mark_broken();
+        assert_eq!(state.lease(), lease);
+    }
+
+    #[tokio::test]
+    async fn wait_settled_resolves_when_settling_ends() {
+        let state = Arc::new(State::default());
+        let _claim = claimed(&state);
+        assert!(state.settle());
+        let waiter = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.wait_settled().await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished());
+        state.settled(false);
+        assert_eq!(waiter.await.ok(), Some(Err(CoreError::Broken)));
     }
 }
