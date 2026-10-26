@@ -91,6 +91,19 @@ def test_multiple_hosts_are_kept_in_extra() -> None:
     assert dict(opts.extra) == {"host": "a,b", "port": "1,2"}
 
 
+def test_overriding_host_and_port_replaces_a_multi_host_dsn() -> None:
+    opts = ConnectOptions.from_dsn("postgresql://u@a:1,b:2/db", host="c", port=3)
+    assert (opts.host, opts.port) == ("c", 3)
+
+    async def run() -> None:
+        conn = await connect(ConnectOptions.from_dsn("postgresql://u@a:1,b:2/db", host="127.0.0.1", port=1))
+        await conn.close()
+
+    # the refused connection to 127.0.0.1:1 proves a and b were never tried
+    with pytest.raises(InterfaceError):
+        asyncio.run(run())
+
+
 @pytest.mark.parametrize("dsn", ["host=h sslcert=/x", "postgresql://h/db?sslkey=/x", "host=h sslcrl=/x"])
 def test_unsupported_ssl_keys_are_interface_errors(dsn: str) -> None:
     with pytest.raises(InterfaceError):

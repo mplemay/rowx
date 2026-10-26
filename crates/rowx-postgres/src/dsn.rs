@@ -253,7 +253,11 @@ impl ConnectOptions {
             pairs.push(("options", options));
         }
         for (key, value) in &self.extra {
-            if key == "options" {
+            // a typed host or port wins over a retained multi-host value
+            if key == "options"
+                || (key == "host" && self.host.is_some())
+                || (key == "port" && self.port.is_some())
+            {
                 continue;
             }
             if key.is_empty() || key.contains(['=', ' ']) {
@@ -558,6 +562,19 @@ mod tests {
         let opts = ConnectOptions::from_dsn("postgres://u@h:1/db?port=2&connect_timeout=0")?;
         assert_eq!(opts.port, Some(2));
         assert_eq!(opts.connect_timeout, None);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_host_and_port_win_over_retained_multi_host_extra() -> Result<(), Error> {
+        let opts = ConnectOptions {
+            host: Some("c".to_owned()),
+            port: Some(3),
+            ..ConnectOptions::from_dsn("postgres://u@a:1,b:2/db")?
+        };
+        let config = opts.build()?.config;
+        assert_eq!(config.get_hosts().len(), 1);
+        assert_eq!(config.get_ports(), &[3]);
         Ok(())
     }
 

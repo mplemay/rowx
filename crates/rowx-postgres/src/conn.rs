@@ -138,10 +138,7 @@ pub fn opens_transaction(sql: &str) -> bool {
                 .map_or("", |(_, tail)| tail)
                 .trim_start();
         } else if let Some(after) = rest.strip_prefix("/*") {
-            rest = after
-                .split_once("*/")
-                .map_or("", |(_, tail)| tail)
-                .trim_start();
+            rest = skip_block_comment(after).trim_start();
         } else {
             break;
         }
@@ -152,6 +149,26 @@ pub fn opens_transaction(sql: &str) -> bool {
         .collect::<String>()
         .to_ascii_uppercase();
     matches!(word.as_str(), "BEGIN" | "START" | "SAVEPOINT")
+}
+
+// block comments nest in Postgres; `after` starts just past the opening `/*`
+fn skip_block_comment(after: &str) -> &str {
+    let mut depth = 1_usize;
+    let mut rest = after;
+    while depth > 0 {
+        match (rest.find("/*"), rest.find("*/")) {
+            (Some(open), Some(close)) if open < close => {
+                depth += 1;
+                rest = &rest[open + 2..];
+            }
+            (_, Some(close)) => {
+                depth -= 1;
+                rest = &rest[close + 2..];
+            }
+            _ => return "",
+        }
+    }
+    rest
 }
 
 #[cfg(test)]
@@ -166,6 +183,7 @@ mod tests {
             "  Start TRANSACTION",
             "-- note\nSAVEPOINT a",
             "/* x */ begin;",
+            "/* outer /* inner */ outer */ BEGIN",
         ] {
             assert!(opens_transaction(sql), "{sql}");
         }
