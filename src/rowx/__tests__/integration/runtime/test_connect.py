@@ -5,7 +5,7 @@ import pytest
 from psycopg.conninfo import make_conninfo
 
 from rowx.errors import DatabaseError, InterfaceError
-from rowx.postgres import Connection, connect
+from rowx.postgres import Connection, ConnectOptions, connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -27,7 +27,7 @@ def test_connect_and_close(schema: str) -> None:
 
 def test_async_with_closes(schema: str) -> None:
     async def run() -> tuple[bool, bool]:
-        async with await connect(schema, connect_timeout=5, statement_cache_size=0) as conn:
+        async with await connect(ConnectOptions.from_dsn(schema, connect_timeout=5, statement_cache_size=0)) as conn:
             inside = conn.closed
         return inside, conn.closed
 
@@ -44,7 +44,7 @@ def test_malformed_dsn_is_interface_error() -> None:
 
 def test_negative_timeout_is_interface_error() -> None:
     async def run() -> None:
-        await connect("postgresql://localhost/x", connect_timeout=-1)
+        await connect(ConnectOptions.from_dsn("postgresql://localhost/x", connect_timeout=-1))
 
     with pytest.raises(InterfaceError):
         asyncio.run(run())

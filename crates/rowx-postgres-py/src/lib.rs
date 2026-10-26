@@ -27,6 +27,7 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     let m = PyModule::new(py, "postgres")?;
     m.add_class::<conn::Connection>()?;
     m.add_function(wrap_pyfunction!(conn::connect, &m)?)?;
+    m.add_function(wrap_pyfunction!(conn::parse_dsn, &m)?)?;
     m.add_class::<describe::ColumnInfo>()?;
     m.add_class::<describe::Describe>()?;
     m.add_class::<describe::ParamInfo>()?;

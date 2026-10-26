@@ -6,6 +6,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
 use rowx_core::state::{Claim, State};
 use rowx_postgres::cancel::{self, Cancel, Hook};
+use rowx_postgres::conn::opens_transaction;
 use rowx_postgres::error::Error;
 use rowx_postgres::exec::{self, Raw, Shape};
 use rowx_postgres::{Row, Type};
@@ -33,6 +34,7 @@ pub fn fetch<'py>(
     let params = codec::extract(py, params)?;
     // claimed synchronously so a second call made before the first is awaited fails immediately
     let claim = cancel.state.claim().map_err(|e| to_py_err(py, &e.into()))?;
+    note_sql(&cancel.state, &args.sql);
     let cancel = cancel.clone();
     let hook = Hook::default();
     let watched = hook.clone();
@@ -80,6 +82,7 @@ pub fn execute<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let params = codec::extract(py, params)?;
     let claim = cancel.state.claim().map_err(|e| to_py_err(py, &e.into()))?;
+    note_sql(&cancel.state, &sql);
     let cancel = cancel.clone();
     let hook = Hook::default();
     let watched = hook.clone();
@@ -107,6 +110,59 @@ pub fn execute<'py>(
     })?;
     watch(&future, watched)?;
     Ok(future)
+}
+
+/// Runs `sql` as a simple query (`ping`, `reset`). With `reset`, a `ROLLBACK` goes first when the
+/// session may be inside a transaction, and the flag clears once the whole batch has succeeded.
+///
+/// # Errors
+/// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed.
+pub fn simple<'py>(
+    py: Python<'py>,
+    cancel: &Cancel,
+    sql: String,
+    reset: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let claim = cancel.state.claim().map_err(|e| to_py_err(py, &e.into()))?;
+    let cancel = cancel.clone();
+    let hook = Hook::default();
+    let watched = hook.clone();
+    let future = future_into_py(py, async move {
+        let claim = settle_claim(&cancel.state, claim).await?;
+        let inner = Arc::clone(&cancel.backend.conn);
+        let state = Arc::clone(&cancel.state);
+        let pending = cancel::spawn(&cancel, claim, &hook, async move {
+            let conn = inner.lock().await;
+            // an unconditional ROLLBACK would log a server WARNING on every idle reset
+            let sql = if reset && state.maybe_in_txn() {
+                format!("ROLLBACK; {sql}")
+            } else {
+                sql
+            };
+            let result = conn.simple(&sql).await;
+            drop(conn);
+            result?;
+            if reset {
+                state.clear_maybe_in_txn();
+            }
+            Ok::<(), Error>(())
+        });
+        pending
+            .wait()
+            .await
+            .map_err(|e| PgError(e.into()))?
+            .map_err(|e| fail(&cancel.state, e))?;
+        Ok(())
+    })?;
+    watch(&future, watched)?;
+    Ok(future)
+}
+
+/// Sets the "maybe in a transaction" flag when `sql` opens one by hand.
+pub fn note_sql(state: &State, sql: &str) {
+    if opens_transaction(sql) {
+        state.mark_maybe_in_txn();
+    }
 }
 
 /// asyncio runs done callbacks before the awaiting task resumes, while the Rust future is only dropped
@@ -142,6 +198,10 @@ pub async fn settle_claim(state: &Arc<State>, claim: Option<Claim>) -> Result<Cl
 pub fn fail(state: &State, err: Error) -> PgError {
     if err == Error::Core(CoreError::Broken) {
         state.mark_broken();
+    }
+    // 25P02: the session is inside an aborted transaction
+    if matches!(&err, Error::Db { sqlstate, .. } if &**sqlstate == "25P02") {
+        state.mark_maybe_in_txn();
     }
     PgError(err)
 }

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tokio::sync::Notify;
 
@@ -23,6 +23,8 @@ pub enum Phase {
 #[derive(Debug, Default)]
 pub struct State {
     phase: AtomicU8,
+    // conservative: set whenever the session may be inside a transaction, cleared by a reset
+    maybe_in_txn: AtomicBool,
     settled: Notify,
 }
 
@@ -79,9 +81,28 @@ impl State {
     /// Busy → Settling, for a cancelled operation whose request is still on the wire.
     /// Returns `false` when the connection was not busy, for example because it was closed.
     pub fn settle(&self) -> bool {
-        self.phase
+        let settling = self
+            .phase
             .compare_exchange(BUSY, SETTLING, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .is_ok();
+        if settling {
+            // a cancelled operation may have left a transaction open or aborted
+            self.mark_maybe_in_txn();
+        }
+        settling
+    }
+
+    pub fn mark_maybe_in_txn(&self) {
+        self.maybe_in_txn.store(true, Ordering::Release);
+    }
+
+    pub fn clear_maybe_in_txn(&self) {
+        self.maybe_in_txn.store(false, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn maybe_in_txn(&self) -> bool {
+        self.maybe_in_txn.load(Ordering::Acquire)
     }
 
     /// Settling → Idle (or Broken after an IO error) and wakes every waiting call.
@@ -236,6 +257,17 @@ mod tests {
         state.settled(false);
         assert_eq!(state.phase(), Phase::Broken);
         assert_eq!(state.claim().err(), Some(CoreError::Broken));
+    }
+
+    #[test]
+    fn settling_marks_maybe_in_txn_until_cleared() {
+        let state = Arc::new(State::default());
+        assert!(!state.maybe_in_txn());
+        let _claim = claimed(&state);
+        assert!(state.settle());
+        assert!(state.maybe_in_txn());
+        state.clear_maybe_in_txn();
+        assert!(!state.maybe_in_txn());
     }
 
     #[test]

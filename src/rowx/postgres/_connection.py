@@ -1,6 +1,9 @@
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Final, Self
 
 from rowx._core.postgres import connect as connect_impl
+from rowx.postgres._options import ConnectOptions
+
+RESET_QUERY: Final[str] = "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;"
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -37,6 +40,12 @@ class Connection:
     async def _execute(self, sql: str, params: list[object]) -> int:
         return await self._impl._execute(sql, params)  # ruff: ignore[private-member-access]
 
+    async def ping(self) -> None:
+        await self._impl.ping()
+
+    async def reset(self) -> None:
+        await self._impl.reset(RESET_QUERY)
+
     async def close(self) -> None:
         await self._impl.close()
 
@@ -56,6 +65,6 @@ class Connection:
         return self._impl.closed
 
 
-async def connect(dsn: str, /, *, connect_timeout: float | None = None, statement_cache_size: int = 256) -> Connection:
-    impl = await connect_impl(dsn, connect_timeout=connect_timeout, statement_cache_size=statement_cache_size)
-    return Connection(impl)
+async def connect(dsn_or_options: str | ConnectOptions, /) -> Connection:
+    options = ConnectOptions.from_dsn(dsn_or_options) if isinstance(dsn_or_options, str) else dsn_or_options
+    return Connection(await connect_impl(options))
