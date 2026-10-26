@@ -309,7 +309,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         "str",
         TzRule::None,
         STR,
-        Format::Text,
+        Format::Binary,
     )
     .codecs(Codec::Mac, Codec::Mac),
     row(
@@ -318,7 +318,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         "str",
         TzRule::None,
         STR,
-        Format::Text,
+        Format::Binary,
     )
     .codecs(Codec::Mac, Codec::Mac),
     // json/jsonb results take the user's annotation (docs/design/checker.md, rules), so the leaf is `object`

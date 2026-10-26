@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from rowx import query
-from rowx.errors import DatabaseError, EncodeError
+from rowx.errors import EncodeError
 from rowx.postgres import Connection, connect
 
 if TYPE_CHECKING:
@@ -146,9 +146,6 @@ def test_mac_decodes_to_lower_case_colons(schema: str, sql_type: str, literal: s
         ("macaddr", "08:00:2b:01:02:03", "08:00:2b:01:02:03"),
         ("macaddr", "08-00-2B-01-02-03", "08:00:2b:01:02:03"),
         ("macaddr", "08002b010203", "08:00:2b:01:02:03"),
-        # the server parses the text, so its own spellings work too
-        ("macaddr", "0800.2b01.0203", "08:00:2b:01:02:03"),
-        ("macaddr8", "0800.2b01.0203.0405", "08:00:2b:01:02:03:04:05"),
         ("macaddr8", "08:00:2b:01:02:03:04:05", "08:00:2b:01:02:03:04:05"),
         ("macaddr8", "08:00:2b:01:02:03", "08:00:2b:ff:fe:01:02:03"),
     ],
@@ -166,15 +163,9 @@ def test_mac_encodes_common_spellings(schema: str, sql_type: str, value: str, ex
         ("macaddr8", ""),
     ],
 )
-def test_bad_mac_is_rejected_by_the_server(schema: str, sql_type: str, value: str) -> None:
-    with pytest.raises(DatabaseError) as info:
+def test_bad_mac_is_an_encode_error(schema: str, sql_type: str, value: str) -> None:
+    with pytest.raises(EncodeError, match=r"\$1"):
         read(schema, f"SELECT $1::{sql_type}", [value])
-    assert info.value.sqlstate == "22P02"
-
-
-def test_mac_with_a_nul_is_an_encode_error(schema: str) -> None:
-    with pytest.raises(EncodeError, match=r"\$1.*NUL"):
-        read(schema, "SELECT $1::macaddr", ["08:00:2b:01:02:03\0"])
 
 
 def test_network_arrays_round_trip_with_nulls_and_two_dimensions(schema: str) -> None:

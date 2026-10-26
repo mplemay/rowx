@@ -36,8 +36,8 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 | `uuid` | `uuid.UUID` |  | `UUID`, `str` | binary |
 | `inet` | `ipaddress.IPv4Interface \| ipaddress.IPv6Interface` |  | `IPv4Interface`, `IPv6Interface`, `IPv4Address`, `IPv6Address`, `str` | binary |
 | `cidr` | `ipaddress.IPv4Network \| ipaddress.IPv6Network` |  | `IPv4Network`, `IPv6Network`, `str` | binary |
-| `macaddr` | `str` |  | `str` | text |
-| `macaddr8` | `str` |  | `str` | text |
+| `macaddr` | `str` |  | `str` | binary |
+| `macaddr8` | `str` |  | `str` | binary |
 | `json` | any value (`json.loads`) |  | any JSON-serialisable value | text |
 | `jsonb` | any value (`json.loads`) |  | any JSON-serialisable value | text |
 | `enum` | `str` |  | `str` | text |

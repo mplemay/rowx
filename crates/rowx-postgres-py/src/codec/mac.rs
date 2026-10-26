@@ -22,15 +22,13 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: &[u8]) -> PyResult<Bound<'py
     Ok(PyString::new(py, &text).into_any())
 }
 
-/// The `str` goes out as text for the server to parse, as asyncpg and psycopg do, so every
-/// spelling the server accepts works and it owns the error for a malformed one.
-///
 /// # Errors
 /// A description of why the value cannot be encoded as `macaddr` or `macaddr8`.
 pub fn encode(ty: &Type, param: &PyParam) -> Result<Param, String> {
     match param {
-        PyParam::Str(text) if text.contains('\0') => Err("the str contains a NUL byte".to_owned()),
-        PyParam::Str(text) => Ok(Param::text(text.clone().into_bytes())),
+        PyParam::Str(text) => mac::encode(text, width(ty))
+            .map(Param::binary)
+            .map_err(|e| e.to_string()),
         _ => Err(format!(
             "a Python {} cannot be encoded as {}",
             param.type_name(),
