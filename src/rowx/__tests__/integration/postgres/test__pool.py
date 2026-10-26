@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 from rowx import query, query_unchecked
-from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError, PoolTimeoutError
+from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError, PoolTimeoutError, RowShapeError
 from rowx.postgres import RESET_QUERY, Connection, Pool, connect
 
 if TYPE_CHECKING:
@@ -437,6 +437,65 @@ def test_close_waits_for_checked_out_connections(schema: str) -> None:
         return waiting
 
     assert asyncio.run(run())
+
+
+def test_a_hand_written_begin_through_the_pool_does_not_leak_a_transaction(schema: str) -> None:
+    async def state_after_release(pool: Pool, observer: Connection, pid: int) -> str:
+        # the release runs in the background, so wait until the connection is idle again
+        await spin_until(lambda: pool.idle == 1)
+        return await query[str](t"SELECT state FROM pg_stat_activity WHERE pid = {pid}").one(observer)
+
+    async def run() -> tuple[str, str]:
+        async with Pool(schema, max_size=1) as pool, await connect(schema) as observer:
+            pid = await query[int](t"SELECT pg_backend_pid()").one(pool)
+            await query(t"BEGIN").execute(pool)
+            after_execute = await state_after_release(pool, observer, pid)
+            # the statement runs, then its missing column fails the row plan
+            with pytest.raises(RowShapeError):
+                await query[int](t"BEGIN").optional(pool)
+            return after_execute, await state_after_release(pool, observer, pid)
+
+    assert asyncio.run(run()) == ("idle", "idle")
+
+
+@pytest.mark.parametrize("hooked", [False, True])
+def test_a_detached_connection_survives_the_end_of_the_acquire_block(schema: str, *, hooked: bool) -> None:
+    async def noop(_conn: Connection) -> None:
+        await asyncio.sleep(0)
+
+    async def run() -> tuple[int, int]:
+        async with Pool(schema, max_size=1, setup=noop if hooked else None) as pool:
+            async with pool.acquire() as conn:
+                conn.detach()
+            size = pool.size
+            value = await query[int](t"SELECT 9").one(conn)
+            await conn.close()
+            return size, value
+
+    assert asyncio.run(run()) == (0, 9)
+
+
+@pytest.mark.timing
+def test_a_busy_connection_is_settled_and_reset_before_the_reset_hook_runs(schema: str) -> None:
+    seen: list[str] = []
+
+    async def reset(conn: Connection) -> None:
+        seen.append(await query[str](t"SHOW work_mem").one(conn))
+
+    async def run() -> str:
+        async with Pool(schema, max_size=1, acquire_timeout=10, reset=reset) as pool, await connect(schema) as observer:
+            async with pool.acquire() as conn:
+                original = await query[str](t"SHOW work_mem").one(conn)
+                await query(t"SET work_mem = '11MB'").execute(conn)
+                pid = await backend_pid(conn)
+                background = asyncio.create_task(query(t"SELECT pg_sleep(30)").execute(conn))
+                await wait_active(observer, pid)
+            with pytest.raises((DatabaseError, InterfaceError)):
+                await background
+            return original
+
+    original = asyncio.run(run())
+    assert seen == [original]
 
 
 def test_pool_is_usable_through_the_shared_query_api(schema: str) -> None:

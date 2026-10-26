@@ -82,7 +82,6 @@ pub fn fetch<'py>(
     let claim = access
         .claim(&cancel.state)
         .map_err(|e| to_py_err(py, &e.into()))?;
-    note_sql(&cancel.state, &args.sql);
     let cancel = cancel.clone();
     let access = access.clone();
     let hook = Hook::default();
@@ -107,6 +106,8 @@ pub async fn run_fetch(
     args: FetchArgs,
 ) -> PyResult<Py<PyAny>> {
     let claim = access.settle_claim(&cancel.state, claim).await?;
+    // here and not in the callers, so a pool's fast path records a hand-written BEGIN as well
+    note_sql(&cancel.state, &args.sql);
     let inner = Arc::clone(&cancel.backend.conn);
     let scalar = args.scalar;
     // the operation owns the request; dropping this future while it runs cancels it
@@ -149,7 +150,6 @@ pub fn execute<'py>(
     let claim = access
         .claim(&cancel.state)
         .map_err(|e| to_py_err(py, &e.into()))?;
-    note_sql(&cancel.state, &sql);
     let cancel = cancel.clone();
     let access = access.clone();
     let hook = Hook::default();
@@ -174,6 +174,7 @@ pub async fn run_execute(
     sql: String,
 ) -> PyResult<u64> {
     let claim = access.settle_claim(&cancel.state, claim).await?;
+    note_sql(&cancel.state, &sql);
     let inner = Arc::clone(&cancel.backend.conn);
     let pending = cancel::spawn(&cancel, claim, &hook, async move {
         let mut conn = inner.lock().await;

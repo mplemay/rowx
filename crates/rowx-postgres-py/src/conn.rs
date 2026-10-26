@@ -6,6 +6,7 @@ use std::time::Duration;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
+use rowx_core::cancel::Backend;
 use rowx_core::error::CoreError;
 use rowx_core::state::State;
 use rowx_postgres::cancel::{Cancel, PgBackend};
@@ -20,6 +21,9 @@ use crate::errors::{PgError, interface_error, to_py_err};
 use crate::exec::{self, Access, FetchArgs};
 use crate::stream::{RowStream, StreamArgs};
 use rowx_py_core::runtime;
+
+// how often a running operation is asked again to stop while its connection is settled
+const SETTLE_RECANCEL: Duration = Duration::from_millis(100);
 
 #[pyclass(frozen, module = "rowx._core.postgres", name = "Connection")]
 #[derive(Debug)]
@@ -193,6 +197,29 @@ impl Connection {
     #[getter]
     fn closed(&self) -> bool {
         self.cancel.state.is_closed()
+    }
+
+    /// Cancels and settles whatever still runs on the connection, so a reset hook can use it.
+    #[pyo3(name = "_settle")]
+    fn settle<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let cancel = self.cancel.clone();
+        future_into_py(py, async move {
+            let state = &cancel.state;
+            if state.is_busy() {
+                // an operation that is cut short may have left a transaction open
+                state.mark_maybe_in_txn();
+                // a cancel request only stops a statement that is running, so it is resent
+                while tokio::time::timeout(SETTLE_RECANCEL, state.wait_unclaimed())
+                    .await
+                    .is_err()
+                {
+                    // a failed request is fine: the next round tries again
+                    let _ = cancel.backend.send_cancel().await;
+                }
+            }
+            state.wait_settled().await.map_err(PgError::from)?;
+            Ok(())
+        })
     }
 
     #[getter]

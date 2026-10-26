@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable, Generator
 from typing import TYPE_CHECKING, Any, Final, Self
 
 from rowx._core.postgres import Pool as PoolImpl
-from rowx.errors import ConnectionBusyError, InterfaceError
+from rowx.errors import InterfaceError
 from rowx.postgres._connection import RESET_QUERY, Connection
 from rowx.postgres._options import ConnectOptions
 
@@ -205,15 +205,13 @@ class Pool:
         await self._impl.release(impl, reset_done)
 
     async def _run_reset(self, impl: ConnectionImpl) -> bool:
+        # a task that still runs on the connection is cancelled and settled first, so the reset
+        # query and then the hook see an idle connection
+        await impl._settle()  # ruff: ignore[private-member-access]
         done = False
         if self._reset_query is not None:
-            try:
-                await impl.reset(self._reset_query)
-            except ConnectionBusyError:
-                # a task still runs on the connection; the release cancels and settles it
-                pass
-            else:
-                done = True
+            await impl.reset(self._reset_query)
+            done = True
         if self._reset is not None:
             await self._call(self._reset, impl)
         return done
@@ -249,8 +247,8 @@ class Pool:
             await self._call(self._setup, impl)
 
     async def _finish(self, conn: Connection) -> None:
-        # a block that already released or closed its connection has nothing left to give back
-        if conn._released:  # ruff: ignore[private-member-access]
+        # a block that already released, closed or detached its connection has nothing left to give back
+        if conn._released or conn._pool is not self:  # ruff: ignore[private-member-access]
             return
         if self._hooked:
             await self.release(conn)
