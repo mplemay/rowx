@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Final, Self
 from rowx._core.postgres import connect as connect_impl
 from rowx.errors import InterfaceError
 from rowx.postgres._options import ConnectOptions
+from rowx.postgres._transaction import Transaction
 
 RESET_QUERY: Final[str] = "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;"
 
@@ -67,6 +68,15 @@ class Connection:
 
     async def reset(self) -> None:
         await self._impl.reset(RESET_QUERY)
+
+    def transaction(
+        self,
+        *,
+        isolation: str | None = None,
+        readonly: bool = False,
+        deferrable: bool = False,
+    ) -> Transaction:
+        return Transaction(self, isolation=isolation, readonly=readonly, deferrable=deferrable)
 
     def detach(self) -> None:
         self._impl.detach()

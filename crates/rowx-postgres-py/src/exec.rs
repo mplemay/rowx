@@ -246,6 +246,116 @@ pub fn simple<'py>(
     Ok(future)
 }
 
+/// What a successful transaction statement does to the helper depth.
+#[derive(Debug, Clone, Copy)]
+pub enum Depth {
+    Enter,
+    Leave,
+    Keep,
+}
+
+/// Runs one statement of the transaction helper over the simple protocol and then adjusts the depth,
+/// which it returns.
+///
+/// # Errors
+/// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed, or the statement's error.
+pub fn txn_step<'py>(
+    py: Python<'py>,
+    cancel: &Cancel,
+    access: &Access,
+    sql: String,
+    depth: Depth,
+) -> PyResult<Bound<'py, PyAny>> {
+    let claim = access
+        .claim(&cancel.state)
+        .map_err(|e| to_py_err(py, &e.into()))?;
+    let cancel = cancel.clone();
+    let access = access.clone();
+    let hook = Hook::default();
+    let watched = hook.clone();
+    let future = future_into_py(py, async move {
+        let claim = access.settle_claim(&cancel.state, claim).await?;
+        let inner = Arc::clone(&cancel.backend.conn);
+        let pending = cancel::spawn(&cancel, claim, &hook, async move {
+            inner.lock().await.simple(&sql).await
+        });
+        pending
+            .wait()
+            .await
+            .map_err(|e| PgError(e.into()))?
+            .map_err(|e| access.fail(&cancel.state, e))?;
+        Ok(match depth {
+            Depth::Enter => cancel.state.enter_txn(),
+            Depth::Leave => cancel.state.leave_txn(),
+            Depth::Keep => cancel.state.txn_depth(),
+        })
+    })?;
+    watch(&future, watched)?;
+    Ok(future)
+}
+
+/// Ends the outermost transaction with `COMMIT` or `ROLLBACK`.
+///
+/// The statement runs in a task of its own, so dropping the caller neither stops it nor sends a cancel
+/// request. A caller that goes away while a `COMMIT` is in flight cannot know the outcome, so the
+/// connection is marked broken.
+///
+/// # Errors
+/// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed, or the statement's error.
+pub fn end_transaction<'py>(
+    py: Python<'py>,
+    cancel: &Cancel,
+    access: &Access,
+    commit: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let claim = access
+        .claim(&cancel.state)
+        .map_err(|e| to_py_err(py, &e.into()))?;
+    let cancel = cancel.clone();
+    let access = access.clone();
+    let task = {
+        let (cancel, access) = (cancel.clone(), access.clone());
+        cancel.handle.clone().spawn(async move {
+            let claim = access
+                .settle_claim(&cancel.state, claim)
+                .await
+                .map_err(|e| e.0)?;
+            let conn = cancel.backend.conn.lock().await;
+            let result = conn
+                .simple(if commit { "COMMIT" } else { "ROLLBACK" })
+                .await;
+            drop(conn);
+            // a rejected COMMIT still ends the transaction; only an IO failure leaves the outcome open
+            if matches!(&result, Ok(()) | Err(Error::Db { .. })) {
+                cancel.state.clear_maybe_in_txn();
+            } else {
+                cancel.state.mark_maybe_in_txn();
+            }
+            drop(claim);
+            result
+        })
+    };
+    let state = Arc::clone(&cancel.state);
+    let future = future_into_py(py, async move {
+        task.await
+            .map_err(|e| PgError(Error::Interface(e.to_string())))?
+            .map_err(|e| access.fail(&cancel.state, e))?;
+        Ok(())
+    })?;
+    if commit {
+        let callback = PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
+            if let Ok(done) = args.get_item(0)
+                && done.call_method0("cancelled")?.is_truthy()?
+            {
+                state.mark_broken();
+            }
+            PyResult::Ok(())
+        })?;
+        future.call_method1("add_done_callback", (callback,))?;
+    }
+    Ok(future)
+}
+
 /// Sets the "maybe in a transaction" flag when `sql` opens one by hand.
 pub fn note_sql(state: &State, sql: &str) {
     if opens_transaction(sql) {
