@@ -1,5 +1,7 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rowx_core::error::CoreError;
+use rowx_core::pool::OptionsError;
 use rowx_postgres::error::Error;
 use rowx_py_core::errors as shared;
 
@@ -65,4 +67,10 @@ impl From<CoreError> for PgError {
     fn from(err: CoreError) -> Self {
         Self(err.into())
     }
+}
+
+/// A pool setting that is out of range is a `ValueError`, like any other bad argument.
+#[must_use]
+pub fn options_error(err: &OptionsError) -> PyErr {
+    PyValueError::new_err(err.to_string())
 }

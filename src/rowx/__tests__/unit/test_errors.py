@@ -12,6 +12,7 @@ from rowx.errors import (
     EncodeError,
     Error,
     InterfaceError,
+    PoolTimeoutError,
     RowNotFound,
     RowShapeError,
 )
@@ -19,6 +20,7 @@ from rowx.errors import (
 ALL_ERRORS: Final[list[type[Error]]] = [
     InterfaceError,
     ConnectionBusyError,
+    PoolTimeoutError,
     DatabaseError,
     RowNotFound,
     RowShapeError,
@@ -38,6 +40,7 @@ def test_every_class_subclasses_error(cls: type[Exception]) -> None:
 
 def test_tree() -> None:
     assert issubclass(ConnectionBusyError, InterfaceError)
+    assert issubclass(PoolTimeoutError, InterfaceError)
     assert InterfaceError.__bases__ == (Error,)
     for cls in (DatabaseError, RowNotFound, RowShapeError, DecodeError, EncodeError):
         assert cls.__bases__ == (Error,)

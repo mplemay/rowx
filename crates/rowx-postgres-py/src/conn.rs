@@ -1,20 +1,23 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
+use rowx_core::error::CoreError;
 use rowx_core::state::State;
 use rowx_postgres::cancel::{Cancel, PgBackend};
 use rowx_postgres::conn::Connection as PgConnection;
 use rowx_postgres::dsn::ConnectOptions;
 use rowx_postgres::error::Error;
+use rowx_postgres::pool::{Pool as PgPool, Pooled};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
 use crate::errors::{PgError, interface_error, to_py_err};
-use crate::exec::{self, FetchArgs};
+use crate::exec::{self, Access, FetchArgs};
 use crate::stream::{RowStream, StreamArgs};
 use rowx_py_core::runtime;
 
@@ -22,6 +25,11 @@ use rowx_py_core::runtime;
 #[derive(Debug)]
 pub struct Connection {
     pub(crate) cancel: Cancel,
+    access: Access,
+    // the checkout of a pooled connection, until it is released or detached
+    pooled: StdMutex<Option<Pooled>>,
+    reset_done: Option<Arc<AtomicBool>>,
+    init_pending: AtomicBool,
     #[pyo3(get)]
     statement_cache_size: usize,
 }
@@ -38,14 +46,72 @@ impl Connection {
                 },
                 handle,
             },
+            access: Access::default(),
+            pooled: StdMutex::new(None),
+            reset_done: None,
+            init_pending: AtomicBool::new(false),
             statement_cache_size,
         }
+    }
+
+    /// Wraps a checkout: its lease is what every claim on this connection is checked against.
+    ///
+    /// # Errors
+    /// `Closed` when the checkout was already released.
+    pub fn pooled(
+        pooled: Pooled,
+        pool: PgPool,
+        statement_cache_size: usize,
+    ) -> Result<Self, CoreError> {
+        let conn = pooled.conn()?;
+        let cancel = conn.cancel.clone();
+        let reset_done = Arc::clone(&conn.reset_done);
+        let access = Access {
+            lease: Some(pooled.lease()),
+            pool: Some(pool),
+        };
+        let init_pending = pooled.init_pending();
+        Ok(Self {
+            cancel,
+            access,
+            pooled: StdMutex::new(Some(pooled)),
+            reset_done: Some(reset_done),
+            init_pending: AtomicBool::new(init_pending),
+            statement_cache_size,
+        })
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Pooled>> {
+        self.pooled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Takes the checkout and revokes the lease at once, so a stream built on it cannot claim the
+    /// connection again before the release has run.
+    ///
+    /// # Errors
+    /// `Closed` when it was already released or detached.
+    pub fn take_pooled(&self, reset_done: bool) -> Result<Pooled, CoreError> {
+        let pooled = self.slot().take().ok_or(CoreError::Closed)?;
+        if reset_done && let Some(flag) = &self.reset_done {
+            flag.store(true, Ordering::Release);
+        }
+        self.cancel.state.renew_lease();
+        Ok(pooled)
     }
 }
 
 #[pymethods]
 impl Connection {
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // closing a pooled connection gives it back
+        if let Ok(pooled) = self.take_pooled(false) {
+            return future_into_py(py, async move {
+                pooled.release().await;
+                Ok(())
+            });
+        }
         let cancel = self.cancel.clone();
         future_into_py(py, async move {
             let running = cancel.state.is_busy();
@@ -80,7 +146,7 @@ impl Connection {
             limit_one,
             arity,
         };
-        exec::fetch(py, &self.cancel, params, args)
+        exec::fetch(py, &self.cancel, &self.access, params, args)
     }
 
     // the argument list is fixed by the binding contract in docs/design/driver.md, streaming
@@ -103,7 +169,7 @@ impl Connection {
             arity,
             batch_size,
         };
-        RowStream::new(py, &self.cancel, params, args)
+        RowStream::new(py, &self.cancel, &self.access, params, args)
     }
 
     #[pyo3(name = "_execute")]
@@ -113,20 +179,43 @@ impl Connection {
         sql: String,
         params: &Bound<'py, PyList>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        exec::execute(py, &self.cancel, params, sql)
+        exec::execute(py, &self.cancel, &self.access, params, sql)
     }
 
     fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        exec::simple(py, &self.cancel, String::new(), false)
+        exec::simple(py, &self.cancel, &self.access, String::new(), false)
     }
 
     fn reset<'py>(&self, py: Python<'py>, query: String) -> PyResult<Bound<'py, PyAny>> {
-        exec::simple(py, &self.cancel, query, true)
+        exec::simple(py, &self.cancel, &self.access, query, true)
     }
 
     #[getter]
     fn closed(&self) -> bool {
         self.cancel.state.is_closed()
+    }
+
+    #[getter]
+    fn init_pending(&self) -> bool {
+        self.init_pending.load(Ordering::Acquire)
+    }
+
+    #[pyo3(name = "_clear_init_pending")]
+    fn clear_init_pending(&self) {
+        self.init_pending.store(false, Ordering::Release);
+        if let Some(pooled) = self.slot().as_mut() {
+            pooled.clear_init_pending();
+        }
+    }
+
+    /// Takes the connection out of the pool for good; it then behaves like one from `connect`.
+    fn detach(&self, py: Python<'_>) -> PyResult<()> {
+        let taken = self.slot().take();
+        taken
+            .ok_or_else(|| interface_error(py, "the connection is not checked out of a pool"))?
+            .detach()
+            .map_err(|e| to_py_err(py, &e.into()))?;
+        Ok(())
     }
 }
 
@@ -136,7 +225,7 @@ fn pairs(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<(String, String)>> 
 }
 
 // reads a `rowx.postgres.ConnectOptions`; the shared Python never imports this module
-fn options_from_py(py: Python<'_>, opts: &Bound<'_, PyAny>) -> PyResult<ConnectOptions> {
+pub(crate) fn options_from_py(py: Python<'_>, opts: &Bound<'_, PyAny>) -> PyResult<ConnectOptions> {
     let timeout: Option<f64> = opts.getattr("connect_timeout")?.extract()?;
     let connect_timeout = timeout
         .map(|secs| {

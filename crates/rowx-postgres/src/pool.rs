@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rowx_core::cancel::Cancel as CoreCancel;
 use rowx_core::pool::{Manage, PoolError};
@@ -22,6 +23,8 @@ pub use rowx_core::pool::PoolOptions;
 #[derive(Debug, Clone)]
 pub struct PgConn {
     pub cancel: CoreCancel<PgBackend>,
+    /// Set when the caller already ran the reset query, so the release does not send it twice.
+    pub reset_done: Arc<AtomicBool>,
 }
 
 impl PgConn {
@@ -90,6 +93,7 @@ impl Manage for PgManager {
                 },
                 handle: self.handle.clone(),
             },
+            reset_done: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -106,6 +110,10 @@ impl Manage for PgManager {
     }
 
     async fn reset(&self, conn: &PgConn, rollback: bool) -> Result<(), Error> {
+        // the caller's own reset covers a clean session, but not one that is in a transaction again
+        if conn.reset_done.swap(false, Ordering::AcqRel) && !rollback {
+            return Ok(());
+        }
         // an unconditional ROLLBACK would log a server WARNING on every idle release
         let sql = match (rollback, self.reset_query.as_deref()) {
             (false, None) => return Ok(()),

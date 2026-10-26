@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, reveal_type
 from rowx import query, query_unchecked
 
 if TYPE_CHECKING:
-    from rowx.postgres import Connection
+    from rowx.postgres import Connection, Pool
 
 type Pair = tuple[int, str]
 type UserId = int
@@ -72,6 +72,14 @@ async def positive(conn: Connection) -> None:
 
     unchecked_default = query_unchecked(t"SELECT 1")
     reveal_type(unchecked_default)  # reveal: query_unchecked[None]
+
+
+async def pool_is_an_executor(pool: Pool) -> None:
+    scalar = query[int](t"SELECT 1")
+    reveal_type(await scalar.one(pool))  # reveal: int
+    reveal_type(await scalar.all(pool))  # reveal: list[int]
+    reveal_type(await scalar.execute(pool))  # reveal: QueryResult
+    reveal_type(scalar.fetch(pool))  # reveal: RowStream[int]
 
 
 def negative() -> None:
