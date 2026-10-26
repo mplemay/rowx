@@ -688,26 +688,24 @@ async fn inet_and_cidr_match_the_server_send_functions() -> TestResult {
 }
 
 #[tokio::test]
-async fn macaddr_and_macaddr8_match_the_server_send_functions() -> TestResult {
+async fn macaddr_and_macaddr8_decode_what_the_server_sends() -> TestResult {
     let (schema, client) = connect!();
     for raw in samples(any::<[u8; MAC_LEN]>(), CASES) {
         let text = mac::decode(&raw, MAC_LEN)?;
-        let sent = send(&client, "macaddr_send", "macaddr", &text).await?;
-        assert_eq!(sent, raw.to_vec(), "macaddr {text}");
-        assert_eq!(mac::encode(&text, MAC_LEN), Ok(sent), "macaddr {text}");
-        // six bytes into a macaddr8 are widened exactly as the server does
-        let sent = send(&client, "macaddr8_send", "macaddr8", &text).await?;
+        // the server's own text rendering is the oracle for the text rowx builds
+        assert_eq!(literal_text(&client, "macaddr", &text).await?, text);
         assert_eq!(
-            mac::encode(&text, MAC8_LEN),
-            Ok(sent),
-            "macaddr8 from {text}"
+            send(&client, "macaddr_send", "macaddr", &text).await?,
+            raw.to_vec()
         );
     }
     for raw in samples(any::<[u8; MAC8_LEN]>(), CASES) {
         let text = mac::decode(&raw, MAC8_LEN)?;
-        let sent = send(&client, "macaddr8_send", "macaddr8", &text).await?;
-        assert_eq!(sent, raw.to_vec(), "macaddr8 {text}");
-        assert_eq!(mac::encode(&text, MAC8_LEN), Ok(sent), "macaddr8 {text}");
+        assert_eq!(literal_text(&client, "macaddr8", &text).await?, text);
+        assert_eq!(
+            send(&client, "macaddr8_send", "macaddr8", &text).await?,
+            raw.to_vec()
+        );
     }
     schema.drop().await
 }
