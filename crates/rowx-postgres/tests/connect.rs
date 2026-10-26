@@ -4,6 +4,7 @@ pub mod common;
 use common::TestResult;
 use rowx_core::error::CoreError;
 use rowx_postgres::conn::Connection;
+use rowx_postgres::dsn::ConnectOptions;
 use rowx_postgres::error::Error;
 use tokio::runtime::Handle;
 
@@ -26,7 +27,8 @@ async fn connect_then_close() -> TestResult {
     let Some(dsn) = common::test_dsn()? else {
         return Ok(());
     };
-    let mut conn = Connection::connect(&dsn, &Handle::current(), 256).await?;
+    let mut conn =
+        Connection::connect(&ConnectOptions::from_dsn(&dsn)?, &Handle::current()).await?;
     let row = conn.client()?.query_one("SELECT 1::int4", &[]).await?;
     assert_eq!(row.get::<_, i32>(0), 1);
     conn.close().await;
@@ -39,7 +41,8 @@ async fn query_after_close_is_closed() -> TestResult {
     let Some(dsn) = common::test_dsn()? else {
         return Ok(());
     };
-    let mut conn = Connection::connect(&dsn, &Handle::current(), 256).await?;
+    let mut conn =
+        Connection::connect(&ConnectOptions::from_dsn(&dsn)?, &Handle::current()).await?;
     conn.close().await;
     assert!(matches!(conn.client(), Err(Error::Core(CoreError::Closed))));
     Ok(())
@@ -52,7 +55,8 @@ async fn bad_password_is_28p01_and_never_leaks() -> TestResult {
     };
     let secret = "wrong-secret-pw";
     let bad = with_password(&dsn, secret)?;
-    let Err(err) = Connection::connect(&bad, &Handle::current(), 256).await else {
+    let Err(err) = Connection::connect(&ConnectOptions::from_dsn(&bad)?, &Handle::current()).await
+    else {
         return Err("connect unexpectedly succeeded".into());
     };
     assert!(
@@ -68,7 +72,8 @@ async fn bad_password_is_28p01_and_never_leaks() -> TestResult {
 async fn refused_port_is_interface_error() -> TestResult {
     let secret = "refused-secret-pw";
     let dsn = format!("postgres://u:{secret}@127.0.0.1:1/db");
-    let Err(err) = Connection::connect(&dsn, &Handle::current(), 256).await else {
+    let Err(err) = Connection::connect(&ConnectOptions::from_dsn(&dsn)?, &Handle::current()).await
+    else {
         return Err("connect unexpectedly succeeded".into());
     };
     assert!(matches!(err, Error::Interface(_)), "{err:?}");
@@ -78,10 +83,8 @@ async fn refused_port_is_interface_error() -> TestResult {
 
 #[tokio::test]
 async fn client_certificate_settings_are_interface_errors() -> TestResult {
-    let Err(err) =
-        Connection::connect("postgres://u@h/db?sslcert=/x", &Handle::current(), 256).await
-    else {
-        return Err("connect unexpectedly succeeded".into());
+    let Err(err) = ConnectOptions::from_dsn("postgres://u@h/db?sslcert=/x") else {
+        return Err("parse unexpectedly succeeded".into());
     };
     assert!(matches!(err, Error::Interface(_)));
     Ok(())

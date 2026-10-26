@@ -9,7 +9,7 @@ use tokio_postgres::{Client, Statement};
 use rowx_core::error::CoreError;
 
 use crate::cancel::CancelTarget;
-use crate::dsn;
+use crate::dsn::ConnectOptions;
 use crate::error::Error;
 use crate::stmt_cache::StmtCache;
 
@@ -25,12 +25,8 @@ pub struct Connection {
 impl Connection {
     /// # Errors
     /// `Interface` for DSN, IO or TLS problems, `Db` for a server rejection.
-    pub async fn connect(
-        dsn: &str,
-        handle: &Handle,
-        statement_cache_size: usize,
-    ) -> Result<Self, Error> {
-        let parsed = dsn::parse(dsn)?;
+    pub async fn connect(options: &ConnectOptions, handle: &Handle) -> Result<Self, Error> {
+        let parsed = options.build()?;
         let connector = parsed.tls.connector()?;
         let (client, connection) = parsed.config.connect(connector.clone()).await?;
         let cancel = CancelTarget::new(client.cancel_token(), &parsed.config, connector)?;
@@ -45,7 +41,7 @@ impl Connection {
             client: Some(client),
             task: Some(task),
             broken,
-            cache: StmtCache::new(statement_cache_size),
+            cache: StmtCache::new(options.statement_cache_size),
             cancel,
         })
     }
@@ -59,7 +55,11 @@ impl Connection {
         handle: &Handle,
         statement_timeout: Duration,
     ) -> Result<Self, Error> {
-        let mut conn = Self::connect(dsn, handle, 0).await?;
+        let options = ConnectOptions {
+            statement_cache_size: 0,
+            ..ConnectOptions::from_dsn(dsn)?
+        };
+        let mut conn = Self::connect(&options, handle).await?;
         let settings = format!(
             "SET default_transaction_read_only = on; \
              SET statement_timeout = '{}ms'; \
@@ -106,6 +106,15 @@ impl Connection {
         Ok((client, &mut self.cache))
     }
 
+    /// Runs `sql` with the simple query protocol, so nothing is prepared or cached.
+    ///
+    /// # Errors
+    /// `Closed`/`Broken` for a dead connection, `Db` when the server rejects the statement.
+    pub async fn simple(&self, sql: &str) -> Result<(), Error> {
+        self.client()?.batch_execute(sql).await?;
+        Ok(())
+    }
+
     // idempotent: the client drops first so the server sees a clean terminate, then the task is awaited
     pub async fn close(&mut self) {
         self.cache.clear();
@@ -113,6 +122,66 @@ impl Connection {
         if let Some(task) = self.task.take() {
             // a join error means the task panicked or was cancelled; the connection is gone either way
             let _ = task.await;
+        }
+    }
+}
+
+/// Whether `sql` opens a transaction or savepoint by hand, judged from its first keyword.
+#[must_use]
+pub fn opens_transaction(sql: &str) -> bool {
+    let mut rest = sql.trim_start();
+    // leading comments do not change the statement
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after
+                .split_once('\n')
+                .map_or("", |(_, tail)| tail)
+                .trim_start();
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after
+                .split_once("*/")
+                .map_or("", |(_, tail)| tail)
+                .trim_start();
+        } else {
+            break;
+        }
+    }
+    let word: String = rest
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    matches!(word.as_str(), "BEGIN" | "START" | "SAVEPOINT")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::opens_transaction;
+
+    #[test]
+    fn detects_the_transaction_keywords() {
+        for sql in [
+            "BEGIN",
+            "begin isolation level serializable",
+            "  Start TRANSACTION",
+            "-- note\nSAVEPOINT a",
+            "/* x */ begin;",
+        ] {
+            assert!(opens_transaction(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn ignores_everything_else() {
+        for sql in [
+            "SELECT 1",
+            "COMMIT",
+            "",
+            "-- BEGIN\nSELECT 1",
+            "BEGINNING()",
+            "startx",
+        ] {
+            assert!(!opens_transaction(sql), "{sql}");
         }
     }
 }

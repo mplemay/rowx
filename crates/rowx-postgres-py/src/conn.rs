@@ -1,17 +1,19 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::state::State;
 use rowx_postgres::cancel::{Cancel, PgBackend};
 use rowx_postgres::conn::Connection as PgConnection;
+use rowx_postgres::dsn::ConnectOptions;
 use rowx_postgres::error::Error;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
-use crate::errors::{PgError, interface_error};
+use crate::errors::{PgError, interface_error, to_py_err};
 use crate::exec::{self, FetchArgs};
 use crate::stream::{RowStream, StreamArgs};
 use rowx_py_core::runtime;
@@ -114,23 +116,29 @@ impl Connection {
         exec::execute(py, &self.cancel, params, sql)
     }
 
+    fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        exec::simple(py, &self.cancel, String::new(), false)
+    }
+
+    fn reset<'py>(&self, py: Python<'py>, query: String) -> PyResult<Bound<'py, PyAny>> {
+        exec::simple(py, &self.cancel, query, true)
+    }
+
     #[getter]
     fn closed(&self) -> bool {
         self.cancel.state.is_closed()
     }
 }
 
-/// # Errors
-/// `InterfaceError` for a bad `connect_timeout`; connection failures surface when the future is awaited.
-#[pyfunction]
-#[pyo3(signature = (dsn, /, *, connect_timeout=None, statement_cache_size=256))]
-pub fn connect(
-    py: Python<'_>,
-    dsn: String,
-    connect_timeout: Option<f64>,
-    statement_cache_size: usize,
-) -> PyResult<Bound<'_, PyAny>> {
-    let timeout = connect_timeout
+fn pairs(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<(String, String)>> {
+    let items = obj.getattr(name)?.call_method0("items")?;
+    items.try_iter()?.map(|item| item?.extract()).collect()
+}
+
+// reads a `rowx.postgres.ConnectOptions`; the shared Python never imports this module
+fn options_from_py(py: Python<'_>, opts: &Bound<'_, PyAny>) -> PyResult<ConnectOptions> {
+    let timeout: Option<f64> = opts.getattr("connect_timeout")?.extract()?;
+    let connect_timeout = timeout
         .map(|secs| {
             Duration::try_from_secs_f64(secs).map_err(|_| {
                 interface_error(
@@ -140,16 +148,64 @@ pub fn connect(
             })
         })
         .transpose()?;
+    Ok(ConnectOptions {
+        host: opts.getattr("host")?.extract()?,
+        port: opts.getattr("port")?.extract()?,
+        user: opts.getattr("user")?.extract()?,
+        password: opts.getattr("password")?.extract()?,
+        database: opts.getattr("database")?.extract()?,
+        sslmode: opts.getattr("sslmode")?.extract()?,
+        sslrootcert: opts.getattr("sslrootcert")?.extract()?,
+        connect_timeout,
+        statement_cache_size: opts.getattr("statement_cache_size")?.extract()?,
+        application_name: opts.getattr("application_name")?.extract()?,
+        server_settings: pairs(opts, "server_settings")?,
+        extra: pairs(opts, "extra")?,
+    })
+}
+
+/// # Errors
+/// `InterfaceError` for a DSN that cannot be parsed or uses an unsupported setting.
+#[pyfunction]
+pub fn parse_dsn<'py>(py: Python<'py>, dsn: &str) -> PyResult<Bound<'py, PyDict>> {
+    let opts = ConnectOptions::from_dsn(dsn).map_err(|e| to_py_err(py, &e))?;
+    let out = PyDict::new(py);
+    out.set_item("host", opts.host)?;
+    out.set_item("port", opts.port)?;
+    out.set_item("user", opts.user)?;
+    out.set_item("password", opts.password)?;
+    out.set_item("database", opts.database)?;
+    out.set_item("sslmode", opts.sslmode)?;
+    out.set_item("sslrootcert", opts.sslrootcert)?;
+    out.set_item(
+        "connect_timeout",
+        opts.connect_timeout.map(|t| t.as_secs_f64()),
+    )?;
+    out.set_item("application_name", opts.application_name)?;
+    out.set_item(
+        "server_settings",
+        opts.server_settings.into_iter().collect::<HashMap<_, _>>(),
+    )?;
+    out.set_item("extra", opts.extra.into_iter().collect::<HashMap<_, _>>())?;
+    Ok(out)
+}
+
+/// # Errors
+/// `InterfaceError` for a bad `connect_timeout`; connection failures surface when the future is awaited.
+#[pyfunction]
+pub fn connect<'py>(py: Python<'py>, options: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let options = options_from_py(py, options)?;
     let handle = runtime::handle()?;
     future_into_py(py, async move {
-        let connecting = PgConnection::connect(&dsn, &handle, statement_cache_size);
-        let result = match timeout {
+        let connecting = PgConnection::connect(&options, &handle);
+        let limit = options.connect_timeout.filter(|t| !t.is_zero());
+        let result = match limit {
             Some(limit) => tokio::time::timeout(limit, connecting)
                 .await
                 .unwrap_or_else(|_| Err(Error::Interface("connection timed out".to_owned()))),
             None => connecting.await,
         };
         let conn = result.map_err(PgError)?;
-        Ok(Connection::new(conn, handle, statement_cache_size))
+        Ok(Connection::new(conn, handle, options.statement_cache_size))
     })
 }

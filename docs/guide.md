@@ -143,8 +143,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`rowx.postgres.connect(dsn, connect_timeout=None, statement_cache_size=256)` returns a `Connection`. Use it as an async
-context manager, or call `close()`.
+`rowx.postgres.connect(dsn)` returns a `Connection`. Use it as an async context manager, or call `close()`. Pass a
+`ConnectOptions` instead of a DSN to set `connect_timeout`, `statement_cache_size`, `server_settings` and more
+(`ConnectOptions.from_dsn(dsn, connect_timeout=5)`).
 
 ## Row types
 
@@ -391,9 +392,9 @@ server connection than the one that prepared it. Either connect with `statement_
 newer with `max_prepared_statements` set.
 
 ```python
-from rowx.postgres import connect
+from rowx.postgres import ConnectOptions, connect
 
-conn = await connect("postgresql://app@pooler:6432/app", statement_cache_size=0)
+conn = await connect(ConnectOptions.from_dsn("postgresql://app@pooler:6432/app", statement_cache_size=0))
 ```
 
 TLS defaults to `prefer`, as in libpq: it uses TLS when the server offers it, without verifying the certificate, and

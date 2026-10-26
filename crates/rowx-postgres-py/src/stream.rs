@@ -15,7 +15,7 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::codec::{self, PyParam};
 use crate::errors::to_py_err;
-use crate::exec::{decode_row, fail, settle_claim, watch};
+use crate::exec::{decode_row, fail, note_sql, settle_claim, watch};
 
 type Msg = Result<Batch, Error>;
 
@@ -128,7 +128,10 @@ impl RowStream {
         // claimed synchronously so a second call made before the first is awaited fails immediately
         let starting = match first {
             Some(start) => match self.cancel.state.claim() {
-                Ok(claim) => Some((start, claim)),
+                Ok(claim) => {
+                    note_sql(&self.cancel.state, &start.args.sql);
+                    Some((start, claim))
+                }
                 Err(e) => {
                     self.shared.finish();
                     return Err(to_py_err(py, &e.into()));
