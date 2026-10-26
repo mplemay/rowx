@@ -100,7 +100,8 @@ def _render_elem(elem: Elem) -> str:
                 return "list[Any]"
             base = f"list[{_render_elem(elem.item)}]"
         case leaf:
-            base = leaf.rsplit(".", maxsplit=1)[-1]
+            # a network pair is one leaf, written as its two classes
+            base = " | ".join(member.rsplit(".", maxsplit=1)[-1] for member in leaf.split(" | "))
     return f"{base} | None" if elem.nullable else base
 
 

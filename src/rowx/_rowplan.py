@@ -1,5 +1,6 @@
 import datetime as dt
 import decimal
+import ipaddress
 import types
 import uuid
 from dataclasses import dataclass
@@ -22,6 +23,14 @@ LEAVES: Final[frozenset[type]] = frozenset(
         dt.datetime,
         dt.timedelta,
         uuid.UUID,
+    },
+)
+
+# each pair is one leaf (inet and cidr); neither member is a leaf on its own
+NETWORK_PAIRS: Final[frozenset[frozenset[type]]] = frozenset(
+    {
+        frozenset({ipaddress.IPv4Interface, ipaddress.IPv6Interface}),
+        frozenset({ipaddress.IPv4Network, ipaddress.IPv6Network}),
     },
 )
 
@@ -68,7 +77,10 @@ def _elem(t: object) -> bool:
         return True
     origin = get_origin(t)
     if origin is Union or origin is types.UnionType:
-        members = [m for m in get_args(t) if not _is_none(_unwrap(m))]
+        unwrapped = [_unwrap(m) for m in get_args(t)]
+        members = [m for m in unwrapped if not _is_none(m)]
+        if len(members) > 1 and frozenset(members) in NETWORK_PAIRS:
+            return len(members) < len(unwrapped)
         if len(members) != 1:
             raise _reject(t, "a union must have exactly one non-None member")
         _elem(members[0])

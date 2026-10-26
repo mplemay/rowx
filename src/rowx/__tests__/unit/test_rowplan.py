@@ -43,3 +43,10 @@ def test_alias_depth_limit() -> None:
     with pytest.raises(InterfaceError):
         row_plan(ns["A19"])
     assert row_plan(ns["A10"]).kind == "scalar"
+
+
+def test_network_pair_in_either_order_is_one_leaf() -> None:
+    forward = evaluate("T = ipaddress.IPv4Network | ipaddress.IPv6Network | None")
+    backward = evaluate("T = ipaddress.IPv6Network | ipaddress.IPv4Network")
+    assert row_plan(forward) == RowPlan(kind="scalar", arity=1, nullable_mask=(True,))
+    assert row_plan(backward) == RowPlan(kind="scalar", arity=1, nullable_mask=(False,))

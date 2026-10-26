@@ -34,6 +34,8 @@ const fn codec_name(codec: Codec) -> &'static str {
         Codec::Text => "text",
         Codec::Bytes => "bytes",
         Codec::Uuid => "uuid",
+        Codec::Network => "network",
+        Codec::Mac => "mac",
         Codec::Json => "json",
         Codec::Temporal => "temporal",
         Codec::Array => "array",

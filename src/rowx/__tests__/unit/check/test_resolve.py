@@ -236,3 +236,32 @@ def test_plain_alias_of_constructor_is_subscriptable(tmp_path: Path) -> None:
     assert row_type(resolution).elements[0].leaf == "list"
     write(tmp_path, {"typed.py": "type L = list\n" + QUERY.format(t="L[int]")})
     assert resolve(tmp_path, "typed.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+
+
+def test_network_pair_is_one_leaf_in_either_order(tmp_path: Path) -> None:
+    pair = "ipaddress.IPv6Interface | ipaddress.IPv4Interface"
+    write(tmp_path, {"main.py": "import ipaddress\n" + QUERY.format(t=f"tuple[{pair}, {pair} | None]")})
+    leaf = "ipaddress.IPv4Interface | ipaddress.IPv6Interface"
+    assert leaves(resolve(tmp_path, "main.py")) == [(leaf, False), (leaf, True)]
+
+
+def test_network_pair_through_an_alias_and_optional(tmp_path: Path) -> None:
+    source = "import ipaddress\ntype Net = ipaddress.IPv4Network | ipaddress.IPv6Network\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="list[Net | None]")})
+    [elem] = row_type(resolve(tmp_path, "main.py")).elements
+    assert elem.leaf == "list"
+    assert elem.item is not None
+    assert (elem.item.leaf, elem.item.nullable) == ("ipaddress.IPv4Network | ipaddress.IPv6Network", True)
+
+
+def test_a_lone_network_class_or_mixed_pair_is_invalid(tmp_path: Path) -> None:
+    for index, annotation in enumerate([
+        "ipaddress.IPv4Interface",
+        "ipaddress.IPv4Interface | ipaddress.IPv6Network",
+        "ipaddress.IPv4Interface | ipaddress.IPv6Interface | str",
+        "ipaddress.IPv4Address | ipaddress.IPv6Address",
+    ]):
+        write(tmp_path, {f"main{index}.py": "import ipaddress\n" + QUERY.format(t=annotation)})
+        diagnostic = resolve(tmp_path, f"main{index}.py").diagnostic
+        assert diagnostic is not None, annotation
+        assert diagnostic.rule == "invalid-row-type", annotation

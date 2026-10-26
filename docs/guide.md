@@ -582,7 +582,7 @@ falls back to plaintext when the server doesn't support TLS. Use `sslmode=verify
 
 - **Nullability inference** is conservative, never optimistic. Views, set operations, recursive CTEs and computed
   columns are nullable; use `"col!"` to narrow. See [known-limits.md](known-limits.md) for each case.
-- **Unsupported types** (`money`, `inet`/`cidr`, ranges, composites, `xml`, `hstore`, `regclass`, ...) are
+- **Unsupported types** (`money`, ranges, composites, `xml`, `hstore`, `regclass`, ...) are
   `unsupported-type` in the checker and raise `DecodeError` at runtime. Cast to `text`.
 - **Decode errors.** `date`, `timestamp` and `timestamptz` that are infinite or outside years 1 to 9999, and `interval`
   values with a months component, raise `DecodeError`. Cast to `text`.

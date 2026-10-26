@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import ipaddress
 from decimal import Decimal
 from typing import Any, Final
 from uuid import UUID
@@ -38,6 +39,10 @@ DECODE_GOLDENS: Final[dict[str, tuple[str, str, Any]]] = {
     "timestamptz": ("timestamptz", "2024-01-02 03:04:05+00", dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)),
     "interval": ("interval", "1 day 02:00:00", dt.timedelta(days=1, hours=2)),
     "uuid": ("uuid", "12345678-1234-5678-1234-567812345678", UUID("12345678-1234-5678-1234-567812345678")),
+    "inet": ("inet", "192.168.0.1/24", ipaddress.IPv4Interface("192.168.0.1/24")),
+    "cidr": ("cidr", "2001:db8::/32", ipaddress.IPv6Network("2001:db8::/32")),
+    "macaddr": ("macaddr", "08:00:2B:01:02:03", "08:00:2b:01:02:03"),
+    "macaddr8": ("macaddr8", "08:00:2b:01:02:03", "08:00:2b:ff:fe:01:02:03"),
     "json": ("json", '{"a": [1, null]}', {"a": [1, None]}),
     "jsonb": ("jsonb", '{"a": [1, null]}', {"a": [1, None]}),
     "enum": ("mood", "happy", "happy"),
@@ -69,6 +74,10 @@ ENCODE_GOLDENS: Final[dict[str, tuple[str, Any]]] = {
     "timestamptz": ("timestamptz", dt.datetime(2024, 1, 2, 3, 4, 5, 6, tzinfo=UTC)),
     "interval": ("interval", dt.timedelta(days=-1, seconds=5, microseconds=7)),
     "uuid": ("uuid", UUID("12345678-1234-5678-1234-567812345678")),
+    "inet": ("inet", ipaddress.IPv6Interface("2001:db8::1/64")),
+    "cidr": ("cidr", ipaddress.IPv4Network("10.0.0.0/8")),
+    "macaddr": ("macaddr", "08:00:2b:01:02:03"),
+    "macaddr8": ("macaddr8", "08:00:2b:01:02:03:04:05"),
     "json": ("json", {"a": [1, None]}),
     "jsonb": ("jsonb", {"a": [1, None]}),
     "enum": ("mood", "ok"),
@@ -81,7 +90,7 @@ ENCODE_EXEMPT: Final[frozenset[str]] = frozenset({"void"})
 # type -> literal that parses; none has a codec so reading one must fail cleanly
 UNSUPPORTED_DECODE: Final[dict[str, str]] = {
     "money": "1.00",
-    "inet": "127.0.0.1",
+    "tsvector": "a",
     "int4range": "[1,5)",
 }
 

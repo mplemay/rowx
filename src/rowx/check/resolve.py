@@ -31,9 +31,21 @@ LEAVES: Final[dict[str, LeafName]] = {
     "datetime.datetime": "datetime.datetime",
     "datetime.timedelta": "datetime.timedelta",
     "uuid.UUID": "uuid.UUID",
+    "ipaddress.IPv4Interface": "ipaddress.IPv4Interface",
+    "ipaddress.IPv6Interface": "ipaddress.IPv6Interface",
+    "ipaddress.IPv4Network": "ipaddress.IPv4Network",
+    "ipaddress.IPv6Network": "ipaddress.IPv6Network",
 }
+# a pair of classes is ONE leaf, and a member alone is not a leaf
+NETWORK_PAIRS: Final[dict[frozenset[str], LeafName]] = {
+    frozenset({"ipaddress.IPv4Interface", "ipaddress.IPv6Interface"}): (
+        "ipaddress.IPv4Interface | ipaddress.IPv6Interface"
+    ),
+    frozenset({"ipaddress.IPv4Network", "ipaddress.IPv6Network"}): "ipaddress.IPv4Network | ipaddress.IPv6Network",
+}
+NETWORK_MEMBERS: Final[frozenset[str]] = frozenset(member for pair in NETWORK_PAIRS for member in pair)
 # `LeafName` is this map plus the three structural markers; keep the two in lockstep
-assert set(LEAVES.values()) | {"list", "any", "none"} == set(get_args(LeafName.__value__))  # ruff: ignore[assert]
+assert set(LEAVES.values()) | set(NETWORK_PAIRS.values()) | {"list", "any", "none"} == set(get_args(LeafName.__value__))  # ruff: ignore[assert]
 NEUTRAL: Final[frozenset[str]] = frozenset({"typing.Any", "builtins.object"})
 
 SCOPE_TYPES: Final = (
@@ -402,6 +414,17 @@ def _union(left: _Node, right: _Node) -> _Node:
     return _Node(tuple(dict.fromkeys((*left.members, *right.members))), left.none or right.none)
 
 
+def _network_pair(node: _Node) -> Elem | None:
+    names = frozenset(m.leaf for m in node.members if isinstance(m, Elem) and m.item is None)
+    if len(names) != len(node.members) or (pair := NETWORK_PAIRS.get(names)) is None:
+        return None
+    return Elem(pair, nullable=node.none)
+
+
+def _pair_of(leaf: str) -> str:
+    return next(" | ".join(sorted(pair)) for pair in NETWORK_PAIRS if leaf in pair)
+
+
 def _to_elem(node: _Node, *, allow_none: bool) -> Elem:
     if not node.members:
         if allow_none:
@@ -409,6 +432,8 @@ def _to_elem(node: _Node, *, allow_none: bool) -> Elem:
         msg = "`None` is only valid as a tuple element or as the whole row type"
         raise _invalid(msg)
     if len(node.members) > 1:
+        if (pair := _network_pair(node)) is not None:
+            return pair
         msg = "a union may have only one non-`None` member"
         raise _invalid(msg)
     (member,) = node.members
@@ -417,6 +442,9 @@ def _to_elem(node: _Node, *, allow_none: bool) -> Elem:
         raise _invalid(msg)
     if member.leaf == "any":
         return Elem("any", nullable=True)
+    if member.leaf in NETWORK_MEMBERS:
+        msg = f"`{member.leaf}` is only valid as the pair `{_pair_of(member.leaf)}`"
+        raise _invalid(msg)
     return Elem(member.leaf, nullable=node.none, item=member.item)
 
 
@@ -642,6 +670,8 @@ class _Resolver:
         if not node.members:
             return RowType(kind="none", alias=self.alias)
         if len(node.members) > 1:
+            if (pair := _network_pair(node)) is not None:
+                return RowType(kind="scalar", elements=(pair,), alias=self.alias)
             msg = "a union may have only one non-`None` member"
             raise _invalid(msg)
         (member,) = node.members

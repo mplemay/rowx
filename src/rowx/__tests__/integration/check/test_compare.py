@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import datetime as dt
+import ipaddress
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from string.templatelib import Interpolation, Template
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from rowx._core.postgres import ColumnInfo
+    from rowx.postgres._vocab import LeafName
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -155,6 +157,27 @@ def list_leaf(name: str, annotation: object, inner: Leaf, *, item_nullable: bool
     )
 
 
+def pair_leaf(name: str, annotation: object, leaf: LeafName, members: tuple[type, ...]) -> Leaf:
+    return Leaf(
+        name=name,
+        annotation=annotation,
+        elem=Elem(leaf=leaf, nullable=False),
+        is_value=lambda value: type(value) in members,
+    )
+
+
+INET_LEAF: Final[Leaf] = pair_leaf(
+    "IPv4Interface | IPv6Interface",
+    ipaddress.IPv4Interface | ipaddress.IPv6Interface,
+    "ipaddress.IPv4Interface | ipaddress.IPv6Interface",
+    (ipaddress.IPv4Interface, ipaddress.IPv6Interface),
+)
+CIDR_LEAF: Final[Leaf] = pair_leaf(
+    "IPv4Network | IPv6Network",
+    ipaddress.IPv4Network | ipaddress.IPv6Network,
+    "ipaddress.IPv4Network | ipaddress.IPv6Network",
+    (ipaddress.IPv4Network, ipaddress.IPv6Network),
+)
 INT_LEAF: Final[Leaf] = scalar_leaf("int", int, "int")
 STR_LEAF: Final[Leaf] = scalar_leaf("str", str, "str")
 LIST_INT: Final[Leaf] = list_leaf("list[int]", list[int], INT_LEAF)
@@ -170,6 +193,8 @@ LEAVES: Final[list[Leaf]] = [
     scalar_leaf("datetime", dt.datetime, "datetime.datetime"),
     scalar_leaf("timedelta", dt.timedelta, "datetime.timedelta"),
     scalar_leaf("UUID", UUID, "uuid.UUID"),
+    INET_LEAF,
+    CIDR_LEAF,
     LIST_INT,
     list_leaf("list[int | None]", list[int | None], INT_LEAF, item_nullable=True),
     list_leaf("list[str]", list[str], STR_LEAF),
@@ -303,7 +328,7 @@ def natural_leaf(column: ColumnDesc) -> Leaf:
     # the fixed leaves hold only a few array shapes, so every other one-dimensional array gets its own
     candidates += [
         list_leaf(f"list[{inner.name}]", list[inner.annotation], inner)  # ty: ignore[invalid-type-form]
-        for inner in LEAVES[:11]
+        for inner in LEAVES[:13]
     ]
     for leaf in candidates:
         if not TYPE_RULES.intersection(findings_for(column, leaf, nullable=column.nullable)):
@@ -377,7 +402,7 @@ def test_nullability_matrix(schema: str) -> None:
 
 # --- parameters ---
 
-PRELUDE: Final[str] = "import datetime\nimport decimal\nimport uuid\n"
+PRELUDE: Final[str] = "import datetime\nimport decimal\nimport ipaddress\nimport uuid\n"
 UUID_TEXT: Final[str] = "12345678-1234-5678-1234-567812345678"
 # python source -> value; the source is what the checker's inference reads, and the value is what the runtime binds
 PARAM_VALUES: Final[list[str]] = [
@@ -396,6 +421,12 @@ PARAM_VALUES: Final[list[str]] = [
     "datetime.datetime(2024, 1, 2, 3, 4, 5, tzinfo=datetime.UTC)",
     "datetime.timedelta(days=1)",
     "datetime.time(1, 2, 3)",
+    'ipaddress.IPv4Interface("10.0.0.1/24")',
+    'ipaddress.IPv6Interface("2001:db8::1/64")',
+    'ipaddress.IPv4Address("10.0.0.1")',
+    'ipaddress.IPv6Address("::ffff:1.2.3.4")',
+    'ipaddress.IPv4Network("10.0.0.0/8")',
+    'ipaddress.IPv6Network("2001:db8::/32")',
     "None",
     "[1, 2]",
     "(1, 2)",
@@ -413,6 +444,12 @@ NOT_JSON: Final[list[str]] = [
     "datetime.datetime(2024, 1, 2, 3, 4, 5)",
     "datetime.datetime(2024, 1, 2, 3, 4, 5, tzinfo=datetime.UTC)",
     "datetime.timedelta(days=1)",
+    'ipaddress.IPv4Interface("10.0.0.1/24")',
+    'ipaddress.IPv6Interface("2001:db8::1/64")',
+    'ipaddress.IPv4Address("10.0.0.1")',
+    'ipaddress.IPv6Address("::ffff:1.2.3.4")',
+    'ipaddress.IPv4Network("10.0.0.0/8")',
+    'ipaddress.IPv6Network("2001:db8::/32")',
 ]
 # the checker does not look at time zones, so the runtime rejects these where the checker stays quiet
 # and `json.dumps` and the one-character rule of "char" are value checks the checker never makes
@@ -425,6 +462,9 @@ RUNTIME_ONLY: Final[frozenset[tuple[str, str]]] = frozenset(
         ('"char"', '"ok"'),
         ('"char"', f'"{UUID_TEXT}"'),
         ('"char"[]', '["ok"]'),
+        # a `str` is accepted by type, but only a parseable address or MAC encodes
+        *((decl, source) for decl in ("inet", "cidr", "macaddr", "macaddr8") for source in ('"ok"', f'"{UUID_TEXT}"')),
+        *((f"{decl}[]", '["ok"]') for decl in ("inet", "cidr", "macaddr", "macaddr8")),
     },
 )
 
