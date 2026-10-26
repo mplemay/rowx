@@ -38,6 +38,21 @@ FOOTER: Final[str] = """
 - `void` decodes to `None` and is only valid as a tuple element.
 - Any type not listed here is `unsupported-type` in the checker and raises `DecodeError` at runtime (for example
   `money`, `inet`, ranges, composites and `xml`).
+
+## Differences from psycopg
+
+Decoding the same server value with rowx and with psycopg gives equal results, except for these cases. A test asserts
+that this list matches the one it checks.
+
+- `timestamptz`: rowx always returns a UTC-aware value, while psycopg uses the session `TimeZone`; the instants are
+  equal.
+- `float4`: rowx widens the exact 32-bit value to a `float`, while psycopg parses the shortest decimal text; the values
+  are equal after rounding to 32 bits.
+- `char`: A non-ASCII `"char"` is cut to one byte by the server, which is not valid UTF-8, so rowx raises `DecodeError`.
+- `interval`: An interval with a month or year part raises `DecodeError`, while psycopg approximates a month as 30 days.
+- `date`: An infinite date raises `DecodeError`, while psycopg raises its own `DataError`.
+- `timestamp`: An infinite timestamp raises `DecodeError`, while psycopg raises its own `DataError`.
+- `void`: `void` decodes to `None`, while psycopg returns an empty string.
 """
 
 TZ_LABELS: Final[dict[str, str]] = {"none": "", "aware": "aware", "naive": "naive"}
