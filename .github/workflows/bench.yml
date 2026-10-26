@@ -13,7 +13,7 @@ env:
 
 jobs:
   bench:
-    name: Fetch 100k rows
+    name: Benchmarks
     runs-on: ubuntu-latest
     # tracked, not gating
     continue-on-error: true

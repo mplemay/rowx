@@ -22,11 +22,12 @@ db-up:
 db-down:
     @scripts/pg.sh down
 
-# release build plus bench/fetch_100k.py; needs ROWX_TEST_DSN
+# release build plus bench/fetch_100k.py and bench/pool_one.py; needs ROWX_TEST_DSN
 bench:
     uv sync --group bench --no-install-project
     uv run --no-sync maturin develop --release
     uv run --no-sync python bench/fetch_100k.py
+    uv run --no-sync python bench/pool_one.py
 
 # format rust, python, and shell through prek
 fmt:
