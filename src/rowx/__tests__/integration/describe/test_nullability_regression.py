@@ -1,7 +1,13 @@
+from typing import TYPE_CHECKING
+
 import pytest
 
 from rowx.__tests__.integration.describe.sqlx_cases import SQLX_CASES
-from rowx.__tests__.integration.describe.test_base import run_describe
+from rowx.__tests__.integration.describe.test_base import run_checker, run_describe, scalar
+from rowx._core.postgres import describe
+
+if TYPE_CHECKING:
+    from rowx._core.postgres import Connection
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -10,6 +16,7 @@ def verdicts(dsn: str, sql: str) -> list[tuple[bool, str]]:
     return [(c.nullable, c.reason) for c in run_describe(dsn, sql).columns]
 
 
+# one case per row of the evidence table in docs/design/nullability.md, in table order
 @pytest.mark.parametrize(
     ("sql", "expected"),
     [
@@ -57,9 +64,39 @@ def verdicts(dsn: str, sql: str) -> list[tuple[bool, str]]:
         ("SELECT coalesce(email, 'x') FROM users", [(True, "Computed")]),
         ("SELECT 1", [(True, "Computed")]),
     ],
+    ids=[
+        "left_join_where_param",
+        "right_join",
+        "left_join_order_by",
+        "trivial_subquery_elided",
+        "subquery_row_number_scan_boundary",
+        "materialized_cte_scan_boundary",
+        "rollup_grouping_sets",
+        "returning_old",
+        "duplicate_columns",
+        "not_valid_constraint",
+        "full_join",
+        "left_join_reduced_to_inner",
+        "computed_upper",
+        "computed_count",
+        "computed_coalesce",
+        "computed_literal",
+    ],
 )
 def test_design_table(schema: str, sql: str, expected: list[tuple[bool, str]]) -> None:
     assert verdicts(schema, sql) == expected
+
+
+# sqlx#3541 and #4274 (describe.rs it_forces_generic_plan_for_describe): a session that forces custom plans
+# would fold `= NULL` and drop the outer join, so describe must plan generically whatever the session says
+@pytest.mark.parametrize("mode", ["force_custom_plan", "force_generic_plan", "auto"])
+def test_generic_plan_is_used_whatever_the_session_mode(schema: str, mode: str) -> None:
+    async def body(conn: Connection) -> list[tuple[bool, str]]:
+        await scalar(conn, f"SELECT set_config('plan_cache_mode', '{mode}', false)")
+        d = await describe(conn, "SELECT p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id WHERE u.id = $1")
+        return [(c.nullable, c.reason) for c in d.columns]
+
+    assert run_checker(schema, body) == [(True, "OuterJoin")]
 
 
 def test_count_with_bang_override(schema: str) -> None:

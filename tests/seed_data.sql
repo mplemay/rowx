@@ -8,6 +8,14 @@ INSERT INTO posts (user_id, title) SELECT id, 'hello from ' || name FROM users W
 INSERT INTO orders (user_id, amount, note) SELECT id, 10.50, NULL FROM users WHERE name = 'alice';
 INSERT INTO orders (user_id, amount, note) SELECT id, 99.99, 'rush' FROM users WHERE name = 'bob';
 
+-- outer-join coverage: rows on both sides without a match, plus NULL keys on the nullable columns
+-- (users.email, orders.note). Posts and orders that match no user email, an order note equal to a post title,
+-- and users with no posts or orders (carol) or a NULL email (bob, carol)
+INSERT INTO posts (user_id, title) SELECT id, 'alice@example.com' FROM users WHERE name = 'alice';
+INSERT INTO posts (user_id, title) SELECT id, 'orphan title' FROM users WHERE name = 'bob';
+INSERT INTO orders (user_id, amount, note) SELECT id, 0.00, 'alice@example.com' FROM users WHERE name = 'bob';
+INSERT INTO orders (user_id, amount, note) SELECT id, 0.00, 'orphan note' FROM users WHERE name = 'bob';
+
 -- all-NULL row, then a fully populated one
 INSERT INTO all_types DEFAULT VALUES;
 INSERT INTO all_types (
