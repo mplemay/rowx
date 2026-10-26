@@ -85,10 +85,16 @@ class PoolTransaction:
         self._isolation = isolation
         self._readonly = readonly
         self._deferrable = deferrable
+        self._entered = False
         self._conn: Connection | None = None
         self._tx: Transaction | None = None
 
     async def __aenter__(self) -> Transaction:
+        # set before any await, so a concurrent or repeated entry can't check out a second connection
+        if self._entered:
+            msg = "a transaction can only be entered once"
+            raise InterfaceError(msg)
+        self._entered = True
         conn = await self._pool._checkout(None)  # ruff: ignore[private-member-access]
         tx = conn.transaction(isolation=self._isolation, readonly=self._readonly, deferrable=self._deferrable)
         try:

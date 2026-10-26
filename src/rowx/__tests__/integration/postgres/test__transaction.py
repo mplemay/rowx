@@ -412,3 +412,16 @@ def test_cancelling_in_a_pool_transaction_rolls_back(schema: str) -> None:
             return await query[int](t"SELECT 1").one(pool), await count_users(observer, "pool_cancelled")
 
     assert asyncio.run(run()) == (1, 0)
+
+
+def test_a_pool_transaction_cannot_be_entered_twice(schema: str) -> None:
+    async def body() -> int:
+        async with Pool(schema, max_size=1) as pool:
+            manager = pool.transaction()
+            async with manager:
+                with pytest.raises(InterfaceError):
+                    async with manager:
+                        pass
+            return await query[int](t"SELECT 1").one(pool)
+
+    assert asyncio.run(body()) == 1
