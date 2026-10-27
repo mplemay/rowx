@@ -340,3 +340,31 @@ def test_money_and_interval_cannot_be_subscripted(tmp_path: Path) -> None:
     source = "from rowx.postgres import Interval\n"
     write(tmp_path, {"main.py": source + QUERY.format(t="Interval[int]")})
     assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+
+
+def test_geometric_leaves_through_aliases_optional_and_a_list(tmp_path: Path) -> None:
+    source = "from rowx.postgres import Box, Point, Path\ntype Corner = Point\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="tuple[Corner | None, Box, list[Path | None]]")})
+    first, second, third = row_type(resolve(tmp_path, "main.py")).elements
+    assert (first.leaf, first.nullable) == ("rowx.postgres.Point", True)
+    assert (second.leaf, second.nullable) == ("rowx.postgres.Box", False)
+    assert third.item is not None
+    assert (third.item.leaf, third.item.nullable) == ("rowx.postgres.Path", True)
+
+
+def test_geometric_leaves_through_their_defining_module(tmp_path: Path) -> None:
+    source = "from rowx.postgres._geometric import Circle, LineSegment, Line, Polygon\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="tuple[Circle, LineSegment, Line, Polygon]")})
+    assert leaves(resolve(tmp_path, "main.py")) == [
+        ("rowx.postgres.Circle", False),
+        ("rowx.postgres.LineSegment", False),
+        ("rowx.postgres.Line", False),
+        ("rowx.postgres.Polygon", False),
+    ]
+
+
+@pytest.mark.parametrize("annotation", ["Point | Circle", "Point | int", "Path | Polygon", "Point[int]"])
+def test_geometric_classes_cannot_be_unioned_or_subscripted(tmp_path: Path, annotation: str) -> None:
+    source = "from rowx.postgres import Circle, Path, Point, Polygon\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t=annotation)})
+    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]

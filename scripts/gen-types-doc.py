@@ -48,6 +48,12 @@ FOOTER: Final[str] = """
   the column to `text`.
 - `bit` and `varbit` decode to a `str` of `0` and `1`. A `bit(n)` parameter of any other length is rejected by the
   server.
+- The geometric types decode to frozen dataclasses in `rowx.postgres`: `Point(x, y)`, `Line(a, b, c)`,
+  `LineSegment(start, end)`, `Box(upper_right, lower_left)`, `Path(points, closed)`, `Polygon(points)` and
+  `Circle(center, radius)`, with `points` a tuple of `Point`. The server canonicalises a `box` so its upper right corner
+  comes first, and a decoded box shows that order. Equality compares the fields exactly, not with Postgres'
+  epsilon-based `~=`, so a NaN coordinate is never equal to anything. A `path` or `polygon` needs at least one point,
+  and the server rejects a `line` whose `a` and `b` are both zero.
 - Any type not listed here is `unsupported-type` in the checker and raises `DecodeError` at runtime (for example
   multiranges, composites and `xml`).
 
@@ -79,6 +85,20 @@ that this list matches the one it checks.
   instants, but an infinite bound of this subtype raises `DecodeError`, while psycopg raises its own `DataError`.
 - `money`: rowx returns `rowx.postgres.Money`, the int8 minor units with no scale, while psycopg returns the text the
   server formats under `lc_monetary`.
+- `point`: rowx returns `rowx.postgres.Point`, while psycopg returns the text the server formats; the
+  coordinates are equal.
+- `line`: rowx returns `rowx.postgres.Line`, while psycopg returns the text the server formats; the
+  coordinates are equal.
+- `lseg`: rowx returns `rowx.postgres.LineSegment`, while psycopg returns the text the server formats; the
+  coordinates are equal.
+- `box`: rowx returns `rowx.postgres.Box`, while psycopg returns the text the server formats; the
+  coordinates are equal.
+- `path`: rowx returns `rowx.postgres.Path`, while psycopg returns the text the server formats; the
+  coordinates are equal.
+- `polygon`: rowx returns `rowx.postgres.Polygon`, while psycopg returns the text the server formats; the
+  coordinates are equal.
+- `circle`: rowx returns `rowx.postgres.Circle`, while psycopg returns the text the server formats; the
+  coordinates are equal.
 """
 
 TZ_LABELS: Final[dict[str, str]] = {"none": "", "aware": "aware", "naive": "naive"}

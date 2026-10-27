@@ -1,8 +1,11 @@
+from typing import Final
+
 import pytest
 
 from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
-from rowx.check.params import ParamType
+from rowx.check.params import ParamName, ParamType
 from rowx.check.resolve import Elem, RowType
+from rowx.postgres._vocab import LeafName, TypeKey
 
 
 def col(key: str | None, *, nullable: bool = False, name: str = "c", **extra: object) -> ColumnDesc:
@@ -370,3 +373,48 @@ def test_bit_parameter_takes_only_str() -> None:
         assert compare_param(0, key, key, ParamType("str")) is None
         for name in ("int", "bytes", "Money"):
             assert compare_param(0, key, key, ParamType(name)) is not None, (key, name)
+
+
+type GeometricPair = tuple[TypeKey, LeafName, ParamName]
+
+GEOMETRIC: Final[list[GeometricPair]] = [
+    ("point", "rowx.postgres.Point", "Point"),
+    ("line", "rowx.postgres.Line", "Line"),
+    ("lseg", "rowx.postgres.LineSegment", "LineSegment"),
+    ("box", "rowx.postgres.Box", "Box"),
+    ("path", "rowx.postgres.Path", "Path"),
+    ("polygon", "rowx.postgres.Polygon", "Polygon"),
+    ("circle", "rowx.postgres.Circle", "Circle"),
+]
+WRONG_LEAVES: Final[list[LeafName]] = ["str", "float", "int", "rowx.postgres.Money"]
+WRONG_PARAMS: Final[list[ParamName]] = ["float", "str", "int", "Money"]
+
+
+@pytest.mark.parametrize(("key", "leaf", "_name"), GEOMETRIC)
+def test_geometric_column_matches_only_its_own_class(key: TypeKey, leaf: LeafName, _name: ParamName) -> None:
+    assert run(scalar(Elem(leaf, nullable=False)), col(key)) == []
+    for other, other_leaf, _ in GEOMETRIC:
+        if other != key:
+            found = run(scalar(Elem(other_leaf, nullable=False)), col(key, name="g"))
+            assert rules(found) == ["type-mismatch"], other
+            assert f"`{leaf}`" in found[0].message
+    for wrong in WRONG_LEAVES:
+        assert rules(run(scalar(Elem(wrong, nullable=False)), col(key))) == ["type-mismatch"], wrong
+
+
+@pytest.mark.parametrize(("_key", "leaf", "_name"), GEOMETRIC)
+def test_geometric_class_matches_no_other_column(_key: TypeKey, leaf: LeafName, _name: ParamName) -> None:
+    for other in ("int4", "text", "money", "interval", "float8"):
+        assert rules(run(scalar(Elem(leaf, nullable=False)), col(other))) == ["type-mismatch"], other
+
+
+@pytest.mark.parametrize(("key", "_leaf", "name"), GEOMETRIC)
+def test_geometric_parameter_takes_only_its_own_class(key: TypeKey, _leaf: LeafName, name: ParamName) -> None:
+    assert compare_param(0, key, key, ParamType(name)) is None
+    for other, _, other_name in GEOMETRIC:
+        if other != key:
+            finding = compare_param(0, key, key, ParamType(other_name))
+            assert finding is not None, (key, other_name)
+            assert finding.rule == "param-type-mismatch"
+    for wrong in WRONG_PARAMS:
+        assert compare_param(0, key, key, ParamType(wrong)) is not None, (key, wrong)

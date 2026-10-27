@@ -122,6 +122,17 @@ def _is_money(t: object) -> bool:
     return _is_value_class(t, "rowx.postgres._money", "Money")
 
 
+GEOMETRIC_CLASSES: Final[tuple[str, ...]] = ("Point", "Line", "LineSegment", "Box", "Path", "Polygon", "Circle")
+
+
+def _is_geometric(t: object) -> bool:
+    return any(_is_value_class(t, "rowx.postgres._geometric", name) for name in GEOMETRIC_CLASSES)
+
+
+def _is_value_leaf(t: type) -> bool:
+    return t in LEAVES or _is_interval(t) or _is_money(t) or _is_geometric(t)
+
+
 def _elem(t: object) -> bool:
     t = _unwrap(t)
     if _is_none(t) or t is Any or t is object:
@@ -144,7 +155,7 @@ def _elem(t: object) -> bool:
         if _unwrap(subtype) not in RANGE_SUBTYPES:
             raise _reject(t, "a range subtype must be int, Decimal, date or datetime")
         return False
-    if origin is None and isinstance(t, type) and (t in LEAVES or _is_interval(t) or _is_money(t)):
+    if origin is None and isinstance(t, type) and _is_value_leaf(t):
         return False
     raise _reject(t, "not derivable from the row type grammar")
 

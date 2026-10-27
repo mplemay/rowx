@@ -39,6 +39,20 @@ LEAVES: Final[dict[str, LeafName]] = {
     "rowx.postgres._money.Money": "rowx.postgres.Money",
     "rowx.postgres.Interval": "rowx.postgres.Interval",
     "rowx.postgres._interval.Interval": "rowx.postgres.Interval",
+    "rowx.postgres.Point": "rowx.postgres.Point",
+    "rowx.postgres._geometric.Point": "rowx.postgres.Point",
+    "rowx.postgres.Line": "rowx.postgres.Line",
+    "rowx.postgres._geometric.Line": "rowx.postgres.Line",
+    "rowx.postgres.LineSegment": "rowx.postgres.LineSegment",
+    "rowx.postgres._geometric.LineSegment": "rowx.postgres.LineSegment",
+    "rowx.postgres.Box": "rowx.postgres.Box",
+    "rowx.postgres._geometric.Box": "rowx.postgres.Box",
+    "rowx.postgres.Path": "rowx.postgres.Path",
+    "rowx.postgres._geometric.Path": "rowx.postgres.Path",
+    "rowx.postgres.Polygon": "rowx.postgres.Polygon",
+    "rowx.postgres._geometric.Polygon": "rowx.postgres.Polygon",
+    "rowx.postgres.Circle": "rowx.postgres.Circle",
+    "rowx.postgres._geometric.Circle": "rowx.postgres.Circle",
 }
 # a pair of classes is ONE leaf, and a member alone is not a leaf
 NETWORK_PAIRS: Final[dict[frozenset[str], LeafName]] = {

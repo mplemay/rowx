@@ -513,3 +513,23 @@ def test_unknown_binding_forms_are_never_reported(seed: int) -> None:
 def test_unknown_expressions_are_never_reported(seed: int) -> None:
     case = unknown_expression(seeded(seed))
     assert infer_case(case.source) is None, case.source
+
+
+def test_annotation_geometric_classes() -> None:
+    source = """
+        from rowx.postgres import Box, Circle, Line, LineSegment, Path, Point, Polygon
+
+        def f(a: Point, b: Line | None, c: list[LineSegment], d: list[Box | None], e: Path, g: Polygon, h: Circle):
+            q(t"{a} {b} {c} {d} {e} {g} {h}")
+    """
+    assert infer(source) == ["Point", "Line", "list[LineSegment]", "list[Box]", "Path", "Polygon", "Circle"]
+
+
+def test_calls_to_geometric_classes_have_evident_types() -> None:
+    source = """
+        from rowx.postgres import Box, Circle, Line, LineSegment, Path, Point, Polygon
+
+        q(t"{Point(1.0, 2.0)} {Line(1.0, 2.0, 3.0)} {LineSegment(a, b)} {Box(a, b)} {Path((a,), closed=True)}")
+        q(t"{Polygon((a,))} {Circle(a, 1.0)}")
+    """
+    assert infer(source) == ["Point", "Line", "LineSegment", "Box", "Path", "Polygon", "Circle"]

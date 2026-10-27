@@ -36,6 +36,7 @@ pub enum Codec {
     Range,
     Money,
     Bits,
+    Geometric,
     Json,
     Temporal,
     Array,
@@ -417,6 +418,69 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         Format::Binary,
     )
     .codecs(Codec::Bits, Codec::Bits),
+    row(
+        "point",
+        Matcher::Oid(600),
+        "rowx.postgres.Point",
+        TzRule::None,
+        &["Point"],
+        Format::Binary,
+    )
+    .codecs(Codec::Geometric, Codec::Geometric),
+    row(
+        "line",
+        Matcher::Oid(628),
+        "rowx.postgres.Line",
+        TzRule::None,
+        &["Line"],
+        Format::Binary,
+    )
+    .codecs(Codec::Geometric, Codec::Geometric),
+    row(
+        "lseg",
+        Matcher::Oid(601),
+        "rowx.postgres.LineSegment",
+        TzRule::None,
+        &["LineSegment"],
+        Format::Binary,
+    )
+    .codecs(Codec::Geometric, Codec::Geometric),
+    row(
+        "box",
+        Matcher::Oid(603),
+        "rowx.postgres.Box",
+        TzRule::None,
+        &["Box"],
+        Format::Binary,
+    )
+    .codecs(Codec::Geometric, Codec::Geometric),
+    row(
+        "path",
+        Matcher::Oid(602),
+        "rowx.postgres.Path",
+        TzRule::None,
+        &["Path"],
+        Format::Binary,
+    )
+    .codecs(Codec::Geometric, Codec::Geometric),
+    row(
+        "polygon",
+        Matcher::Oid(604),
+        "rowx.postgres.Polygon",
+        TzRule::None,
+        &["Polygon"],
+        Format::Binary,
+    )
+    .codecs(Codec::Geometric, Codec::Geometric),
+    row(
+        "circle",
+        Matcher::Oid(718),
+        "rowx.postgres.Circle",
+        TzRule::None,
+        &["Circle"],
+        Format::Binary,
+    )
+    .codecs(Codec::Geometric, Codec::Geometric),
     // json/jsonb results take the user's annotation (docs/design/checker.md, rules), so the leaf is `object`
     row(
         "json",

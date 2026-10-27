@@ -89,7 +89,21 @@ CREATE TABLE all_types (
     c_money_array money[],
     c_bit_array bit(8)[],
     c_varbit_array varbit[],
-    c_interval_array interval[]
+    c_interval_array interval[],
+    c_point point,
+    c_line line,
+    c_lseg lseg,
+    c_box box,
+    c_path path,
+    c_polygon polygon,
+    c_circle circle,
+    c_point_array point[],
+    c_line_array line[],
+    c_lseg_array lseg[],
+    c_box_array box[],
+    c_path_array path[],
+    c_polygon_array polygon[],
+    c_circle_array circle[]
 );
 
 -- unsupported types, for unsupported-type cases

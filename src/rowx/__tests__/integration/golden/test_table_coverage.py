@@ -9,7 +9,7 @@ import pytest
 
 from rowx._core.postgres import type_table
 from rowx.errors import DatabaseError, DecodeError
-from rowx.postgres import Money, Range, connect
+from rowx.postgres import Box, Circle, Line, LineSegment, Money, Path, Point, Polygon, Range, connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -60,6 +60,14 @@ DECODE_GOLDENS: Final[dict[str, tuple[str, str, Any]]] = {
     "money": ("money", "12.34", Money(1234)),
     "bit": ("bit(9)", "101010101", "101010101"),
     "varbit": ("varbit", "1011", "1011"),
+    "point": ("point", "(1.5,-2)", Point(1.5, -2.0)),
+    "line": ("line", "{1,-2,3}", Line(1.0, -2.0, 3.0)),
+    "lseg": ("lseg", "[(0,0),(1,2)]", LineSegment(Point(0.0, 0.0), Point(1.0, 2.0))),
+    # the server stores the upper right corner first
+    "box": ("box", "(0,0),(2,3)", Box(Point(2.0, 3.0), Point(0.0, 0.0))),
+    "path": ("path", "[(0,0),(1,1)]", Path((Point(0.0, 0.0), Point(1.0, 1.0)), closed=False)),
+    "polygon": ("polygon", "((0,0),(1,0),(1,1))", Polygon((Point(0.0, 0.0), Point(1.0, 0.0), Point(1.0, 1.0)))),
+    "circle": ("circle", "<(1,2),3>", Circle(Point(1.0, 2.0), 3.0)),
     "json": ("json", '{"a": [1, null]}', {"a": [1, None]}),
     "jsonb": ("jsonb", '{"a": [1, null]}', {"a": [1, None]}),
     "enum": ("mood", "happy", "happy"),
@@ -104,6 +112,13 @@ ENCODE_GOLDENS: Final[dict[str, tuple[str, Any]]] = {
     "money": ("money", Money(-1234)),
     "bit": ("bit(9)", "101010101"),
     "varbit": ("varbit", "1011"),
+    "point": ("point", Point(-0.5, 1e300)),
+    "line": ("line", Line(0.0, 1.0, -4.5)),
+    "lseg": ("lseg", LineSegment(Point(-1.0, -1.0), Point(1.0, 1.0))),
+    "box": ("box", Box(Point(2.0, 3.0), Point(-1.0, 0.0))),
+    "path": ("path", Path((Point(0.0, 0.0), Point(1.0, 2.0), Point(3.0, 4.0)), closed=True)),
+    "polygon": ("polygon", Polygon((Point(0.0, 0.0), Point(4.0, 0.0), Point(0.0, 4.0)))),
+    "circle": ("circle", Circle(Point(0.0, 0.0), 0.5)),
     "json": ("json", {"a": [1, None]}),
     "jsonb": ("jsonb", {"a": [1, None]}),
     "enum": ("mood", "ok"),

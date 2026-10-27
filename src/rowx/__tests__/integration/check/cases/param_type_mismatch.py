@@ -3,7 +3,7 @@ import ipaddress
 from decimal import Decimal
 
 from rowx import query
-from rowx.postgres import Interval, Money, Range
+from rowx.postgres import Box, Circle, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
 
 type Inet = ipaddress.IPv4Interface | ipaddress.IPv6Interface
 type Cidr = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -66,3 +66,23 @@ def run_money_bit_interval() -> None:
     query[int](t'SELECT {Interval(months=1)}::int AS "n!"')  # error: [param-type-mismatch]
     query[list[Interval]](t'SELECT {[Interval(days=1)]}::interval[] AS "i!"')
     query[list[Interval]](t'SELECT {[1]}::interval[] AS "i!"')  # error: [param-type-mismatch]
+
+
+def run_geometric() -> None:
+    query[Point](t'SELECT {Point(1.0, 2.0)}::point AS "p!"')
+    query[Line](t'SELECT {Line(1.0, 2.0, 3.0)}::line AS "l!"')
+    query[LineSegment](t'SELECT {LineSegment(Point(0.0, 0.0), Point(1.0, 1.0))}::lseg AS "l!"')
+    query[Box](t'SELECT {Box(Point(1.0, 1.0), Point(0.0, 0.0))}::box AS "b!"')
+    query[Path](t'SELECT {Path((Point(0.0, 0.0),), closed=False)}::path AS "p!"')
+    query[Polygon](t'SELECT {Polygon((Point(0.0, 0.0),))}::polygon AS "p!"')
+    query[Circle](t'SELECT {Circle(Point(0.0, 0.0), 1.0)}::circle AS "c!"')
+    query[Point](t'SELECT {(1.0, 2.0)}::point AS "p!"')  # error: [param-type-mismatch]
+    query[Point](t'SELECT {"(1,2)"}::point AS "p!"')  # error: [param-type-mismatch]
+    query[Point](t'SELECT {1.5}::point AS "p!"')  # error: [param-type-mismatch]
+    query[Point](t'SELECT {Circle(Point(0.0, 0.0), 1.0)}::point AS "p!"')  # error: [param-type-mismatch]
+    query[Polygon](t'SELECT {Path((Point(0.0, 0.0),), closed=True)}::polygon AS "p!"')  # error: [param-type-mismatch]
+    query[Box](t'SELECT {LineSegment(Point(0.0, 0.0), Point(1.0, 1.0))}::box AS "b!"')  # error: [param-type-mismatch]
+    query[str](t'SELECT {Point(1.0, 2.0)}::text AS "p!"')  # error: [param-type-mismatch]
+    query[Money](t'SELECT {Point(1.0, 2.0)}::money AS "p!"')  # error: [param-type-mismatch]
+    query[list[Point]](t'SELECT {[Point(1.0, 2.0)]}::point[] AS "p!"')
+    query[list[Point]](t'SELECT {[1.0]}::point[] AS "p!"')  # error: [param-type-mismatch]
