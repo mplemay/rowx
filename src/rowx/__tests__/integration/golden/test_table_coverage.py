@@ -9,7 +9,7 @@ import pytest
 
 from rowx._core.postgres import type_table
 from rowx.errors import DatabaseError, DecodeError
-from rowx.postgres import Box, Circle, Line, LineSegment, Money, Path, Point, Polygon, Range, connect
+from rowx.postgres import Box, Circle, Cube, Line, LineSegment, Money, Path, Point, Polygon, Range, connect
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -68,6 +68,10 @@ DECODE_GOLDENS: Final[dict[str, tuple[str, str, Any]]] = {
     "path": ("path", "[(0,0),(1,1)]", Path((Point(0.0, 0.0), Point(1.0, 1.0)), closed=False)),
     "polygon": ("polygon", "((0,0),(1,0),(1,1))", Polygon((Point(0.0, 0.0), Point(1.0, 0.0), Point(1.0, 1.0)))),
     "circle": ("circle", "<(1,2),3>", Circle(1.0, 2.0, 3.0)),
+    "hstore": ("public.hstore", 'a=>1, b=>NULL, "c d"=>"e"', {"a": "1", "b": None, "c d": "e"}),
+    "ltree": ("public.ltree", "Top.Science.Astronomy", "Top.Science.Astronomy"),
+    "lquery": ("public.lquery", "Top.*{1,2}.Astronomy", "Top.*{1,2}.Astronomy"),
+    "cube": ("public.cube", "(1,2),(3,4)", Cube((1.0, 2.0), (3.0, 4.0))),
     "json": ("json", '{"a": [1, null]}', {"a": [1, None]}),
     "jsonb": ("jsonb", '{"a": [1, null]}', {"a": [1, None]}),
     "enum": ("mood", "happy", "happy"),
@@ -119,6 +123,10 @@ ENCODE_GOLDENS: Final[dict[str, tuple[str, Any]]] = {
     "path": ("path", Path((Point(0.0, 0.0), Point(1.0, 2.0), Point(3.0, 4.0)), closed=True)),
     "polygon": ("polygon", Polygon((Point(0.0, 0.0), Point(4.0, 0.0), Point(0.0, 4.0)))),
     "circle": ("circle", Circle(0.0, 0.0, 0.5)),
+    "hstore": ("public.hstore", {"a": "1", "b": None, "": "", "é": "ü"}),
+    "ltree": ("public.ltree", "A.b_2.c"),
+    "lquery": ("public.lquery", "A.*{1,2}.c|d@"),
+    "cube": ("public.cube", Cube((-1.5, 2.0), (3.0, 1e10))),
     "json": ("json", {"a": [1, None]}),
     "jsonb": ("jsonb", {"a": [1, None]}),
     "enum": ("mood", "ok"),

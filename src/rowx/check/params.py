@@ -31,6 +31,8 @@ type ParamName = Literal[
     "Path",
     "Polygon",
     "Circle",
+    "Cube",
+    "dict",
     "date",
     "datetime",
     "timedelta",
@@ -84,6 +86,7 @@ BUILTIN_NAMES: Final[dict[str, ParamName]] = {
     "float": "float",
     "bool": "bool",
     "bytes": "bytes",
+    "dict": "dict",
 }
 CLASS_NAMES: Final[dict[str, ParamName]] = {
     "decimal.Decimal": "Decimal",
@@ -114,6 +117,8 @@ CLASS_NAMES: Final[dict[str, ParamName]] = {
     "rowx.postgres._geometric.Polygon": "Polygon",
     "rowx.postgres.Circle": "Circle",
     "rowx.postgres._geometric.Circle": "Circle",
+    "rowx.postgres.Cube": "Cube",
+    "rowx.postgres._cube.Cube": "Cube",
     "datetime.date": "date",
     "datetime.datetime": "datetime",
     "datetime.timedelta": "timedelta",
@@ -334,16 +339,21 @@ class ParamInference:
             case ast.BinOp(op=ast.BitOr()):
                 return self._union_type(node, scope)
             case ast.Subscript(value=value, slice=item):
-                qualified = self._qualify(value, scope)
-                if qualified is not None and CLASS_NAMES.get(qualified) == "Range":
-                    return ParamType("Range")
-                element = self._annotation_type(item, scope) if qualified == "list" else None
-                return None if element is None else ParamType("list", element)
+                return self._subscript_type(value, item, scope)
             case ast.Name() | ast.Attribute():
                 qualified = self._qualify(node, scope)
                 name = None if qualified is None else BUILTIN_NAMES.get(qualified) or CLASS_NAMES.get(qualified)
                 return None if name is None else ParamType(name)
         return None
+
+    def _subscript_type(self, value: ast.expr, item: ast.expr, scope: _Scope) -> ParamType | None:
+        qualified = self._qualify(value, scope)
+        if qualified is not None and CLASS_NAMES.get(qualified) == "Range":
+            return ParamType("Range")
+        element = self._annotation_type(item, scope) if qualified == "list" else None
+        if element is None:
+            return ParamType("dict") if qualified == "dict" else None
+        return ParamType("list", element)
 
     def _union_type(self, node: ast.expr, scope: _Scope) -> ParamType | None:
         members = [m for m in _union_members(node) if not (isinstance(m, ast.Constant) and m.value is None)]

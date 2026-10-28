@@ -2,6 +2,7 @@ pub mod array;
 pub mod array_enc;
 pub mod bits;
 pub mod bytes;
+pub mod extension;
 pub mod extract;
 pub mod float;
 pub mod geometric;
@@ -42,8 +43,14 @@ fn is_supported_range(ty: &Type) -> bool {
         .any(|info| info.matcher == Matcher::RangeKind(subtype.oid())))
 }
 
+// extension types are matched by name here; the prepare step already refused any same-named type that
+// the extension does not own, so no codec sees one
 fn is_citext(ty: &Type) -> bool {
     matches!(ty.kind(), Kind::Simple) && ty.name() == "citext"
+}
+
+fn is_extension(ty: &Type) -> bool {
+    matches!(ty.kind(), Kind::Simple) && extension::is_extension_type(ty)
 }
 
 /// One arm per type family; an `interval` becomes a `timedelta`.
@@ -97,6 +104,7 @@ pub fn decode_with<'py>(
         | Type::POLYGON
         | Type::CIRCLE => geometric::decode(py, ty, raw),
         _ if matches!(ty.kind(), Kind::Enum(_)) || is_citext(ty) => text::decode(py, ty, raw),
+        _ if is_extension(ty) => extension::decode(py, ty, raw),
         _ if matches!(ty.kind(), Kind::Array(_)) => array::decode(py, ty, raw, as_span),
         _ if is_supported_range(ty) => range::decode(py, ty, raw),
         // void arrives as an empty, non-NULL value
@@ -121,7 +129,7 @@ pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
             Matcher::Oid(oid) => oid == ty.oid(),
             Matcher::EnumKind => is_enum,
             Matcher::ArrayKind => is_array,
-            Matcher::NamedSimple(name) => is_citext(ty) && name == ty.name(),
+            Matcher::ExtNamed(name, _) => matches!(ty.kind(), Kind::Simple) && name == ty.name(),
             Matcher::RangeKind(oid) => {
                 matches!(ty.kind(), Kind::Range(subtype) if subtype.oid() == oid)
             }
@@ -175,6 +183,7 @@ pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         // an enum label is sent as text so the server resolves it
         _ if is_enum => text::encode(ty, param).map(Param::text),
         _ if is_citext(ty) => text::encode(ty, param).map(Param::binary),
+        _ if is_extension(ty) => extension::encode(ty, param),
         _ if is_array => array_enc::encode(ty, param),
         _ if is_supported_range(ty) => range::encode(ty, param),
         _ => Err(format!("no encoder for the postgres type {}", ty.name())),

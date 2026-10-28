@@ -4,6 +4,7 @@ use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
 };
 
+use crate::codec::extension::cube_class;
 use crate::codec::geometric::{class_name, kind_of_object, point_class};
 use crate::codec::money::money_class;
 use crate::codec::network::read as read_ip;
@@ -72,6 +73,11 @@ pub enum PyParam {
     Money(i64),
     // one of the `rowx.postgres` geometric dataclasses
     Geometric(Shape),
+    // a `rowx.postgres.Cube`: its two corners
+    Cube {
+        lower: Vec<f64>,
+        upper: Vec<f64>,
+    },
     // a `rowx.postgres.Range`; a `None` bound is an infinite side
     Range {
         lower: Option<Box<Self>>,
@@ -117,6 +123,7 @@ impl PyParam {
             Self::Timedelta { .. } => "timedelta",
             Self::Interval { .. } => "Interval",
             Self::Money(_) => "Money",
+            Self::Cube { .. } => "Cube",
             Self::Geometric(shape) => class_name(shape.kind()),
             Self::Range { .. } => "Range",
             Self::Bytes(_, name) | Self::Seq(_, _, name) | Self::Other(_, name) => name,
@@ -283,6 +290,27 @@ fn value_class(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult
             .extract::<i64>()
             .map(|minor| Some(PyParam::Money(minor)))
             .map_err(|_| overflow("the money amount"));
+    }
+    if obj.is_instance(cube_class(py)?)? {
+        let corner = |name: &str| -> PyResult<Vec<f64>> {
+            obj.getattr(name)?
+                .try_iter()?
+                .map(|item| item?.extract::<f64>())
+                .collect::<PyResult<Vec<_>>>()
+                .map_err(|_| {
+                    encode_error(
+                        py,
+                        &format!(
+                            "${}: the cube {name} has a coordinate that is not a number",
+                            index + 1
+                        ),
+                    )
+                })
+        };
+        return Ok(Some(PyParam::Cube {
+            lower: corner("lower_left")?,
+            upper: corner("upper_right")?,
+        }));
     }
     Ok(None)
 }

@@ -54,6 +54,14 @@ FOOTER: Final[str] = """
   comes first, and a decoded box shows that order. Equality compares the fields exactly, not with Postgres'
   epsilon-based `~=`, so a NaN coordinate is never equal to anything. A `path` or `polygon` needs at least one point,
   and the server rejects a `line` whose `a` and `b` are both zero.
+- `hstore` decodes to `dict[str, str | None]` (a NULL value is `None`; a key is never NULL, and a `None` key in a
+  parameter raises `EncodeError`). `ltree` and `lquery` are `str`. `cube` is
+  `rowx.postgres.Cube(lower_left, upper_right)`, two `tuple[float, ...]` of one length; the corners keep the order the
+  server stores (the first corner written is `lower_left`, not necessarily the minimum), a point has equal corners, and
+  the codec sends equal corners as a point. A `str` that the server's parser rejects fails at Bind.
+- Extension types (`citext`, `hstore`, `ltree`, `lquery`, `cube`) are recognised by name **and** owning extension, found
+  through `pg_depend`, so a same-named type from another schema or no extension is `unsupported-type` in the checker
+  and raises `DecodeError` at runtime (when the statement is prepared). The extension may live in any schema.
 - Any type not listed here is `unsupported-type` in the checker and raises `DecodeError` at runtime (for example
   multiranges, composites and `xml`).
 
@@ -99,6 +107,8 @@ that this list matches the one it checks.
   coordinates are equal.
 - `circle`: rowx returns `rowx.postgres.Circle`, while psycopg returns the text the server formats; the
   coordinates are equal.
+- `cube`: rowx returns `rowx.postgres.Cube`, while psycopg returns the text the server formats; the coordinates are
+  equal.
 """
 
 TZ_LABELS: Final[dict[str, str]] = {"none": "", "aware": "aware", "naive": "naive"}

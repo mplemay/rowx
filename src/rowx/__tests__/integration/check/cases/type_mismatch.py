@@ -4,7 +4,7 @@ import uuid
 from decimal import Decimal
 
 from rowx import query
-from rowx.postgres import Box, Circle, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
+from rowx.postgres import Box, Circle, Cube, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
 
 type Inet = ipaddress.IPv4Interface | ipaddress.IPv6Interface
 type Cidr = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -104,3 +104,23 @@ def run_geometric() -> None:
     query[Money](t'''SELECT '(1,2)'::point AS "p!"''')  # error: [type-mismatch]
     query[list[Point | None]](t'''SELECT ARRAY['(1,2)'::point] AS "p!"''')
     query[list[Box]](t'''SELECT ARRAY['(1,2)'::point] AS "p!"''')  # error: [type-mismatch]
+
+
+def run_extensions() -> None:
+    query[dict[str, str | None]](t'''SELECT 'a=>1'::public.hstore AS "h!"''')
+    query[dict[str, str | None] | None](t'''SELECT 'a=>1'::public.hstore AS "h?"''')
+    query[str](t'''SELECT 'a.b'::public.ltree AS "l!"''')
+    query[str](t'''SELECT 'a.*'::public.lquery AS "l!"''')
+    query[Cube](t'''SELECT '(1,2)'::public.cube AS "c!"''')
+    query[str](t'''SELECT 'MiXed'::public.citext AS "c!"''')
+    query[list[str | None]](t'''SELECT ARRAY['a']::public.citext[] AS "c!"''')
+    query[list[Cube | None]](t'''SELECT ARRAY['(1)']::public.cube[] AS "c!"''')
+    query[str](t'''SELECT 'a=>1'::public.hstore AS "h!"''')  # error: [type-mismatch]
+    query[dict[str, str]](t'''SELECT 'a=>1'::public.hstore AS "h!"''')  # error: [invalid-row-type]
+    query[dict[str, int]](t'''SELECT 'a=>1'::public.hstore AS "h!"''')  # error: [invalid-row-type]
+    query[Cube](t'''SELECT 'a.b'::public.ltree AS "l!"''')  # error: [type-mismatch]
+    query[Cube](t'''SELECT '(1,2)'::point AS "p!"''')  # error: [type-mismatch]
+    query[Point](t'''SELECT '(1,2)'::public.cube AS "c!"''')  # error: [type-mismatch]
+    query[list[str]](t'''SELECT 'a=>1'::public.hstore AS "h!"''')  # error: [type-mismatch]
+    query[dict[str, str | None]](t'''SELECT 'a.b'::public.ltree AS "l!"''')  # error: [type-mismatch]
+    query[int](t'''SELECT 'a.*'::public.lquery AS "l!"''')  # error: [type-mismatch]

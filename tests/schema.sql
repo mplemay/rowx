@@ -1,4 +1,7 @@
 CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS ltree WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS cube WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS file_fdw WITH SCHEMA public;
 CREATE SERVER IF NOT EXISTS rowx_files FOREIGN DATA WRAPPER file_fdw;
 
@@ -103,7 +106,16 @@ CREATE TABLE all_types (
     c_box_array box[],
     c_path_array path[],
     c_polygon_array polygon[],
-    c_circle_array circle[]
+    c_circle_array circle[],
+    c_hstore public.hstore,
+    c_ltree public.ltree,
+    c_lquery public.lquery,
+    c_cube public.cube,
+    c_citext_array public.citext[],
+    c_hstore_array public.hstore[],
+    c_ltree_array public.ltree[],
+    c_lquery_array public.lquery[],
+    c_cube_array public.cube[]
 );
 
 -- unsupported types, for unsupported-type cases

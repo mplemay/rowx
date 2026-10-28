@@ -8,7 +8,7 @@ import datetime
 import decimal
 import ipaddress
 import uuid
-from rowx.postgres import Box, Circle, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
+from rowx.postgres import Box, Circle, Cube, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
 from typing import Annotated, Any, Literal, Optional, TypeVar, Union
 """
 
@@ -58,6 +58,15 @@ ROWS: Final[list[Row]] = [
     ),
     ("T = list[Point | None]", ("scalar", 1, (False,)), "ok"),
     ("T = list[list[Polygon]]", ("scalar", 1, (False,)), "ok"),
+    ("T = Cube", ("scalar", 1, (False,)), "ok"),
+    ("T = Cube | None", ("scalar", 1, (True,)), "ok"),
+    ("T = list[Cube | None]", ("scalar", 1, (False,)), "ok"),
+    ("T = dict[str, str | None]", ("scalar", 1, (False,)), "ok"),
+    ("T = dict[str, str | None] | None", ("scalar", 1, (True,)), "ok"),
+    ("T = Optional[dict[str, Optional[str]]]", ("scalar", 1, (True,)), "ok"),
+    ("T = tuple[dict[str, str | None], str]", ("tuple", 2, (False, False)), "ok"),
+    ("T = list[dict[str, str | None] | None]", ("scalar", 1, (False,)), "ok"),
+    ("type H = dict[str, str | None]\nT = H", ("scalar", 1, (False,)), "ok"),
     ("T = tuple[int, str]", ("tuple", 2, (False, False)), "ok"),
     ("T = tuple[int]", ("tuple", 1, (False,)), "ok"),
     ("T = tuple[None]", ("tuple", 1, (True,)), "ok"),
@@ -100,6 +109,10 @@ ROWS: Final[list[Row]] = [
     ("type Row[X] = tuple[X, str]\nT = Row[int]", "InterfaceError", "invalid-row-type"),
     ("T = Literal[1]", "InterfaceError", "invalid-row-type"),
     ("T = dict[str, int]", "InterfaceError", "invalid-row-type"),
+    ("T = dict[str, str]", "InterfaceError", "invalid-row-type"),
+    ("T = dict[int, str | None]", "InterfaceError", "invalid-row-type"),
+    ("T = dict", "InterfaceError", "invalid-row-type"),
+    ("T = Cube | Point", "InterfaceError", "invalid-row-type"),
     ("T = list", "InterfaceError", "invalid-row-type"),
     ("T = list[dict]", "InterfaceError", "invalid-row-type"),
     ("T = tuple[tuple[int, int], str]", "InterfaceError", "invalid-row-type"),

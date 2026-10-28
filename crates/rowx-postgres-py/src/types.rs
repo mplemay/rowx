@@ -11,10 +11,12 @@ use rowx_postgres::types::{Codec, Format, Matcher, TYPE_TABLE, TzRule};
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
     key: String,
-    // one of "oid", "enum", "named", "array", "range", "domain"
+    // one of "oid", "enum", "extension", "array", "range", "domain"
     matcher: String,
     matcher_oid: Option<u32>,
     matcher_name: Option<String>,
+    // the extension that must own a type of `matcher_name`, for an "extension" matcher
+    matcher_extension: Option<String>,
     py_result: String,
     alt_py_results: Vec<String>,
     // one of "none", "aware", "naive"
@@ -41,6 +43,7 @@ const fn codec_name(codec: Codec) -> &'static str {
         Codec::Money => "money",
         Codec::Bits => "bits",
         Codec::Geometric => "geometric",
+        Codec::Extension => "extension",
         Codec::Json => "json",
         Codec::Temporal => "temporal",
         Codec::Array => "array",
@@ -50,10 +53,14 @@ const fn codec_name(codec: Codec) -> &'static str {
 
 impl From<&rowx_postgres::types::TypeInfo> for TypeInfo {
     fn from(t: &rowx_postgres::types::TypeInfo) -> Self {
+        let mut matcher_extension = None;
         let (matcher, matcher_oid, matcher_name) = match t.matcher {
             Matcher::Oid(oid) => ("oid", Some(oid), None),
             Matcher::EnumKind => ("enum", None, None),
-            Matcher::NamedSimple(name) => ("named", None, Some(name.to_owned())),
+            Matcher::ExtNamed(name, extension) => {
+                matcher_extension = Some(extension.to_owned());
+                ("extension", None, Some(name.to_owned()))
+            }
             Matcher::ArrayKind => ("array", None, None),
             Matcher::RangeKind(oid) => ("range", Some(oid), None),
             Matcher::DomainKind => ("domain", None, None),
@@ -63,6 +70,7 @@ impl From<&rowx_postgres::types::TypeInfo> for TypeInfo {
             matcher: matcher.to_owned(),
             matcher_oid,
             matcher_name,
+            matcher_extension,
             py_result: t.py_result.to_owned(),
             alt_py_results: t.alt_py_results.iter().map(|s| (*s).to_owned()).collect(),
             tz: match t.tz {

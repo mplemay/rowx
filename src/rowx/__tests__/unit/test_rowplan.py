@@ -131,3 +131,23 @@ def test_geometric_classes_are_rejected_in_unions_and_subscripts() -> None:
     for source in ("T = Point | Circle", "T = Point | int", "T = Path | Polygon"):
         with pytest.raises(InterfaceError):
             row_plan(evaluate(source))
+
+
+def test_cube_and_the_hstore_dict_are_non_nullable_leaves() -> None:
+    for leaf in ("Cube", "dict[str, str | None]"):
+        assert row_plan(evaluate(f"T = {leaf}")).nullable_mask == (False,), leaf
+        assert row_plan(evaluate(f"T = {leaf} | None")).nullable_mask == (True,), leaf
+        assert row_plan(evaluate(f"T = list[list[{leaf} | None]]")).nullable_mask == (False,), leaf
+
+
+def test_other_dicts_and_cube_unions_are_rejected() -> None:
+    for source in (
+        "T = dict",
+        "T = dict[str, str]",
+        "T = dict[str, int]",
+        "T = dict[int, str | None]",
+        "T = Cube | Point",
+        "T = dict[str, str | None] | Cube",
+    ):
+        with pytest.raises(InterfaceError):
+            row_plan(evaluate(source))

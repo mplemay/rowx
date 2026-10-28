@@ -3,7 +3,7 @@ from decimal import Decimal
 from ipaddress import IPv4Interface, IPv4Network, IPv6Interface, IPv6Network
 
 from rowx import query
-from rowx.postgres import Box, Circle, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
+from rowx.postgres import Box, Circle, Cube, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
 
 
 def run() -> None:
@@ -47,3 +47,15 @@ def run() -> None:
     query[tuple[list[Point | None] | None, list[Box | None] | None, list[Polygon | None] | None]](
         t"SELECT c_point_array, c_box_array, c_polygon_array FROM all_types"
     )
+    query[tuple[dict[str, str | None] | None, str | None, str | None, Cube | None]](
+        t"SELECT c_hstore, c_ltree, c_lquery, c_cube FROM all_types"
+    )
+    query[
+        tuple[
+            list[str | None] | None,
+            list[dict[str, str | None] | None] | None,
+            list[str | None] | None,
+            list[str | None] | None,
+            list[Cube | None] | None,
+        ]
+    ](t"SELECT c_citext_array, c_hstore_array, c_ltree_array, c_lquery_array, c_cube_array FROM all_types")

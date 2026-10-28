@@ -129,8 +129,29 @@ def _is_geometric(t: object) -> bool:
     return any(_is_value_class(t, "rowx.postgres._geometric", name) for name in GEOMETRIC_CLASSES)
 
 
+def _is_cube(t: object) -> bool:
+    return _is_value_class(t, "rowx.postgres._cube", "Cube")
+
+
 def _is_value_leaf(t: type) -> bool:
-    return t in LEAVES or _is_interval(t) or _is_money(t) or _is_geometric(t)
+    return t in LEAVES or _is_interval(t) or _is_money(t) or _is_geometric(t) or _is_cube(t)
+
+
+# the one dict leaf: an hstore, `dict[str, str | None]`
+def _is_hstore(t: object) -> bool:
+    key, value = get_args(t)
+    members, has_none = _flatten(value)
+    return _unwrap(key) is str and members == [str] and has_none
+
+
+def _union_elem(t: object) -> bool:
+    members, has_none = _flatten(t)
+    if len(members) > 1 and all(isinstance(m, type) for m in members) and frozenset(members) in NETWORK_PAIRS:
+        return has_none
+    if len(members) != 1:
+        raise _reject(t, "a union must have exactly one non-None member")
+    _elem(members[0])
+    return True
 
 
 def _elem(t: object) -> bool:
@@ -139,16 +160,14 @@ def _elem(t: object) -> bool:
         return True
     origin = get_origin(t)
     if origin is Union or origin is types.UnionType:
-        members, has_none = _flatten(t)
-        if len(members) > 1 and all(isinstance(m, type) for m in members) and frozenset(members) in NETWORK_PAIRS:
-            return has_none
-        if len(members) != 1:
-            raise _reject(t, "a union must have exactly one non-None member")
-        _elem(members[0])
-        return True
+        return _union_elem(t)
     if origin is list:
         (inner,) = get_args(t)
         _elem(inner)
+        return False
+    if origin is dict and not _is_hstore(t):
+        raise _reject(t, "a dict must be `dict[str, str | None]`, the hstore leaf")
+    if origin is dict:
         return False
     if _is_range(origin):
         (subtype,) = get_args(t)

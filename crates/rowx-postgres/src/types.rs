@@ -2,7 +2,8 @@
 pub enum Matcher {
     Oid(u32),
     EnumKind,
-    NamedSimple(&'static str),
+    // a type of this name that belongs to this extension (checked through `pg_depend`)
+    ExtNamed(&'static str, &'static str),
     ArrayKind,
     DomainKind,
     // any range type, built-in or user-defined, whose subtype has this oid
@@ -37,6 +38,7 @@ pub enum Codec {
     Money,
     Bits,
     Geometric,
+    Extension,
     Json,
     Temporal,
     Array,
@@ -206,7 +208,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     .codecs(Codec::Text, Codec::Text),
     row(
         "citext",
-        Matcher::NamedSimple("citext"),
+        Matcher::ExtNamed("citext", "citext"),
         "str",
         TzRule::None,
         STR,
@@ -536,6 +538,42 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         Format::Binary,
     )
     .codecs(Codec::Geometric, Codec::Geometric),
+    row(
+        "hstore",
+        Matcher::ExtNamed("hstore", "hstore"),
+        "dict[str, str | None]",
+        TzRule::None,
+        &["dict"],
+        Format::Binary,
+    )
+    .codecs(Codec::Extension, Codec::Extension),
+    row(
+        "ltree",
+        Matcher::ExtNamed("ltree", "ltree"),
+        "str",
+        TzRule::None,
+        STR,
+        Format::Binary,
+    )
+    .codecs(Codec::Extension, Codec::Extension),
+    row(
+        "lquery",
+        Matcher::ExtNamed("lquery", "ltree"),
+        "str",
+        TzRule::None,
+        STR,
+        Format::Binary,
+    )
+    .codecs(Codec::Extension, Codec::Extension),
+    row(
+        "cube",
+        Matcher::ExtNamed("cube", "cube"),
+        "rowx.postgres.Cube",
+        TzRule::None,
+        &["Cube"],
+        Format::Binary,
+    )
+    .codecs(Codec::Extension, Codec::Extension),
 ];
 
 #[cfg(test)]
