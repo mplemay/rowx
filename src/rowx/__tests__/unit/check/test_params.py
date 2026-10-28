@@ -533,3 +533,17 @@ def test_calls_to_geometric_classes_have_evident_types() -> None:
         q(t"{Polygon((a,))} {Circle(1.0, 2.0, 1.0)}")
     """
     assert infer(source) == ["Point", "Line", "LineSegment", "Box", "Path", "Polygon", "Circle"]
+
+
+def test_cube_and_annotated_dict_have_evident_types() -> None:
+    source = """
+        from rowx.postgres import Cube
+
+        def f(a: Cube, b: dict[str, str | None], c: list[Cube | None], d: dict | None):
+            q(t"{a} {b} {c} {d} {Cube((1.0,), (2.0,))}")
+    """
+    assert infer(source) == ["Cube", "dict", "list[Cube]", "dict", "Cube"]
+
+
+def test_a_dict_literal_or_call_is_not_evident() -> None:
+    assert infer("""q(t"{ {'k': None} } {dict(k=None)} { {k: 1 for k in 'ab'} }")""") == [None, None, None]

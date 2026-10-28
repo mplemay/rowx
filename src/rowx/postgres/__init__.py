@@ -1,4 +1,5 @@
 from rowx.postgres._connection import RESET_QUERY, Connection, connect
+from rowx.postgres._cube import Cube
 from rowx.postgres._geometric import Box, Circle, Line, LineSegment, Path, Point, Polygon
 from rowx.postgres._interval import Interval
 from rowx.postgres._money import Money
@@ -13,6 +14,7 @@ __all__ = [
     "Circle",
     "ConnectOptions",
     "Connection",
+    "Cube",
     "Interval",
     "Line",
     "LineSegment",

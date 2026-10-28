@@ -65,6 +65,7 @@ fn to_object<'py>(py: Python<'py>, param: &PyParam) -> Result<Bound<'py, PyAny>,
         | PyParam::Time { .. }
         | PyParam::DateTime { .. }
         | PyParam::Money(_)
+        | PyParam::Cube { .. }
         | PyParam::Geometric(_)
         | PyParam::Interval { .. }
         | PyParam::Timedelta { .. } => {

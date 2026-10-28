@@ -53,7 +53,11 @@ LEAVES: Final[dict[str, LeafName]] = {
     "rowx.postgres._geometric.Polygon": "rowx.postgres.Polygon",
     "rowx.postgres.Circle": "rowx.postgres.Circle",
     "rowx.postgres._geometric.Circle": "rowx.postgres.Circle",
+    "rowx.postgres.Cube": "rowx.postgres.Cube",
+    "rowx.postgres._cube.Cube": "rowx.postgres.Cube",
 }
+# `dict[str, str | None]` is the one dict leaf (hstore)
+HSTORE_LEAF: Final[LeafName] = "dict[str, str | None]"
 # a pair of classes is ONE leaf, and a member alone is not a leaf
 NETWORK_PAIRS: Final[dict[frozenset[str], LeafName]] = {
     frozenset({"ipaddress.IPv4Interface", "ipaddress.IPv6Interface"}): (
@@ -72,7 +76,10 @@ RANGE_LEAVES: Final[dict[str, LeafName]] = {
 RANGE_CLASSES: Final[frozenset[str]] = frozenset({"rowx.postgres.Range", "rowx.postgres._range.Range"})
 # `LeafName` is these maps plus the three structural markers; keep them in lockstep
 assert (  # ruff: ignore[assert]
-    set(LEAVES.values()) | set(NETWORK_PAIRS.values()) | set(RANGE_LEAVES.values()) | {"list", "any", "none"}
+    set(LEAVES.values())
+    | set(NETWORK_PAIRS.values())
+    | set(RANGE_LEAVES.values())
+    | {HSTORE_LEAF, "list", "any", "none"}
     == set(get_args(LeafName.__value__))
 )
 NEUTRAL: Final[frozenset[str]] = frozenset({"typing.Any", "builtins.object"})
@@ -680,14 +687,33 @@ class _Resolver:
                 return result
             case "typing.Annotated" if len(elts) >= 2 and isinstance(slice_, ast.Tuple):  # ruff: ignore[magic-value-comparison]
                 return self._eval(elts[0], module, chain)
+        if (node := self._eval_container(qualname, slice_, module, chain)) is not None:
+            return node
+        msg = f"`{base.qualname}` can't be subscripted this way in a row type"
+        raise _invalid(msg)
+
+    def _eval_container(
+        self, qualname: str, slice_: ast.expr, module: _Module, chain: tuple[tuple[Path, str], ...]
+    ) -> _Node | None:
+        elts = slice_.elts if isinstance(slice_, ast.Tuple) else [slice_]
+        match qualname:
             case "builtins.list" if len(elts) == 1 and not isinstance(slice_, ast.Tuple):
                 item = _to_elem(self._eval(slice_, module, chain), allow_none=False)
                 return _Node((Elem("list", nullable=False, item=item),), none=False)
+            case "builtins.dict" if len(elts) == 2 and isinstance(slice_, ast.Tuple):  # ruff: ignore[magic-value-comparison]
+                return self._eval_hstore(elts, module, chain)
             case "builtins.tuple" if elts:
                 elems = tuple(_to_elem(self._eval(element, module, chain), allow_none=True) for element in elts)
                 return _Node((_Tuple(elems),), none=False)
-        msg = f"`{base.qualname}` can't be subscripted this way in a row type"
-        raise _invalid(msg)
+        return None
+
+    def _eval_hstore(self, elts: list[ast.expr], module: _Module, chain: tuple[tuple[Path, str], ...]) -> _Node:
+        key = _to_elem(self._eval(elts[0], module, chain), allow_none=False)
+        value = _to_elem(self._eval(elts[1], module, chain), allow_none=False)
+        if key != Elem("str", nullable=False) or value != Elem("str", nullable=True):
+            msg = "a dict row type must be `dict[str, str | None]`, the hstore leaf"
+            raise _invalid(msg)
+        return _Node((Elem(HSTORE_LEAF, nullable=False),), none=False)
 
     def _eval_range(self, subtype: ast.expr, module: _Module, chain: tuple[tuple[Path, str], ...]) -> _Node:
         inner = _to_elem(self._eval(subtype, module, chain), allow_none=False)

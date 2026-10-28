@@ -418,3 +418,34 @@ def test_geometric_parameter_takes_only_its_own_class(key: TypeKey, _leaf: LeafN
             assert finding.rule == "param-type-mismatch"
     for wrong in WRONG_PARAMS:
         assert compare_param(0, key, key, ParamType(wrong)) is not None, (key, wrong)
+
+
+EXTENSION: Final[list[tuple[TypeKey, LeafName, ParamName]]] = [
+    ("hstore", "dict[str, str | None]", "dict"),
+    ("cube", "rowx.postgres.Cube", "Cube"),
+]
+
+
+@pytest.mark.parametrize(("key", "leaf", "_name"), EXTENSION)
+def test_extension_column_matches_only_its_own_leaf(key: TypeKey, leaf: LeafName, _name: ParamName) -> None:
+    assert run(scalar(Elem(leaf, nullable=False)), col(key)) == []
+    for wrong in ("str", "float", "int", "rowx.postgres.Money"):
+        assert rules(run(scalar(Elem(wrong, nullable=False)), col(key))) == ["type-mismatch"], wrong
+    for other_key, other_leaf, _ in EXTENSION:
+        if other_key != key:
+            assert rules(run(scalar(Elem(other_leaf, nullable=False)), col(key))) == ["type-mismatch"], other_key
+
+
+@pytest.mark.parametrize("key", ["ltree", "lquery"])
+def test_label_tree_columns_are_str(key: TypeKey) -> None:
+    assert run(scalar(Elem("str", nullable=False)), col(key)) == []
+    assert rules(run(scalar(Elem("rowx.postgres.Cube", nullable=False)), col(key))) == ["type-mismatch"]
+    assert compare_param(0, key, key, ParamType("str")) is None
+    assert compare_param(0, key, key, ParamType("dict")) is not None
+
+
+@pytest.mark.parametrize(("key", "_leaf", "name"), EXTENSION)
+def test_extension_parameter_takes_only_its_own_class(key: TypeKey, _leaf: LeafName, name: ParamName) -> None:
+    assert compare_param(0, key, key, ParamType(name)) is None
+    for wrong in ("str", "int", "float", "list", "Money"):
+        assert compare_param(0, key, key, ParamType(wrong)) is not None, (key, wrong)

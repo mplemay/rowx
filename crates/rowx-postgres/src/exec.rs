@@ -5,6 +5,7 @@ use futures_util::{FutureExt, TryStreamExt, pin_mut};
 use tokio_postgres::types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
 use tokio_postgres::{Client, Row, RowStream, Statement};
 
+use crate::describe;
 use crate::error::Error;
 use crate::stmt_cache::StmtCache;
 
@@ -128,8 +129,30 @@ async fn prepare(
         return Ok((stmt, true));
     }
     let stmt = client.prepare(sql).await?;
+    reject_impostors(client, &stmt).await?;
     cache.insert(sql, stmt.clone());
     Ok((stmt, false))
+}
+
+// the codecs pick an extension type by name, so a same-named type from elsewhere must not get them;
+// the owner lookup runs only when a statement mentions such a name, and only on a cache miss
+async fn reject_impostors(client: &Client, stmt: &Statement) -> Result<(), Error> {
+    let types = || {
+        stmt.params()
+            .iter()
+            .chain(stmt.columns().iter().map(tokio_postgres::Column::type_))
+    };
+    let candidates = describe::extension_candidates(types());
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let owners = describe::extension_owners(client, &candidates).await?;
+    describe::impostor(types(), &owners).map_or(Ok(()), |name| {
+        Err(Error::Decode(format!(
+            "the type {name} is not owned by the extension that defines a type of that name, \
+             so rowx has no codec for it"
+        )))
+    })
 }
 
 enum Retry {

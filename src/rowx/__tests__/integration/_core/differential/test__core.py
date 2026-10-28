@@ -12,6 +12,8 @@ from typing import Any, Final, Literal, LiteralString, cast
 import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.types import TypeInfo
+from psycopg.types.hstore import register_hstore
 from psycopg.types.range import Range as PsycopgRange
 
 from rowx import postgres
@@ -28,8 +30,10 @@ DOC_HEADING: Final[str] = "## Differences from psycopg"
 # rowx returning None for void, rowx returning an interface where psycopg returns the bare host address, or rowx's
 # own `Range` class holding the bounds psycopg's `Range` holds, or rowx returning the minor units of a money value
 # where psycopg returns its formatted text, or rowx returning a geometric dataclass where psycopg returns the server's
-# text
-type Difference = Literal["instant", "float32", "decode-error", "void", "host-address", "range", "money", "geometric"]
+# text, or rowx returning a `Cube` where psycopg returns the server's text
+type Difference = Literal[
+    "instant", "float32", "decode-error", "void", "host-address", "range", "money", "geometric", "cube"
+]
 
 _RANGE_CLASS: Final[str] = (
     "rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal"
@@ -92,6 +96,10 @@ DIFFERENCES: Final[dict[str, str]] = {
         "server formats under `lc_monetary`."
     ),
     **GEOMETRIC_DIFFERENCES,
+    "cube": (
+        "rowx returns `rowx.postgres.Cube`, while psycopg returns the text the server formats; the coordinates are "
+        "equal."
+    ),
 }
 
 
@@ -210,6 +218,33 @@ CORPUS: Final[list[Case]] = [
         "polygon", "polygon", "((0,0))", "((0,0),(1,0),(1,1))", "((0,0),(1e300,0),(NaN,1))", difference="geometric"
     ),
     *_cases("circle", "circle", "<(0,0),0>", "<(1,2),3>", "<(-1.5,1e300),Infinity>", difference="geometric"),
+    # the extensions live in public, which the test search_path leaves out
+    *_cases(
+        "hstore",
+        "public.hstore",
+        "",
+        "a=>1",
+        "a=>NULL",
+        '"a b"=>"c, d"',
+        '"k"=>"", "n"=>"NULL"',
+        "é=>ü",
+        '"a=>b"=>"c=>d"',
+    ),
+    *_cases("array", "public.hstore[]", '{"a=>1",NULL,""}'),
+    *_cases("ltree", "public.ltree", "", "a", "a.b.c", "Top.Science.Astronomy", "A_1.b2"),
+    *_cases("lquery", "public.lquery", "*", "a.*{1,2}.b", "a|b.c@", "!a.*", "*.a.*"),
+    *_cases(
+        "cube",
+        "public.cube",
+        "()",
+        "(1)",
+        "(1),(2)",
+        "(1,2)",
+        "(1,2),(3,4)",
+        "(-1.5,0),(2,1e10)",
+        "(3,4),(1,2)",
+        difference="cube",
+    ),
     *_cases("bit", "bit(1)", "0", "1"),
     *_cases("bit", "bit(8)", "00000000", "10101010", "11111111"),
     *_cases("bit", "bit(9)", "101010101", "000000001"),
@@ -332,6 +367,9 @@ def _psycopg_outcome(dsn: str, sql: str) -> tuple[str, Any]:
     options = f"{conninfo_to_dict(dsn).get('options', '')} -c TimeZone=America/Chicago"
     conninfo = make_conninfo(dsn, options=options)
     with psycopg.connect(conninfo, autocommit=True) as conn:
+        # without this psycopg returns an hstore as text
+        if (info := TypeInfo.fetch(conn, "public.hstore")) is not None:
+            register_hstore(info, conn)
         try:
             row = conn.execute(cast("LiteralString", sql)).fetchone()
         except psycopg.DataError as exc:
@@ -431,6 +469,25 @@ def _geometric_matches(rowx_value: object, psycopg_text: object) -> bool:
     return True
 
 
+def _cube_matches(rowx_value: postgres.Cube, psycopg_text: object) -> bool:
+    assert isinstance(psycopg_text, str)
+    numbers = [float(number) for number in re.findall(GEOMETRIC_NUMBER, psycopg_text)]
+    dim = len(rowx_value.lower_left)
+    if len(rowx_value.upper_right) != dim:
+        return False
+    # the server prints a point with one corner, and the codec reads it back as two equal ones
+    if len(numbers) == dim:
+        return list(rowx_value.lower_left) == numbers == list(rowx_value.upper_right)
+    return len(numbers) == 2 * dim and [*rowx_value.lower_left, *rowx_value.upper_right] == numbers
+
+
+def _structured_matches(rowx_value: object, psycopg_value: object) -> bool:
+    if isinstance(rowx_value, postgres.Cube):
+        return _cube_matches(rowx_value, psycopg_value)
+    classes = tuple(getattr(postgres, name) for name in GEOMETRIC_CLASSES.values())
+    return isinstance(rowx_value, classes) and _geometric_matches(rowx_value, psycopg_value)
+
+
 def test_corpus_covers_the_type_table() -> None:
     supported = {t.key for t in type_table() if t.decode != "unsupported"}
     assert {case.key for case in CORPUS} == supported
@@ -469,11 +526,10 @@ def test_decode_matches_psycopg(schema: str, case: Case) -> None:
         case "money":
             assert status == "ok", rowx_value
             assert _money_matches(schema, case, rowx_value)
-        case "geometric":
+        case "geometric" | "cube":
             _, psycopg_value = _psycopg_outcome(schema, sql)
             assert status == "ok", rowx_value
-            assert isinstance(rowx_value, tuple(getattr(postgres, name) for name in GEOMETRIC_CLASSES.values()))
-            assert _geometric_matches(rowx_value, psycopg_value), (rowx_value, psycopg_value)
+            assert _structured_matches(rowx_value, psycopg_value), (rowx_value, psycopg_value)
         case "void":
             assert (status, rowx_value) == ("ok", None)
             assert _psycopg_outcome(schema, sql) == ("ok", "")

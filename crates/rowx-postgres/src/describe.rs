@@ -103,51 +103,120 @@ fn range_key(subtype: &Type) -> Option<&'static str> {
     key_of(Matcher::RangeKind(subtype.oid()))
 }
 
-fn table_key(ty: &Type) -> Option<&'static str> {
+// the extension that owns each candidate type, by oid; a type missing from it belongs to none
+pub type Owners = HashMap<u32, String>;
+
+fn table_key(ty: &Type, owners: &Owners) -> Option<&'static str> {
     TYPE_TABLE
         .iter()
         .find(|t| match t.matcher {
             Matcher::Oid(oid) => oid == ty.oid(),
-            Matcher::NamedSimple(name) => name == ty.name(),
+            Matcher::ExtNamed(name, extension) => {
+                matches!(ty.kind(), Kind::Simple)
+                    && name == ty.name()
+                    && owners.get(&ty.oid()).is_some_and(|o| o == extension)
+            }
             _ => false,
         })
         .map(|t| t.key)
 }
 
+// the oid of the leaf type (below any array or domain wrapper) that bears an extension row's name,
+// which is the only kind of type whose owner decides its row
+fn extension_leaf(ty: &Type) -> Option<&Type> {
+    match ty.kind() {
+        Kind::Array(inner) | Kind::Domain(inner) => extension_leaf(inner),
+        Kind::Simple => TYPE_TABLE
+            .iter()
+            .any(|t| matches!(t.matcher, Matcher::ExtNamed(name, _) if name == ty.name()))
+            .then_some(ty),
+        _ => None,
+    }
+}
+
+/// The oids among `types` whose owning extension decides how they are read (sorted, deduplicated).
+#[must_use]
+pub fn extension_candidates<'a>(types: impl IntoIterator<Item = &'a Type>) -> Vec<u32> {
+    let mut oids: Vec<u32> = types
+        .into_iter()
+        .filter_map(|ty| extension_leaf(ty).map(Type::oid))
+        .collect();
+    oids.sort_unstable();
+    oids.dedup();
+    oids
+}
+
+/// The name of the first type among `types` that bears an extension type's name without being owned
+/// by that extension; the runtime codecs dispatch on the name, so a statement using it must not run.
+#[must_use]
+pub fn impostor<'a>(types: impl IntoIterator<Item = &'a Type>, owners: &Owners) -> Option<String> {
+    types
+        .into_iter()
+        .filter_map(extension_leaf)
+        .find(|leaf| table_key(leaf, owners).is_none())
+        .map(|leaf| format!("{}.{}", leaf.schema(), leaf.name()))
+}
+
+/// The extension (`pg_depend` with `deptype = 'e'`, then `pg_extension`) that owns each type in `oids`.
+/// A type that no extension owns is absent from the result.
+///
+/// # Errors
+/// `Db`/`Interface` when the catalog query fails.
+pub async fn extension_owners(client: &Client, oids: &[u32]) -> Result<Owners, Error> {
+    if oids.is_empty() {
+        return Ok(Owners::new());
+    }
+    let rows = client
+        .query(
+            "SELECT d.objid, e.extname::text FROM pg_depend d \
+             JOIN pg_extension e ON e.oid = d.refobjid \
+             WHERE d.classid = 'pg_type'::regclass AND d.refclassid = 'pg_extension'::regclass \
+             AND d.deptype = 'e' AND d.objid = ANY($1::oid[])",
+            &[&oids],
+        )
+        .await?;
+    rows.iter()
+        .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
+        .collect::<Result<_, tokio_postgres::Error>>()
+        .map_err(Error::from)
+}
+
 // the oid of the first leaf type (below any array or domain wrapper) that has no table row
-fn unresolved_leaf(ty: &Type) -> Option<u32> {
+fn unresolved_leaf(ty: &Type, owners: &Owners) -> Option<u32> {
     match ty.kind() {
         Kind::Enum(_) => None,
-        Kind::Array(inner) | Kind::Domain(inner) => unresolved_leaf(inner),
+        Kind::Array(inner) | Kind::Domain(inner) => unresolved_leaf(inner, owners),
         Kind::Range(subtype) => range_key(subtype).is_none().then(|| ty.oid()),
-        _ => table_key(ty).is_none().then(|| ty.oid()),
+        _ => table_key(ty, owners).is_none().then(|| ty.oid()),
     }
 }
 
 // a type outside the table is unsupported even when it reuses a built-in send function, since the
 // runtime codecs dispatch on the table alone; its typsend only describes why (`-` has no binary send)
-fn resolve(ty: &Type, sends: &HashMap<u32, String>) -> TypeKey {
+fn resolve(ty: &Type, sends: &HashMap<u32, String>, owners: &Owners) -> TypeKey {
     let wrapper = |matcher| key_of(matcher).ok_or(Unsupported { typsend: None });
     match ty.kind() {
         Kind::Enum(_) => wrapper(Matcher::EnumKind),
-        Kind::Array(inner) => resolve(inner, sends).and_then(|_| wrapper(Matcher::ArrayKind)),
+        Kind::Array(inner) => {
+            resolve(inner, sends, owners).and_then(|_| wrapper(Matcher::ArrayKind))
+        }
         // the runtime encodes and decodes a domain as its base type, so it takes the base key
-        Kind::Domain(base) => resolve(base, sends),
+        Kind::Domain(base) => resolve(base, sends, owners),
         // a user-defined range over a supported subtype decodes like the built-in range of that subtype
         Kind::Range(subtype) => range_key(subtype).ok_or_else(|| Unsupported {
             typsend: sends.get(&ty.oid()).cloned(),
         }),
-        _ => table_key(ty).ok_or_else(|| Unsupported {
+        _ => table_key(ty, owners).ok_or_else(|| Unsupported {
             typsend: sends.get(&ty.oid()).cloned(),
         }),
     }
 }
 
 // the key of the element type behind an array (looking through domains), if there is one
-fn element_key(ty: &Type, sends: &HashMap<u32, String>) -> Option<&'static str> {
+fn element_key(ty: &Type, sends: &HashMap<u32, String>, owners: &Owners) -> Option<&'static str> {
     match ty.kind() {
-        Kind::Array(inner) => resolve(inner, sends).ok(),
-        Kind::Domain(base) => element_key(base, sends),
+        Kind::Array(inner) => resolve(inner, sends, owners).ok(),
+        Kind::Domain(base) => element_key(base, sends, owners),
         _ => None,
     }
 }
@@ -265,11 +334,20 @@ fn apply_overrides(col: &mut ColumnInfo) {
 /// `Db` (with the error position) when the server rejects the SQL, `Interface` for IO problems.
 pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
     let stmt = client.prepare(sql).await?;
+    let owners = extension_owners(
+        client,
+        &extension_candidates(
+            stmt.params()
+                .iter()
+                .chain(stmt.columns().iter().map(tokio_postgres::Column::type_)),
+        ),
+    )
+    .await?;
     let mut unresolved: Vec<u32> = stmt
         .params()
         .iter()
         .chain(stmt.columns().iter().map(tokio_postgres::Column::type_))
-        .filter_map(unresolved_leaf)
+        .filter_map(|ty| unresolved_leaf(ty, &owners))
         .collect();
     unresolved.sort_unstable();
     unresolved.dedup();
@@ -281,8 +359,8 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
         .map(|ty| ParamInfo {
             oid: ty.oid(),
             type_name: ty.name().to_owned(),
-            type_key: resolve(ty, &sends),
-            element_key: element_key(ty, &sends),
+            type_key: resolve(ty, &sends, &owners),
+            element_key: element_key(ty, &sends, &owners),
         })
         .collect();
     let mut columns: Vec<ColumnInfo> = stmt
@@ -295,8 +373,8 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
                 raw_name: col.name().to_owned(),
                 oid: col.type_().oid(),
                 type_name: col.type_().name().to_owned(),
-                type_key: resolve(col.type_(), &sends),
-                element_key: element_key(col.type_(), &sends),
+                type_key: resolve(col.type_(), &sends, &owners),
+                element_key: element_key(col.type_(), &sends, &owners),
                 table_oid,
                 attnum: table_oid.and_then(|_| col.column_id()),
                 // the catalog and plan passes below refine this
@@ -354,7 +432,7 @@ mod tests {
 
     use tokio_postgres::types::{Kind, Type};
 
-    use super::{Unsupported, resolve, unresolved_leaf};
+    use super::{Unsupported, extension_candidates, impostor, resolve, unresolved_leaf};
 
     fn custom(name: &str, oid: u32) -> Type {
         Type::new(name.to_owned(), oid, Kind::Simple, "public".to_owned())
@@ -362,17 +440,20 @@ mod tests {
 
     #[test]
     fn builtin_types_resolve_without_typsend() {
-        assert_eq!(resolve(&Type::INT4, &HashMap::new()), Ok("int4"));
-        assert_eq!(unresolved_leaf(&Type::INT4), None);
+        assert_eq!(
+            resolve(&Type::INT4, &HashMap::new(), &HashMap::new()),
+            Ok("int4")
+        );
+        assert_eq!(unresolved_leaf(&Type::INT4, &HashMap::new()), None);
     }
 
     #[test]
     fn custom_type_with_a_builtin_send_function_is_unsupported() {
         let ty = custom("refcursor_like", 90_001);
-        assert_eq!(unresolved_leaf(&ty), Some(90_001));
+        assert_eq!(unresolved_leaf(&ty, &HashMap::new()), Some(90_001));
         let sends = HashMap::from([(90_001, "textsend".to_owned())]);
         assert_eq!(
-            resolve(&ty, &sends),
+            resolve(&ty, &sends, &HashMap::new()),
             Err(Unsupported {
                 typsend: Some("textsend".to_owned())
             })
@@ -387,14 +468,17 @@ mod tests {
             Kind::Domain(Type::INT4),
             "public".to_owned(),
         );
-        assert_eq!(resolve(&domain, &HashMap::new()), Ok("int4"));
+        assert_eq!(
+            resolve(&domain, &HashMap::new(), &HashMap::new()),
+            Ok("int4")
+        );
         let over_unsupported = Type::new(
             "odd_domain".to_owned(),
             90_005,
             Kind::Domain(custom("odd", 90_002)),
             "public".to_owned(),
         );
-        assert!(resolve(&over_unsupported, &HashMap::new()).is_err());
+        assert!(resolve(&over_unsupported, &HashMap::new(), &HashMap::new()).is_err());
     }
 
     #[test]
@@ -402,13 +486,13 @@ mod tests {
         let ty = custom("odd", 90_002);
         let sends = HashMap::from([(90_002, "cash_send".to_owned())]);
         assert_eq!(
-            resolve(&ty, &sends),
+            resolve(&ty, &sends, &HashMap::new()),
             Err(Unsupported {
                 typsend: Some("cash_send".to_owned())
             })
         );
         assert_eq!(
-            resolve(&ty, &HashMap::new()),
+            resolve(&ty, &HashMap::new(), &HashMap::new()),
             Err(Unsupported { typsend: None })
         );
     }
@@ -421,15 +505,21 @@ mod tests {
             Kind::Array(custom("odd", 90_002)),
             "public".to_owned(),
         );
-        assert_eq!(unresolved_leaf(&array), Some(90_002));
-        assert!(resolve(&array, &HashMap::new()).is_err());
+        assert_eq!(unresolved_leaf(&array, &HashMap::new()), Some(90_002));
+        assert!(resolve(&array, &HashMap::new(), &HashMap::new()).is_err());
     }
 
     #[test]
     fn builtin_ranges_resolve_by_subtype() {
-        assert_eq!(resolve(&Type::INT4_RANGE, &HashMap::new()), Ok("int4range"));
-        assert_eq!(resolve(&Type::TSTZ_RANGE, &HashMap::new()), Ok("tstzrange"));
-        assert_eq!(unresolved_leaf(&Type::NUM_RANGE), None);
+        assert_eq!(
+            resolve(&Type::INT4_RANGE, &HashMap::new(), &HashMap::new()),
+            Ok("int4range")
+        );
+        assert_eq!(
+            resolve(&Type::TSTZ_RANGE, &HashMap::new(), &HashMap::new()),
+            Ok("tstzrange")
+        );
+        assert_eq!(unresolved_leaf(&Type::NUM_RANGE, &HashMap::new()), None);
     }
 
     #[test]
@@ -440,8 +530,11 @@ mod tests {
             Kind::Range(Type::INT4),
             "public".to_owned(),
         );
-        assert_eq!(resolve(&custom, &HashMap::new()), Ok("int4range"));
-        assert_eq!(unresolved_leaf(&custom), None);
+        assert_eq!(
+            resolve(&custom, &HashMap::new(), &HashMap::new()),
+            Ok("int4range")
+        );
+        assert_eq!(unresolved_leaf(&custom, &HashMap::new()), None);
     }
 
     #[test]
@@ -452,10 +545,10 @@ mod tests {
             Kind::Range(Type::FLOAT8),
             "public".to_owned(),
         );
-        assert_eq!(unresolved_leaf(&custom), Some(90_011));
+        assert_eq!(unresolved_leaf(&custom, &HashMap::new()), Some(90_011));
         let sends = HashMap::from([(90_011, "range_send".to_owned())]);
         assert_eq!(
-            resolve(&custom, &sends),
+            resolve(&custom, &sends, &HashMap::new()),
             Err(Unsupported {
                 typsend: Some("range_send".to_owned())
             })
@@ -467,7 +560,7 @@ mod tests {
             Kind::Array(custom),
             "public".to_owned(),
         );
-        assert!(resolve(&array, &sends).is_err());
+        assert!(resolve(&array, &sends, &HashMap::new()).is_err());
     }
 
     #[test]
@@ -478,10 +571,74 @@ mod tests {
             Kind::Array(Type::INT4_RANGE),
             "pg_catalog".to_owned(),
         );
-        assert_eq!(resolve(&array, &HashMap::new()), Ok("array"));
         assert_eq!(
-            super::element_key(&array, &HashMap::new()),
+            resolve(&array, &HashMap::new(), &HashMap::new()),
+            Ok("array")
+        );
+        assert_eq!(
+            super::element_key(&array, &HashMap::new(), &HashMap::new()),
             Some("int4range")
+        );
+    }
+
+    #[test]
+    fn extension_type_resolves_only_for_its_owning_extension() {
+        let ty = custom("hstore", 90_020);
+        assert_eq!(extension_candidates([&ty]), vec![90_020]);
+        let owned = HashMap::from([(90_020, "hstore".to_owned())]);
+        assert_eq!(resolve(&ty, &HashMap::new(), &owned), Ok("hstore"));
+        assert_eq!(unresolved_leaf(&ty, &owned), None);
+        // owned by no extension, or by another one
+        assert!(resolve(&ty, &HashMap::new(), &HashMap::new()).is_err());
+        let other = HashMap::from([(90_020, "ltree".to_owned())]);
+        assert!(resolve(&ty, &HashMap::new(), &other).is_err());
+        assert_eq!(unresolved_leaf(&ty, &other), Some(90_020));
+    }
+
+    #[test]
+    fn lquery_belongs_to_the_ltree_extension() {
+        let ty = custom("lquery", 90_021);
+        let owned = HashMap::from([(90_021, "ltree".to_owned())]);
+        assert_eq!(resolve(&ty, &HashMap::new(), &owned), Ok("lquery"));
+    }
+
+    #[test]
+    fn array_of_an_extension_type_follows_the_element_owner() {
+        let element = custom("citext", 90_022);
+        let array = Type::new(
+            "_citext".to_owned(),
+            90_023,
+            Kind::Array(element),
+            "public".to_owned(),
+        );
+        assert_eq!(extension_candidates([&array]), vec![90_022]);
+        let owned = HashMap::from([(90_022, "citext".to_owned())]);
+        assert_eq!(
+            super::element_key(&array, &HashMap::new(), &owned),
+            Some("citext")
+        );
+        assert_eq!(
+            super::element_key(&array, &HashMap::new(), &HashMap::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn impostor_names_a_same_named_type_the_extension_does_not_own() {
+        let ty = custom("hstore", 90_025);
+        assert_eq!(
+            impostor([&ty], &HashMap::new()).as_deref(),
+            Some("public.hstore")
+        );
+        let owned = HashMap::from([(90_025, "hstore".to_owned())]);
+        assert_eq!(impostor([&ty, &Type::TEXT], &owned), None);
+    }
+
+    #[test]
+    fn a_type_that_shares_no_extension_name_is_never_a_candidate() {
+        assert_eq!(
+            extension_candidates([&custom("mood", 90_024), &Type::TEXT]),
+            Vec::<u32>::new()
         );
     }
 }

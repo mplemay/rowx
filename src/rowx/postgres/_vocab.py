@@ -50,6 +50,10 @@ type TypeKey = Literal[
     "path",
     "polygon",
     "circle",
+    "hstore",
+    "ltree",
+    "lquery",
+    "cube",
 ]
 # `""` is `domain` (no result of its own); `"None"` is `void`; `"object"` is json/jsonb.
 type PyResultName = Literal[
@@ -79,6 +83,8 @@ type PyResultName = Literal[
     "rowx.postgres.Path",
     "rowx.postgres.Polygon",
     "rowx.postgres.Circle",
+    "dict[str, str | None]",
+    "rowx.postgres.Cube",
     "object",
     "list",
     "None",
@@ -106,6 +112,8 @@ type AcceptedParam = Literal[
     "Path",
     "Polygon",
     "Circle",
+    "Cube",
+    "dict",
     "UUID",
     "IPv4Interface",
     "IPv6Interface",
@@ -132,6 +140,7 @@ type CodecName = Literal[
     "money",
     "bits",
     "geometric",
+    "extension",
     "json",
     "temporal",
     "array",
@@ -151,7 +160,7 @@ type NullReasonName = Literal[
     "OverrideBang",
     "OverrideQuestion",
 ]
-# `LEAVES` values (the four network classes only inside a pair), the two pairs, the four range leaves, `Money`, `Interval`, the seven geometric classes, plus `list`, `any` (`Any`/`object`) and `none` (a tuple element `None`).
+# `LEAVES` values (the four network classes only inside a pair), the two pairs, the four range leaves, `Money`, `Interval`, the seven geometric classes, `Cube`, the hstore `dict`, plus `list`, `any` (`Any`/`object`) and `none` (a tuple element `None`).
 type LeafName = Literal[
     "int",
     "float",
@@ -183,6 +192,8 @@ type LeafName = Literal[
     "rowx.postgres.Path",
     "rowx.postgres.Polygon",
     "rowx.postgres.Circle",
+    "rowx.postgres.Cube",
+    "dict[str, str | None]",
     "list",
     "any",
     "none",

@@ -1,6 +1,9 @@
 pub mod array;
 pub mod bits;
+pub mod cube;
 pub mod geometric;
+pub mod hstore;
+pub mod ltree;
 pub mod mac;
 pub mod money;
 pub mod network;

@@ -3,7 +3,7 @@ import ipaddress
 from decimal import Decimal
 
 from rowx import query
-from rowx.postgres import Box, Circle, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
+from rowx.postgres import Box, Circle, Cube, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
 
 type Inet = ipaddress.IPv4Interface | ipaddress.IPv6Interface
 type Cidr = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -86,3 +86,21 @@ def run_geometric() -> None:
     query[Money](t'SELECT {Point(1.0, 2.0)}::money AS "p!"')  # error: [param-type-mismatch]
     query[list[Point]](t'SELECT {[Point(1.0, 2.0)]}::point[] AS "p!"')
     query[list[Point]](t'SELECT {[1.0]}::point[] AS "p!"')  # error: [param-type-mismatch]
+
+
+def run_extensions(tags: dict[str, str | None]) -> None:
+    query[dict[str, str | None]](t'SELECT {tags}::public.hstore AS "h!"')
+    query[Cube](t'SELECT {Cube((1.0,), (2.0,))}::public.cube AS "c!"')
+    query[str](t'SELECT {"a.b"}::public.ltree AS "l!"')
+    query[str](t'SELECT {"a.*"}::public.lquery AS "l!"')
+    query[list[str | None]](t'SELECT {["a", "b"]}::public.citext[] AS "c!"')
+    query[dict[str, str | None]](t'SELECT {"a=>1"}::public.hstore AS "h!"')  # error: [param-type-mismatch]
+    query[dict[str, str | None]](t'SELECT {[1]}::public.hstore AS "h!"')  # error: [param-type-mismatch]
+    query[Cube](t'SELECT {(1.0, 2.0)}::public.cube AS "c!"')  # error: [param-type-mismatch]
+    query[Cube](t'SELECT {"(1,2)"}::public.cube AS "c!"')  # error: [param-type-mismatch]
+    query[Cube](t'SELECT {Point(1.0, 2.0)}::public.cube AS "c!"')  # error: [param-type-mismatch]
+    query[str](t'SELECT {Cube((1.0,), (2.0,))}::public.ltree AS "l!"')  # error: [param-type-mismatch]
+    query[str](t'SELECT {tags}::public.ltree AS "l!"')  # error: [param-type-mismatch]
+    query[str](t'SELECT {1}::public.lquery AS "l!"')  # error: [param-type-mismatch]
+    query[list[Cube | None]](t'SELECT {[Cube((1.0,), (2.0,))]}::public.cube[] AS "c!"')
+    query[list[Cube | None]](t'SELECT {[1.0]}::public.cube[] AS "c!"')  # error: [param-type-mismatch]

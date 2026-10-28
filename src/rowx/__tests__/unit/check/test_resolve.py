@@ -368,3 +368,29 @@ def test_geometric_classes_cannot_be_unioned_or_subscripted(tmp_path: Path, anno
     source = "from rowx.postgres import Circle, Path, Point, Polygon\n"
     write(tmp_path, {"main.py": source + QUERY.format(t=annotation)})
     assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+
+
+def test_hstore_leaf_through_aliases_and_a_list(tmp_path: Path) -> None:
+    source = "from typing import Optional\ntype Tags = dict[str, str | None]\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="tuple[Tags, Optional[dict[str, Optional[str]]], list[Tags]]")})
+    first, second, third = row_type(resolve(tmp_path, "main.py")).elements
+    assert (first.leaf, first.nullable) == ("dict[str, str | None]", False)
+    assert (second.leaf, second.nullable) == ("dict[str, str | None]", True)
+    assert third.item is not None
+    assert third.item.leaf == "dict[str, str | None]"
+
+
+def test_cube_leaf_through_its_defining_module(tmp_path: Path) -> None:
+    source = "from rowx.postgres._cube import Cube\nimport rowx.postgres\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t="tuple[Cube, rowx.postgres.Cube | None]")})
+    assert leaves(resolve(tmp_path, "main.py")) == [("rowx.postgres.Cube", False), ("rowx.postgres.Cube", True)]
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    ["dict", "dict[str, str]", "dict[str, int]", "dict[int, str | None]", "dict[str, str | None] | Cube", "Cube[int]"],
+)
+def test_only_the_hstore_dict_and_a_plain_cube_are_leaves(tmp_path: Path, annotation: str) -> None:
+    source = "from rowx.postgres import Cube\n"
+    write(tmp_path, {"main.py": source + QUERY.format(t=annotation)})
+    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
