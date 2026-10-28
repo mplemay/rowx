@@ -135,7 +135,7 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: &[u8]) -> PyResult<Bound<'py
             closed,
         } => cls.call1((points(py, &items)?, closed)),
         Shape::Polygon(items) => cls.call1((points(py, &items)?,)),
-        Shape::Circle { center, radius } => cls.call1((point(py, center)?, radius)),
+        Shape::Circle { center, radius } => cls.call1((center.x, center.y, radius)),
     }
 }
 

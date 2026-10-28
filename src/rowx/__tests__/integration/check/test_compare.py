@@ -465,7 +465,7 @@ PARAM_VALUES: Final[list[str]] = [
     "Box(Point(1.0, 1.0), Point(0.0, 0.0))",
     "Path((Point(0.0, 0.0),), closed=False)",
     "Polygon((Point(0.0, 0.0),))",
-    "Circle(Point(0.0, 0.0), 1.0)",
+    "Circle(0.0, 0.0, 1.0)",
     "None",
     "[1, 2]",
     "(1, 2)",
@@ -498,7 +498,7 @@ NOT_JSON: Final[list[str]] = [
     "Box(Point(1.0, 1.0), Point(0.0, 0.0))",
     "Path((Point(0.0, 0.0),), closed=False)",
     "Polygon((Point(0.0, 0.0),))",
-    "Circle(Point(0.0, 0.0), 1.0)",
+    "Circle(0.0, 0.0, 1.0)",
 ]
 # the checker does not look at time zones, so the runtime rejects these where the checker stays quiet
 # and `json.dumps` and the one-character rule of "char" are value checks the checker never makes

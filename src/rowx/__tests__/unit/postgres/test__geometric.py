@@ -18,7 +18,7 @@ FIELDS: Final[dict[str, list[str]]] = {
     "Box": ["upper_right", "lower_left"],
     "Path": ["points", "closed"],
     "Polygon": ["points"],
-    "Circle": ["center", "radius"],
+    "Circle": ["x", "y", "radius"],
 }
 
 VALUES: Final[list[Shape]] = [
@@ -28,7 +28,7 @@ VALUES: Final[list[Shape]] = [
     Box(UNIT, ORIGIN),
     Path((ORIGIN, UNIT), closed=True),
     Polygon((ORIGIN, UNIT)),
-    Circle(ORIGIN, 1.0),
+    Circle(0.0, 0.0, 1.0),
 ]
 
 

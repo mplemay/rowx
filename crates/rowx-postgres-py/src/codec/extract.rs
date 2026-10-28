@@ -247,7 +247,10 @@ fn geometric_param(
         },
         Kind::Polygon => Shape::Polygon(geo_points(py, index, obj)?),
         Kind::Circle => Shape::Circle {
-            center: geo_field(py, index, obj, "center")?,
+            center: Point {
+                x: geo_float(py, index, obj, "x")?,
+                y: geo_float(py, index, obj, "y")?,
+            },
             radius: geo_float(py, index, obj, "radius")?,
         },
     };

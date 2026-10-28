@@ -44,5 +44,6 @@ class Polygon:
 
 @dataclass(frozen=True, slots=True)
 class Circle:
-    center: Point
+    x: float
+    y: float
     radius: float

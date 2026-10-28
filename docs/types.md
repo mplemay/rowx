@@ -88,7 +88,7 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
   server.
 - The geometric types decode to frozen dataclasses in `rowx.postgres`: `Point(x, y)`, `Line(a, b, c)`,
   `LineSegment(start, end)`, `Box(upper_right, lower_left)`, `Path(points, closed)`, `Polygon(points)` and
-  `Circle(center, radius)`, with `points` a tuple of `Point`. The server canonicalises a `box` so its upper right corner
+  `Circle(x, y, radius)`, with `points` a tuple of `Point`. The server canonicalises a `box` so its upper right corner
   comes first, and a decoded box shows that order. Equality compares the fields exactly, not with Postgres'
   epsilon-based `~=`, so a NaN coordinate is never equal to anything. A `path` or `polygon` needs at least one point,
   and the server rejects a `line` whose `a` and `b` are both zero.

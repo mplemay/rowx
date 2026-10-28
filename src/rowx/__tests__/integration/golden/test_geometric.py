@@ -26,7 +26,7 @@ VALUES: Final[dict[str, Any]] = {
     "box": Box(Point(2.0, 3.0), Point(-1.0, 0.0)),
     "path": Path((ORIGIN, UNIT, Point(2.0, 0.0)), closed=False),
     "polygon": Polygon((ORIGIN, Point(1.0, 0.0), UNIT)),
-    "circle": Circle(Point(1.0, 2.0), 3.0),
+    "circle": Circle(1.0, 2.0, 3.0),
 }
 
 
@@ -62,7 +62,7 @@ def test_geometric_array_decodes_and_encodes_with_null_elements_and_dimensions(s
 
 def test_geometric_array_decodes_from_server_literals(schema: str) -> None:
     assert read(schema, "SELECT '{\"(1,2)\",NULL}'::point[]") == [Point(1.0, 2.0), None]
-    assert read(schema, "SELECT '{\"<(0,0),1>\"}'::circle[]") == [Circle(ORIGIN, 1.0)]
+    assert read(schema, "SELECT '{\"<(0,0),1>\"}'::circle[]") == [Circle(0.0, 0.0, 1.0)]
     assert read(schema, "SELECT '{\"((0,0),(1,1))\"}'::polygon[]") == [Polygon((ORIGIN, UNIT))]
 
 
@@ -74,7 +74,7 @@ def test_geometric_array_decodes_from_server_literals(schema: str) -> None:
         ("SELECT '{1,2,3}'::line", Line(1.0, 2.0, 3.0)),
         ("SELECT '[(0,0),(1,1)]'::line", Line(1.0, -1.0, 0.0)),
         ("SELECT '((1,2),(3,4))'::lseg", LineSegment(Point(1.0, 2.0), Point(3.0, 4.0))),
-        ("SELECT '<(1,2),3>'::circle", Circle(Point(1.0, 2.0), 3.0)),
+        ("SELECT '<(1,2),3>'::circle", Circle(1.0, 2.0, 3.0)),
         ("SELECT '((0,0),(1,1))'::path", Path((ORIGIN, UNIT), closed=True)),
         ("SELECT '[(0,0),(1,1)]'::path", Path((ORIGIN, UNIT), closed=False)),
         ("SELECT '(0,0),(1,1),(2,0)'::polygon", Polygon((ORIGIN, UNIT, Point(2.0, 0.0)))),
@@ -101,8 +101,8 @@ def test_non_finite_coordinates_round_trip(schema: str) -> None:
     assert isinstance(nan, Point)
     assert math.isnan(nan.x)
     assert nan.y == pytest.approx(1.0)
-    circle = read(schema, "SELECT $1::circle", [Circle(ORIGIN, math.inf)])
-    assert circle == Circle(ORIGIN, math.inf)
+    circle = read(schema, "SELECT $1::circle", [Circle(0.0, 0.0, math.inf)])
+    assert circle == Circle(0.0, 0.0, math.inf)
 
 
 def test_nan_coordinates_are_not_equal_to_each_other() -> None:
@@ -139,7 +139,7 @@ def test_a_degenerate_line_is_rejected_by_the_server(schema: str) -> None:
 
 def test_a_negative_radius_is_rejected_by_the_server(schema: str) -> None:
     with pytest.raises(DatabaseError) as info:
-        read(schema, "SELECT $1::circle", [Circle(ORIGIN, -1.0)])
+        read(schema, "SELECT $1::circle", [Circle(0.0, 0.0, -1.0)])
     assert info.value.sqlstate == INVALID_BINARY_REPRESENTATION
 
 

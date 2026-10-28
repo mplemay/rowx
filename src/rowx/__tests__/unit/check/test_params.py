@@ -530,6 +530,6 @@ def test_calls_to_geometric_classes_have_evident_types() -> None:
         from rowx.postgres import Box, Circle, Line, LineSegment, Path, Point, Polygon
 
         q(t"{Point(1.0, 2.0)} {Line(1.0, 2.0, 3.0)} {LineSegment(a, b)} {Box(a, b)} {Path((a,), closed=True)}")
-        q(t"{Polygon((a,))} {Circle(a, 1.0)}")
+        q(t"{Polygon((a,))} {Circle(1.0, 2.0, 1.0)}")
     """
     assert infer(source) == ["Point", "Line", "LineSegment", "Box", "Path", "Polygon", "Circle"]

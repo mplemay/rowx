@@ -75,11 +75,11 @@ def run_geometric() -> None:
     query[Box](t'SELECT {Box(Point(1.0, 1.0), Point(0.0, 0.0))}::box AS "b!"')
     query[Path](t'SELECT {Path((Point(0.0, 0.0),), closed=False)}::path AS "p!"')
     query[Polygon](t'SELECT {Polygon((Point(0.0, 0.0),))}::polygon AS "p!"')
-    query[Circle](t'SELECT {Circle(Point(0.0, 0.0), 1.0)}::circle AS "c!"')
+    query[Circle](t'SELECT {Circle(0.0, 0.0, 1.0)}::circle AS "c!"')
     query[Point](t'SELECT {(1.0, 2.0)}::point AS "p!"')  # error: [param-type-mismatch]
     query[Point](t'SELECT {"(1,2)"}::point AS "p!"')  # error: [param-type-mismatch]
     query[Point](t'SELECT {1.5}::point AS "p!"')  # error: [param-type-mismatch]
-    query[Point](t'SELECT {Circle(Point(0.0, 0.0), 1.0)}::point AS "p!"')  # error: [param-type-mismatch]
+    query[Point](t'SELECT {Circle(0.0, 0.0, 1.0)}::point AS "p!"')  # error: [param-type-mismatch]
     query[Polygon](t'SELECT {Path((Point(0.0, 0.0),), closed=True)}::polygon AS "p!"')  # error: [param-type-mismatch]
     query[Box](t'SELECT {LineSegment(Point(0.0, 0.0), Point(1.0, 1.0))}::box AS "b!"')  # error: [param-type-mismatch]
     query[str](t'SELECT {Point(1.0, 2.0)}::text AS "p!"')  # error: [param-type-mismatch]
