@@ -4,6 +4,7 @@ use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
 };
 
+use crate::codec::geometric::{class_name, kind_of_object, point_class};
 use crate::codec::money::money_class;
 use crate::codec::network::read as read_ip;
 use crate::codec::numeric::decimal_class;
@@ -14,6 +15,7 @@ use crate::codec::temporal::{
 use crate::codec::temporal_enc::Ymd;
 use crate::codec::uuid::uuid_class;
 use crate::errors::encode_error;
+use rowx_postgres::wire::geometric::{Kind, Point, Shape};
 use rowx_postgres::wire::network::Addr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +70,8 @@ pub enum PyParam {
     },
     // a `rowx.postgres.Money`: its minor units
     Money(i64),
+    // one of the `rowx.postgres` geometric dataclasses
+    Geometric(Shape),
     // a `rowx.postgres.Range`; a `None` bound is an infinite side
     Range {
         lower: Option<Box<Self>>,
@@ -113,6 +117,7 @@ impl PyParam {
             Self::Timedelta { .. } => "timedelta",
             Self::Interval { .. } => "Interval",
             Self::Money(_) => "Money",
+            Self::Geometric(shape) => class_name(shape.kind()),
             Self::Range { .. } => "Range",
             Self::Bytes(_, name) | Self::Seq(_, _, name) | Self::Other(_, name) => name,
         }
@@ -178,6 +183,78 @@ fn range_param(
         upper_inc: obj.getattr("upper_inc")?.extract()?,
         empty: obj.getattr("empty")?.extract()?,
     })
+}
+
+fn geo_float(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, name: &str) -> PyResult<f64> {
+    obj.getattr(name)
+        .and_then(|value| value.extract::<f64>())
+        .map_err(|_| encode_error(py, &format!("${}: the {name} is not a number", index + 1)))
+}
+
+fn geo_point(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<Point> {
+    let cls = point_class(py)?;
+    if !obj.is_instance(&cls)? {
+        return Err(encode_error(
+            py,
+            &format!(
+                "${}: expected a rowx.postgres.Point, got a Python {}",
+                index + 1,
+                obj.get_type().name()?
+            ),
+        ));
+    }
+    Ok(Point {
+        x: geo_float(py, index, obj, "x")?,
+        y: geo_float(py, index, obj, "y")?,
+    })
+}
+
+fn geo_field(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Point> {
+    geo_point(py, index, &obj.getattr(name)?)
+}
+
+fn geo_points(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<Vec<Point>> {
+    obj.getattr("points")?
+        .try_iter()?
+        .map(|item| geo_point(py, index, &item?))
+        .collect()
+}
+
+fn geometric_param(
+    py: Python<'_>,
+    index: usize,
+    kind: Kind,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<PyParam> {
+    let shape = match kind {
+        Kind::Point => Shape::Point(geo_point(py, index, obj)?),
+        Kind::Line => Shape::Line {
+            a: geo_float(py, index, obj, "a")?,
+            b: geo_float(py, index, obj, "b")?,
+            c: geo_float(py, index, obj, "c")?,
+        },
+        Kind::LineSegment => Shape::LineSegment(
+            geo_field(py, index, obj, "start")?,
+            geo_field(py, index, obj, "end")?,
+        ),
+        Kind::Box => Shape::Box {
+            upper_right: geo_field(py, index, obj, "upper_right")?,
+            lower_left: geo_field(py, index, obj, "lower_left")?,
+        },
+        Kind::Path => Shape::Path {
+            points: geo_points(py, index, obj)?,
+            closed: obj.getattr("closed")?.extract()?,
+        },
+        Kind::Polygon => Shape::Polygon(geo_points(py, index, obj)?),
+        Kind::Circle => Shape::Circle {
+            center: Point {
+                x: geo_float(py, index, obj, "x")?,
+                y: geo_float(py, index, obj, "y")?,
+            },
+            radius: geo_float(py, index, obj, "radius")?,
+        },
+    };
+    Ok(PyParam::Geometric(shape))
 }
 
 // the `rowx.postgres` value classes
@@ -292,6 +369,9 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
                     &format!("${}: the str cannot be encoded as UTF-8: {e}", index + 1),
                 )
             });
+    }
+    if let Some(kind) = kind_of_object(py, obj)? {
+        return geometric_param(py, index, kind, obj);
     }
     if depth < MAX_SEQ_DEPTH && obj.is_instance(range_class(py)?)? {
         return range_param(py, index, obj, depth);

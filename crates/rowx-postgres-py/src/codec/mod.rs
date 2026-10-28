@@ -4,6 +4,7 @@ pub mod bits;
 pub mod bytes;
 pub mod extract;
 pub mod float;
+pub mod geometric;
 pub mod int;
 pub mod json;
 pub mod mac;
@@ -88,6 +89,13 @@ pub fn decode_with<'py>(
         Type::INTERVAL => temporal::decode_interval(py, raw),
         Type::MONEY => money::decode(py, raw),
         Type::BIT | Type::VARBIT => bits::decode(py, ty, raw),
+        Type::POINT
+        | Type::LINE
+        | Type::LSEG
+        | Type::BOX
+        | Type::PATH
+        | Type::POLYGON
+        | Type::CIRCLE => geometric::decode(py, ty, raw),
         _ if matches!(ty.kind(), Kind::Enum(_)) || is_citext(ty) => text::decode(py, ty, raw),
         _ if matches!(ty.kind(), Kind::Array(_)) => array::decode(py, ty, raw, as_span),
         _ if is_supported_range(ty) => range::decode(py, ty, raw),
@@ -157,6 +165,13 @@ pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         Type::INTERVAL => temporal_enc::encode_interval(param).map(Param::binary),
         Type::MONEY => money::encode(param),
         Type::BIT | Type::VARBIT => bits::encode(ty, param),
+        Type::POINT
+        | Type::LINE
+        | Type::LSEG
+        | Type::BOX
+        | Type::PATH
+        | Type::POLYGON
+        | Type::CIRCLE => geometric::encode(ty, param),
         // an enum label is sent as text so the server resolves it
         _ if is_enum => text::encode(ty, param).map(Param::text),
         _ if is_citext(ty) => text::encode(ty, param).map(Param::binary),

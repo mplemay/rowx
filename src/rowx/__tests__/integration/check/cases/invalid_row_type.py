@@ -2,7 +2,7 @@ import datetime as dt
 import ipaddress
 
 from rowx import query
-from rowx.postgres import Interval, Money, Range
+from rowx.postgres import Circle, Interval, Money, Path, Point, Polygon, Range
 
 
 def run() -> None:
@@ -18,3 +18,6 @@ def run() -> None:
     query[Interval | Money](t"SELECT 1")  # error: [invalid-row-type]
     query[Interval | dt.timedelta](t"SELECT 1")  # error: [invalid-row-type]
     query[tuple[Interval | Money, int]](t"SELECT 1, 2")  # error: [invalid-row-type]
+    query[Point | Circle](t"SELECT 1")  # error: [invalid-row-type]
+    query[Point | dt.date](t"SELECT 1")  # error: [invalid-row-type]
+    query[tuple[Path | Polygon, int]](t"SELECT 1, 2")  # error: [invalid-row-type]

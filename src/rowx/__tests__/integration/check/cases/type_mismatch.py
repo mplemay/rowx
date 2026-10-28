@@ -4,7 +4,7 @@ import uuid
 from decimal import Decimal
 
 from rowx import query
-from rowx.postgres import Interval, Money, Range
+from rowx.postgres import Box, Circle, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
 
 type Inet = ipaddress.IPv4Interface | ipaddress.IPv6Interface
 type Cidr = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -81,3 +81,26 @@ def run_money_bit_interval() -> None:
     query[Interval](t'''SELECT now()::time AS "t!"''')  # error: [type-mismatch]
     query[dt.timedelta](t'''SELECT now()::time AS "t!"''')  # error: [type-mismatch]
     query[list[Interval]](t'''SELECT ARRAY[1] AS "n!"''')  # error: [type-mismatch]
+
+
+def run_geometric() -> None:
+    query[Point](t'''SELECT '(1,2)'::point AS "p!"''')
+    query[Point | None](t'''SELECT '(1,2)'::point AS "p?"''')
+    query[Line](t'''SELECT '[(0,0),(1,1)]'::line AS "l!"''')
+    query[LineSegment](t'''SELECT '[(0,0),(1,1)]'::lseg AS "l!"''')
+    query[Box](t'''SELECT '(0,0),(1,1)'::box AS "b!"''')
+    query[Path](t'''SELECT '[(0,0),(1,1)]'::path AS "p!"''')
+    query[Polygon](t'''SELECT '((0,0),(1,1))'::polygon AS "p!"''')
+    query[Circle](t'''SELECT '<(0,0),1>'::circle AS "c!"''')
+    query[Box](t'''SELECT '(1,2)'::point AS "p!"''')  # error: [type-mismatch]
+    query[Point](t'''SELECT '<(0,0),1>'::circle AS "c!"''')  # error: [type-mismatch]
+    query[Polygon](t'''SELECT '[(0,0),(1,1)]'::path AS "p!"''')  # error: [type-mismatch]
+    query[Path](t'''SELECT '((0,0),(1,1))'::polygon AS "p!"''')  # error: [type-mismatch]
+    query[Line](t'''SELECT '[(0,0),(1,1)]'::lseg AS "l!"''')  # error: [type-mismatch]
+    query[str](t'''SELECT '(1,2)'::point AS "p!"''')  # error: [type-mismatch]
+    query[float](t'''SELECT '(1,2)'::point AS "p!"''')  # error: [type-mismatch]
+    query[Point](t'''SELECT 1 AS "n!"''')  # error: [type-mismatch]
+    query[Point](t'''SELECT 1::money AS "m!"''')  # error: [type-mismatch]
+    query[Money](t'''SELECT '(1,2)'::point AS "p!"''')  # error: [type-mismatch]
+    query[list[Point | None]](t'''SELECT ARRAY['(1,2)'::point] AS "p!"''')
+    query[list[Box]](t'''SELECT ARRAY['(1,2)'::point] AS "p!"''')  # error: [type-mismatch]

@@ -1,8 +1,9 @@
 import asyncio
 import datetime as dt
 import ipaddress
+import re
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from decimal import Decimal
 from math import isnan
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.range import Range as PsycopgRange
 
+from rowx import postgres
 from rowx._core.postgres import type_table
 from rowx.errors import DecodeError
 from rowx.postgres import Money, Range, connect
@@ -25,8 +27,9 @@ DOC_HEADING: Final[str] = "## Differences from psycopg"
 # how a case may differ from psycopg: equal as instants, equal after rounding to float32, rowx raising DecodeError,
 # rowx returning None for void, rowx returning an interface where psycopg returns the bare host address, or rowx's
 # own `Range` class holding the bounds psycopg's `Range` holds, or rowx returning the minor units of a money value
-# where psycopg returns its formatted text
-type Difference = Literal["instant", "float32", "decode-error", "void", "host-address", "range", "money"]
+# where psycopg returns its formatted text, or rowx returning a geometric dataclass where psycopg returns the server's
+# text
+type Difference = Literal["instant", "float32", "decode-error", "void", "host-address", "range", "money", "geometric"]
 
 _RANGE_CLASS: Final[str] = (
     "rowx returns `rowx.postgres.Range`, while psycopg returns its own `Range`; the bounds are equal"
@@ -41,6 +44,24 @@ RANGE_DIFFERENCES: Final[dict[str, str]] = {
     "daterange": f"{_RANGE_CLASS}, but {_RANGE_BOUNDS}.",
     "tsrange": f"{_RANGE_CLASS}, but {_RANGE_BOUNDS}.",
     "tstzrange": f"{_RANGE_CLASS} as instants, but {_RANGE_BOUNDS}.",
+}
+
+
+GEOMETRIC_CLASSES: Final[dict[str, str]] = {
+    "point": "Point",
+    "line": "Line",
+    "lseg": "LineSegment",
+    "box": "Box",
+    "path": "Path",
+    "polygon": "Polygon",
+    "circle": "Circle",
+}
+GEOMETRIC_DIFFERENCES: Final[dict[str, str]] = {
+    key: (
+        f"rowx returns `rowx.postgres.{name}`, while psycopg returns the text the server formats; the coordinates are "
+        "equal."
+    )
+    for key, name in GEOMETRIC_CLASSES.items()
 }
 
 
@@ -70,6 +91,7 @@ DIFFERENCES: Final[dict[str, str]] = {
         "rowx returns `rowx.postgres.Money`, the int8 minor units with no scale, while psycopg returns the text the "
         "server formats under `lc_monetary`."
     ),
+    **GEOMETRIC_DIFFERENCES,
 }
 
 
@@ -170,6 +192,24 @@ CORPUS: Final[list[Case]] = [
         difference="money",
     ),
     *_cases("array", "money[]", "{1.00,NULL,-2.50}", difference="money"),
+    *_cases(
+        "point",
+        "point",
+        "(0,0)",
+        "(1.5,-2)",
+        "(1e300,-1e-300)",
+        "(NaN,Infinity)",
+        "(-Infinity,-0)",
+        difference="geometric",
+    ),
+    *_cases("line", "line", "{1,-2,3}", "{0,1,0}", "{1e10,1e-10,-0.5}", "{NaN,1,Infinity}", difference="geometric"),
+    *_cases("lseg", "lseg", "[(0,0),(1,2)]", "[(1,1),(1,1)]", "[(-1.5,2),(NaN,Infinity)]", difference="geometric"),
+    *_cases("box", "box", "(0,0),(2,3)", "(2,3),(0,0)", "(1,1),(1,1)", "(0,3),(2,0)", difference="geometric"),
+    *_cases("path", "path", "[(0,0)]", "((0,0))", "[(0,0),(1,1),(2,0)]", "((0,0),(1,1),(2,0))", difference="geometric"),
+    *_cases(
+        "polygon", "polygon", "((0,0))", "((0,0),(1,0),(1,1))", "((0,0),(1e300,0),(NaN,1))", difference="geometric"
+    ),
+    *_cases("circle", "circle", "<(0,0),0>", "<(1,2),3>", "<(-1.5,1e300),Infinity>", difference="geometric"),
     *_cases("bit", "bit(1)", "0", "1"),
     *_cases("bit", "bit(8)", "00000000", "10101010", "11111111"),
     *_cases("bit", "bit(9)", "101010101", "000000001"),
@@ -362,6 +402,35 @@ def _money_matches(dsn: str, case: Case, value: object) -> bool:
     return value == Money(expected)
 
 
+GEOMETRIC_NUMBER: Final[str] = r"[-+]?(?:Infinity|NaN|\d+\.?\d*(?:[eE][-+]?\d+)?|\.\d+)"
+
+
+def _geometric_numbers(value: object) -> list[float]:
+    # the coordinates in field order, which is also the order the server prints them in
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, float | int):
+        return [float(value)]
+    if isinstance(value, tuple):
+        return [number for item in value for number in _geometric_numbers(item)]
+    assert is_dataclass(value), value
+    return [number for field in fields(value) for number in _geometric_numbers(getattr(value, field.name))]
+
+
+def _geometric_matches(rowx_value: object, psycopg_text: object) -> bool:
+    assert isinstance(psycopg_text, str)
+    expected = [float(number) for number in re.findall(GEOMETRIC_NUMBER, psycopg_text)]
+    got = _geometric_numbers(rowx_value)
+    if len(got) != len(expected) or not all(
+        (isnan(a) and isnan(b)) or (a == b and str(a) == str(b)) for a, b in zip(got, expected, strict=True)
+    ):
+        return False
+    # a path is closed when the server prints it with parentheses
+    if isinstance(rowx_value, postgres.Path):
+        return rowx_value.closed == psycopg_text.startswith("(")
+    return True
+
+
 def test_corpus_covers_the_type_table() -> None:
     supported = {t.key for t in type_table() if t.decode != "unsupported"}
     assert {case.key for case in CORPUS} == supported
@@ -400,6 +469,11 @@ def test_decode_matches_psycopg(schema: str, case: Case) -> None:
         case "money":
             assert status == "ok", rowx_value
             assert _money_matches(schema, case, rowx_value)
+        case "geometric":
+            _, psycopg_value = _psycopg_outcome(schema, sql)
+            assert status == "ok", rowx_value
+            assert isinstance(rowx_value, tuple(getattr(postgres, name) for name in GEOMETRIC_CLASSES.values()))
+            assert _geometric_matches(rowx_value, psycopg_value), (rowx_value, psycopg_value)
         case "void":
             assert (status, rowx_value) == ("ok", None)
             assert _psycopg_outcome(schema, sql) == ("ok", "")

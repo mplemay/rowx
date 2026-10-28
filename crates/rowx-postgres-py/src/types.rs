@@ -40,6 +40,7 @@ const fn codec_name(codec: Codec) -> &'static str {
         Codec::Range => "range",
         Codec::Money => "money",
         Codec::Bits => "bits",
+        Codec::Geometric => "geometric",
         Codec::Json => "json",
         Codec::Temporal => "temporal",
         Codec::Array => "array",

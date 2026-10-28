@@ -3,7 +3,7 @@ from decimal import Decimal
 from ipaddress import IPv4Interface, IPv4Network, IPv6Interface, IPv6Network
 
 from rowx import query
-from rowx.postgres import Interval, Money, Range
+from rowx.postgres import Box, Circle, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
 
 
 def run() -> None:
@@ -39,4 +39,11 @@ def run() -> None:
     query[tuple[timedelta | None, Interval | None]](t"SELECT c_interval, c_interval FROM all_types")
     query[tuple[list[timedelta | None] | None, list[Interval | None] | None]](
         t"SELECT c_interval_array, c_interval_array FROM all_types"
+    )
+    query[tuple[Point | None, Line | None, LineSegment | None, Box | None]](
+        t"SELECT c_point, c_line, c_lseg, c_box FROM all_types"
+    )
+    query[tuple[Path | None, Polygon | None, Circle | None]](t"SELECT c_path, c_polygon, c_circle FROM all_types")
+    query[tuple[list[Point | None] | None, list[Box | None] | None, list[Polygon | None] | None]](
+        t"SELECT c_point_array, c_box_array, c_polygon_array FROM all_types"
     )

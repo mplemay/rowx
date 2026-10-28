@@ -19,7 +19,7 @@ from rowx.check.params import ParamInference
 from rowx.check.resolve import Elem, RowType
 from rowx.check.runner import describe_all
 from rowx.errors import EncodeError, Error, RowShapeError
-from rowx.postgres import Interval, Money, Range, connect
+from rowx.postgres import Box, Circle, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range, connect
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -215,6 +215,13 @@ LEAVES: Final[list[Leaf]] = [
     range_leaf(dt.datetime, Range[dt.datetime], "rowx.postgres.Range[datetime.datetime]"),
     scalar_leaf("Money", Money, "rowx.postgres.Money"),
     scalar_leaf("Interval", Interval, "rowx.postgres.Interval"),
+    scalar_leaf("Point", Point, "rowx.postgres.Point"),
+    scalar_leaf("Line", Line, "rowx.postgres.Line"),
+    scalar_leaf("LineSegment", LineSegment, "rowx.postgres.LineSegment"),
+    scalar_leaf("Box", Box, "rowx.postgres.Box"),
+    scalar_leaf("Path", Path, "rowx.postgres.Path"),
+    scalar_leaf("Polygon", Polygon, "rowx.postgres.Polygon"),
+    scalar_leaf("Circle", Circle, "rowx.postgres.Circle"),
     LIST_INT,
     list_leaf("list[int | None]", list[int | None], INT_LEAF, item_nullable=True),
     list_leaf("list[str]", list[str], STR_LEAF),
@@ -348,7 +355,7 @@ def natural_leaf(column: ColumnDesc) -> Leaf:
     # the fixed leaves hold only a few array shapes, so every other one-dimensional array gets its own
     candidates += [
         list_leaf(f"list[{inner.name}]", list[inner.annotation], inner)  # ty: ignore[invalid-type-form]
-        for inner in LEAVES[:19]
+        for inner in LEAVES[: LEAVES.index(LIST_INT)]
     ]
     for leaf in candidates:
         if not TYPE_RULES.intersection(findings_for(column, leaf, nullable=column.nullable)):
@@ -423,7 +430,7 @@ def test_nullability_matrix(schema: str) -> None:
 # --- parameters ---
 
 PRELUDE: Final[str] = (
-    "import datetime\nimport decimal\nimport ipaddress\nimport uuid\nfrom rowx.postgres import Interval, Money, Range\n"
+    "import datetime\nimport decimal\nimport ipaddress\nimport uuid\nfrom rowx.postgres import Box, Circle, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range\n"
 )
 UUID_TEXT: Final[str] = "12345678-1234-5678-1234-567812345678"
 # python source -> value; the source is what the checker's inference reads, and the value is what the runtime binds
@@ -452,6 +459,13 @@ PARAM_VALUES: Final[list[str]] = [
     "Range(1, 5)",
     "Money(100)",
     "Interval(months=1)",
+    "Point(1.0, 2.0)",
+    "Line(1.0, 2.0, 3.0)",
+    "LineSegment(Point(0.0, 0.0), Point(1.0, 1.0))",
+    "Box(Point(1.0, 1.0), Point(0.0, 0.0))",
+    "Path((Point(0.0, 0.0),), closed=False)",
+    "Polygon((Point(0.0, 0.0),))",
+    "Circle(0.0, 0.0, 1.0)",
     "None",
     "[1, 2]",
     "(1, 2)",
@@ -478,6 +492,13 @@ NOT_JSON: Final[list[str]] = [
     "Range(1, 5)",
     "Money(100)",
     "Interval(months=1)",
+    "Point(1.0, 2.0)",
+    "Line(1.0, 2.0, 3.0)",
+    "LineSegment(Point(0.0, 0.0), Point(1.0, 1.0))",
+    "Box(Point(1.0, 1.0), Point(0.0, 0.0))",
+    "Path((Point(0.0, 0.0),), closed=False)",
+    "Polygon((Point(0.0, 0.0),))",
+    "Circle(0.0, 0.0, 1.0)",
 ]
 # the checker does not look at time zones, so the runtime rejects these where the checker stays quiet
 # and `json.dumps` and the one-character rule of "char" are value checks the checker never makes

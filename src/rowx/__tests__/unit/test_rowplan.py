@@ -115,3 +115,19 @@ def test_interval_and_money_are_rejected_in_unions() -> None:
     for source in ("T = Interval | Money", "T = Interval | datetime.timedelta"):
         with pytest.raises(InterfaceError):
             row_plan(evaluate(source))
+
+
+def test_geometric_classes_are_non_nullable_leaves() -> None:
+    for name in ("Point", "Line", "LineSegment", "Box", "Path", "Polygon", "Circle"):
+        assert row_plan(evaluate(f"T = {name}")).nullable_mask == (False,), name
+        assert row_plan(evaluate(f"T = {name} | None")).nullable_mask == (True,), name
+        assert row_plan(evaluate(f"T = list[list[{name} | None]]")).nullable_mask == (False,), name
+    plan = row_plan(evaluate("T = tuple[Point, Box | None, list[Circle]]"))
+    assert plan.nullable_mask == (False, True, False)
+    assert plan.interval_mask == (False, False, False)
+
+
+def test_geometric_classes_are_rejected_in_unions_and_subscripts() -> None:
+    for source in ("T = Point | Circle", "T = Point | int", "T = Path | Polygon"):
+        with pytest.raises(InterfaceError):
+            row_plan(evaluate(source))

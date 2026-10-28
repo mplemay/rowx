@@ -11,6 +11,7 @@ use proptest::test_runner::TestRunner;
 use rowx_postgres::exec::Param;
 use rowx_postgres::wire::array;
 use rowx_postgres::wire::bits;
+use rowx_postgres::wire::geometric::{self, Kind, Point, Shape};
 use rowx_postgres::wire::mac::{self, MAC_LEN, MAC8_LEN};
 use rowx_postgres::wire::money;
 use rowx_postgres::wire::network::{self, Addr, Network};
@@ -989,5 +990,185 @@ async fn numrange_text_literals_are_read_back_by_the_server() -> TestResult {
     let literal = array::encode_literal(&[3], &elements);
     let shown = read_back(&client, "numrange[]", Param::text(literal.into_bytes())).await?;
     assert_eq!(shown, "{\"[1,2)\",NULL,empty}");
+    schema.drop().await
+}
+
+fn coord_text(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".to_owned()
+    } else if value.is_infinite() {
+        if value < 0.0 { "-Infinity" } else { "Infinity" }.to_owned()
+    } else {
+        format!("{value}")
+    }
+}
+
+fn point_text(point: Point) -> String {
+    format!("({},{})", coord_text(point.x), coord_text(point.y))
+}
+
+fn points_text(points: &[Point]) -> String {
+    points
+        .iter()
+        .map(|p| point_text(*p))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+// the text literal the server parses into the same value
+fn shape_literal(shape: &Shape) -> String {
+    match shape {
+        Shape::Point(p) => point_text(*p),
+        Shape::Line { a, b, c } => format!(
+            "{{{},{},{}}}",
+            coord_text(*a),
+            coord_text(*b),
+            coord_text(*c)
+        ),
+        Shape::LineSegment(s, e) => format!("[{},{}]", point_text(*s), point_text(*e)),
+        Shape::Box {
+            upper_right,
+            lower_left,
+        } => format!("{},{}", point_text(*upper_right), point_text(*lower_left)),
+        Shape::Path { points, closed } => {
+            let (open, close) = if *closed { ('(', ')') } else { ('[', ']') };
+            format!("{open}{}{close}", points_text(points))
+        }
+        Shape::Polygon(points) => format!("({})", points_text(points)),
+        Shape::Circle { center, radius } => {
+            format!("<{},{}>", point_text(*center), coord_text(*radius))
+        }
+    }
+}
+
+fn coordinate() -> impl Strategy<Value = f64> {
+    prop_oneof![
+        6 => -1.0e15f64..1.0e15,
+        1 => (-1000i32..1000).prop_map(f64::from),
+        1 => Just(0.0),
+        1 => Just(f64::NAN),
+        1 => Just(f64::INFINITY),
+        1 => Just(f64::NEG_INFINITY),
+    ]
+}
+
+fn point() -> impl Strategy<Value = Point> {
+    (coordinate(), coordinate()).prop_map(|(x, y)| Point { x, y })
+}
+
+fn shape_of(kind: Kind) -> BoxedStrategy<Shape> {
+    let points = || proptest::collection::vec(point(), 1..6);
+    match kind {
+        Kind::Point => point().prop_map(Shape::Point).boxed(),
+        // the server rejects a line whose A and B are both zero
+        Kind::Line => (coordinate(), coordinate(), coordinate())
+            .prop_filter("A and B both zero", |(a, b, _)| *a != 0.0 || *b != 0.0)
+            .prop_map(|(a, b, c)| Shape::Line { a, b, c })
+            .boxed(),
+        Kind::LineSegment => (point(), point())
+            .prop_map(|(s, e)| Shape::LineSegment(s, e))
+            .boxed(),
+        Kind::Box => (point(), point())
+            .prop_map(|(upper_right, lower_left)| Shape::Box {
+                upper_right,
+                lower_left,
+            })
+            .boxed(),
+        Kind::Path => (points(), any::<bool>())
+            .prop_map(|(points, closed)| Shape::Path { points, closed })
+            .boxed(),
+        Kind::Polygon => points().prop_map(Shape::Polygon).boxed(),
+        // the server rejects a negative radius
+        Kind::Circle => (
+            point(),
+            prop_oneof![0.0f64..1.0e15, Just(f64::NAN), Just(f64::INFINITY)],
+        )
+            .prop_map(|(center, radius)| Shape::Circle { center, radius })
+            .boxed(),
+    }
+}
+
+const GEOMETRIC: [Kind; 7] = [
+    Kind::Point,
+    Kind::Line,
+    Kind::LineSegment,
+    Kind::Box,
+    Kind::Path,
+    Kind::Polygon,
+    Kind::Circle,
+];
+
+fn send_function(kind: Kind) -> String {
+    // the server names the polygon function `poly_send`
+    let name = match kind {
+        Kind::Polygon => "poly",
+        other => other.name(),
+    };
+    format!("{name}_send")
+}
+
+#[tokio::test]
+async fn geometric_types_match_their_send_functions() -> TestResult {
+    let (schema, client) = connect!();
+    for kind in GEOMETRIC {
+        for shape in samples(shape_of(kind), CASES) {
+            let literal = shape_literal(&shape);
+            let sent = send(&client, &send_function(kind), kind.name(), &literal).await?;
+            let decoded = geometric::decode(kind, &sent)?;
+            // the server canonicalises a box, so only its decoded form is compared with the server's bytes
+            assert_eq!(geometric::encode(&decoded), Ok(sent.clone()), "{literal}");
+            if kind != Kind::Box {
+                assert_eq!(geometric::encode(&shape), Ok(sent), "{literal}");
+            }
+        }
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn geometric_parameters_are_read_back_by_the_server() -> TestResult {
+    let (schema, client) = connect!();
+    for kind in GEOMETRIC {
+        for shape in samples(shape_of(kind), CASES) {
+            let literal = shape_literal(&shape);
+            let shown = read_back(
+                &client,
+                kind.name(),
+                Param::binary(geometric::encode(&shape)?),
+            )
+            .await?;
+            assert_eq!(
+                shown,
+                literal_text(&client, kind.name(), &literal).await?,
+                "{literal}"
+            );
+        }
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn the_server_rejects_what_rowx_refuses_to_send() -> TestResult {
+    let (schema, client) = connect!();
+    let degenerate = geometric::encode(&Shape::Line {
+        a: 0.0,
+        b: 0.0,
+        c: 1.0,
+    })?;
+    assert!(
+        client
+            .query_one("SELECT $1::line::text", &[&Param::binary(degenerate)])
+            .await
+            .is_err()
+    );
+    for (ty, raw) in [("path", vec![0, 0, 0, 0, 0]), ("polygon", vec![0, 0, 0, 0])] {
+        let sql = format!("SELECT $1::{ty}::text");
+        assert!(
+            client
+                .query_one(&sql, &[&Param::binary(raw)])
+                .await
+                .is_err()
+        );
+    }
     schema.drop().await
 }

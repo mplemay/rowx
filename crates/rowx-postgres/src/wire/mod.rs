@@ -1,5 +1,6 @@
 pub mod array;
 pub mod bits;
+pub mod geometric;
 pub mod mac;
 pub mod money;
 pub mod network;
