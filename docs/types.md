@@ -98,7 +98,8 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
   and the server rejects a `line` whose `a` and `b` are both zero.
 - `hstore` decodes to `dict[str, str | None]` (a NULL value is `None`; a key is never NULL, and a `None` key in a
   parameter raises `EncodeError`). `ltree` and `lquery` are `str`. `cube` is
-  `rowx.postgres.Cube(lower_left, upper_right)`, two `tuple[float, ...]` of one length; a point has equal corners, and
+  `rowx.postgres.Cube(lower_left, upper_right)`, two `tuple[float, ...]` of one length; the corners keep the order the
+  server stores (the first corner written is `lower_left`, not necessarily the minimum), a point has equal corners, and
   the codec sends equal corners as a point. A `str` that the server's parser rejects fails at Bind.
 - Extension types (`citext`, `hstore`, `ltree`, `lquery`, `cube`) are recognised by name **and** owning extension, found
   through `pg_depend`, so a same-named type from another schema or no extension is `unsupported-type` in the checker

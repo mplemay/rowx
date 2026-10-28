@@ -22,3 +22,6 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
   with several statements fails at prepare time. Run them as separate queries.
 - **No `command` tag in `QueryResult`.** `QueryResult` carries `rows_affected` only. The tag (`"INSERT 0 5"`) is not
   exposed by the driver.
+- **Extension types are verified once per statement.** The owning extension of `citext`, `hstore`, `ltree`, `lquery` and
+  `cube` is checked when a statement is prepared. `DROP EXTENSION` or `ALTER EXTENSION` while a connection holds a
+  cached statement is not noticed until that statement is prepared again.
