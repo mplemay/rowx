@@ -418,6 +418,61 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         Format::Binary,
     )
     .codecs(Codec::Bits, Codec::Bits),
+    // json/jsonb results take the user's annotation (docs/design/checker.md, rules), so the leaf is `object`
+    row(
+        "json",
+        Matcher::Oid(114),
+        "object",
+        TzRule::None,
+        &["object"],
+        Format::Text,
+    )
+    .codecs(Codec::Json, Codec::Json),
+    row(
+        "jsonb",
+        Matcher::Oid(3802),
+        "object",
+        TzRule::None,
+        &["object"],
+        Format::Text,
+    )
+    .codecs(Codec::Json, Codec::Json),
+    row(
+        "enum",
+        Matcher::EnumKind,
+        "str",
+        TzRule::None,
+        STR,
+        Format::Text,
+    )
+    .codecs(Codec::Text, Codec::Text),
+    // a domain resolves to its base type at dispatch time, so it carries no metadata of its own
+    row(
+        "domain",
+        Matcher::DomainKind,
+        "",
+        TzRule::None,
+        &[],
+        Format::Binary,
+    ),
+    row(
+        "array",
+        Matcher::ArrayKind,
+        "list",
+        TzRule::None,
+        &["list", "tuple"],
+        Format::Binary,
+    )
+    .codecs(Codec::Array, Codec::Array),
+    row(
+        "void",
+        Matcher::Oid(2278),
+        "None",
+        TzRule::None,
+        &[],
+        Format::Binary,
+    )
+    .codecs(Codec::Void, Codec::Unsupported),
     row(
         "point",
         Matcher::Oid(600),
@@ -481,61 +536,6 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         Format::Binary,
     )
     .codecs(Codec::Geometric, Codec::Geometric),
-    // json/jsonb results take the user's annotation (docs/design/checker.md, rules), so the leaf is `object`
-    row(
-        "json",
-        Matcher::Oid(114),
-        "object",
-        TzRule::None,
-        &["object"],
-        Format::Text,
-    )
-    .codecs(Codec::Json, Codec::Json),
-    row(
-        "jsonb",
-        Matcher::Oid(3802),
-        "object",
-        TzRule::None,
-        &["object"],
-        Format::Text,
-    )
-    .codecs(Codec::Json, Codec::Json),
-    row(
-        "enum",
-        Matcher::EnumKind,
-        "str",
-        TzRule::None,
-        STR,
-        Format::Text,
-    )
-    .codecs(Codec::Text, Codec::Text),
-    // a domain resolves to its base type at dispatch time, so it carries no metadata of its own
-    row(
-        "domain",
-        Matcher::DomainKind,
-        "",
-        TzRule::None,
-        &[],
-        Format::Binary,
-    ),
-    row(
-        "array",
-        Matcher::ArrayKind,
-        "list",
-        TzRule::None,
-        &["list", "tuple"],
-        Format::Binary,
-    )
-    .codecs(Codec::Array, Codec::Array),
-    row(
-        "void",
-        Matcher::Oid(2278),
-        "None",
-        TzRule::None,
-        &[],
-        Format::Binary,
-    )
-    .codecs(Codec::Void, Codec::Unsupported),
 ];
 
 #[cfg(test)]

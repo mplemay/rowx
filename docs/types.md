@@ -47,6 +47,12 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 | `money` | `rowx.postgres.Money` |  | `Money` | binary |
 | `bit` | `str` |  | `str` | binary |
 | `varbit` | `str` |  | `str` | binary |
+| `json` | any value (`json.loads`) |  | any JSON-serialisable value | text |
+| `jsonb` | any value (`json.loads`) |  | any JSON-serialisable value | text |
+| `enum` | `str` |  | `str` | text |
+| `domain` | base type |  | base type | base type |
+| `array` | `list[X]` |  | `list`, `tuple` | binary, or text if an element needs it |
+| `void` | `None` |  | none |  |
 | `point` | `rowx.postgres.Point` |  | `Point` | binary |
 | `line` | `rowx.postgres.Line` |  | `Line` | binary |
 | `lseg` | `rowx.postgres.LineSegment` |  | `LineSegment` | binary |
@@ -54,12 +60,6 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 | `path` | `rowx.postgres.Path` |  | `Path` | binary |
 | `polygon` | `rowx.postgres.Polygon` |  | `Polygon` | binary |
 | `circle` | `rowx.postgres.Circle` |  | `Circle` | binary |
-| `json` | any value (`json.loads`) |  | any JSON-serialisable value | text |
-| `jsonb` | any value (`json.loads`) |  | any JSON-serialisable value | text |
-| `enum` | `str` |  | `str` | text |
-| `domain` | base type |  | base type | base type |
-| `array` | `list[X]` |  | `list`, `tuple` | binary, or text if an element needs it |
-| `void` | `None` |  | none |  |
 
 ## Notes
 

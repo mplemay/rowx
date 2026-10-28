@@ -37,6 +37,12 @@ type TypeKey = Literal[
     "money",
     "bit",
     "varbit",
+    "json",
+    "jsonb",
+    "enum",
+    "domain",
+    "array",
+    "void",
     "point",
     "line",
     "lseg",
@@ -44,12 +50,6 @@ type TypeKey = Literal[
     "path",
     "polygon",
     "circle",
-    "json",
-    "jsonb",
-    "enum",
-    "domain",
-    "array",
-    "void",
 ]
 # `""` is `domain` (no result of its own); `"None"` is `void`; `"object"` is json/jsonb.
 type PyResultName = Literal[
