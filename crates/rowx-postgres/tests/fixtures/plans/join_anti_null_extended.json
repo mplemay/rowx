@@ -25,7 +25,7 @@
           "Parallel Aware": false,
           "Parent Relationship": "Outer",
           "Relation Name": "users",
-          "Schema": "probe"
+          "Schema": "public"
         },
         {
           "Async Capable": false,
@@ -50,7 +50,7 @@
               "Parallel Aware": false,
               "Parent Relationship": "Outer",
               "Relation Name": "users",
-              "Schema": "probe"
+              "Schema": "public"
             }
           ]
         }

@@ -41,10 +41,10 @@ def test_nested_cte_chain(schema: str) -> None:
     assert verdicts(schema, sql) == [(True, "ScanBoundary")]
 
 
-# limit: the scan-boundary rule promotes every column of the alias, including ones from the non-null side
+# correct: a scan-boundary column from the non-null side keeps its catalog verdict (it was the limit #105 fixed)
 def test_scan_boundary_over_promotes(schema: str) -> None:
     sql = f"SELECT x.id, x.title FROM (SELECT u.id, p.title, row_number() OVER () {JOIN}) x"  # ruff: ignore[hardcoded-sql-expression]
-    assert verdicts(schema, sql) == [(True, "ScanBoundary"), (True, "ScanBoundary")]
+    assert verdicts(schema, sql) == [(False, "NotNullColumn"), (True, "ScanBoundary")]
 
 
 # limit: view columns are always nullable, because attnotnull is false for views

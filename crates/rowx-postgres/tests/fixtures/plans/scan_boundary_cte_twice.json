@@ -1,0 +1,132 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Inner Unique": false,
+      "Join Type": "Inner",
+      "Merge Cond": "(a.id = b.id)",
+      "Node Type": "Merge Join",
+      "Output": [
+        "a.id",
+        "b.title"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Hash Cond": "(p.user_id = u.id)",
+          "Inner Unique": true,
+          "Join Type": "Right",
+          "Node Type": "Hash Join",
+          "Output": [
+            "u.id",
+            "p.title"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "InitPlan",
+          "Plans": [
+            {
+              "Alias": "p",
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Seq Scan",
+              "Output": [
+                "p.id",
+                "p.user_id",
+                "p.title"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer",
+              "Relation Name": "posts",
+              "Schema": "public"
+            },
+            {
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Hash",
+              "Output": [
+                "u.id"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Inner",
+              "Plans": [
+                {
+                  "Alias": "u",
+                  "Async Capable": false,
+                  "Disabled": false,
+                  "Node Type": "Seq Scan",
+                  "Output": [
+                    "u.id"
+                  ],
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Relation Name": "users",
+                  "Schema": "public"
+                }
+              ]
+            }
+          ],
+          "Subplan Name": "CTE c"
+        },
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Sort",
+          "Output": [
+            "a.id"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Plans": [
+            {
+              "Alias": "a",
+              "Async Capable": false,
+              "CTE Name": "c",
+              "Disabled": false,
+              "Node Type": "CTE Scan",
+              "Output": [
+                "a.id"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer"
+            }
+          ],
+          "Sort Key": [
+            "a.id"
+          ]
+        },
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Sort",
+          "Output": [
+            "b.title",
+            "b.id"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Inner",
+          "Plans": [
+            {
+              "Alias": "b",
+              "Async Capable": false,
+              "CTE Name": "c",
+              "Disabled": false,
+              "Node Type": "CTE Scan",
+              "Output": [
+                "b.title",
+                "b.id"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer"
+            }
+          ],
+          "Sort Key": [
+            "b.id"
+          ]
+        }
+      ]
+    }
+  }
+]
