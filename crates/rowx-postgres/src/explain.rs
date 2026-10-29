@@ -5,11 +5,14 @@ use serde_json::Value;
 use crate::describe::NullReason;
 
 mod boundaries;
+mod setop;
+
+pub use setop::{NotNullLeaves, leaf_columns, proven_not_null};
 
 type Marked = HashMap<String, NullReason>;
 
 /// The base column a top-level column was traced to by describe.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Origin {
     pub schema: String,
     pub relation: String,

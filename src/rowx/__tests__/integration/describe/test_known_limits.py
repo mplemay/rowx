@@ -55,9 +55,38 @@ def test_view_columns_are_nullable(schema: str) -> None:
     ]
 
 
-# limit: set operations have no table origin, so they are Unknown and default to nullable
-def test_set_operation_is_nullable(schema: str) -> None:
-    assert verdicts(schema, "SELECT name FROM users UNION SELECT title FROM posts") == [(True, "Computed")]
+# correct: a set operation column is NOT NULL when the plan proves it at that output position (`SetOperation`)
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT name FROM users UNION SELECT title FROM posts",
+        "SELECT name FROM users UNION ALL SELECT title FROM posts ORDER BY 1",
+        "SELECT name FROM users EXCEPT SELECT email FROM users",
+        "SELECT email FROM users INTERSECT SELECT title FROM posts",
+        "(SELECT name FROM users UNION ALL SELECT title FROM posts) INTERSECT SELECT name FROM users",
+        "SELECT name FROM users EXCEPT (SELECT title FROM posts UNION SELECT email FROM users)",
+    ],
+)
+def test_set_operation_not_null_is_inferred(schema: str, sql: str) -> None:
+    assert verdicts(schema, sql) == [(False, "SetOperation")]
+
+
+# correct: a set operation column stays nullable when any position is unproven, by position and not by name
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT name FROM users UNION SELECT email FROM users",
+        "SELECT email FROM users EXCEPT SELECT name FROM users",
+        "SELECT email FROM users INTERSECT SELECT email FROM users",
+        "SELECT name FROM users UNION ALL SELECT NULL::text",
+        "SELECT name FROM users UNION ALL SELECT upper(title) FROM posts",
+        "SELECT x FROM not_valid UNION SELECT id FROM users",
+        "SELECT name, email FROM users UNION SELECT email, name FROM users",
+        "SELECT u.id FROM users u FULL JOIN posts p ON p.id = u.id UNION SELECT id FROM users",
+    ],
+)
+def test_set_operation_stays_nullable_when_unproven(schema: str, sql: str) -> None:
+    assert all(nullable for nullable, _ in verdicts(schema, sql))
 
 
 # limit: a recursive CTE has no table origin, so it is Unknown and defaults to nullable
@@ -81,4 +110,4 @@ def test_marker_count_matches_doc() -> None:
     rows = [line for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("| ")]
     # the first two table lines are the header and its separator
     assert markers == len(rows) - 1
-    assert markers == 9
+    assert markers == 10

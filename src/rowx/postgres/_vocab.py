@@ -156,6 +156,7 @@ type NullReasonName = Literal[
     "GroupingSets",
     "ScanBoundary",
     "ReturningOldNew",
+    "SetOperation",
     "Computed",
     "ExplainFailed",
     "OverrideBang",

@@ -69,7 +69,8 @@ rejects the SQL it raises `DatabaseError` with `.position` set.
      This is non-fatal. Utility statements that return columns, such as `SHOW`, `CALL` and
      `FETCH`, fail EXPLAIN with 42601.
    - The walk is described in [Plan walk](#plan-walk-explainrs-a-pure-function-over-serde_jsonvalue). Its result can
-     only promote a column to Nullable, never the reverse.
+     only promote a column to Nullable, never the reverse. The one exception is a Computed column behind a set
+     operation, which [Set operations](#set-operations) can prove NOT NULL (`SetOperation`).
 4. **Overrides** ([Overrides](#overrides)).
 5. **Defaulting.** An Unknown column becomes Nullable (SQLx). Computed columns therefore
    need `"col!"`.
@@ -152,6 +153,29 @@ not, and the walk stays promote-only.
 | Columns renamed by the subquery or CTE (swapped aliases) | Promote. The name match points at a different column than the origin. Step 4 fails. |
 | Nested boundaries (a CTE over a subquery) | Map one boundary at a time. Resolve the inner boundary first, and treat an entry it promotes as marked in step 3. |
 
+### Set operations
+
+A set-operation column has no table origin, so it starts as Computed (Unknown). The plan can prove it NOT NULL, by
+output position and never by name. A Computed column that is proven becomes NOT NULL with reason `SetOperation`. The
+proof only applies to Computed columns, and a promotion from the walk above still wins.
+
+For a top-level output position `i`, the node is NOT NULL at `i` when:
+
+- `Append` or `Merge Append` (`UNION`, `UNION ALL`): it has at least one child and every child is NOT NULL at `i`.
+  These nodes have no `Output` key, so they take their first child's when compared with a parent.
+- `SetOp`: `EXCEPT` is NOT NULL if its left (`Outer`) child is; `INTERSECT` is NOT NULL if either child is.
+- `Aggregate`, `Unique`, `Sort` and `Limit`: it has exactly one child, its `Output` is non-empty and equals the child's
+  `Output`, and the child is NOT NULL at `i`. Anything else, including a changed `Output`, is nullable.
+- A scan node (`Seq Scan`, `Sample Scan`, `Index Scan`, `Index Only Scan`, `Bitmap Heap Scan`, `Tid Scan`): the `i`th
+  output is `alias.col` where the alias is the node's `Alias`, both names are plain unquoted lowercase identifiers, the
+  relation is `relkind` `r` or `p`, the column passes the NOT NULL tests of the [algorithm](#algorithm) (attnotnull and
+  no `NOT VALID` constraint), and the expression is not marked as null-extended by an ancestor join or a
+  grouping-sets aggregate.
+- Any other node (a join, a `Subquery Scan`, a `Result`, a NULL or computed output, a recursive union) is nullable.
+
+The catalog lookup for the scanned columns is one batched query, and only runs when the plan contains an `Append`,
+`Merge Append` or `SetOp`. If it fails, nothing is proven and the columns stay nullable.
+
 ### View columns
 
 A view column has `attnotnull = false`, so base nullability alone is always Nullable. rowx analyses the view's
@@ -233,7 +257,8 @@ Its `describe` is also `#[doc(hidden)]` and feature-gated. rowx keeps sqlx's **m
   non-null-extended source column that resolves to the origin column
   ([Scan-boundary mapping](#scan-boundary-mapping)). Computed, duplicate-named, constant and renamed (swapped-alias)
   outputs still promote.
-- **Set operations and recursive CTEs** have `table_oid = 0`, so they are Unknown →
-  Nullable. That is safe.
+- **Set operations** are NOT NULL only when [the plan proves it](#set-operations). Branches that are joins, subquery
+  scans, casts, computed or constant expressions stay nullable. **Recursive CTEs** have `table_oid = 0`, so they are
+  Unknown → Nullable. That is safe.
 - **Computed columns** are always Unknown → Nullable. NOT NULL narrowing for computed
   columns would need a parser ([Dependency evaluation](dependencies.md#dependency-evaluation)).
