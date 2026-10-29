@@ -157,6 +157,7 @@ type NullReasonName = Literal[
     "ScanBoundary",
     "ReturningOldNew",
     "SetOperation",
+    "ComputedExpr",
     "Computed",
     "ExplainFailed",
     "OverrideBang",

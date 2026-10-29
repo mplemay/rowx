@@ -60,9 +60,9 @@ def verdicts(dsn: str, sql: str) -> list[tuple[bool, str]]:
             [(False, "NotNullColumn")],
         ),
         ("SELECT upper(name) FROM users", [(True, "Computed")]),
-        ("SELECT count(*) FROM users", [(True, "Computed")]),
-        ("SELECT coalesce(email, 'x') FROM users", [(True, "Computed")]),
-        ("SELECT 1", [(True, "Computed")]),
+        ("SELECT count(*) FROM users", [(False, "ComputedExpr")]),
+        ("SELECT coalesce(email, 'x') FROM users", [(False, "ComputedExpr")]),
+        ("SELECT 1", [(False, "ComputedExpr")]),
     ],
     ids=[
         "left_join_where_param",

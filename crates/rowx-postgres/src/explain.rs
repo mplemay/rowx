@@ -5,8 +5,10 @@ use serde_json::Value;
 use crate::describe::NullReason;
 
 mod boundaries;
+mod computed;
 mod setop;
 
+pub use computed::{WHITELISTED_FUNCTIONS, needs_function_check, proven_computed};
 pub use setop::{NotNullLeaves, leaf_columns, proven_not_null};
 
 type Marked = HashMap<String, NullReason>;

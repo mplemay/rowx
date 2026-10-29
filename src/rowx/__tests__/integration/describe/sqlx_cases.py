@@ -12,7 +12,7 @@ SQLX_CASES: Final[dict[str, Case]] = {
         [("id", False, "NotNullColumn"), ("name", False, "NotNullColumn"), ("email", True, "NullableColumn")],
     ),
     # it_describes_expression: postgres cannot infer nullability of an expression
-    "expression": ("SELECT 1::int8 + 10", [("?column?", True, "Computed")]),
+    "expression": ("SELECT 1::int8 + 10", [("?column?", False, "ComputedExpr")]),
     # test_column_override_nullable: a NOT NULL column of a left-joined table is declared nullable
     "override_question": (
         'SELECT name AS "name?" FROM (VALUES (1)) foo(id) LEFT JOIN users ON false',
@@ -30,9 +30,9 @@ SQLX_CASES: Final[dict[str, Case]] = {
         [("name", True, "OuterJoin")],
     ),
     # it_describes_enum: an enum literal is a computed column
-    "enum": ("SELECT 'ok'::mood AS _1", [("_1", True, "Computed")]),
+    "enum": ("SELECT 'ok'::mood AS _1", [("_1", False, "ComputedExpr")]),
     # it_describes_record: a row constructor is a computed column named `row`
-    "record": ("SELECT (true, 10::int2)", [("row", True, "Computed")]),
+    "record": ("SELECT (true, 10::int2)", [("row", False, "ComputedExpr")]),
     # test_void: a function returning void is a computed column
     "void": ("SELECT pg_notify('chan', 'message')", [("pg_notify", True, "Computed")]),
     # test_call_procedure: CALL returns the INOUT parameters, and EXPLAIN cannot plan it
@@ -44,7 +44,7 @@ SQLX_CASES: Final[dict[str, Case]] = {
     # test_query_as: `!` on a VALUES column, the other column is computed
     "query_as_bang": (
         "SELECT id \"id!\", name FROM (VALUES (1, 'x')) accounts(id, name)",
-        [("id", False, "OverrideBang"), ("name", True, "Computed")],
+        [("id", False, "OverrideBang"), ("name", False, "ComputedExpr")],
     ),
     # test_query_as_raw: `!` on a reserved-word column name
     "query_as_raw_bang": (
@@ -57,12 +57,12 @@ SQLX_CASES: Final[dict[str, Case]] = {
         [("id", False, "NotNullColumn"), ("name", False, "NotNullColumn"), ("email", True, "NullableColumn")],
     ),
     # test_text_var_char_char_n: casts are computed columns
-    "text_cast": ("SELECT 'Hello'::text AS greeting", [("greeting", True, "Computed")]),
+    "text_cast": ("SELECT 'Hello'::text AS greeting", [("greeting", False, "ComputedExpr")]),
     "varchar_cast": ("SELECT 'Hello'::varchar(5) AS greeting", [("greeting", True, "Computed")]),
     "char_cast": ("SELECT 'Hello'::char(5) AS greeting", [("greeting", True, "Computed")]),
     # test_array_from_slice: an array parameter cast and an array constructor
     "array_param": ("SELECT $1::int[] AS my_array", [("my_array", True, "Computed")]),
-    "array_constructor": ("SELECT ARRAY[4,3,2,1] AS my_array", [("my_array", True, "Computed")]),
+    "array_constructor": ("SELECT ARRAY[4,3,2,1] AS my_array", [("my_array", False, "ComputedExpr")]),
     # fetch_is_usable_issue_224: a set-returning function column has no table origin
     "generate_series": ("SELECT * FROM generate_series(1, 3) AS series(num)", [("num", True, "Computed")]),
     # test_column_override_wildcard, _exact: `: Type` is a sqlx type override with no meaning in rowx, so it is
