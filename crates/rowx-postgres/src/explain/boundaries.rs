@@ -4,11 +4,36 @@ use serde_json::Value;
 
 use super::{Marked, Origin, children, null_extends, outputs, str_key};
 
-pub(super) type Ctes<'a> = HashMap<&'a str, &'a Value>;
+// The plan names a CTE but does not say which scope it belongs to, so a name defined twice (a nested `WITH c` shadowing
+// an outer `c`) cannot be resolved. Such a name has no source and is treated as able to introduce NULLs.
+#[derive(Default)]
+pub(super) struct Ctes<'a> {
+    sources: HashMap<&'a str, &'a Value>,
+    ambiguous: HashSet<&'a str>,
+}
+
+impl<'a> Ctes<'a> {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, name: &str) -> Option<&'a Value> {
+        if self.ambiguous.contains(name) {
+            return None;
+        }
+        self.sources.get(name).copied()
+    }
+
+    fn is_ambiguous(&self, name: &str) -> bool {
+        self.ambiguous.contains(name)
+    }
+}
 
 pub(super) fn collect_ctes<'a>(node: &'a Value, ctes: &mut Ctes<'a>) {
-    if let Some(name) = str_key(node, "Subplan Name").and_then(|n| n.strip_prefix("CTE ")) {
-        ctes.insert(name, node);
+    if let Some(name) = str_key(node, "Subplan Name").and_then(|n| n.strip_prefix("CTE "))
+        && ctes.sources.insert(name, node).is_some()
+    {
+        ctes.ambiguous.insert(name);
     }
     for child in children(node) {
         collect_ctes(child, ctes);
@@ -44,10 +69,11 @@ fn introduces_nulls<'a>(node: &'a Value, ctes: &Ctes<'a>, seen: &mut HashSet<&'a
     }
     // a scan of another CTE inherits whatever that CTE introduces; `seen` stops recursive CTEs looping
     cte_name(node).is_some_and(|name| {
-        seen.insert(name)
-            && ctes
-                .get(name)
-                .is_some_and(|source| introduces_nulls(source, ctes, seen))
+        ctes.is_ambiguous(name)
+            || (seen.insert(name)
+                && ctes
+                    .get(name)
+                    .is_some_and(|source| introduces_nulls(source, ctes, seen)))
     })
 }
 
@@ -68,9 +94,10 @@ pub(super) fn nullable_aliases<'a>(node: &'a Value, ctes: &Ctes<'a>, found: &mut
         let nullable = cte_name(node).map_or_else(
             || introduces_nulls(node, ctes, &mut HashSet::new()),
             |name| {
-                ctes.get(name).is_some_and(|source| {
-                    introduces_nulls(source, ctes, &mut HashSet::from([name]))
-                })
+                ctes.is_ambiguous(name)
+                    || ctes.get(name).is_some_and(|source| {
+                        introduces_nulls(source, ctes, &mut HashSet::from([name]))
+                    })
             },
         );
         if nullable {
@@ -167,7 +194,7 @@ fn source_of<'a>(boundary: &'a Value, ctes: &Ctes<'a>) -> Option<&'a Value> {
             [only] => Some(only),
             _ => None,
         },
-        "CTE Scan" => ctes.get(str_key(boundary, "CTE Name")?).copied(),
+        "CTE Scan" => ctes.get(str_key(boundary, "CTE Name")?),
         _ => None,
     }
 }

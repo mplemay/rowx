@@ -194,6 +194,14 @@ BOUNDARY: Final[tuple[bool, str]] = (True, "ScanBoundary")
             [BOUNDARY, BOUNDARY],
         ),
         (
+            (
+                "WITH c AS MATERIALIZED (SELECT u.id, p.title @JOIN@), "
+                "d AS MATERIALIZED (WITH c AS MATERIALIZED (SELECT p.user_id AS id, p.title FROM posts p) "
+                "SELECT id, title FROM c) SELECT o.title, d.title FROM c o JOIN d ON o.id = d.id"
+            ),
+            [BOUNDARY, BOUNDARY],
+        ),
+        (
             "WITH c AS MATERIALIZED (SELECT p.title AS name, u.name AS title @JOIN@) SELECT name, title FROM c",
             [BOUNDARY, BOUNDARY],
         ),
@@ -214,6 +222,7 @@ BOUNDARY: Final[tuple[bool, str]] = (True, "ScanBoundary")
         "same_named_source_columns",
         "unused_column_pruned",
         "grouping_sets",
+        "shadowed_cte_name",
         "swapped_aliases",
         "union_all_branch_nulls",
     ],

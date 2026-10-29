@@ -120,6 +120,8 @@ SELECT x.id, x.pid FROM (SELECT u.id, p.id AS pid, row_number() OVER () FROM use
 WITH c AS MATERIALIZED (SELECT u.id, p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id) SELECT id FROM c
 -- name: scan_boundary_grouping_sets
 SELECT x.name, x.email FROM (SELECT name, email, count(*) FROM users GROUP BY GROUPING SETS ((name), (email))) x
+-- name: scan_boundary_shadowed_cte
+WITH c AS MATERIALIZED (SELECT u.id, p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id), d AS MATERIALIZED (WITH c AS MATERIALIZED (SELECT p.user_id AS id, p.title FROM posts p) SELECT id, title FROM c) SELECT o.title, d.title FROM c o JOIN d ON o.id = d.id
 -- name: scan_boundary_swapped
 WITH c AS MATERIALIZED (SELECT p.title AS name, u.name AS title FROM users u LEFT JOIN posts p ON p.user_id = u.id) SELECT name, title FROM c
 -- name: scan_boundary_union_all

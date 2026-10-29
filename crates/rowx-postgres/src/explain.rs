@@ -425,6 +425,21 @@ mod join {
         );
     }
 
+    // a nested `WITH c` shadows the outer `c`; the plan does not say which scope a name belongs to
+    #[test]
+    fn shadowed_cte_name_is_promoted() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_shadowed_cte",
+                &[
+                    Some(origin("posts", "title")),
+                    Some(origin("posts", "title"))
+                ]
+            ),
+            [Some(boundary("o")), Some(boundary("d"))]
+        );
+    }
+
     #[test]
     fn swapped_aliases_are_promoted() {
         assert_eq!(
