@@ -84,9 +84,12 @@ promotions for each top-level column position.
 - **Join marking.** At a node with `Join Type`, mark the nullable children:
   - `Full`: both children;
   - `Left`: the child whose `Parent Relationship` is `Inner`;
-  - `Right`: the child whose `Parent Relationship` is `Outer`.
+  - `Right`: the child whose `Parent Relationship` is `Outer`;
+  - `Anti`: the child whose `Parent Relationship` is `Inner`;
+  - `Right Anti`: the child whose `Parent Relationship` is `Outer`.
 
-  Semi and anti joins never null-extend. A marked subtree stays marked, and its `Output`
+  Semi joins never null-extend. An anti join null-extends the other side's columns: they can
+  still appear in the plan's `Output`, and are NULL on every output row. A marked subtree stays marked, and its `Output`
   expressions become marked.
 - **Descend through every node type.** That includes Sort, Limit, Aggregate, Hash,
   Materialize, Gather, Append and SubPlans/InitPlans, not only joins at the top.
