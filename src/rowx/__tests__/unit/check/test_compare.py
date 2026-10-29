@@ -139,7 +139,7 @@ def test_array_element_may_be_nullable_or_not() -> None:
 def test_array_nested_levels_accept_optional_elements() -> None:
     inner = Elem("list", nullable=False, item=Elem("int", nullable=True))
     outer = Elem("list", nullable=False, item=inner)
-    assert run(scalar(outer), col("array", element_key="int4", dims=2)) == []
+    assert run(scalar(outer), col("array", element_key="int4")) == []
 
 
 def test_array_wrong_item_type() -> None:
@@ -148,11 +148,20 @@ def test_array_wrong_item_type() -> None:
     assert rules(run(scalar(elem), column)) == ["type-mismatch"]
 
 
-def test_array_depth_mismatch() -> None:
-    inner = Elem("list", nullable=False, item=Elem("int", nullable=False))
+def test_array_accepts_any_nesting_depth() -> None:
     column = col("array", element_key="int4")
-    assert rules(run(scalar(Elem("list", nullable=False, item=inner)), column)) == ["type-mismatch"]
-    assert rules(run(scalar(inner), col("array", element_key="int4", dims=2))) == ["type-mismatch"]
+    elem = Elem("int", nullable=False)
+    for depth in range(1, 4):
+        nested = elem
+        for _ in range(depth):
+            nested = Elem("list", nullable=False, item=nested)
+        assert run(scalar(nested), column) == []
+
+
+def test_array_nested_wrong_leaf_is_mismatch() -> None:
+    inner = Elem("list", nullable=False, item=Elem("str", nullable=False))
+    elem = Elem("list", nullable=False, item=inner)
+    assert rules(run(scalar(elem), col("array", element_key="int4"))) == ["type-mismatch"]
 
 
 def test_array_column_against_scalar_leaf() -> None:
