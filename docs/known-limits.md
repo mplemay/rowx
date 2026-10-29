@@ -16,6 +16,13 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
 | limit | `test_computed_column_is_nullable` | Computed columns are always nullable; narrowing needs a parser ([dependencies](design/dependencies.md)). |
 | correct | `test_bang_narrows_computed_column` | `"col!"` forces NOT NULL on a computed column (`OverrideBang`). |
 
+## Checker limits
+
+- **Array nesting depth is not checked.** Postgres does not record dimensions in a column's declared type, so
+  `describe` can't report them. The checker accepts `list[X]`, `list[list[X]]` and deeper for any array column. A
+  mismatch with the real value's dimensions (such as `list[int]` for a two-dimensional `int[]`) surfaces at runtime.
+  Pinned by `test_array_depth_is_not_checked`.
+
 ## Execution limits
 
 - **No multi-statement execution.** A query is one statement. Postgres prepares one statement at a time, so a string

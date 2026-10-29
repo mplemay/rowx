@@ -17,7 +17,7 @@ type _Reason = NullReasonName | Literal[""]
 
 
 # `type_key` is None for a type outside the table; an array column carries its innermost
-# element key and dimension count because the key alone is just "array"
+# element key because the key alone is just "array"
 @dataclass(slots=True, kw_only=True, frozen=True)
 class ColumnDesc:
     name: str
@@ -27,7 +27,6 @@ class ColumnDesc:
     reason: _Reason = ""
     reason_detail: str | None = None
     element_key: TypeKey | None = None
-    dims: int = 1
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -54,7 +53,7 @@ def _label(column: ColumnDesc, index: int) -> str:
 def _expected(column: ColumnDesc) -> str:
     if column.type_key == "array":
         leaf = result_type(column.element_key) if column.element_key is not None else "?"
-        return "list[" * column.dims + leaf + "]" * column.dims
+        return f"list[{leaf}]"
     return "None" if column.type_key == "void" else result_type(column.type_key or "")
 
 
@@ -72,11 +71,12 @@ def _shown(elem: Elem) -> str:
 def _array_matches(column: ColumnDesc, elem: Elem) -> bool:
     if column.element_key is None:
         return False
-    item: Elem | None = elem
-    for _ in range(column.dims):
-        if item is None or item.leaf != "list":
-            return False
-        # an element at any nesting level may be `X` or `X | None`
+    # the declared type does not record dimensions, so any nesting depth is accepted (#112); an element at any
+    # level may be `X` or `X | None`
+    if elem.leaf != "list":
+        return False
+    item = elem.item
+    while item is not None and item.leaf == "list":
         item = item.item
     if item is None:
         return False

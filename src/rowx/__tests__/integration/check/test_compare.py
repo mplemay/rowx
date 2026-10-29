@@ -279,9 +279,9 @@ def documented(sql: SqlType, leaf: Leaf) -> bool | None:
 
 
 # the checker cannot see how many dimensions an array has, because the declared type does not record it, so it
-# models every array as one-dimensional (#112); see `test_multidimensional_array_disagrees`
+# accepts any list nesting depth (#112); see `test_array_depth_is_not_checked`
 def dimension_limit(sql: SqlType, leaf: Leaf) -> bool:
-    return sql.dims == 2 and leaf.depth > 0
+    return sql.dims > 0 and leaf.depth > 0 and leaf.depth != sql.dims
 
 
 def query_for(annotation: object, template: Template) -> Any:  # ruff: ignore[any-type]
@@ -334,17 +334,19 @@ def test_result_matrix(schema: str) -> None:
     assert not disagreements, "\n".join(disagreements)
 
 
-def test_multidimensional_array_disagrees(schema: str) -> None:
-    # a two-dimensional column decodes to nested lists, but the checker models every array as one-dimensional
-    sql = next(sql for sql in sql_types() if sql.name == "int4[][]")
-    outcomes = asyncio.run(describe_all(schema, [sql.statement], 1, TIMEOUT_MS))
-    values = asyncio.run(run_values(schema, [sql]))
-    (column,) = describe_columns(outcomes, sql.statement)
+def test_array_depth_is_not_checked(schema: str) -> None:
+    # the declared type does not record dimensions, so the checker accepts both depths for either column
+    flat_sql = next(sql for sql in sql_types() if sql.name == "int4[]")
+    nested_sql = next(sql for sql in sql_types() if sql.name == "int4[][]")
+    statements = [flat_sql.statement, nested_sql.statement]
+    outcomes = asyncio.run(describe_all(schema, statements, 1, TIMEOUT_MS))
+    values = asyncio.run(run_values(schema, [flat_sql, nested_sql]))
     flat, nested = LEAF_BY_NAME["list[int]"], LEAF_BY_NAME["list[list[int]]"]
-    assert not TYPE_RULES.intersection(findings_for(column, flat, nullable=column.nullable))
-    assert not flat.is_value(values[sql.name, flat.name])
-    assert TYPE_RULES.intersection(findings_for(column, nested, nullable=column.nullable))
-    assert nested.is_value(values[sql.name, nested.name])
+    for sql, real in ((flat_sql, flat), (nested_sql, nested)):
+        (column,) = describe_columns(outcomes, sql.statement)
+        assert not TYPE_RULES.intersection(findings_for(column, flat, nullable=column.nullable))
+        assert not TYPE_RULES.intersection(findings_for(column, nested, nullable=column.nullable))
+        assert real.is_value(values[sql.name, real.name])
 
 
 # --- nullability ---
