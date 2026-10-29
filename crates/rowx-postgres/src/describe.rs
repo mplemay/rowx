@@ -19,6 +19,7 @@ pub enum NullReason {
     GroupingSets,
     ScanBoundary { alias: String },
     ReturningOldNew,
+    SetOperation,
     Computed,
     ExplainFailed,
     OverrideBang,
@@ -38,6 +39,7 @@ impl NullReason {
             Self::GroupingSets => "GroupingSets",
             Self::ScanBoundary { .. } => "ScanBoundary",
             Self::ReturningOldNew => "ReturningOldNew",
+            Self::SetOperation => "SetOperation",
             Self::Computed => "Computed",
             Self::ExplainFailed => "ExplainFailed",
             Self::OverrideBang => "OverrideBang",
@@ -297,6 +299,43 @@ async fn typsends(client: &Client, oids: &[u32]) -> Result<HashMap<u32, String>,
         .map_err(Error::from)
 }
 
+// the leaf columns that are NOT NULL on a real table (never a view, foreign table or NOT VALID constraint);
+// a failed lookup proves nothing, so it is an empty set
+const LEAF_NOT_NULL_SQL: &str = "\
+SELECT l.s, l.r, l.c FROM unnest($1::text[], $2::text[], $3::text[]) AS l(s, r, c) \
+JOIN pg_namespace n ON n.nspname = l.s \
+JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = l.r AND c.relkind IN ('r', 'p') \
+JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = l.c AND a.attnotnull AND NOT a.attisdropped \
+WHERE NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = a.attrelid AND k.contype = 'n' \
+    AND NOT k.convalidated AND k.conkey = ARRAY[a.attnum])";
+
+async fn not_null_leaves(client: &Client, leaves: &[Origin]) -> explain::NotNullLeaves {
+    if leaves.is_empty() {
+        return explain::NotNullLeaves::new();
+    }
+    let schemas: Vec<&str> = leaves.iter().map(|o| o.schema.as_str()).collect();
+    let relations: Vec<&str> = leaves.iter().map(|o| o.relation.as_str()).collect();
+    let columns: Vec<&str> = leaves.iter().map(|o| o.column.as_str()).collect();
+    let Ok(rows) = client
+        .query(LEAF_NOT_NULL_SQL, &[&schemas, &relations, &columns])
+        .await
+    else {
+        return explain::NotNullLeaves::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            Some(Origin {
+                schema: row.try_get(0).ok()?,
+                relation: row.try_get(1).ok()?,
+                column: row.try_get(2).ok()?,
+            })
+        })
+        .collect()
+}
+
+// the promotions to Nullable, and per column whether a set operation proves it NOT NULL
+type PlanVerdicts = (Vec<Option<NullReason>>, Vec<bool>);
+
 // simple_query, because the extended protocol would demand values for `$n`; the caller's Parse has
 // already rejected anything but a single statement
 async fn plan_promotions(
@@ -304,7 +343,7 @@ async fn plan_promotions(
     sql: &str,
     column_count: usize,
     origins: &[Option<Origin>],
-) -> Option<Vec<Option<NullReason>>> {
+) -> Option<PlanVerdicts> {
     let messages = client
         .simple_query(&format!(
             "EXPLAIN (GENERIC_PLAN, VERBOSE, COSTS OFF, FORMAT JSON) {sql}"
@@ -319,7 +358,11 @@ async fn plan_promotions(
         })
         .collect();
     let plan = serde_json::from_str(&text).ok()?;
-    Some(explain::walk(&plan, column_count, origins))
+    let leaves = not_null_leaves(client, &explain::leaf_columns(&plan)).await;
+    Some((
+        explain::walk(&plan, column_count, origins),
+        explain::proven_not_null(&plan, column_count, &leaves),
+    ))
 }
 
 // the nullability-relevant part of a column, so a view's definition can be analysed without its types
@@ -378,8 +421,14 @@ async fn refine(
     if slots.is_empty() {
         return Ok(true);
     }
-    if let Some(promotions) = plan_promotions(client, sql, slots.len(), &column_origins).await {
-        for (slot, promotion) in slots.iter_mut().zip(promotions) {
+    if let Some((promotions, proven)) =
+        plan_promotions(client, sql, slots.len(), &column_origins).await
+    {
+        for ((slot, promotion), proven) in slots.iter_mut().zip(promotions).zip(proven) {
+            if proven && slot.reason == NullReason::Computed {
+                slot.nullable = false;
+                slot.reason = NullReason::SetOperation;
+            }
             if let Some(reason) = promotion {
                 slot.nullable = true;
                 slot.reason = reason;

@@ -20,7 +20,19 @@ COUNT_ENV: Final[str] = "ROWX_FUZZ_COUNT"
 
 type ColType = Literal["int", "text", "num"]
 type Wrap = Literal[
-    "none", "subquery", "cte", "cte_mat", "cte_inline", "cte_twice", "recursive", "union", "intersect", "except"
+    "none",
+    "subquery",
+    "cte",
+    "cte_mat",
+    "cte_inline",
+    "cte_twice",
+    "recursive",
+    "union",
+    "intersect",
+    "except",
+    "union_all",
+    "nested_left",
+    "nested_right",
 ]
 type Other = Literal["same", "empty", "nulls"]
 
@@ -47,6 +59,9 @@ WRAPS: Final[tuple[Wrap, ...]] = (
     "union",
     "intersect",
     "except",
+    "union_all",
+    "nested_left",
+    "nested_right",
 )
 GROUPS: Final[tuple[str, ...]] = ("", "", "rollup", "cube", "sets")
 WINDOWS: Final[tuple[str, ...]] = (
@@ -196,7 +211,19 @@ def render(shape: Shape) -> str:
             ", ".join(f"r.{n}" for n in names),
             "FROM r",
         ])
-    op = {"union": "UNION", "intersect": "INTERSECT", "except": "EXCEPT"}[wrap]
+    return _render_set_op(shape, inner)
+
+
+def _render_set_op(shape: Shape, inner: str) -> str:
+    wrap = shape.wrap
+    op = {
+        "union": "UNION",
+        "intersect": "INTERSECT",
+        "except": "EXCEPT",
+        "union_all": "UNION ALL",
+        "nested_left": "UNION ALL",
+        "nested_right": "EXCEPT",
+    }[wrap]
     match shape.other:
         case "same":
             second = _core(replace(shape, where=""))
@@ -204,6 +231,12 @@ def render(shape: Shape) -> str:
             second = _core(replace(shape, where="false"))
         case "nulls":
             second = "SELECT " + ", ".join(f"NULL::{SQL_TYPES[t]}" for _, t in outputs(shape))
+    # a third branch nests a different operation on either side of the first
+    third = _core(replace(shape, where=""))
+    if wrap == "nested_left":
+        return f"(({inner}) {op} ({second})) INTERSECT ({third})"
+    if wrap == "nested_right":
+        return f"({inner}) {op} (({second}) UNION ({third}))"
     return f"({inner}) {op} ({second})"
 
 

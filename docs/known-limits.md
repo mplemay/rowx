@@ -11,7 +11,8 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
 | correct | `test_nested_cte_chain` | A nested CTE chain over an outer join is nullable (`ScanBoundary`). |
 | correct | `test_scan_boundary_over_promotes` | A scan boundary column from the non-null side stays NOT NULL. Computed, duplicate-named, renamed (swapped-alias) and constant outputs, and columns that merge inputs (`UNION ALL`), stay nullable (`ScanBoundary`). |
 | correct | `test_view_columns_are_nullable` | A view column is NOT NULL (`ViewColumn`) when the view's definition proves it, such as a column from the non-null side of its join. Columns on the nullable side, computed columns and views that fall back (extra rules, unreadable `security_invoker` views, chains deeper than 8) stay nullable (`ForeignOrView`). |
-| limit | `test_set_operation_is_nullable` | Set operation columns have no table origin, so they default to nullable. |
+| correct | `test_set_operation_not_null_is_inferred` | A set operation column is NOT NULL (`SetOperation`) when the plan proves that output position, through `UNION`, `UNION ALL`, `EXCEPT` and `INTERSECT`, nested or mixed. |
+| correct | `test_set_operation_stays_nullable_when_unproven` | A set operation column stays nullable when any branch is unproven: a nullable or `NOT VALID` column, a `NULL` or computed branch, a null-extended join side, or a position that only matches by name. |
 | limit | `test_recursive_cte_is_nullable` | Recursive CTE columns have no table origin, so they default to nullable. |
 | limit | `test_computed_column_is_nullable` | Computed columns are always nullable; narrowing needs a parser ([dependencies](design/dependencies.md)). |
 | correct | `test_bang_narrows_computed_column` | `"col!"` forces NOT NULL on a computed column (`OverrideBang`). |
