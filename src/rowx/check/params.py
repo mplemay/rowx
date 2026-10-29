@@ -11,6 +11,8 @@ type ParamName = Literal[
     "float",
     "str",
     "bytes",
+    "bytearray",
+    "memoryview",
     "None",
     "Template",
     "Decimal",
@@ -36,6 +38,7 @@ type ParamName = Literal[
     "date",
     "datetime",
     "timedelta",
+    "time",
     "list",
 ]
 type _BindingKind = Literal["annotated", "assign", "import", "other"]
@@ -86,6 +89,8 @@ BUILTIN_NAMES: Final[dict[str, ParamName]] = {
     "float": "float",
     "bool": "bool",
     "bytes": "bytes",
+    "bytearray": "bytearray",
+    "memoryview": "memoryview",
     "dict": "dict",
 }
 CLASS_NAMES: Final[dict[str, ParamName]] = {
@@ -122,8 +127,14 @@ CLASS_NAMES: Final[dict[str, ParamName]] = {
     "datetime.date": "date",
     "datetime.datetime": "datetime",
     "datetime.timedelta": "timedelta",
+    "datetime.time": "time",
 }
-CALL_NAMES: Final[dict[str, ParamName]] = {**CLASS_NAMES, "datetime.datetime.now": "datetime"}
+CALL_NAMES: Final[dict[str, ParamName]] = {
+    **CLASS_NAMES,
+    "bytearray": "bytearray",
+    "memoryview": "memoryview",
+    "datetime.datetime.now": "datetime",
+}
 LITERAL_NAMES: Final[dict[type, ParamName]] = {
     int: "int",
     float: "float",
