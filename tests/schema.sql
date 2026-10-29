@@ -139,6 +139,20 @@ SELECT u.id AS user_id, u.name, p.id AS post_id, p.title
 FROM users u
 LEFT JOIN posts p ON p.user_id = u.id;
 
+-- views the nullability fuzzer draws from, shaped like the tables they stand in for; `v_posts` is null-extended
+CREATE VIEW v_users AS
+SELECT id, name, email FROM users;
+
+CREATE VIEW v_posts AS
+SELECT p.id, p.user_id, p.title
+FROM users u
+LEFT JOIN posts p ON p.user_id = u.id;
+
+CREATE VIEW v_orders AS
+SELECT o.id, o.user_id, o.amount, o.note
+FROM orders o
+LEFT JOIN users u ON u.id = o.user_id;
+
 -- describe only prepares, so the file is never read
 CREATE FOREIGN TABLE foreign_users (
     id integer NOT NULL,

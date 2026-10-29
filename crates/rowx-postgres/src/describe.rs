@@ -14,6 +14,7 @@ pub enum NullReason {
     NullableColumn,
     NotValidatedConstraint,
     ForeignOrView,
+    ViewColumn,
     OuterJoin { node: String },
     GroupingSets,
     ScanBoundary { alias: String },
@@ -32,6 +33,7 @@ impl NullReason {
             Self::NullableColumn => "NullableColumn",
             Self::NotValidatedConstraint => "NotValidatedConstraint",
             Self::ForeignOrView => "ForeignOrView",
+            Self::ViewColumn => "ViewColumn",
             Self::OuterJoin { .. } => "OuterJoin",
             Self::GroupingSets => "GroupingSets",
             Self::ScanBoundary { .. } => "ScanBoundary",
@@ -229,9 +231,11 @@ pub fn catalog_queries() -> u64 {
     CATALOG_QUERIES.load(Ordering::Acquire)
 }
 
-// one round trip for every column with a table origin; foreign tables and views are never NotNull
+// one round trip for every column with a table origin; foreign tables and views are never NotNull here, and a
+// view is resolved afterwards from its definition
 const BASE_NULLABILITY_SQL: &str = "\
 SELECT o.relid, o.attnum, n.nspname::text, c.relname::text, a.attname::text, CASE \
+    WHEN c.relkind = 'v' THEN 'view' \
     WHEN c.relkind NOT IN ('r', 'p', 'm') THEN 'foreign_or_view' \
     WHEN NOT a.attnotnull THEN 'nullable' \
     WHEN EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = a.attrelid AND k.contype = 'n' \
@@ -242,10 +246,10 @@ JOIN pg_attribute a ON a.attrelid = o.relid AND a.attnum = o.attnum \
 JOIN pg_class c ON c.oid = a.attrelid \
 JOIN pg_namespace n ON n.oid = c.relnamespace";
 
-async fn base_nullability(
-    client: &Client,
-    origins: &[(u32, i16)],
-) -> Result<HashMap<(u32, i16), (NullReason, Origin)>, Error> {
+// the verdict, the origin and whether the relation is a view
+type Base = HashMap<(u32, i16), (NullReason, Origin, bool)>;
+
+async fn base_nullability(client: &Client, origins: &[(u32, i16)]) -> Result<Base, Error> {
     if origins.is_empty() {
         return Ok(HashMap::new());
     }
@@ -260,7 +264,7 @@ async fn base_nullability(
             let reason = match status.as_str() {
                 "not_null" => NullReason::NotNullColumn,
                 "not_validated" => NullReason::NotValidatedConstraint,
-                "foreign_or_view" => NullReason::ForeignOrView,
+                "foreign_or_view" | "view" => NullReason::ForeignOrView,
                 _ => NullReason::NullableColumn,
             };
             let origin = Origin {
@@ -268,7 +272,10 @@ async fn base_nullability(
                 relation: row.try_get(3)?,
                 column: row.try_get(4)?,
             };
-            Ok(((row.try_get(0)?, row.try_get(1)?), (reason, origin)))
+            Ok((
+                (row.try_get(0)?, row.try_get(1)?),
+                (reason, origin, status == "view"),
+            ))
         })
         .collect::<Result<_, tokio_postgres::Error>>()
         .map_err(Error::from)
@@ -313,6 +320,224 @@ async fn plan_promotions(
         .collect();
     let plan = serde_json::from_str(&text).ok()?;
     Some(explain::walk(&plan, column_count, origins))
+}
+
+// the nullability-relevant part of a column, so a view's definition can be analysed without its types
+struct Slot {
+    table_oid: Option<u32>,
+    attnum: Option<i16>,
+    nullable: bool,
+    reason: NullReason,
+}
+
+// a view column is resolved at most 8 views deep
+const MAX_VIEW_DEPTH: usize = 8;
+
+#[derive(Default)]
+struct ViewCtx {
+    // inside the rolled-back transaction that pins `search_path`
+    pinned: bool,
+    // the chain of views being resolved, which catches a cycle and bounds the depth
+    visited: Vec<u32>,
+    // per view: whether each output column is NOT NULL, or `None` when the view falls back to Nullable
+    cache: HashMap<u32, Option<Vec<bool>>>,
+}
+
+// One catalog query (base nullability), the views behind the view columns, and the plan pass. Returns whether
+// the plan pass ran; when it did not, a view definition is not trusted.
+async fn refine(
+    client: &Client,
+    sql: &str,
+    slots: &mut [Slot],
+    ctx: &mut ViewCtx,
+) -> Result<bool, Error> {
+    let mut origins: Vec<(u32, i16)> = slots
+        .iter()
+        .filter_map(|c| c.table_oid.zip(c.attnum))
+        .collect();
+    origins.sort_unstable();
+    origins.dedup();
+    let base = base_nullability(client, &origins).await?;
+    let mut column_origins = Vec::with_capacity(slots.len());
+    for slot in slots.iter_mut() {
+        let found = slot.table_oid.zip(slot.attnum).and_then(|o| base.get(&o));
+        if let Some((reason, _, is_view)) = found {
+            slot.nullable = *reason != NullReason::NotNullColumn;
+            slot.reason = reason.clone();
+            if *is_view
+                && let Some((oid, attnum)) = slot.table_oid.zip(slot.attnum)
+                && view_column_not_null(client, oid, attnum, ctx).await
+            {
+                slot.nullable = false;
+                slot.reason = NullReason::ViewColumn;
+            }
+        }
+        column_origins.push(found.map(|(_, origin, _)| origin.clone()));
+    }
+
+    if slots.is_empty() {
+        return Ok(true);
+    }
+    if let Some(promotions) = plan_promotions(client, sql, slots.len(), &column_origins).await {
+        for (slot, promotion) in slots.iter_mut().zip(promotions) {
+            if let Some(reason) = promotion {
+                slot.nullable = true;
+                slot.reason = reason;
+            }
+        }
+        Ok(true)
+    } else {
+        for slot in slots.iter_mut() {
+            if slot.reason == NullReason::Computed {
+                slot.reason = NullReason::ExplainFailed;
+            }
+        }
+        Ok(false)
+    }
+}
+
+// the position of `attnum` among the live columns, which are the view definition's output columns in order
+fn output_position(live_attnums: &[i16], attnum: i16) -> Option<usize> {
+    live_attnums.iter().position(|n| *n == attnum)
+}
+
+// The definition as one statement without its trailing `;`, because it is concatenated into a simple-protocol
+// `EXPLAIN`. Any other `;` means a second statement (or a literal holding one), which is Nullable either way.
+fn definition_statement(definition: &str) -> Option<&str> {
+    let text = definition.trim_end();
+    let text = text.strip_suffix(';').unwrap_or(text);
+    (!text.trim().is_empty() && !text.contains(';')).then_some(text)
+}
+
+async fn view_column_not_null(client: &Client, view: u32, attnum: i16, ctx: &mut ViewCtx) -> bool {
+    let Some(verdicts) = view_verdicts(client, view, ctx).await else {
+        return false;
+    };
+    let Some(live) = live_attnums(client, view).await else {
+        return false;
+    };
+    // a view without a matching shape is not trusted
+    live.len() == verdicts.len()
+        && output_position(&live, attnum).is_some_and(|i| verdicts.get(i).copied().unwrap_or(false))
+}
+
+async fn live_attnums(client: &Client, view: u32) -> Option<Vec<i16>> {
+    let rows = client
+        .query(
+            "SELECT attnum FROM pg_catalog.pg_attribute \
+             WHERE attrelid = $1::oid AND attnum > 0 AND NOT attisdropped ORDER BY attnum",
+            &[&view],
+        )
+        .await
+        .ok()?;
+    rows.iter().map(|r| r.try_get(0).ok()).collect()
+}
+
+async fn view_verdicts(client: &Client, view: u32, ctx: &mut ViewCtx) -> Option<Vec<bool>> {
+    if let Some(cached) = ctx.cache.get(&view) {
+        return cached.clone();
+    }
+    if ctx.visited.contains(&view) || ctx.visited.len() >= MAX_VIEW_DEPTH {
+        return None;
+    }
+    ctx.visited.push(view);
+    let result = pinned_view_verdicts(client, view, ctx).await;
+    ctx.visited.pop();
+    ctx.cache.insert(view, result.clone());
+    result
+}
+
+// `SET LOCAL search_path = pg_catalog` makes `pg_get_viewdef` qualify every name, so the definition cannot
+// resolve to a different table under the checker's own path; the transaction is always rolled back
+async fn pinned_view_verdicts(client: &Client, view: u32, ctx: &mut ViewCtx) -> Option<Vec<bool>> {
+    let outermost = !ctx.pinned;
+    if outermost {
+        if client
+            .batch_execute("BEGIN; SET LOCAL search_path = pg_catalog")
+            .await
+            .is_err()
+        {
+            let _ = client.batch_execute("ROLLBACK").await;
+            return None;
+        }
+        ctx.pinned = true;
+    }
+    let result = savepointed_view_verdicts(client, view, ctx).await;
+    if outermost {
+        ctx.pinned = false;
+        let _ = client.batch_execute("ROLLBACK").await;
+    }
+    result
+}
+
+// a savepoint keeps a failed definition from aborting the transaction for the views that follow
+async fn savepointed_view_verdicts(
+    client: &Client,
+    view: u32,
+    ctx: &mut ViewCtx,
+) -> Option<Vec<bool>> {
+    client.batch_execute("SAVEPOINT rowx_view").await.ok()?;
+    let verdicts = definition_verdicts(client, view, ctx).await;
+    let end = if verdicts.is_some() {
+        "RELEASE SAVEPOINT rowx_view"
+    } else {
+        "ROLLBACK TO SAVEPOINT rowx_view"
+    };
+    client.batch_execute(end).await.ok()?;
+    verdicts
+}
+
+// the view is eligible unless it has a rule besides `_RETURN`, or is `security_invoker` over a relation the
+// role cannot read
+const VIEW_ELIGIBLE_SQL: &str = "\
+SELECT c.relkind = 'v' \
+    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid AND r.rulename <> '_RETURN') \
+    AND (NOT COALESCE((SELECT bool_or(o.option_value::boolean) FROM pg_catalog.pg_options_to_table(c.reloptions) o \
+            WHERE o.option_name = 'security_invoker'), false) \
+        OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r \
+            JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass AND d.objid = r.oid \
+                AND d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid <> c.oid \
+            WHERE r.ev_class = c.oid AND NOT pg_catalog.has_table_privilege(d.refobjid, 'SELECT'))) \
+FROM pg_catalog.pg_class c WHERE c.oid = $1::oid";
+
+async fn definition_verdicts(client: &Client, view: u32, ctx: &mut ViewCtx) -> Option<Vec<bool>> {
+    let eligible: bool = client
+        .query_opt(VIEW_ELIGIBLE_SQL, &[&view])
+        .await
+        .ok()??
+        .try_get(0)
+        .ok()?;
+    if !eligible {
+        return None;
+    }
+    let definition: String = client
+        .query_one("SELECT pg_catalog.pg_get_viewdef($1::oid, false)", &[&view])
+        .await
+        .ok()?
+        .try_get(0)
+        .ok()?;
+    let sql = definition_statement(&definition)?;
+    // Parse rejects anything but a single statement, as for the user's own query
+    let stmt = client.prepare(sql).await.ok()?;
+    let mut slots: Vec<Slot> = stmt
+        .columns()
+        .iter()
+        .map(|col| {
+            let table_oid = col.table_oid().filter(|oid| *oid != 0);
+            Slot {
+                table_oid,
+                attnum: table_oid.and_then(|_| col.column_id()),
+                nullable: true,
+                reason: if table_oid.is_some() {
+                    NullReason::NullableColumn
+                } else {
+                    NullReason::Computed
+                },
+            }
+        })
+        .collect();
+    let plan_ran = Box::pin(refine(client, sql, &mut slots, ctx)).await.ok()?;
+    plan_ran.then(|| slots.iter().map(|s| !s.nullable).collect())
 }
 
 fn apply_overrides(col: &mut ColumnInfo) {
@@ -395,41 +620,19 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
         })
         .collect();
 
-    let mut origins: Vec<(u32, i16)> = columns
+    let mut slots: Vec<Slot> = columns
         .iter()
-        .filter_map(|c| c.table_oid.zip(c.attnum))
+        .map(|c| Slot {
+            table_oid: c.table_oid,
+            attnum: c.attnum,
+            nullable: c.nullable,
+            reason: c.reason.clone(),
+        })
         .collect();
-    origins.sort_unstable();
-    origins.dedup();
-    let base = base_nullability(client, &origins).await?;
-    let mut column_origins = Vec::with_capacity(columns.len());
-    for col in &mut columns {
-        let found = col.table_oid.zip(col.attnum).and_then(|o| base.get(&o));
-        if let Some((reason, _)) = found {
-            col.nullable = *reason != NullReason::NotNullColumn;
-            col.reason = reason.clone();
-        }
-        column_origins.push(found.map(|(_, origin)| origin.clone()));
-    }
-
-    if !columns.is_empty() {
-        match plan_promotions(client, sql, columns.len(), &column_origins).await {
-            Some(promotions) => {
-                for (col, promotion) in columns.iter_mut().zip(promotions) {
-                    if let Some(reason) = promotion {
-                        col.nullable = true;
-                        col.reason = reason;
-                    }
-                }
-            }
-            None => {
-                for col in &mut columns {
-                    if col.reason == NullReason::Computed {
-                        col.reason = NullReason::ExplainFailed;
-                    }
-                }
-            }
-        }
+    refine(client, sql, &mut slots, &mut ViewCtx::default()).await?;
+    for (col, slot) in columns.iter_mut().zip(slots) {
+        col.nullable = slot.nullable;
+        col.reason = slot.reason;
     }
     // Unknown columns (Computed, ExplainFailed) were never set to NotNull, so they are already Nullable
     columns.iter_mut().for_each(apply_overrides);
@@ -442,7 +645,33 @@ mod tests {
 
     use tokio_postgres::types::{Kind, Type};
 
-    use super::{Unsupported, extension_candidates, impostor, resolve, unresolved_leaf};
+    use super::{
+        Unsupported, definition_statement, extension_candidates, impostor, output_position,
+        resolve, unresolved_leaf,
+    };
+
+    #[test]
+    fn output_position_is_the_rank_among_live_columns() {
+        // attnum 2 was dropped, so attnum 3 is the second output column
+        assert_eq!(output_position(&[1, 3, 4], 1), Some(0));
+        assert_eq!(output_position(&[1, 3, 4], 3), Some(1));
+        assert_eq!(output_position(&[1, 3, 4], 4), Some(2));
+        assert_eq!(output_position(&[1, 3, 4], 2), None);
+    }
+
+    #[test]
+    fn definition_statement_strips_one_trailing_semicolon() {
+        assert_eq!(definition_statement(" SELECT 1;\n"), Some(" SELECT 1"));
+        assert_eq!(definition_statement("SELECT 1"), Some("SELECT 1"));
+    }
+
+    #[test]
+    fn definition_statement_rejects_a_second_statement() {
+        assert_eq!(definition_statement("SELECT 1; DROP TABLE users;"), None);
+        assert_eq!(definition_statement("SELECT 1; SELECT 2"), None);
+        assert_eq!(definition_statement(";"), None);
+        assert_eq!(definition_statement("  "), None);
+    }
 
     fn custom(name: &str, oid: u32) -> Type {
         Type::new(name.to_owned(), oid, Kind::Simple, "public".to_owned())

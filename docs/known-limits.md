@@ -10,7 +10,7 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
 | correct | `test_window_over_outer_join` | A window function over an outer join, behind a subquery, is nullable (`ScanBoundary`). |
 | correct | `test_nested_cte_chain` | A nested CTE chain over an outer join is nullable (`ScanBoundary`). |
 | correct | `test_scan_boundary_over_promotes` | A scan boundary column from the non-null side stays NOT NULL. Computed, duplicate-named, renamed (swapped-alias) and constant outputs, and columns that merge inputs (`UNION ALL`), stay nullable (`ScanBoundary`). |
-| limit | `test_view_columns_are_nullable` | View columns are always nullable (`ForeignOrView`). Use `"col!"` to narrow. Planned (#106): NOT NULL when the view definition proves it. |
+| correct | `test_view_columns_are_nullable` | A view column is NOT NULL (`ViewColumn`) when the view's definition proves it, such as a column from the non-null side of its join. Columns on the nullable side, computed columns and views that fall back (extra rules, unreadable `security_invoker` views, chains deeper than 8) stay nullable (`ForeignOrView`). |
 | limit | `test_set_operation_is_nullable` | Set operation columns have no table origin, so they default to nullable. |
 | limit | `test_recursive_cte_is_nullable` | Recursive CTE columns have no table origin, so they default to nullable. |
 | limit | `test_computed_column_is_nullable` | Computed columns are always nullable; narrowing needs a parser ([dependencies](design/dependencies.md)). |
