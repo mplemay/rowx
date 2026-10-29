@@ -35,7 +35,8 @@ outside this spike.
 
 ## Set operations
 
-**Recommendation: accept.** Needs a design change, then its own issue.
+**Recommendation: accept.** Follow-up: [#133](https://github.com/mplemay/rowx/issues/133). It needs a design change
+first. sqlx has no equivalent: it leaves these columns unknown, so this goes beyond parity.
 
 - Rule, by output position (not by name):
   - `Append`/`Merge Append` (UNION, UNION ALL): NOT NULL only if every branch is NOT NULL at that position.
@@ -69,11 +70,14 @@ outside this spike.
   guard needs `pg_operator`.
 - The work-table reference is treated as NOT NULL by induction, and falls back to untrusted unless every position
   passes. That is sound and was needed (a recursive term can reintroduce NULL).
+- sqlx leaves these columns unknown too, so staying nullable matches it.
 - Revisit with roadmap item 7 (a parser), which supplies the alias list.
 
 ## Computed columns
 
-**Recommendation: accept a small whitelist, with a search-path guard.** Needs a design change, then its own issue.
+**Recommendation: accept a small whitelist, with a shadowing guard.** Follow-up:
+[#134](https://github.com/mplemay/rowx/issues/134). It needs a design change first. sqlx never proves a computed column
+NOT NULL, so this goes beyond parity.
 
 - Whitelist, parsed with a balanced-parenthesis scan (not a regex over the whole expression, because `count(a) + f(y)`
   would match a regex ending in `)`):
@@ -87,9 +91,10 @@ outside this spike.
 - **Soundness hazard.** The plan prints a function by bare name when it is visible on the `search_path`. With
   `search_path = myschema, pg_catalog`, a user-defined `count(int)` or `row_number()` prints as `count(a)` and
   `row_number()`, identical to the built-ins, and returned NULL in the spike. The fuzzer can't find this because it
-  never defines such functions. A plan-only whitelist is therefore unsound unless guarded. Proposed guard: skip the
-  whitelist when `pg_proc` has a function with a whitelisted name outside `pg_catalog` in any schema on the session
-  `search_path`. This is a design question for the follow-up.
+  never defines such functions. A plan-only whitelist is therefore unsound unless guarded. Decided guard: query
+  `pg_proc` for functions with a whitelisted name outside `pg_catalog`, and disable the function-name items when any
+  exist. This avoids parsing `search_path`. Constants and `COALESCE` over them are unaffected. The design change must
+  say where the lookup runs and how it is cached.
 - Strict `pg_proc` checks for general functions are out of scope: they need overload resolution, which the plan doesn't
   give.
 
@@ -97,7 +102,7 @@ outside this spike.
 
 | Bug | Where | Status |
 |---|---|---|
-| The design says "semi and anti joins never null-extend", which is wrong. `Anti` and `Right Anti` do, and a prototype that followed the doc produced a NOT NULL verdict that a NULL contradicted. | `docs/design/nullability.md` (the code in `explain.rs` is right) | Filed as [#131](https://github.com/mplemay/rowx/issues/131) |
+| The design says "semi and anti joins never null-extend", which is wrong. `Anti` and `Right Anti` do, and a prototype that followed the doc produced a NOT NULL verdict that a NULL contradicted. | `docs/design/nullability.md` (the code in `explain.rs` is right) | Filed as [#131](https://github.com/mplemay/rowx/issues/131). sqlx has the opposite gap: it never marks `Anti` joins at all. |
 
 One handwritten expectation was wrong, not the prototype: `count(*) FILTER (...)` is NOT NULL, and the prototype
 conservatively keeps it nullable.
