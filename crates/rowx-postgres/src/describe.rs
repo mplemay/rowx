@@ -5,7 +5,7 @@ use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::{Client, SimpleQueryMessage};
 
 use crate::error::Error;
-use crate::explain;
+use crate::explain::{self, Origin};
 use crate::types::{Matcher, TYPE_TABLE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,7 +231,7 @@ pub fn catalog_queries() -> u64 {
 
 // one round trip for every column with a table origin; foreign tables and views are never NotNull
 const BASE_NULLABILITY_SQL: &str = "\
-SELECT o.relid, o.attnum, CASE \
+SELECT o.relid, o.attnum, n.nspname::text, c.relname::text, a.attname::text, CASE \
     WHEN c.relkind NOT IN ('r', 'p', 'm') THEN 'foreign_or_view' \
     WHEN NOT a.attnotnull THEN 'nullable' \
     WHEN EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = a.attrelid AND k.contype = 'n' \
@@ -239,12 +239,13 @@ SELECT o.relid, o.attnum, CASE \
     ELSE 'not_null' END \
 FROM unnest($1::oid[], $2::int2[]) AS o(relid, attnum) \
 JOIN pg_attribute a ON a.attrelid = o.relid AND a.attnum = o.attnum \
-JOIN pg_class c ON c.oid = a.attrelid";
+JOIN pg_class c ON c.oid = a.attrelid \
+JOIN pg_namespace n ON n.oid = c.relnamespace";
 
 async fn base_nullability(
     client: &Client,
     origins: &[(u32, i16)],
-) -> Result<HashMap<(u32, i16), NullReason>, Error> {
+) -> Result<HashMap<(u32, i16), (NullReason, Origin)>, Error> {
     if origins.is_empty() {
         return Ok(HashMap::new());
     }
@@ -255,14 +256,19 @@ async fn base_nullability(
         .await?;
     rows.iter()
         .map(|row| {
-            let status: String = row.try_get(2)?;
+            let status: String = row.try_get(5)?;
             let reason = match status.as_str() {
                 "not_null" => NullReason::NotNullColumn,
                 "not_validated" => NullReason::NotValidatedConstraint,
                 "foreign_or_view" => NullReason::ForeignOrView,
                 _ => NullReason::NullableColumn,
             };
-            Ok(((row.try_get(0)?, row.try_get(1)?), reason))
+            let origin = Origin {
+                schema: row.try_get(2)?,
+                relation: row.try_get(3)?,
+                column: row.try_get(4)?,
+            };
+            Ok(((row.try_get(0)?, row.try_get(1)?), (reason, origin)))
         })
         .collect::<Result<_, tokio_postgres::Error>>()
         .map_err(Error::from)
@@ -290,6 +296,7 @@ async fn plan_promotions(
     client: &Client,
     sql: &str,
     column_count: usize,
+    origins: &[Option<Origin>],
 ) -> Option<Vec<Option<NullReason>>> {
     let messages = client
         .simple_query(&format!(
@@ -305,7 +312,7 @@ async fn plan_promotions(
         })
         .collect();
     let plan = serde_json::from_str(&text).ok()?;
-    Some(explain::walk(&plan, column_count))
+    Some(explain::walk(&plan, column_count, origins))
 }
 
 fn apply_overrides(col: &mut ColumnInfo) {
@@ -395,15 +402,18 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
     origins.sort_unstable();
     origins.dedup();
     let base = base_nullability(client, &origins).await?;
+    let mut column_origins = Vec::with_capacity(columns.len());
     for col in &mut columns {
-        if let Some(reason) = col.table_oid.zip(col.attnum).and_then(|o| base.get(&o)) {
+        let found = col.table_oid.zip(col.attnum).and_then(|o| base.get(&o));
+        if let Some((reason, _)) = found {
             col.nullable = *reason != NullReason::NotNullColumn;
             col.reason = reason.clone();
         }
+        column_origins.push(found.map(|(_, origin)| origin.clone()));
     }
 
     if !columns.is_empty() {
-        match plan_promotions(client, sql, columns.len()).await {
+        match plan_promotions(client, sql, columns.len(), &column_origins).await {
             Some(promotions) => {
                 for (col, promotion) in columns.iter_mut().zip(promotions) {
                     if let Some(reason) = promotion {

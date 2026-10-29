@@ -1,0 +1,64 @@
+[
+  {
+    "Plan": {
+      "Alias": "x",
+      "Async Capable": false,
+      "Disabled": false,
+      "Node Type": "Subquery Scan",
+      "Output": [
+        "x.name",
+        "x.email"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Grouping Sets": [
+            {
+              "Hash Keys": [
+                [
+                  "users.name"
+                ]
+              ]
+            },
+            {
+              "Hash Keys": [
+                [
+                  "users.email"
+                ]
+              ]
+            }
+          ],
+          "Node Type": "Aggregate",
+          "Output": [
+            "users.name",
+            "users.email",
+            "NULL::bigint"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Subquery",
+          "Partial Mode": "Simple",
+          "Plans": [
+            {
+              "Alias": "users",
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Seq Scan",
+              "Output": [
+                "users.id",
+                "users.name",
+                "users.email"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer",
+              "Relation Name": "users",
+              "Schema": "public"
+            }
+          ],
+          "Strategy": "Hashed"
+        }
+      ]
+    }
+  }
+]

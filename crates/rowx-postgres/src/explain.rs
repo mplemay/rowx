@@ -8,9 +8,21 @@ mod boundaries;
 
 type Marked = HashMap<String, NullReason>;
 
+/// The base column a top-level column was traced to by describe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub schema: String,
+    pub relation: String,
+    pub column: String,
+}
+
 // Returns one entry per top-level column: `Some` is a promotion to Nullable, `None` means no opinion.
 #[must_use]
-pub fn walk(plan: &Value, column_count: usize) -> Vec<Option<NullReason>> {
+pub fn walk(
+    plan: &Value,
+    column_count: usize,
+    origins: &[Option<Origin>],
+) -> Vec<Option<NullReason>> {
     let mut promotions = vec![None; column_count];
     let Some(root) = plan.get(0).and_then(|entry| entry.get("Plan")) else {
         return promotions;
@@ -30,6 +42,12 @@ pub fn walk(plan: &Value, column_count: usize) -> Vec<Option<NullReason>> {
         Vec::new()
     };
 
+    let context = boundaries::Context {
+        root,
+        ctes: &ctes,
+        marked: &marked,
+    };
+
     for (index, (slot, expr)) in promotions.iter_mut().zip(outputs(root)).enumerate() {
         *slot = marked.get(expr).cloned().or_else(|| {
             aliases
@@ -37,6 +55,10 @@ pub fn walk(plan: &Value, column_count: usize) -> Vec<Option<NullReason>> {
                 .find(|alias| {
                     expr.strip_prefix(**alias)
                         .is_some_and(|rest| rest.starts_with('.'))
+                })
+                .filter(|_| {
+                    let origin = origins.get(index).and_then(Option::as_ref);
+                    !boundaries::boundary_output_is_clean(expr, origin, &context)
                 })
                 .map(|alias| NullReason::ScanBoundary {
                     alias: (*alias).to_owned(),
@@ -118,7 +140,7 @@ mod join {
     use proptest::prelude::*;
     use serde_json::{Value, json};
 
-    use super::{NullReason, walk};
+    use super::{NullReason, Origin, walk};
 
     fn fixture(name: &str) -> Value {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -135,7 +157,7 @@ mod join {
     }
 
     fn nullable_flags(name: &str, columns: usize) -> Vec<bool> {
-        walk(&fixture(name), columns)
+        walk(&fixture(name), columns, &[])
             .iter()
             .map(Option::is_some)
             .collect()
@@ -220,7 +242,7 @@ mod join {
     #[test]
     fn reason_names_the_join_node() {
         assert_eq!(
-            walk(&fixture("join_right"), 2)[1],
+            walk(&fixture("join_right"), 2, &[])[1],
             Some(NullReason::OuterJoin {
                 node: "Hash Join".to_owned()
             }),
@@ -228,7 +250,7 @@ mod join {
     }
 
     fn reasons(name: &str, columns: usize) -> Vec<Option<NullReason>> {
-        walk(&fixture(name), columns)
+        walk(&fixture(name), columns, &[])
     }
 
     fn boundary(alias: &str) -> NullReason {
@@ -299,9 +321,172 @@ mod join {
         assert_eq!(nullable_flags("returning_alias", 2), [false, false]);
     }
 
+    fn origin(relation: &str, column: &str) -> Origin {
+        Origin {
+            schema: "public".to_owned(),
+            relation: relation.to_owned(),
+            column: column.to_owned(),
+        }
+    }
+
+    fn mapped(name: &str, origins: &[Option<Origin>]) -> Vec<Option<NullReason>> {
+        walk(&fixture(name), origins.len(), origins)
+    }
+
+    #[test]
+    fn subquery_keeps_the_non_null_side_not_promoted() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_subquery",
+                &[Some(origin("users", "id")), Some(origin("posts", "title"))]
+            ),
+            [None, Some(boundary("x"))]
+        );
+    }
+
+    #[test]
+    fn materialized_cte_keeps_the_non_null_side_not_promoted() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_cte_materialized",
+                &[Some(origin("users", "id")), Some(origin("posts", "title"))]
+            ),
+            [None, Some(boundary("c"))]
+        );
+    }
+
+    #[test]
+    fn cte_chain_resolves_one_boundary_at_a_time() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_cte_chain",
+                &[Some(origin("users", "id")), Some(origin("posts", "title"))]
+            ),
+            [None, Some(boundary("b"))]
+        );
+    }
+
+    #[test]
+    fn cte_referenced_twice_is_mapped_per_alias() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_cte_twice",
+                &[Some(origin("users", "id")), Some(origin("posts", "title"))]
+            ),
+            [None, Some(boundary("b"))]
+        );
+    }
+
+    #[test]
+    fn expression_output_is_promoted() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_expression",
+                &[Some(origin("users", "id")), None]
+            ),
+            [None, Some(boundary("x"))]
+        );
+    }
+
+    #[test]
+    fn same_named_source_columns_are_promoted() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_duplicate_names",
+                &[Some(origin("users", "id")), Some(origin("posts", "id"))]
+            ),
+            [Some(boundary("x")), Some(boundary("x"))]
+        );
+    }
+
+    // the window function is gone from the plan, so the source output list ends in a NULL constant
+    #[test]
+    fn planner_null_constant_does_not_disturb_the_mapping() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_null_constant",
+                &[Some(origin("users", "id"))]
+            ),
+            [None]
+        );
+    }
+
+    #[test]
+    fn grouping_sets_source_is_promoted() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_grouping_sets",
+                &[
+                    Some(origin("users", "name")),
+                    Some(origin("users", "email"))
+                ]
+            ),
+            [Some(boundary("x")), Some(boundary("x"))]
+        );
+    }
+
+    // a nested `WITH c` shadows the outer `c`; the plan does not say which scope a name belongs to
+    #[test]
+    fn shadowed_cte_name_is_promoted() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_shadowed_cte",
+                &[
+                    Some(origin("posts", "title")),
+                    Some(origin("posts", "title"))
+                ]
+            ),
+            [Some(boundary("o")), Some(boundary("d"))]
+        );
+    }
+
+    #[test]
+    fn swapped_aliases_are_promoted() {
+        assert_eq!(
+            mapped(
+                "scan_boundary_swapped",
+                &[
+                    Some(origin("posts", "title")),
+                    Some(origin("users", "name"))
+                ]
+            ),
+            [Some(boundary("c")), Some(boundary("c"))]
+        );
+    }
+
+    #[test]
+    fn missing_origin_is_promoted() {
+        assert_eq!(
+            mapped("scan_boundary_subquery", &[None, None]),
+            [Some(boundary("x")), Some(boundary("x"))]
+        );
+    }
+
+    #[test]
+    fn origin_in_another_schema_is_promoted() {
+        let mut other = origin("users", "id");
+        "elsewhere".clone_into(&mut other.schema);
+        assert_eq!(
+            mapped(
+                "scan_boundary_subquery",
+                &[Some(other), Some(origin("posts", "title"))]
+            ),
+            [Some(boundary("x")), Some(boundary("x"))]
+        );
+    }
+
+    // an Append names its output after the first branch, so a NULL from another branch is invisible
+    #[test]
+    fn append_source_is_promoted() {
+        assert_eq!(
+            mapped("scan_boundary_union_all", &[Some(origin("posts", "title"))]),
+            [Some(boundary("x"))]
+        );
+    }
+
     #[test]
     fn malformed_plan_promotes_nothing() {
-        assert_eq!(walk(&json!({}), 3), [None, None, None]);
+        assert_eq!(walk(&json!({}), 3, &[]), [None, None, None]);
     }
 
     fn arb_node() -> impl Strategy<Value = Value> {
@@ -330,7 +515,7 @@ mod join {
         // The walker only ever yields promotions; a plan with no null-extending join yields none.
         #[test]
         fn only_promotions(root in arb_node(), columns in 0usize..6) {
-            let result = walk(&json!([{ "Plan": root }]), columns);
+            let result = walk(&json!([{ "Plan": root }]), columns, &[]);
             prop_assert_eq!(result.len(), columns);
             for promotion in result.into_iter().flatten() {
                 let is_outer_join = matches!(promotion, NullReason::OuterJoin { .. });
@@ -341,7 +526,7 @@ mod join {
         #[test]
         fn no_outer_join_no_promotion(out in prop::collection::vec("[a-c]\\.[xyz]", 0..4), columns in 0usize..6) {
             let plan = json!([{ "Plan": { "Node Type": "Seq Scan", "Output": out } }]);
-            prop_assert!(walk(&plan, columns).iter().all(Option::is_none));
+            prop_assert!(walk(&plan, columns, &[]).iter().all(Option::is_none));
         }
     }
 }

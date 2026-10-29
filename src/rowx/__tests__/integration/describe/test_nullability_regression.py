@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -155,3 +155,77 @@ def test_sorted_grouping_set_chain_is_nullable(schema: str, grouping: str) -> No
         f"WHERE t0.email IS NOT NULL GROUP BY {grouping}"
     )
     assert verdicts(schema, sql) == [(True, "GroupingSets")] * 2
+
+
+JOIN: Final[str] = "FROM users u LEFT JOIN posts p ON p.user_id = u.id"
+NOT_NULL: Final[tuple[bool, str]] = (False, "NotNullColumn")
+BOUNDARY: Final[tuple[bool, str]] = (True, "ScanBoundary")
+
+
+# scan-boundary mapping (#105): the same shapes as the plan fixtures, through describe with real origins;
+# @JOIN@ stands for the left join above
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("SELECT x.id, x.title FROM (SELECT u.id, p.title, row_number() OVER () @JOIN@) x", [NOT_NULL, BOUNDARY]),
+        ("WITH c AS MATERIALIZED (SELECT u.id, p.title @JOIN@) SELECT id, title FROM c", [NOT_NULL, BOUNDARY]),
+        (
+            (
+                "WITH a AS MATERIALIZED (SELECT u.id, p.title @JOIN@), "
+                "b AS MATERIALIZED (SELECT id, title FROM a) SELECT id, title FROM b"
+            ),
+            [NOT_NULL, BOUNDARY],
+        ),
+        (
+            "WITH c AS MATERIALIZED (SELECT u.id, p.title @JOIN@) SELECT a.id, b.title FROM c a JOIN c b ON a.id = b.id",
+            [NOT_NULL, BOUNDARY],
+        ),
+        (
+            "SELECT x.id, x.title FROM (SELECT u.id, upper(p.title) AS title, row_number() OVER () @JOIN@) x",
+            [NOT_NULL, BOUNDARY],
+        ),
+        (
+            "SELECT x.id, x.pid FROM (SELECT u.id, p.id AS pid, row_number() OVER () @JOIN@) x",
+            [BOUNDARY, BOUNDARY],
+        ),
+        ("WITH c AS MATERIALIZED (SELECT u.id, p.title @JOIN@) SELECT id FROM c", [NOT_NULL]),
+        (
+            "SELECT x.name, x.email FROM (SELECT name, email, count(*) FROM users GROUP BY GROUPING SETS ((name), (email))) x",
+            [BOUNDARY, BOUNDARY],
+        ),
+        (
+            (
+                "WITH c AS MATERIALIZED (SELECT u.id, p.title @JOIN@), "
+                "d AS MATERIALIZED (WITH c AS MATERIALIZED (SELECT p.user_id AS id, p.title FROM posts p) "
+                "SELECT id, title FROM c) SELECT o.title, d.title FROM c o JOIN d ON o.id = d.id"
+            ),
+            [BOUNDARY, BOUNDARY],
+        ),
+        (
+            "WITH c AS MATERIALIZED (SELECT p.title AS name, u.name AS title @JOIN@) SELECT name, title FROM c",
+            [BOUNDARY, BOUNDARY],
+        ),
+        (
+            (
+                "SELECT x.title FROM (SELECT y.title, row_number() OVER () FROM "
+                "(SELECT title FROM posts UNION ALL SELECT p.title @JOIN@) y) x"
+            ),
+            [BOUNDARY],
+        ),
+    ],
+    ids=[
+        "subquery_non_null_side",
+        "materialized_cte_non_null_side",
+        "cte_chain",
+        "cte_referenced_twice",
+        "expression_output",
+        "same_named_source_columns",
+        "unused_column_pruned",
+        "grouping_sets",
+        "shadowed_cte_name",
+        "swapped_aliases",
+        "union_all_branch_nulls",
+    ],
+)
+def test_scan_boundary_mapping(schema: str, sql: str, expected: list[tuple[bool, str]]) -> None:
+    assert verdicts(schema, sql.replace("@JOIN@", JOIN)) == expected

@@ -1,0 +1,165 @@
+[
+  {
+    "Plan": {
+      "Async Capable": false,
+      "Disabled": false,
+      "Inner Unique": false,
+      "Join Type": "Inner",
+      "Merge Cond": "(o.id = d.id)",
+      "Node Type": "Merge Join",
+      "Output": [
+        "o.title",
+        "d.title"
+      ],
+      "Parallel Aware": false,
+      "Plans": [
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Hash Cond": "(p.user_id = u.id)",
+          "Inner Unique": true,
+          "Join Type": "Right",
+          "Node Type": "Hash Join",
+          "Output": [
+            "u.id",
+            "p.title"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "InitPlan",
+          "Plans": [
+            {
+              "Alias": "p",
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Seq Scan",
+              "Output": [
+                "p.id",
+                "p.user_id",
+                "p.title"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer",
+              "Relation Name": "posts",
+              "Schema": "public"
+            },
+            {
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Hash",
+              "Output": [
+                "u.id"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Inner",
+              "Plans": [
+                {
+                  "Alias": "u",
+                  "Async Capable": false,
+                  "Disabled": false,
+                  "Node Type": "Seq Scan",
+                  "Output": [
+                    "u.id"
+                  ],
+                  "Parallel Aware": false,
+                  "Parent Relationship": "Outer",
+                  "Relation Name": "users",
+                  "Schema": "public"
+                }
+              ]
+            }
+          ],
+          "Subplan Name": "CTE c"
+        },
+        {
+          "Alias": "c",
+          "Async Capable": false,
+          "CTE Name": "c",
+          "Disabled": false,
+          "Node Type": "CTE Scan",
+          "Output": [
+            "c.id",
+            "c.title"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "InitPlan",
+          "Plans": [
+            {
+              "Alias": "p_1",
+              "Async Capable": false,
+              "Disabled": false,
+              "Node Type": "Seq Scan",
+              "Output": [
+                "p_1.user_id",
+                "p_1.title"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "InitPlan",
+              "Relation Name": "posts",
+              "Schema": "public",
+              "Subplan Name": "CTE c"
+            }
+          ],
+          "Subplan Name": "CTE d"
+        },
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Sort",
+          "Output": [
+            "o.title",
+            "o.id"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Outer",
+          "Plans": [
+            {
+              "Alias": "o",
+              "Async Capable": false,
+              "CTE Name": "c",
+              "Disabled": false,
+              "Node Type": "CTE Scan",
+              "Output": [
+                "o.title",
+                "o.id"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer"
+            }
+          ],
+          "Sort Key": [
+            "o.id"
+          ]
+        },
+        {
+          "Async Capable": false,
+          "Disabled": false,
+          "Node Type": "Sort",
+          "Output": [
+            "d.title",
+            "d.id"
+          ],
+          "Parallel Aware": false,
+          "Parent Relationship": "Inner",
+          "Plans": [
+            {
+              "Alias": "d",
+              "Async Capable": false,
+              "CTE Name": "d",
+              "Disabled": false,
+              "Node Type": "CTE Scan",
+              "Output": [
+                "d.title",
+                "d.id"
+              ],
+              "Parallel Aware": false,
+              "Parent Relationship": "Outer"
+            }
+          ],
+          "Sort Key": [
+            "d.id"
+          ]
+        }
+      ]
+    }
+  }
+]

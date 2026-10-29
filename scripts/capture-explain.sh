@@ -100,6 +100,32 @@ MERGE INTO users u USING (VALUES ($1::int, $2::text)) AS s (id, name) ON u.id = 
 INSERT INTO users (id, name) VALUES ($1, $2) RETURNING id, name, email
 -- name: not_valid_constraint
 SELECT id, x FROM nv
+-- name: grouping_cube_chain
+SELECT t0.id, count(*) FROM users t0 FULL JOIN users t2 ON true WHERE t0.email IS NOT NULL GROUP BY CUBE (t0.id)
+-- name: join_anti_null_extended
+SELECT t0.name FROM users t0 RIGHT JOIN users t1 ON t1.email = t0.email WHERE t0.email IS NULL
+-- name: scan_boundary_subquery
+SELECT x.id, x.title FROM (SELECT u.id, p.title, row_number() OVER () FROM users u LEFT JOIN posts p ON p.user_id = u.id) x
+-- name: scan_boundary_cte_materialized
+WITH c AS MATERIALIZED (SELECT u.id, p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id) SELECT id, title FROM c
+-- name: scan_boundary_cte_chain
+WITH a AS MATERIALIZED (SELECT u.id, p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id), b AS MATERIALIZED (SELECT id, title FROM a) SELECT id, title FROM b
+-- name: scan_boundary_cte_twice
+WITH c AS MATERIALIZED (SELECT u.id, p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id) SELECT a.id, b.title FROM c a JOIN c b ON a.id = b.id
+-- name: scan_boundary_expression
+SELECT x.id, x.title FROM (SELECT u.id, upper(p.title) AS title, row_number() OVER () FROM users u LEFT JOIN posts p ON p.user_id = u.id) x
+-- name: scan_boundary_duplicate_names
+SELECT x.id, x.pid FROM (SELECT u.id, p.id AS pid, row_number() OVER () FROM users u LEFT JOIN posts p ON p.user_id = u.id) x
+-- name: scan_boundary_null_constant
+WITH c AS MATERIALIZED (SELECT u.id, p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id) SELECT id FROM c
+-- name: scan_boundary_grouping_sets
+SELECT x.name, x.email FROM (SELECT name, email, count(*) FROM users GROUP BY GROUPING SETS ((name), (email))) x
+-- name: scan_boundary_shadowed_cte
+WITH c AS MATERIALIZED (SELECT u.id, p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id), d AS MATERIALIZED (WITH c AS MATERIALIZED (SELECT p.user_id AS id, p.title FROM posts p) SELECT id, title FROM c) SELECT o.title, d.title FROM c o JOIN d ON o.id = d.id
+-- name: scan_boundary_swapped
+WITH c AS MATERIALIZED (SELECT p.title AS name, u.name AS title FROM users u LEFT JOIN posts p ON p.user_id = u.id) SELECT name, title FROM c
+-- name: scan_boundary_union_all
+SELECT x.title FROM (SELECT y.title, row_number() OVER () FROM (SELECT title FROM posts UNION ALL SELECT p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id) y) x
 -- name: computed
 SELECT upper(name), count(*) OVER (), coalesce(email, ''), 1 FROM users
 SQL
