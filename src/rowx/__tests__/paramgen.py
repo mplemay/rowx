@@ -22,6 +22,9 @@ SCALAR_KINDS: Final[tuple[str, ...]] = (
     "date",
     "datetime",
     "timedelta",
+    "time",
+    "bytearray",
+    "memoryview",
 )
 LITERALS: Final[dict[str, tuple[str, ...]]] = {
     "int": ("1", "-7", "+3", "0"),
@@ -31,6 +34,8 @@ LITERALS: Final[dict[str, tuple[str, ...]]] = {
     "bool": ("True", "False"),
     "None": ("None",),
     "Template": ("t'a'", "t'a {1}'"),
+    "bytearray": ("bytearray(b'a')", "bytearray()"),
+    "memoryview": ("memoryview(b'a')", "memoryview(bytearray())"),
 }
 # kind -> (module, class, constructor arguments)
 CLASSES: Final[dict[str, tuple[str, str, tuple[str, ...]]]] = {
@@ -39,6 +44,7 @@ CLASSES: Final[dict[str, tuple[str, str, tuple[str, ...]]]] = {
     "date": ("datetime", "date", ("2024, 1, 2",)),
     "datetime": ("datetime", "datetime", ("2024, 1, 2", "2024, 1, 2, 3, 4")),
     "timedelta": ("datetime", "timedelta", ("days=1", "seconds=5")),
+    "time": ("datetime", "time", ("1, 2", "1, 2, 3")),
 }
 HEADER: Final[str] = "import contextlib\n\nctx = contextlib.nullcontext\n\n\ndef q(t):\n    return t\n\n\n"
 # a second binding or a binding form the design marks unknown, as statements for the name `v`

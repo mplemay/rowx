@@ -491,6 +491,9 @@ PARAM_VALUES: Final[list[str]] = [
 ]
 NOT_JSON: Final[list[str]] = [
     'b"\\x00"',
+    'bytearray(b"\\x00")',
+    'memoryview(b"\\x00")',
+    "datetime.time(1, 2, 3)",
     'decimal.Decimal("1")',
     f'uuid.UUID("{UUID_TEXT}")',
     "datetime.date(2024, 1, 2)",
@@ -521,6 +524,7 @@ RUNTIME_ONLY: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("timestamptz", "datetime.datetime(2024, 1, 2, 3, 4, 5)"),
         ("timestamp", "datetime.datetime(2024, 1, 2, 3, 4, 5, tzinfo=datetime.UTC)"),
+        ("timetz", "datetime.time(1, 2, 3)"),
         *(("json", source) for source in NOT_JSON),
         *(("jsonb", source) for source in NOT_JSON),
         ('"char"', '"ok"'),
@@ -582,4 +586,6 @@ def test_param_matrix(schema: str) -> None:
             assert found is None, label
             assert encode_error, label
     assert evident > len(types)
+    for source in ('bytearray(b"\\x00")', 'memoryview(b"\\x00")', "datetime.time(1, 2, 3)"):
+        assert evidence[source] is not None, source
     assert not problems, "\n".join(problems)

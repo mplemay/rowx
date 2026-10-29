@@ -234,6 +234,10 @@ def test_param_mismatch_names_both_types() -> None:
         ("int4", ParamType("int")),
         ("int4[]", None),
         (None, ParamType("str")),
+        ("time", ParamType("time")),
+        ("timetz", ParamType("time")),
+        ("bytea", ParamType("bytearray")),
+        ("bytea", ParamType("memoryview")),
     ],
 )
 def test_param_not_flagged(key: str | None, evident: ParamType | None) -> None:
@@ -247,6 +251,10 @@ def test_param_not_flagged(key: str | None, evident: ParamType | None) -> None:
         ("text", ParamType("int")),
         ("date", ParamType("datetime")),
         ("bool", ParamType("int")),
+        ("int4", ParamType("time")),
+        ("int4", ParamType("bytearray")),
+        ("int4", ParamType("memoryview")),
+        ("text", ParamType("memoryview")),
     ],
 )
 def test_param_flagged(key: str, evident: ParamType) -> None:

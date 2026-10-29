@@ -229,8 +229,11 @@ unknown type is **never** reported.
   (`list[int]` matches an array parameter element-wise.)
 - **Calls of known constructors:**
   - `decimal.Decimal(...)`, `uuid.UUID(...)`;
-  - `datetime.date(...)`, `datetime.datetime(...)`, `datetime.timedelta(...)`;
-  - `datetime.datetime.now(...)` gives `datetime`.
+  - `datetime.date(...)`, `datetime.datetime(...)`, `datetime.time(...)`,
+    `datetime.timedelta(...)`;
+  - `datetime.datetime.now(...)` gives `datetime`;
+  - the builtins `bytearray(...)` and `memoryview(...)`, which stay unknown when the name
+    is shadowed or rebound.
 
   Constructors are matched by their resolved import.
 - **Names.** The name must have exactly one binding in its innermost function or module
