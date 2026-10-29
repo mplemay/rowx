@@ -129,6 +129,13 @@ LEFT JOIN posts p ON …) SELECT name FROM c`, `c.name` is `p.title`, but the so
 match `c.name` by name only to `u.name`. The origin of `c.name` is `posts.title`, which differs from `users.name`, so
 step 4 fails and the column is promoted. A top column with no origin (`table_oid = 0`) always fails step 4.
 
+Names are compared only when both the alias and the column are plain unquoted identifiers. A quoted or dotted name
+(`"Title"`, an uppercase column) uses the conservative rule, so such columns are not narrowed.
+
+A source subtree that merges inputs (`Append`, `Merge Append`, `SetOp`, `Recursive Union`) also uses the conservative
+rule, because such a node names its output after its first input. Describe reports no origin for a set-operation
+column, so step 4 already fails there. The check is defensive and covers a change in what the server reports.
+
 Any other case uses the conservative rule: promote. The mapping never promotes an output the conservative rule would
 not, and the walk stays promote-only.
 
