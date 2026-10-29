@@ -29,6 +29,9 @@ TABLES: Final[dict[str, tuple[tuple[str, ColType], ...]]] = {
     "users": (("id", "int"), ("name", "text"), ("email", "text")),
     "posts": (("id", "int"), ("user_id", "int"), ("title", "text")),
     "orders": (("id", "int"), ("user_id", "int"), ("amount", "num"), ("note", "text")),
+    "v_users": (("id", "int"), ("name", "text"), ("email", "text")),
+    "v_posts": (("id", "int"), ("user_id", "int"), ("title", "text")),
+    "v_orders": (("id", "int"), ("user_id", "int"), ("amount", "num"), ("note", "text")),
 }
 JOIN_KINDS: Final[tuple[str, ...]] = ("INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN")
 LATERAL_KINDS: Final[tuple[str, ...]] = ("INNER JOIN LATERAL", "LEFT JOIN LATERAL")

@@ -47,11 +47,11 @@ def test_scan_boundary_over_promotes(schema: str) -> None:
     assert verdicts(schema, sql) == [(False, "NotNullColumn"), (True, "ScanBoundary")]
 
 
-# limit: view columns are always nullable, because attnotnull is false for views
+# correct: view columns from the non-null side of the definition are NOT NULL, and the nullable side of its join stays nullable (`OuterJoin`)
 def test_view_columns_are_nullable(schema: str) -> None:
-    assert verdicts(schema, "SELECT user_id, name FROM user_posts") == [
-        (True, "ForeignOrView"),
-        (True, "ForeignOrView"),
+    assert verdicts(schema, "SELECT user_id, title FROM user_posts") == [
+        (False, "ViewColumn"),
+        (True, "OuterJoin"),
     ]
 
 

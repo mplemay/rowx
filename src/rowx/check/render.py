@@ -31,6 +31,7 @@ type _TemplateReason = Literal[
     "NotNullColumn",
     "NotValidatedConstraint",
     "ForeignOrView",
+    "ViewColumn",
     "GroupingSets",
     "ReturningOldNew",
     "ExplainFailed",
@@ -44,6 +45,7 @@ NULL_NOTES: Final[dict[_TemplateReason, str]] = {
     "NotNullColumn": "NOT NULL because {d} is declared NOT NULL",
     "NotValidatedConstraint": "{d} has a NOT NULL constraint that is not validated, so it may still hold NULL",
     "ForeignOrView": "comes from a foreign table or view, which may hold NULL",
+    "ViewColumn": "NOT NULL because the definition of the view proves {d} is never NULL",
     "GroupingSets": "GROUPING SETS can produce NULL",
     "ReturningOldNew": "the old or new row in RETURNING is NULL for some operations",
     "ExplainFailed": "nullability analysis failed, so the column is assumed nullable",
@@ -69,6 +71,7 @@ def null_reason_note(reason: NullReasonName, detail: str | None = None, *, colum
             | "NotNullColumn"
             | "NotValidatedConstraint"
             | "ForeignOrView"
+            | "ViewColumn"
             | "GroupingSets"
             | "ReturningOldNew"
             | "ExplainFailed"

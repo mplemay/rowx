@@ -151,6 +151,7 @@ type NullReasonName = Literal[
     "NullableColumn",
     "NotValidatedConstraint",
     "ForeignOrView",
+    "ViewColumn",
     "OuterJoin",
     "GroupingSets",
     "ScanBoundary",
