@@ -401,12 +401,12 @@ fn output_position(live_attnums: &[i16], attnum: i16) -> Option<usize> {
     live_attnums.iter().position(|n| *n == attnum)
 }
 
-// The definition as one statement without its trailing `;`, because it is concatenated into a simple-protocol
-// `EXPLAIN`. Any other `;` means a second statement (or a literal holding one), which is Nullable either way.
+// The definition without its trailing `;`, because it is concatenated into a simple-protocol `EXPLAIN`. That is
+// only safe once Parse has accepted the text as a single statement (`analyse_definition` prepares it first).
 fn definition_statement(definition: &str) -> Option<&str> {
     let text = definition.trim_end();
     let text = text.strip_suffix(';').unwrap_or(text);
-    (!text.trim().is_empty() && !text.contains(';')).then_some(text)
+    (!text.trim().is_empty()).then_some(text)
 }
 
 async fn view_column_not_null(client: &Client, view: u32, attnum: i16, ctx: &mut ViewCtx) -> bool {
@@ -516,8 +516,17 @@ async fn definition_verdicts(client: &Client, view: u32, ctx: &mut ViewCtx) -> O
         .ok()?
         .try_get(0)
         .ok()?;
-    let sql = definition_statement(&definition)?;
-    // Parse rejects anything but a single statement, as for the user's own query
+    analyse_definition(client, &definition, ctx).await
+}
+
+// Parse rejects anything but a single statement, as for the user's own query, and only then is the text
+// concatenated into `EXPLAIN`; a definition that fails Parse, or carries a second statement, is Nullable
+async fn analyse_definition(
+    client: &Client,
+    definition: &str,
+    ctx: &mut ViewCtx,
+) -> Option<Vec<bool>> {
+    let sql = definition_statement(definition)?;
     let stmt = client.prepare(sql).await.ok()?;
     let mut slots: Vec<Slot> = stmt
         .columns()
@@ -646,8 +655,8 @@ mod tests {
     use tokio_postgres::types::{Kind, Type};
 
     use super::{
-        Unsupported, definition_statement, extension_candidates, impostor, output_position,
-        resolve, unresolved_leaf,
+        Unsupported, ViewCtx, analyse_definition, definition_statement, extension_candidates,
+        impostor, output_position, resolve, unresolved_leaf,
     };
 
     #[test]
@@ -666,11 +675,57 @@ mod tests {
     }
 
     #[test]
-    fn definition_statement_rejects_a_second_statement() {
-        assert_eq!(definition_statement("SELECT 1; DROP TABLE users;"), None);
-        assert_eq!(definition_statement("SELECT 1; SELECT 2"), None);
+    fn definition_statement_leaves_an_inner_semicolon_to_parse() {
+        assert_eq!(
+            definition_statement("SELECT 1; SELECT 2;"),
+            Some("SELECT 1; SELECT 2")
+        );
         assert_eq!(definition_statement(";"), None);
         assert_eq!(definition_statement("  "), None);
+    }
+
+    async fn connect() -> Option<tokio_postgres::Client> {
+        let Ok(dsn) = std::env::var("ROWX_TEST_DSN") else {
+            assert!(
+                std::env::var("ROWX_REQUIRE_DB").map_or(true, |v| v != "1"),
+                "ROWX_REQUIRE_DB=1 but ROWX_TEST_DSN is not set"
+            );
+            return None;
+        };
+        let (client, connection) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
+            .await
+            .ok()?;
+        tokio::spawn(connection);
+        Some(client)
+    }
+
+    #[tokio::test]
+    async fn a_definition_with_a_second_statement_is_nullable_and_never_runs() {
+        let Some(client) = connect().await else {
+            return;
+        };
+        let mut ctx = ViewCtx::default();
+        let name = "rowx_view_guard_probe";
+        let crafted = format!("SELECT 1 AS a; CREATE TABLE {name} (a int);");
+        assert_eq!(analyse_definition(&client, &crafted, &mut ctx).await, None);
+        let exists = client
+            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&name])
+            .await
+            .map(|row| row.get::<_, bool>(0));
+        assert_eq!(exists.ok(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_semicolon_inside_a_literal_does_not_stop_the_analysis() {
+        let Some(client) = connect().await else {
+            return;
+        };
+        let mut ctx = ViewCtx::default();
+        let definition = "SELECT ';' AS a;";
+        assert_eq!(
+            analyse_definition(&client, definition, &mut ctx).await,
+            Some(vec![false])
+        );
     }
 
     fn custom(name: &str, oid: u32) -> Type {
