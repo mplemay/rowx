@@ -205,6 +205,120 @@ async fn a_failing_transactional_migration_leaves_nothing() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_failure_without_locking_still_leaves_no_open_transaction() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let unlocked = MigrateConfig {
+        locking: false,
+        ..config()
+    };
+    let up = [simple(1, "CREATE TABLE partial (i int); SELECT 1/0")];
+    let err = run(&conn, &unlocked, &up, PlanOptions::default()).await;
+    assert!(
+        matches!(err, Err(MigrateError::Failed { version: 1, .. })),
+        "{err:?}"
+    );
+    // not 25P02: the aborted transaction was rolled back, so the connection and a retry work
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM pg_tables WHERE tablename = 'partial'"
+        )
+        .await?,
+        0
+    );
+    let [up, down] = reversible(1, "CREATE TABLE r (i int)", "DROP TABLE r; SELECT 1/0");
+    assert_eq!(
+        run(
+            &conn,
+            &unlocked,
+            &[up.clone(), down.clone()],
+            PlanOptions::default()
+        )
+        .await?,
+        [1]
+    );
+    let err = undo(&conn, &unlocked, &[up, down], 0, false).await;
+    assert!(
+        matches!(err, Err(MigrateError::Failed { version: 1, .. })),
+        "{err:?}"
+    );
+    assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM pg_tables WHERE tablename = 'r'"
+        )
+        .await?,
+        1
+    );
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_file_that_changes_search_path_keeps_the_history_table() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let all: Vec<Migration> = [
+        reversible(
+            1,
+            "CREATE SCHEMA app; SET LOCAL search_path TO app; CREATE TABLE users (id int)",
+            "SET LOCAL search_path TO app; DROP TABLE users",
+        ),
+        // session-level changes, kept for the rest of the operation
+        reversible(
+            2,
+            "-- no-transaction\nSET search_path TO app",
+            "-- no-transaction\nSET search_path TO app",
+        ),
+        reversible(3, "CREATE TABLE posts (id int)", "DROP TABLE app.posts"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    assert_eq!(
+        run(&conn, &config(), &all, PlanOptions::default()).await?,
+        [1, 2, 3]
+    );
+    let qualified = format!("public.{TABLE}");
+    assert_eq!(
+        history(&conn, &qualified).await?,
+        [(1, true), (2, true), (3, true)]
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM pg_tables WHERE schemaname = 'app' \
+             AND tablename IN ('users', 'posts')"
+        )
+        .await?,
+        2
+    );
+    // only the history table in `public` exists
+    assert_eq!(
+        count(
+            &conn,
+            &format!("SELECT count(*) FROM pg_tables WHERE tablename = '{TABLE}'")
+        )
+        .await?,
+        1
+    );
+
+    // a fresh session, so the unqualified name resolves to `public` again
+    let mut other = db.connect().await?;
+    assert_eq!(undo(&other, &config(), &all, 0, false).await?, [3, 2, 1]);
+    assert_eq!(history(&other, &qualified).await?, []);
+    other.close().await;
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
 async fn the_server_error_keeps_its_position() -> TestResult {
     let Some(db) = TestDb::new().await? else {
         return Ok(());

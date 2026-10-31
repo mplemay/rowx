@@ -155,7 +155,10 @@ pub async fn list_applied(
     let quoted = quote_table(table)?;
     let client = conn.client()?;
     let exists: bool = client
-        .query_one("SELECT to_regclass($1::text) IS NOT NULL", &[&quoted])
+        .query_one(
+            "SELECT pg_catalog.to_regclass($1::text) IS NOT NULL",
+            &[&quoted],
+        )
         .await
         .map_err(Error::from)?
         .get(0);
@@ -285,35 +288,41 @@ async fn revert(
     Ok(())
 }
 
-// Takes the lock, runs `body`, and releases the lock whatever happened. On an error the session may
-// sit in an aborted transaction, so it is rolled back first (a warning and a no-op otherwise); the
-// rollback and the unlock are best effort then, and a pool's reset is the backstop.
+// Takes the lock (unless `locking` is off), runs `body`, and releases the lock whatever happened. On
+// an error the session may sit in an aborted transaction, so it is rolled back first (a warning and a
+// no-op otherwise) whether or not the lock is used; the rollback and the unlock are best effort then,
+// and a pool's reset is the backstop.
 async fn locked<T>(
     conn: &Connection,
     config: &MigrateConfig,
     body: impl AsyncFnOnce() -> Result<T, MigrateError>,
 ) -> Result<T, MigrateError> {
-    if !config.locking {
-        return body().await;
-    }
-    let client = conn.client()?;
-    let database: String = client
-        .query_one("SELECT current_database()", &[])
-        .await
-        .map_err(Error::from)?
-        .get(0);
-    let key = lock_key(&database);
-    client
-        .query("SELECT pg_advisory_lock($1)", &[&key])
-        .await
-        .map_err(Error::from)?;
+    let key = if config.locking {
+        let client = conn.client()?;
+        let database: String = client
+            .query_one("SELECT pg_catalog.current_database()", &[])
+            .await
+            .map_err(Error::from)?
+            .get(0);
+        let key = lock_key(&database);
+        client
+            .query("SELECT pg_catalog.pg_advisory_lock($1)", &[&key])
+            .await
+            .map_err(Error::from)?;
+        Some(key)
+    } else {
+        None
+    };
     let result = body().await;
     if result.is_err() {
         let _ = conn.simple("ROLLBACK").await;
     }
+    let Some(key) = key else {
+        return result;
+    };
     let unlocked = match conn.client() {
         Ok(client) => client
-            .query("SELECT pg_advisory_unlock($1)", &[&key])
+            .query("SELECT pg_catalog.pg_advisory_unlock($1)", &[&key])
             .await
             .map(|_| ())
             .map_err(Error::from),
@@ -326,6 +335,25 @@ async fn locked<T>(
     }
 }
 
+// The existing history table as a schema-qualified, quoted name. A file may change `search_path`
+// (`SET LOCAL` in its transaction, or `SET` for the session), so the bookkeeping after it must not
+// resolve an unqualified name again.
+async fn resolve_table(conn: &Connection, table: &str) -> Result<String, MigrateError> {
+    let quoted = quote_table(table)?;
+    let row = conn
+        .client()?
+        .query_one(
+            "SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.oid = pg_catalog.to_regclass($1::text)",
+            &[&quoted],
+        )
+        .await
+        .map_err(Error::from)?;
+    Ok(row.get(0))
+}
+
 /// Applies every pending migration the plan selects and returns the versions applied.
 ///
 /// # Errors
@@ -336,9 +364,10 @@ pub async fn run(
     local: &[Migration],
     options: PlanOptions,
 ) -> Result<Vec<i64>, MigrateError> {
-    let quoted = quote_table(&config.table)?;
+    quote_table(&config.table)?;
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
+        let quoted = resolve_table(conn, &config.table).await?;
         let applied = list_applied(conn, &config.table).await?;
         let plan = plan_run(local, &plain(&applied), options)?;
         let mut done = Vec::with_capacity(plan.steps.len());
@@ -362,9 +391,10 @@ pub async fn undo(
     target: i64,
     ignore_missing: bool,
 ) -> Result<Vec<i64>, MigrateError> {
-    let quoted = quote_table(&config.table)?;
+    quote_table(&config.table)?;
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
+        let quoted = resolve_table(conn, &config.table).await?;
         let applied = list_applied(conn, &config.table).await?;
         let plan = plan_undo(local, &plain(&applied), target, ignore_missing)?;
         let mut done = Vec::with_capacity(plan.steps.len());
@@ -387,9 +417,10 @@ pub async fn skip(
     local: &[Migration],
     options: PlanOptions,
 ) -> Result<Vec<i64>, MigrateError> {
-    let quoted = quote_table(&config.table)?;
+    quote_table(&config.table)?;
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
+        let quoted = resolve_table(conn, &config.table).await?;
         let applied = list_applied(conn, &config.table).await?;
         let plan = plan_skip(local, &plain(&applied), options)?;
         let mut done = Vec::with_capacity(plan.steps.len());
