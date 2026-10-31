@@ -17,7 +17,7 @@ wheel="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 venv="$(mktemp -d)"
 trap 'rm -rf "$venv"' EXIT
 
-"${PYTHON:-python3.14}" -m venv "$venv"
+"${PYTHON:-python3}" -m venv "$venv"
 "$venv/bin/python" -m pip install --quiet "$wheel"
 
 # run from a scratch directory so the source tree's src/rowx can't shadow the installed wheel
