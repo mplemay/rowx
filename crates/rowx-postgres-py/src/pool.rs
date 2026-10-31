@@ -45,6 +45,11 @@ impl Pool {
         }
     }
 
+    pub(crate) fn inner_checked(&self, py: Python<'_>) -> PyResult<&PgPool> {
+        self.check_process(py)?;
+        Ok(&self.inner)
+    }
+
     // the pool settings are validated in Python first; this is the backstop
     #[allow(clippy::too_many_arguments)]
     fn options(

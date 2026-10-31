@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyType;
 use rowx_core::error::CoreError;
+use rowx_core::migrate::{PlanError, SourceError};
 
 static INTERFACE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DATABASE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -10,6 +11,12 @@ static BUSY_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ROW_SHAPE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DECODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ENCODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static MIGRATION_SOURCE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static MIGRATION_CHECKSUM_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static MIGRATION_MISSING_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static MIGRATION_ORDER_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static DIRTY_MIGRATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static MIGRATION_FAILED_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 fn class<'py>(
     py: Python<'py>,
@@ -39,6 +46,12 @@ pub fn init(py: Python<'_>) -> PyResult<()> {
     class(py, &ROW_SHAPE_ERROR, "RowShapeError")?;
     class(py, &DECODE_ERROR, "DecodeError")?;
     class(py, &ENCODE_ERROR, "EncodeError")?;
+    class(py, &MIGRATION_SOURCE_ERROR, "MigrationSourceError")?;
+    class(py, &MIGRATION_CHECKSUM_ERROR, "MigrationChecksumError")?;
+    class(py, &MIGRATION_MISSING_ERROR, "MigrationMissingError")?;
+    class(py, &MIGRATION_ORDER_ERROR, "MigrationOrderError")?;
+    class(py, &DIRTY_MIGRATION_ERROR, "DirtyMigrationError")?;
+    class(py, &MIGRATION_FAILED_ERROR, "MigrationFailedError")?;
     Ok(())
 }
 
@@ -116,5 +129,51 @@ pub fn core_to_py_err(py: Python<'_>, err: CoreError) -> PyErr {
         | CoreError::PoolClosed
         | CoreError::StaleLease
         | CoreError::Forked => interface_error(py, &err.to_string()),
+    }
+}
+
+/// A migration file that cannot be resolved; `version` is set when the error is about one version.
+#[must_use]
+pub fn source_error(py: Python<'_>, err: &SourceError) -> PyErr {
+    build(
+        py,
+        &MIGRATION_SOURCE_ERROR,
+        "MigrationSourceError",
+        (err.to_string(), err.version()),
+    )
+}
+
+/// A failed file or commit; the caller sets the `DatabaseError` as the cause.
+#[must_use]
+pub fn migration_failed_error(py: Python<'_>, version: i64, message: &str) -> PyErr {
+    build(
+        py,
+        &MIGRATION_FAILED_ERROR,
+        "MigrationFailedError",
+        (message, version),
+    )
+}
+
+// a bad target is an ordering problem, and a missing `.down.sql` is a problem with the files
+#[must_use]
+pub fn plan_error(py: Python<'_>, err: &PlanError) -> PyErr {
+    let args = (err.to_string(), err.version());
+    match err {
+        PlanError::Dirty { .. } => build(py, &DIRTY_MIGRATION_ERROR, "DirtyMigrationError", args),
+        PlanError::Missing { .. } => {
+            build(py, &MIGRATION_MISSING_ERROR, "MigrationMissingError", args)
+        }
+        PlanError::Checksum { .. } => build(
+            py,
+            &MIGRATION_CHECKSUM_ERROR,
+            "MigrationChecksumError",
+            args,
+        ),
+        PlanError::Order { .. } | PlanError::TargetNotFound { .. } => {
+            build(py, &MIGRATION_ORDER_ERROR, "MigrationOrderError", args)
+        }
+        PlanError::MissingDown { .. } => {
+            build(py, &MIGRATION_SOURCE_ERROR, "MigrationSourceError", args)
+        }
     }
 }

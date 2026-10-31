@@ -32,7 +32,7 @@ const SETTLE_RECANCEL: Duration = Duration::from_millis(100);
 #[derive(Debug)]
 pub struct Connection {
     pub(crate) cancel: Cancel,
-    access: Access,
+    pub(crate) access: Access,
     // the checkout of a pooled connection, until it is released or detached
     pooled: StdMutex<Option<Pooled>>,
     reset_done: Option<Arc<AtomicBool>>,

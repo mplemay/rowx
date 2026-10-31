@@ -1,8 +1,13 @@
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 from rowx.postgres._options import ConnectOptions
 from rowx.postgres._vocab import AcceptedParam, CodecName, NullReasonName, PyResultName, TypeKey
+
+type MigrationRow = tuple[
+    int, str, Literal["applied", "pending", "modified", "missing", "dirty"], int | None, int | None
+]
 
 class TypeInfo:
     @property
@@ -170,6 +175,24 @@ class Pool:
     def max_size(self) -> int: ...
     @property
     def closed(self) -> bool: ...
+
+class Migrator:
+    def __init__(
+        self,
+        path: Path,
+        table: str,
+        create_schemas: list[str],
+        locking: bool,
+        ignore_missing: bool,
+        allow_out_of_order: bool,
+        /,
+    ) -> None: ...
+    @property
+    def migrations(self) -> list[tuple[int, str, Literal["simple", "up", "down"], bytes, bool, Path]]: ...
+    async def run(self, executor: Connection | Pool, target: int | None = None) -> list[MigrationRow]: ...
+    async def undo(self, executor: Connection | Pool, target: int) -> list[MigrationRow]: ...
+    async def skip(self, executor: Connection | Pool, target: int | None = None) -> list[MigrationRow]: ...
+    async def info(self, executor: Connection | Pool) -> list[MigrationRow]: ...
 
 def _cancel_requests_sent() -> int: ...
 def _catalog_queries() -> int: ...

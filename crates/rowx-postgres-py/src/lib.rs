@@ -4,6 +4,7 @@ pub mod conn;
 pub mod describe;
 pub mod errors;
 pub mod exec;
+pub mod migrate;
 pub mod pool;
 pub mod stream;
 pub mod types;
@@ -38,6 +39,7 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_class::<describe::ParamInfo>()?;
     m.add_function(wrap_pyfunction!(describe::connect_checker, &m)?)?;
     m.add_function(wrap_pyfunction!(describe::describe, &m)?)?;
+    m.add_class::<migrate::Migrator>()?;
     m.add_class::<pool::Pool>()?;
     m.add_class::<stream::RowStream>()?;
     m.add_class::<types::TypeInfo>()?;

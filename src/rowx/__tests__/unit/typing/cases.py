@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, reveal_type
 from rowx import query, query_unchecked
 
 if TYPE_CHECKING:
-    from rowx.postgres import Connection, Pool, Transaction
+    from rowx.postgres import Connection, Migrator, Pool, Transaction
 
 type Pair = tuple[int, str]
 type UserId = int
@@ -110,3 +110,17 @@ class NotAnExecutor:
 
 async def negative_executor(conn: NotAnExecutor) -> None:
     await query[int](t"SELECT 1").one(conn)  # error  # ty: ignore[invalid-argument-type]
+
+
+async def migrator_runs_on_connection_or_pool(migrator: Migrator, conn: Connection, pool: Pool) -> None:
+    reveal_type(migrator.migrations)  # reveal: tuple[Migration, ...]
+    reveal_type(await migrator.info(conn))  # reveal: tuple[MigrationStatus, ...]
+    reveal_type(await migrator.info(pool))  # reveal: tuple[MigrationStatus, ...]
+    reveal_type(await migrator.run(pool, target=1))  # reveal: tuple[MigrationStatus, ...]
+    reveal_type(await migrator.undo(conn, target=0))  # reveal: tuple[MigrationStatus, ...]
+    reveal_type(await migrator.skip(conn))  # reveal: tuple[MigrationStatus, ...]
+
+
+async def negative_migrator(migrator: Migrator, tx: Transaction) -> None:
+    await migrator.run(tx)  # error  # ty: ignore[invalid-argument-type]
+    await migrator.info(tx)  # error  # ty: ignore[invalid-argument-type]
