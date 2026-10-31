@@ -7,6 +7,8 @@ use crate::error::Error;
 const MAINTENANCE_DATABASE: &str = "postgres";
 // `createdb` connects here instead when the target is itself named `postgres`
 const FALLBACK_MAINTENANCE_DATABASE: &str = "template1";
+// NAMEDATALEN - 1: the server silently truncates longer names, so a lookup by the full name would miss
+const MAX_NAME_BYTES: usize = 63;
 
 /// The database to connect to when creating, dropping or looking for `target`.
 #[must_use]
@@ -21,7 +23,8 @@ pub fn maintenance_database(target: &str) -> &'static str {
 /// Quotes `name` as a Postgres identifier.
 ///
 /// # Errors
-/// `Interface` for an empty name or one with a NUL byte, which no identifier can hold.
+/// `Interface` for an empty name, one with a NUL byte, which no identifier can hold, or one longer than
+/// 63 bytes, which the server would truncate.
 pub fn quote_ident(name: &str) -> Result<String, Error> {
     if name.is_empty() {
         return Err(Error::Interface(
@@ -32,6 +35,11 @@ pub fn quote_ident(name: &str) -> Result<String, Error> {
         return Err(Error::Interface(
             "a database name must not contain a NUL byte".to_owned(),
         ));
+    }
+    if name.len() > MAX_NAME_BYTES {
+        return Err(Error::Interface(format!(
+            "a database name must be at most {MAX_NAME_BYTES} bytes"
+        )));
     }
     Ok(format!("\"{}\"", name.replace('"', "\"\"")))
 }
@@ -154,6 +162,10 @@ mod tests {
         );
         assert!(quote_ident("").is_err());
         assert!(quote_ident("a\0b").is_err());
+        assert!(quote_ident(&"a".repeat(63)).is_ok());
+        assert!(quote_ident(&"a".repeat(64)).is_err());
+        // the limit is in bytes, as the server counts it
+        assert!(quote_ident(&"é".repeat(32)).is_err());
     }
 
     #[test]
