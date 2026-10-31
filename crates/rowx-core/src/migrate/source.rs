@@ -90,6 +90,12 @@ pub fn resolve(dir: &Path) -> Result<Vec<Migration>, SourceError> {
     let mut files = Vec::new();
     for entry in fs::read_dir(dir).map_err(read_dir_error)? {
         let entry = entry.map_err(read_dir_error)?;
+        let name = entry.file_name();
+        // Filter on the name before touching the file, so an ignored entry (a dangling
+        // `README.md` symlink, an unreadable `.gitkeep`) can never fail resolution
+        if !name.to_string_lossy().ends_with(".sql") {
+            continue;
+        }
         let path = entry.path();
         // `fs::metadata` follows symlinks, so a link to a file counts as a file
         let metadata = fs::metadata(&path).map_err(|source| SourceError::ReadFile {
@@ -97,7 +103,7 @@ pub fn resolve(dir: &Path) -> Result<Vec<Migration>, SourceError> {
             source,
         })?;
         if metadata.is_file() {
-            files.push((entry.file_name(), path));
+            files.push((name, path));
         }
     }
     // Directory order is arbitrary; sorting makes the first error deterministic
@@ -105,10 +111,6 @@ pub fn resolve(dir: &Path) -> Result<Vec<Migration>, SourceError> {
 
     let mut migrations = Vec::new();
     for (name, path) in files {
-        let lossy = name.to_string_lossy();
-        if !lossy.ends_with(".sql") {
-            continue;
-        }
         let Some(name) = name.to_str() else {
             return Err(SourceError::InvalidName {
                 path,
@@ -527,5 +529,33 @@ mod tests {
         std::os::unix::fs::symlink(target.path().join("real.txt"), dir.path().join("1_a.sql"))
             .unwrap_or_else(|e| unreachable!("{e}"));
         assert_eq!(names(dir.path()).len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_that_is_not_sql_is_ignored() {
+        let dir = dir_with(&[("1_a.sql", b"select 1;")]);
+        let gone = dir.path().join("gone");
+        std::os::unix::fs::symlink(&gone, dir.path().join("README.md"))
+            .unwrap_or_else(|e| unreachable!("{e}"));
+        std::os::unix::fs::symlink(&gone, dir.path().join("2_b.sql.bak"))
+            .unwrap_or_else(|e| unreachable!("{e}"));
+        assert_eq!(
+            names(dir.path()),
+            [(1, MigrationKind::Simple, "a".to_owned())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_sql_symlink_is_a_read_error_naming_the_file() {
+        let dir = dir_with(&[("1_a.sql", b"select 1;")]);
+        std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join("2_b.sql"))
+            .unwrap_or_else(|e| unreachable!("{e}"));
+        let error = resolve(dir.path())
+            .err()
+            .unwrap_or_else(|| unreachable!("dangling migration"));
+        assert!(matches!(error, SourceError::ReadFile { .. }));
+        assert_eq!(file_name(&error), "2_b.sql");
     }
 }
