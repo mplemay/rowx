@@ -20,6 +20,7 @@ pub enum NullReason {
     ScanBoundary { alias: String },
     ReturningOldNew,
     SetOperation,
+    ComputedExpr,
     Computed,
     ExplainFailed,
     OverrideBang,
@@ -40,6 +41,7 @@ impl NullReason {
             Self::ScanBoundary { .. } => "ScanBoundary",
             Self::ReturningOldNew => "ReturningOldNew",
             Self::SetOperation => "SetOperation",
+            Self::ComputedExpr => "ComputedExpr",
             Self::Computed => "Computed",
             Self::ExplainFailed => "ExplainFailed",
             Self::OverrideBang => "OverrideBang",
@@ -333,8 +335,23 @@ async fn not_null_leaves(client: &Client, leaves: &[Origin]) -> explain::NotNull
         .collect()
 }
 
-// the promotions to Nullable, and per column whether a set operation proves it NOT NULL
-type PlanVerdicts = (Vec<Option<NullReason>>, Vec<bool>);
+// A function with a whitelisted name outside `pg_catalog` may shadow the built-in under the session's
+// `search_path`, because the plan prints functions by bare name. A failed lookup is treated as a shadow.
+const SHADOWED_FUNCTIONS_SQL: &str = "\
+SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+WHERE p.proname = ANY($1::text[]) AND n.nspname <> 'pg_catalog' LIMIT 1";
+
+async fn functions_are_unshadowed(client: &Client) -> bool {
+    let names: Vec<&str> = explain::WHITELISTED_FUNCTIONS.to_vec();
+    client
+        .query(SHADOWED_FUNCTIONS_SQL, &[&names])
+        .await
+        .is_ok_and(|rows| rows.is_empty())
+}
+
+// the promotions to Nullable, per column whether a set operation proves it NOT NULL, and per column whether its
+// computed expression does
+type PlanVerdicts = (Vec<Option<NullReason>>, Vec<bool>, Vec<bool>);
 
 // simple_query, because the extended protocol would demand values for `$n`; the caller's Parse has
 // already rejected anything but a single statement
@@ -359,9 +376,13 @@ async fn plan_promotions(
         .collect();
     let plan = serde_json::from_str(&text).ok()?;
     let leaves = not_null_leaves(client, &explain::leaf_columns(&plan)).await;
+    // the lookup only runs when a function name is what proves a column
+    let functions = !explain::needs_function_check(&plan, column_count)
+        || functions_are_unshadowed(client).await;
     Some((
         explain::walk(&plan, column_count, origins),
         explain::proven_not_null(&plan, column_count, &leaves),
+        explain::proven_computed(&plan, column_count, functions),
     ))
 }
 
@@ -421,13 +442,19 @@ async fn refine(
     if slots.is_empty() {
         return Ok(true);
     }
-    if let Some((promotions, proven)) =
+    if let Some((promotions, proven, computed)) =
         plan_promotions(client, sql, slots.len(), &column_origins).await
     {
-        for ((slot, promotion), proven) in slots.iter_mut().zip(promotions).zip(proven) {
-            if proven && slot.reason == NullReason::Computed {
+        for (((slot, promotion), proven), computed) in
+            slots.iter_mut().zip(promotions).zip(proven).zip(computed)
+        {
+            if slot.reason == NullReason::Computed && (proven || computed) {
                 slot.nullable = false;
-                slot.reason = NullReason::SetOperation;
+                slot.reason = if computed {
+                    NullReason::ComputedExpr
+                } else {
+                    NullReason::SetOperation
+                };
             }
             if let Some(reason) = promotion {
                 slot.nullable = true;
@@ -773,7 +800,7 @@ mod tests {
         let definition = "SELECT ';' AS a;";
         assert_eq!(
             analyse_definition(&client, definition, &mut ctx).await,
-            Some(vec![false])
+            Some(vec![true])
         );
     }
 

@@ -28,7 +28,7 @@ def test_table_columns(schema: str) -> None:
 
 
 def test_computed_column(schema: str) -> None:
-    assert verdicts(schema, "SELECT count(*) FROM users") == [(True, "Computed")]
+    assert verdicts(schema, "SELECT upper(name) FROM users") == [(True, "Computed")]
 
 
 def test_not_valid_constraint(schema: str) -> None:

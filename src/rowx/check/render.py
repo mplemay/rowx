@@ -35,6 +35,7 @@ type _TemplateReason = Literal[
     "GroupingSets",
     "ReturningOldNew",
     "SetOperation",
+    "ComputedExpr",
     "ExplainFailed",
     "OverrideBang",
     "OverrideQuestion",
@@ -50,6 +51,7 @@ NULL_NOTES: Final[dict[_TemplateReason, str]] = {
     "GroupingSets": "GROUPING SETS can produce NULL",
     "ReturningOldNew": "the old or new row in RETURNING is NULL for some operations",
     "SetOperation": "NOT NULL because every branch of the set operation is never NULL here",
+    "ComputedExpr": "NOT NULL because the expression is a constant or a function that never returns NULL",
     "ExplainFailed": "nullability analysis failed, so the column is assumed nullable",
     "OverrideBang": 'forced NOT NULL by the "!" suffix',
     "OverrideQuestion": 'forced nullable by the "?" suffix',
@@ -77,6 +79,7 @@ def null_reason_note(reason: NullReasonName, detail: str | None = None, *, colum
             | "GroupingSets"
             | "ReturningOldNew"
             | "SetOperation"
+            | "ComputedExpr"
             | "ExplainFailed"
             | "OverrideBang"
             | "OverrideQuestion"

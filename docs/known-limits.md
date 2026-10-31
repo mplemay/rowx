@@ -14,7 +14,10 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
 | correct | `test_set_operation_not_null_is_inferred` | A set operation column is NOT NULL (`SetOperation`) when the plan proves that output position, through `UNION`, `UNION ALL`, `EXCEPT` and `INTERSECT`, nested or mixed. |
 | correct | `test_set_operation_stays_nullable_when_unproven` | A set operation column stays nullable when any branch is unproven: a nullable or `NOT VALID` column, a `NULL` or computed branch, a null-extended join side, or a position that only matches by name. |
 | limit | `test_recursive_cte_is_nullable` | Recursive CTE columns have no table origin, so they default to nullable. |
-| limit | `test_computed_column_is_nullable` | Computed columns are always nullable; narrowing needs a parser ([dependencies](design/dependencies.md)). |
+| limit | `test_computed_column_is_nullable` | A computed column outside the whitelist (`upper(name)`, `id + 1`) is nullable (`Computed`), even when its inputs are NOT NULL. |
+| correct | `test_computed_not_null_is_inferred` | Constants, `count(...)`, the ranking window functions, `merge_action()` and a `COALESCE` with a proven argument are NOT NULL (`ComputedExpr`). |
+| correct | `test_computed_stays_nullable_when_unproven` | `NULL::t`, `count(*) FILTER`, other aggregates, arithmetic over a proven value and a constant on the null-extended side of an outer join stay nullable. |
+| correct | `test_shadowed_function_stays_nullable` | A user-defined `count` or `row_number` outside `pg_catalog` disables the function items for that describe call. Constants and `COALESCE` over them are unaffected. |
 | correct | `test_bang_narrows_computed_column` | `"col!"` forces NOT NULL on a computed column (`OverrideBang`). |
 
 ## Checker limits

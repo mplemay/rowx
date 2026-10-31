@@ -19,6 +19,49 @@ const SCANS: [&str; 6] = [
 // nodes that hand their child's rows through unchanged when their own `Output` equals the child's
 const PASS_THROUGH: [&str; 4] = ["Aggregate", "Unique", "Sort", "Limit"];
 
+// nodes that may carry their child's output expressions through unchanged; a superset of `PASS_THROUGH`, because
+// missing one here would let a computed proof trust an expression printed from a set operation's first branch
+const CARRIERS: [&str; 9] = [
+    "Aggregate",
+    "Unique",
+    "Sort",
+    "Incremental Sort",
+    "Limit",
+    "Gather",
+    "Gather Merge",
+    "Materialize",
+    "Result",
+];
+
+/// Whether the root's output expressions are carried up from a set operation, whose parents print the first
+/// branch's expression for every branch. Only [`proven_not_null`] can prove such a column.
+#[must_use]
+pub(super) fn carries_set_operation(node: &Value) -> bool {
+    let Some(node_type) = str_key(node, "Node Type") else {
+        return false;
+    };
+    if matches!(node_type, "Append" | "Merge Append" | "SetOp") {
+        return true;
+    }
+    if !CARRIERS.contains(&node_type) {
+        return false;
+    }
+    let mut kids = children(node);
+    match (kids.next(), kids.next()) {
+        (Some(child), None) => {
+            let own = effective_outputs(node);
+            let below = effective_outputs(child);
+            // a parent may print `(1)` for the child's `1`; over-matching only makes the detection more cautious
+            let bare = |text: &str| text.trim_matches(['(', ')']).to_owned();
+            !own.is_empty()
+                && own.len() == below.len()
+                && own.iter().zip(&below).all(|(a, b)| bare(a) == bare(b))
+                && carries_set_operation(child)
+        }
+        _ => false,
+    }
+}
+
 fn has_merge_node(node: &Value) -> bool {
     matches!(
         str_key(node, "Node Type"),
