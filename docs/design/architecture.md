@@ -11,7 +11,9 @@
 │  POSTGRES                                                                     │
 │  rowx/postgres/                connect, ConnectOptions, Connection, Pool,     │
 │                                Transaction, RESET_QUERY, _types.py, _vocab.py │
-│  rowx/check/                   checker front-end (stdlib ast), CLI; Postgres  │
+│  rowx/check/                   checker front-end (stdlib ast), the CLI        │
+│                                package (check, migrate, database); Postgres  │
+│  rowx/testing.py               opt-in pytest plugin (not imported by rowx)    │
 └──────────────────────────────────┬────────────────────────────────────────────┘
                                    │ PyO3 0.28 (abi3-py314)
                                    │ rowx._core  +  rowx._core.postgres
@@ -19,17 +21,17 @@
 │  crates/rowx-py            cdylib `_core`: registers the shared functions and │
 │                            the `rowx._core.postgres` submodule                │
 │  crates/rowx-postgres-py   rlib: codec/, conn, exec, stream, pool,            │
-│                            transaction, describe, types, errors.rs (Postgres  │
-│                            error mapping)                                     │
+│                            transaction, describe, migrate, types, errors.rs   │
+│                            (Postgres error mapping)                           │
 │  crates/rowx-py-core       rlib: the runtime, the exception-class registry    │
 │                            (errors.rs), the core pool-error mapping           │
 │  crates/rowx-postgres      PURE RUST (no pyo3): dsn, tls, conn,               │
 │                            cancel (impl), stmt_cache, exec, describe,         │
-│                            explain,                                           │
+│                            explain, migrate, admin,                           │
 │                            types.rs, wire/, and its pool connector            │
 │  crates/rowx-core          PURE RUST (no pyo3): claim/settle state machine,   │
 │                            cancel-guard plumbing, shared thiserror variants,  │
-│                            the pool                                           │
+│                            the pool, migrate/ (source, checksums, plan)       │
 └──────────────────────────────────┬────────────────────────────────────────────┘
                                    │ tokio-postgres 0.7.x on a multi-thread tokio runtime
                                    ▼
@@ -45,6 +47,14 @@ Decisions:
     cache, describe, the EXPLAIN walker, the type-table metadata, the byte-level wire codecs
     (which return plain Rust values, such as numeric digits and microseconds) and the pool's
     connector.
+- **Migrations** ([Migrations](migrations.md)) follow the same split.
+  - `rowx-core/src/migrate/` holds the filename grammar, source resolution, SHA-384 checksums and the plan, as pure
+    functions with no IO beyond reading files.
+  - `rowx-postgres/src/migrate.rs` carries a plan out (lock, history table, apply, revert, skip), and
+    `rowx-postgres/src/admin.rs` creates, drops and checks for a database.
+  - `rowx-postgres-py/src/migrate.rs` holds the bindings, and the migrate error mapping is in
+    `rowx-postgres-py/src/errors.rs`.
+  - `rowx.postgres.Migrator` lives in `rowx.postgres`, and `rowx` never imports it.
 - **The backend trait.** `Cancel` held Postgres types. `rowx-core` now defines a small trait
   (send a cancel request, an is-alive check, with `Send` futures). `rowx-postgres`
   implements it, and the pool's `Manage` trait reuses it.
@@ -76,7 +86,11 @@ Decisions:
     plus `_types.py` (the typed view of `type_table()`) and `_vocab.py`, which are
     Postgres-specific.
   - The checker stays in `rowx.check` and imports Postgres internals. It is Postgres-only,
-    and backend dispatch in the checker is deferred.
+    and backend dispatch in the checker is deferred. `rowx.check` is also the CLI package: `check/cli.py` builds the
+    root parser, `check/migrate.py` handles `rowx migrate` and `check/database.py` handles `rowx database`.
+  - `rowx.testing` is an opt-in pytest plugin ([Test plugin](testing.md#test-plugin-rowxtesting)). Nothing imports it,
+    there is no `pytest11` entry point, and `import rowx` never imports pytest. pytest is not a runtime dependency; it
+    stays in the dev group.
 - **The checker front-end is Python** and uses stdlib `ast` and `tokenize`. It gets exact
   PEP 750 support and spans, and it can read type aliases from source without importing
   user code. All database work goes through `rowx._core.postgres`, over the same connection
@@ -115,6 +129,8 @@ Decisions:
     manylinux-aarch64 builds.
   - `webpki-roots`, `rustls-pemfile`, `serde_json`, `lru`, `bytes`, `futures-util` and
     `thiserror`.
+  - `sha2` (SHA-384 checksums) and a CRC-32 crate (the lock key) for migrations
+    ([Dependency evaluation](dependencies.md#dependency-evaluation)).
   - **Not** `sqlx` and **not** `sqlparser` ([Dependency evaluation](dependencies.md#dependency-evaluation)).
 - **Python** has no runtime dependencies. The dev group holds `pytest`, `pytest-asyncio`
   (with `asyncio_mode = "auto"`), `pyright` and `mypy` (both version-pinned), and `ruff`.

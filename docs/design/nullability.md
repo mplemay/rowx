@@ -37,6 +37,12 @@ rejects the SQL it raises `DatabaseError` with `.position` set.
   planning**, and it takes locks on referenced relations.
 - Run it as a dedicated non-superuser role against a CI or disposable database.
 
+**With `--scratch`** ([Drift gate and `--scratch`](checker.md#drift-gate-and---scratch)) the statement is amended:
+
+- The checker still never imports or executes user Python, and never executes your checked queries.
+- It does execute the **migration files**, and only in the database it created for the run, as the connecting role.
+  Migration files are trusted code ([Security and safety](security.md)). The role needs `CREATEDB`.
+
 ## Algorithm
 
 1. **Prepare** with `client.prepare(sql)`.
