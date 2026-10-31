@@ -85,6 +85,44 @@
     flag, a failed `COMMIT`, and `pool.transaction()` returning a clean connection.
   - A 300-iteration cancel stress test over a pool: **zero** follow-ups may fail.
   - Non-gating benchmark: `query.one(pool)` at 64 tasks against asyncpg `pool.fetchrow`.
+- **Migrations** (DB tests, each in a fresh schema or database). Acceptance:
+  - *Source:* every filename-grammar case (simple, `.up`/`.down`, mixed, a subdirectory and a non-`.sql` file ignored),
+    and each resolution error (a malformed name, a duplicate version, an unpaired file, a non-UTF-8 file) naming the
+    file. `-- no-transaction` is recognised only as the exact first line.
+  - *Compatibility:* checksums equal sqlx's SHA-384 values for fixture files, and sqlx-format history rows and checksums
+    run through rowx with `table = "_sqlx_migrations"`. The lock key equals sqlx's for the same database name.
+  - *History table:* the default and a schema-qualified `table` are created and quoted, an invalid `table` raises
+    `ValueError`, and `create_schemas` runs before the table is created.
+  - *Plan (pure `cargo` tests, plus the same cases through Python):* validation order (dirty, missing, modified),
+    `ignore_missing`, out-of-order with and without `allow_out_of_order`, `run(target)` and `undo(target)` including
+    `0`, a missing `.down.sql` raising before anything is reverted, `skip`, and `info` with a missing table.
+  - *Apply:* a transactional file that fails leaves nothing behind. A failed `-- no-transaction` file leaves a dirty row
+    and the next run raises `DirtyMigrationError`. `execution_time` is updated after the commit. A `Transaction`
+    argument raises `InterfaceError`. `CREATE INDEX CONCURRENTLY` works as the only statement of a `-- no-transaction`
+    file, and fails with `MigrationFailedError` (leaving a dirty row) when the file has another statement before it.
+    `ALTER TYPE … ADD VALUE` followed by a use of the value works in a `-- no-transaction` file that commits in between.
+  - *Revert:* a transactional `.down.sql` deletes the row atomically, and a failed `-- no-transaction` one leaves the
+    row dirty.
+  - *Locking:* two migrators on one database serialise (synchronised with `pg_stat_activity` polling), the lock is
+    released after the run and after a failure, and a pooled connection comes back with no advisory lock.
+  - *Cancellation:* cancelling `run` leaves a transactional migration unrecorded and a non-transactional one dirty, and
+    the connection or pool stays usable. Running through a `Pool` bumps the schema epoch.
+  - *CLI:* `migrate add` inference (sequential, timestamp, reversible, simple, with flags and config overrides),
+    `run`, `revert` and `info` output and exit codes (0 and 2), `--dry-run` changes nothing, and `database create`,
+    `drop`, `reset` and `setup`, including the confirmation prompt, `-y`, `--force` and the `template1` rule. The
+    DSN password never appears in output.
+  - *Checker:* the drift gate exits 2 for each of pending, modified, missing and dirty and is skipped by
+    `--no-drift-check`. `--scratch` creates and drops `rowx_check_<hex>` on success, on a diagnostic, on an error and
+    on Ctrl-C, and fails clearly without `CREATEDB`.
+- **Test plugin** (`rowx.testing`).
+  - *Opt-in:* with the plugin not enabled, a pytest session sees no rowx fixtures, and `import rowx` doesn't import
+    pytest.
+  - *Isolation:* two tests that write the same rows don't see each other's data, the per-test database is dropped
+    afterwards (also on failure), and the template is rebuilt only when a migration changes.
+  - *Fixtures:* `rowx_database_url`, `rowx_connection` and `rowx_pool` work under pytest-asyncio and under anyio's
+    asyncio backend.
+  - *Concurrency:* parallel template builds under xdist are serialised, and stale `rowx_tpl_*` databases are removed
+    unless `--rowx-keep-templates` is set.
 - **Module split.** `import rowx` loads neither `rowx._core` nor `rowx.postgres`. `rowx._core.postgres` is importable
   and registered in `sys.modules`, its classes report `module == "rowx._core.postgres"`, and `rowx.connect`,
   `rowx.Connection` and `rowx.ping` no longer exist. `Connection`, `Pool` and `Transaction` satisfy `Executor`.
@@ -98,3 +136,28 @@
   - Lint gates: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
     `ruff check`, `ruff format --check`, `pyright` (strict for `src/rowx`) and `mypy`.
   - The benchmark is a separate, non-blocking job.
+
+## Test plugin (`rowx.testing`)
+
+The plugin gives each test a freshly migrated database. It is opt-in: `pytest_plugins = ["rowx.testing"]` or
+`-p rowx.testing`. Isolation is a **template database plus a clone per test**, unlike the schema-per-test `schema`
+fixture above, because migrations may create schemas and extensions that a `search_path` can't contain. Roles are
+cluster-wide, so a clone doesn't isolate them.
+
+- A session-scoped template database, `rowx_tpl_<hash>`, is built once from the migrations. `<hash>` is taken over the
+  `(version, checksum)` list, so a template is reused across runs until a migration changes. Concurrent builds (xdist)
+  are serialised with an advisory lock.
+- Each test that uses a fixture gets `CREATE DATABASE rowx_test_<hex> TEMPLATE rowx_tpl_<hash>`, which is dropped
+  `WITH (FORCE)` at teardown. The template is closed to connections before it is cloned.
+- The fixtures are `rowx_database_url` (a `str`), `rowx_connection` (a `Connection`) and `rowx_pool` (a `Pool`), all
+  function-scoped. They are synchronous fixtures that drive setup and teardown with `asyncio.run`, which works because
+  rowx connections and pools aren't bound to one event loop. So the plugin needs no async pytest plugin, and works with
+  pytest-asyncio tests and anyio tests on its asyncio backend.
+- **asyncio only.** rowx's awaitables are asyncio futures (`pyo3_async_runtimes::tokio::future_into_py` needs a running
+  asyncio loop), so a test on anyio's Trio backend can't await them. Trio support would need its own interop layer and
+  is out of scope.
+- **Config.** The server URL comes from the `rowx_database_url` ini option, else the `database_url_env` variable, and
+  the migrations from `[tool.rowx.migrate]`. `--rowx-keep-templates` keeps the template; by default, stale
+  `rowx_tpl_*` templates are removed when a new one is built.
+- There is no `pytest11` entry point, so installing rowx never changes a pytest session. pytest is not a runtime
+  dependency.

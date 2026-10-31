@@ -4,8 +4,11 @@
 
 ```text
 rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json]
-           [--statistics] [-j N]
+           [--statistics] [-j N] [--scratch] [--no-drift-check]
 ```
+
+`rowx` also has the `migrate` and `database` commands ([Migrate and database commands](#migrate-and-database-commands)).
+`rowx.check.cli:main` stays the entry point and builds the root parser.
 
 - **Config.** `pyproject.toml` is found by searching upward from the current directory,
   unless `--config` is given. A missing `[tool.rowx]` table means defaults.
@@ -29,6 +32,9 @@ rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text
   - **2:** a usage or config error, a missing or unreachable database, a describe failure
     that is not an SQL error (timeout 57014, connection loss), an internal error, or a
     Python older than 3.14.
+- **Migrations.** When `[tool.rowx.migrate]` is configured, `check` gates on migration drift (`--no-drift-check` skips
+  it), or builds a scratch database from the migrations (`--scratch`); see
+  [Drift gate and `--scratch`](#drift-gate-and---scratch).
 - There are no warnings, severities, ignore comments or `--fix`.
 - **`--statistics`** reports:
   - files scanned and call sites found;
@@ -51,6 +57,80 @@ statement_timeout = "10s"         # integer + unit: ms|s|min
 Unknown keys are an error (exit 2), with a did-you-mean suggestion; port the logic from
 `sqlty/_config.py`. `.gitignore` is honoured through `git ls-files --others --exclude-standard
 --cached`, with a fallback to the exclude globs when git isn't available.
+
+```toml
+[tool.rowx.migrate]
+dir = "migrations"                 # relative to pyproject.toml
+table = "_rowx_migrations"         # "_sqlx_migrations" adopts an existing sqlx project
+create_schemas = []
+versioning = "inferred"            # inferred | timestamp | sequential  (for `migrate add`)
+kind = "inferred"                  # inferred | simple | reversible     (for `migrate add`)
+```
+
+`[tool.rowx.migrate]` is parsed in `check/config.py` with the same unknown-key and did-you-mean errors. Its presence
+(even as an empty table) is what "configured" means for the drift gate. The semantics of `table` and `create_schemas`
+are in [Migrations](migrations.md#history-table).
+
+## Migrate and database commands
+
+```text
+rowx migrate add <description> [--reversible | --simple] [--timestamp | --sequential]
+rowx migrate run    [--target-version V] [--dry-run] [--allow-out-of-order] [--ignore-missing]
+rowx migrate revert [--target-version V] [--dry-run]
+rowx migrate info
+rowx database create | drop [--force] [-y] | reset [--force] [-y] | setup
+```
+
+The handlers are `check/migrate.py` (`migrate`) and `check/database.py` (`database`), so `rowx.check` is the CLI
+package. Both import `rowx.postgres` and run the same [`Migrator`](migrations.md) and connection types as the runtime.
+
+- **Database URL.** Every command finds it as `check` does: `--database-url`, else the variable named by
+  `database_url_env`. `--config` and the upward search for `pyproject.toml` also work as for `check`. The DSN and
+  password are never printed.
+- **`migrate add`** creates the file or files in `dir`, creating the directory if needed, and needs no database.
+  - *Versioning.* Unless a flag or `versioning` says otherwise, it is inferred by sqlx's rule: if the last two versions
+    differ by 1, or the only version is 0 or 1, the new version is sequential (the last plus 1). Otherwise it is a
+    timestamp. Timestamps are UTC `YYYYMMDDHHMMSS`.
+  - *Kind.* Unless a flag or `kind` says otherwise, it is the kind of the latest migration (simple when there is none).
+    `--reversible` writes `<VERSION>_<description>.up.sql` and `.down.sql`, and `--simple` writes one `.sql` file.
+  - The description has spaces replaced with `_`.
+- **`migrate run`, `revert` and `info`** print one line per migration, for example
+  `Applied 20261029120000/migrate create users (12.3ms)`.
+  - `run` maps to `Migrator.run`: `--target-version` is `target`, and the flags set `allow_out_of_order` and
+    `ignore_missing`.
+  - `revert` maps to `Migrator.undo`. With no `--target-version` it reverts only the latest migration; with one, it
+    reverts every version above it, and `0` reverts all.
+  - `--dry-run` prints the lines the command would print (with a `Would apply` or `Would revert` verb), changes nothing
+    and creates no history table.
+  - `info` prints one line per version with its state, from `Migrator.info`.
+  - They exit **0** on success and **2** on any error (a `MigrateError`, a usage or config error, or an unreachable
+    database), matching `check`'s exit-2 class. There is no exit 1.
+- **`database`** connects to the **maintenance database**: `postgres`, or `template1` when the target database is itself
+  named `postgres` (as `createdb` does). The target name comes from the URL, and names are quoted identifiers.
+  - `create` creates the database. It is an error if it exists.
+  - `drop` drops it, and `reset` drops and creates it. Both ask for confirmation on a TTY, and need `-y` otherwise.
+  - `--force` uses `DROP DATABASE … WITH (FORCE)`, which disconnects other sessions.
+  - `setup` runs `create` when the database is missing, then `migrate run`.
+  - They exit 0 or 2 as above.
+
+## Drift gate and `--scratch`
+
+- **Drift gate.** When `[tool.rowx.migrate]` is configured, `rowx check` reads the history table inside its read-only
+  session before describing anything. If any migration is pending, modified, missing or dirty, it exits 2 with a
+  summary, for example: "database is 2 migrations behind `migrations/`: …; run `rowx migrate run` or
+  `rowx check --scratch`". The read creates nothing: a missing history table counts as every migration pending.
+  `--no-drift-check` skips the gate.
+- **`--scratch`.** The configured URL is used as a **server** URL.
+  - *Naming and creation.* The checker creates `rowx_check_<hex>` (`TEMPLATE template0`).
+  - *Migrating.* It runs the migrations in that database as the connecting role.
+  - *Checking.* It then opens its usual [read-only session](nullability.md#interface-and-checker-session) on that
+    database for the run.
+  - *Cleanup.* The scratch database is dropped `WITH (FORCE)` on **every** exit path, including errors and Ctrl-C.
+  - *Requirements.* The role needs `CREATEDB`. The drift gate doesn't apply, because the database is built from the
+    files.
+  - If `[tool.rowx.migrate]` is not configured, `--scratch` is a usage error (exit 2).
+- The checker's safety statement is amended for `--scratch`
+  ([Interface and checker session](nullability.md#interface-and-checker-session)).
 
 ## Discovery (`check/discover.py`)
 

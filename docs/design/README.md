@@ -16,6 +16,7 @@ This directory is the **contract** for v1. Where it says **MUST**, the behaviour
 | [Type mapping](type-mapping.md) | The single type table shared by decoder, encoder and checker |
 | [Driver](driver.md) | DSN and TLS, execution path, codecs, statement cache, state machine, cancellation |
 | [Nullability](nullability.md) | Describe, the nullability algorithm, the EXPLAIN plan walk, known limits |
+| [Migrations](migrations.md) | SQL-file migrations: file format, history table, engine, plan rules |
 | [Checker](checker.md) | `rowx check`: CLI, config, discovery, source map, row-type resolution, rules, output |
 | [Testing](testing.md) | Test strategy and CI |
 | [Dependencies](dependencies.md) | Which crates and tools were evaluated, and the verdicts |

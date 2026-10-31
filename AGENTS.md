@@ -179,4 +179,8 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Bindings | `crates/rowx-postgres-py/src/{conn,exec,stream,pool,transaction,errors,types}.rs`, `crates/rowx-py-core/src/{runtime,errors}.rs`, `crates/rowx-py/src/lib.rs` |
 | Python runtime (shared) | `src/rowx/{__init__,_query,_executor,errors,_template,_rowplan}.py` |
 | Python Postgres backend | `src/rowx/postgres/` (including `_types.py` and `_vocab.py`) |
-| Checker | `src/rowx/check/<module>.py`, one module each |
+| Checker | `src/rowx/check/<module>.py`, one module each (including `migrate.py` and `database.py`, the CLI handlers) |
+| Migrations (pure) | `crates/rowx-core/src/migrate/` (filename grammar, source resolution, checksums, plan) |
+| Migrations (Postgres) | `crates/rowx-postgres/src/{migrate,admin}.rs`, `crates/rowx-postgres-py/src/migrate.rs` |
+| Python migrations | `Migrator`, `Migration` and `MigrationStatus` in `src/rowx/postgres/`; `MigrateError` and its subclasses in `src/rowx/errors.py` |
+| Test plugin | `src/rowx/testing.py` (opt-in pytest plugin) |
