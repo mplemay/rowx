@@ -36,9 +36,18 @@ The Python surface is in [`rowx.postgres`](api.md#rowxpostgres), the commands an
   - two migrations with the same version;
   - an `.up.sql` without its `.down.sql`, or the reverse;
   - a file that isn't UTF-8.
-- **`-- no-transaction`.** When it is the first line of a file (byte-exact, as in sqlx), the file runs outside the
-  per-migration transaction. It is needed for `CREATE INDEX CONCURRENTLY`, `ALTER TYPE … ADD VALUE` used in the same
-  file, and similar statements.
+- **`-- no-transaction`.** When it is the first line of a file (byte-exact, as in sqlx), rowx sends no `BEGIN` around
+  the file ([A `-- no-transaction` migration](#a----no-transaction-migration)). The file is still sent as **one** simple
+  Query, and Postgres runs a multi-statement Query as a single implicit transaction unless the file has its own
+  transaction control. So:
+  - A statement that can't run in a transaction block (`CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`,
+    `REINDEX … CONCURRENTLY`, `VACUUM`) must be the **only statement** in its file. Even an explicit `COMMIT` before it
+    doesn't help, because each later statement of the same Query opens a new implicit block.
+  - `ALTER TYPE … ADD VALUE` followed by a use of the new value needs the value committed first, so the file is
+    `-- no-transaction` and commits in between itself, for example `BEGIN; ALTER TYPE … ADD VALUE …; COMMIT;` and then
+    `BEGIN; … COMMIT;` for the statements that use it.
+- **Checksum of a reversible migration.** The history row holds the `.up.sql` checksum, as in sqlx. The `.down.sql`
+  checksum is computed but never compared against the database.
 - **Checksum.** SHA-384 over the raw file bytes, with no normalisation, so checksums match sqlx byte for byte. The guide
   recommends `migrations/*.sql text eol=lf` in `.gitattributes`. sqlx's `ignored_chars` setting is not ported.
 - **Paths only.** `Migrator(path)` takes a directory. Loading from package data with `importlib.resources` is not part
@@ -101,7 +110,8 @@ The Python surface is in [`rowx.postgres`](api.md#rowxpostgres), the commands an
 ### Executing a file
 
 A migration is many statements, so a file runs over the **simple query protocol** through the existing `Conn::simple`
-(`batch_execute`). This is internal: there is still no public raw-SQL escape. Migration files are trusted code
+(`batch_execute`), which sends the whole file as one Query message, as sqlx does. rowx doesn't split or parse the file.
+This is internal: there is still no public raw-SQL escape. Migration files are trusted code
 ([Security and safety](security.md)).
 
 ### A transactional migration
@@ -123,7 +133,17 @@ On one connection:
 3. `UPDATE` the row to `success = true`, with the `execution_time`.
 
 A failure part-way through leaves a **dirty** row, and the next run raises `DirtyMigrationError`. This improves on
-sqlx, which records nothing on failure and so can't detect partial application on Postgres.
+sqlx, which records nothing on failure and so can't detect partial application on Postgres. Without its own `COMMIT`s,
+a failed multi-statement file is rolled back whole by Postgres's implicit transaction; rowx can't tell, so the row is
+dirty either way and the operator decides.
+
+### Reverting
+
+`undo` mirrors apply, with the `.down.sql` file's own `-- no-transaction` line:
+
+- **Transactional:** `BEGIN`, the `.down.sql` file, `DELETE` the history row, `COMMIT` (as sqlx does).
+- **`-- no-transaction`:** `UPDATE` the row to `success = false`, the file, then `DELETE` the row. A failure leaves the
+  row dirty, as for apply.
 
 ### Cancellation
 
@@ -138,7 +158,13 @@ decision C18), so no connection reuses a statement plan that is now stale.
 
 ### Timeouts
 
-Migrations don't change `statement_timeout` or `lock_timeout`. The guide covers setting them with `SET` inside a file.
+Migrations don't change `statement_timeout` or `lock_timeout`. The guide covers setting them inside a file:
+
+- In a transactional migration, `SET LOCAL` scopes the setting to that migration. A plain `SET` stays on the claimed
+  connection for the rest of the operation (and on a `Connection` afterwards), until a pool's `RESET ALL`.
+- A `-- no-transaction` file whose only statement is, say, `CREATE INDEX CONCURRENTLY` can't carry a `SET` (see
+  [Files](#files)). Its timeouts come from the connection: `server_settings`, a DSN `options=-c lock_timeout=…`, or a
+  role or database default.
 
 ## Plan rules
 

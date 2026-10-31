@@ -98,7 +98,11 @@
     `0`, a missing `.down.sql` raising before anything is reverted, `skip`, and `info` with a missing table.
   - *Apply:* a transactional file that fails leaves nothing behind. A failed `-- no-transaction` file leaves a dirty row
     and the next run raises `DirtyMigrationError`. `execution_time` is updated after the commit. A `Transaction`
-    argument raises `InterfaceError`. `CREATE INDEX CONCURRENTLY` works.
+    argument raises `InterfaceError`. `CREATE INDEX CONCURRENTLY` works as the only statement of a `-- no-transaction`
+    file, and fails with `MigrationFailedError` (leaving a dirty row) when the file has another statement before it.
+    `ALTER TYPE … ADD VALUE` followed by a use of the value works in a `-- no-transaction` file that commits in between.
+  - *Revert:* a transactional `.down.sql` deletes the row atomically, and a failed `-- no-transaction` one leaves the
+    row dirty.
   - *Locking:* two migrators on one database serialise (synchronised with `pg_stat_activity` polling), the lock is
     released after the run and after a failure, and a pooled connection comes back with no advisory lock.
   - *Cancellation:* cancelling `run` leaves a transactional migration unrecorded and a non-transactional one dirty, and
@@ -115,7 +119,8 @@
     pytest.
   - *Isolation:* two tests that write the same rows don't see each other's data, the per-test database is dropped
     afterwards (also on failure), and the template is rebuilt only when a migration changes.
-  - *Fixtures:* `rowx_database_url`, `rowx_connection` and `rowx_pool` work under pytest-asyncio and under anyio.
+  - *Fixtures:* `rowx_database_url`, `rowx_connection` and `rowx_pool` work under pytest-asyncio and under anyio's
+    asyncio backend.
   - *Concurrency:* parallel template builds under xdist are serialised, and stale `rowx_tpl_*` databases are removed
     unless `--rowx-keep-templates` is set.
 - **Module split.** `import rowx` loads neither `rowx._core` nor `rowx.postgres`. `rowx._core.postgres` is importable
@@ -136,8 +141,8 @@
 
 The plugin gives each test a freshly migrated database. It is opt-in: `pytest_plugins = ["rowx.testing"]` or
 `-p rowx.testing`. Isolation is a **template database plus a clone per test**, unlike the schema-per-test `schema`
-fixture above, because migrations may create schemas, extensions and roles-level objects that a `search_path` can't
-contain.
+fixture above, because migrations may create schemas and extensions that a `search_path` can't contain. Roles are
+cluster-wide, so a clone doesn't isolate them.
 
 - A session-scoped template database, `rowx_tpl_<hash>`, is built once from the migrations. `<hash>` is taken over the
   `(version, checksum)` list, so a template is reused across runs until a migration changes. Concurrent builds (xdist)
@@ -145,9 +150,12 @@ contain.
 - Each test that uses a fixture gets `CREATE DATABASE rowx_test_<hex> TEMPLATE rowx_tpl_<hash>`, which is dropped
   `WITH (FORCE)` at teardown. The template is closed to connections before it is cloned.
 - The fixtures are `rowx_database_url` (a `str`), `rowx_connection` (a `Connection`) and `rowx_pool` (a `Pool`), all
-  function-scoped. They are synchronous fixtures that drive setup with `asyncio.run`, which works because rowx
-  connections and pools aren't bound to an event loop. So the plugin needs no async pytest plugin, and works with
-  pytest-asyncio or anyio tests alike.
+  function-scoped. They are synchronous fixtures that drive setup and teardown with `asyncio.run`, which works because
+  rowx connections and pools aren't bound to one event loop. So the plugin needs no async pytest plugin, and works with
+  pytest-asyncio tests and anyio tests on its asyncio backend.
+- **asyncio only.** rowx's awaitables are asyncio futures (`pyo3_async_runtimes::tokio::future_into_py` needs a running
+  asyncio loop), so a test on anyio's Trio backend can't await them. Trio support would need its own interop layer and
+  is out of scope.
 - **Config.** The server URL comes from the `rowx_database_url` ini option, else the `database_url_env` variable, and
   the migrations from `[tool.rowx.migrate]`. `--rowx-keep-templates` keeps the template; by default, stale
   `rowx_tpl_*` templates are removed when a new one is built.
