@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 rowx-core.workspace = true
 bytes = "1"
+crc32fast = "1"
 futures-util = { version = "0.3", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
