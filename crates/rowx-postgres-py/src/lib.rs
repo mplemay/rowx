@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod codec;
 pub mod conn;
 pub mod describe;
@@ -26,6 +27,9 @@ fn _catalog_queries() -> u64 {
 /// A Python error when a class or function cannot be registered.
 pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     let m = PyModule::new(py, "postgres")?;
+    m.add_function(wrap_pyfunction!(admin::database_exists, &m)?)?;
+    m.add_function(wrap_pyfunction!(admin::create_database, &m)?)?;
+    m.add_function(wrap_pyfunction!(admin::drop_database, &m)?)?;
     m.add_class::<conn::Connection>()?;
     m.add_function(wrap_pyfunction!(conn::connect, &m)?)?;
     m.add_function(wrap_pyfunction!(conn::parse_dsn, &m)?)?;
