@@ -139,6 +139,11 @@ async fn rejects_unusable_names() -> TestResult {
         create_database(&base, "a\0b", None, &handle).await,
         Err(Error::Interface(_))
     ));
+    // the server would truncate it, so the lookup by the full name would miss
+    assert!(matches!(
+        drop_database(&base, &"a".repeat(64), false, &handle).await,
+        Err(Error::Interface(_))
+    ));
     Ok(())
 }
 
@@ -184,7 +189,11 @@ async fn maintenance_database_switches_for_a_target_named_postgres() -> TestResu
     // (or, without privilege, for ownership) instead of failing to connect
     let refused = drop_database(&base, "postgres", false, &handle).await;
     let err = refused.err().ok_or("dropping postgres must fail")?;
-    assert!(matches!(err, Error::Db { .. }), "{err:?}");
+    // connecting to `postgres` itself would be refused as "cannot drop the currently open database"
+    match &err {
+        Error::Db { message, .. } => assert!(!message.contains("currently open"), "{err:?}"),
+        _ => return Err(format!("expected a server refusal, got {err:?}").into()),
+    }
     assert!(database_exists(&base, "postgres", &handle).await?);
     session.close().await;
     Ok(())

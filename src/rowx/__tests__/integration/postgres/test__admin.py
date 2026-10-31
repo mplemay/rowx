@@ -36,6 +36,7 @@ def unique(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(6)}"
 
 
+@pytest.mark.db
 def test_create_exists_and_drop(server_dsn: str) -> None:
     name = unique("rowx_py_admin")
 
@@ -54,6 +55,7 @@ def test_create_exists_and_drop(server_dsn: str) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.db
 def test_name_defaults_to_the_database_in_the_options(server_dsn: str) -> None:
     name = unique("rowx_py_default")
     options = ConnectOptions.from_dsn(server_dsn, database=name)
@@ -72,14 +74,18 @@ def test_name_defaults_to_the_database_in_the_options(server_dsn: str) -> None:
     asyncio.run(run())
 
 
-def test_missing_name_is_an_interface_error() -> None:
+def test_unusable_names_are_interface_errors() -> None:
     async def run() -> None:
         with pytest.raises(InterfaceError):
             await database_exists("postgresql://u@127.0.0.1:1")
+        # the server would truncate it, so a lookup by the full name would miss
+        with pytest.raises(InterfaceError):
+            await create_database("postgresql://u@127.0.0.1:1", "a" * 64)
 
     asyncio.run(run())
 
 
+@pytest.mark.db
 def test_template_and_quoted_names(server_dsn: str) -> None:
     template = f'a-b "{unique("tpl")}"'
     clone = unique("rowx_py_clone")
@@ -101,6 +107,7 @@ def test_template_and_quoted_names(server_dsn: str) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.db
 def test_force_drops_a_database_with_a_live_session(server_dsn: str) -> None:
     name = unique("rowx_py_force")
 
@@ -119,13 +126,15 @@ def test_force_drops_a_database_with_a_live_session(server_dsn: str) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.db
 def test_a_wrong_password_never_appears_in_an_error(server_dsn: str) -> None:
     needle = "hunter2-not-the-password"
     options = ConnectOptions.from_dsn(server_dsn, password=needle)
 
     async def run() -> None:
-        with pytest.raises(Exception, match=r".") as exc:
+        with pytest.raises(DatabaseError) as exc:
             await database_exists(options, "anything")
+        assert exc.value.sqlstate == "28P01"
         assert needle not in str(exc.value)
         assert needle not in repr(exc.value)
 
