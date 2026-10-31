@@ -19,8 +19,13 @@ concurrency:
 
 jobs:
   linux:
-    name: Linux
+    # keep the 3.14 cell named "Linux" so an existing required check stays valid
+    name: ${{ matrix.python-version == '3.14' && 'Linux' || format('Linux ({0})', matrix.python-version) }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.14", "3.15"]
 
     services:
       postgres:
@@ -40,6 +45,8 @@ jobs:
     env:
       ROWX_REQUIRE_DB: "1"
       ROWX_TEST_DSN: postgresql://rowx:rowx@localhost:5432/rowx
+      # overrides .python-version; setup-uv also exports this from python-version
+      UV_PYTHON: ${{ matrix.python-version }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,6 +56,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
           cache-dependency-glob: uv.lock
           save-cache: ${{ github.ref == 'refs/heads/main' }}
@@ -59,21 +67,25 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          # PYO3_PYTHON is .venv/bin/python, so each interpreter needs its own artifacts
+          key: py${{ matrix.python-version }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install just
         run: uv tool install rust-just
 
       - name: Install the dependencies
-        run: uv sync --all-groups --no-install-project
+        run: uv sync --all-groups --locked --no-install-project
 
       - name: Build the extension
         run: uv run maturin develop
 
       - name: Check
+        if: matrix.python-version == '3.14'
         run: just check
 
       - name: Test rust
+        if: matrix.python-version == '3.14'
         run: just test-rust
 
       # a service container can't mount certs or override the entrypoint, so the TLS postgres comes from scripts/pg.sh

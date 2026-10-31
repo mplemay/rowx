@@ -81,7 +81,7 @@ jobs:
           if-no-files-found: error
 
   smoke:
-    name: Smoke test (${{ matrix.name }})
+    name: Smoke test (${{ matrix.name }}, ${{ matrix.python-version }})
     needs: build-wheels
     runs-on: ${{ matrix.os }}
     strategy:
@@ -90,8 +90,16 @@ jobs:
         include:
           - name: linux-x86_64
             os: ubuntu-latest
+            python-version: "3.14"
+          - name: linux-x86_64
+            os: ubuntu-latest
+            python-version: "3.15"
           - name: linux-aarch64
             os: ubuntu-24.04-arm
+            python-version: "3.14"
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            python-version: "3.15"
 
     # postgres runs as a plain container so the same job works on the arm runner
     env:
@@ -104,7 +112,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.14"
+          python-version: ${{ matrix.python-version }}
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -123,6 +131,9 @@ jobs:
         run: docker exec -i pg psql -U rowx -d rowx -v ON_ERROR_STOP=1 < examples/app/schema.sql
 
       - name: Smoke test the wheel
+        env:
+          # the wheel is cp314-abi3, built with python3.14; this interpreter only installs and runs it
+          PYTHON: python${{ matrix.python-version }}
         run: scripts/smoke-wheel.sh dist/*.whl
 
   publish:
