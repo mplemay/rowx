@@ -107,6 +107,7 @@ def test_computed_column_is_nullable(schema: str) -> None:
     "sql",
     [
         "SELECT 1, 1.5, 'x'::text, true",
+        "SELECT count(*) FROM (SELECT 1 UNION SELECT NULL::int) s",
         "SELECT count(*), count(email) FROM users",
         "SELECT count(*) OVER () FROM users",
         "SELECT row_number() OVER (), rank() OVER (ORDER BY id), dense_rank() OVER (ORDER BY id) FROM users",
@@ -131,6 +132,9 @@ def test_computed_not_null_is_inferred(schema: str, sql: str) -> None:
         "SELECT COALESCE(email, NULL::text) FROM users",
         "SELECT COALESCE(email, name) FROM users",
         "SELECT count(*) + 1 FROM users",
+        "SELECT 1 UNION SELECT NULL::int",
+        "SELECT 1 UNION ALL SELECT NULL::int",
+        "SELECT COALESCE(c.n, NULL::bigint) FROM users u LEFT JOIN (SELECT count(*) AS n FROM posts) c ON u.id = 0",
         "SELECT x.n FROM users u LEFT JOIN (SELECT 1 AS n) x ON x.n = u.id",
     ],
 )

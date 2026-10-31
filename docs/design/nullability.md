@@ -69,9 +69,8 @@ rejects the SQL it raises `DatabaseError` with `.position` set.
      This is non-fatal. Utility statements that return columns, such as `SHOW`, `CALL` and
      `FETCH`, fail EXPLAIN with 42601.
    - The walk is described in [Plan walk](#plan-walk-explainrs-a-pure-function-over-serde_jsonvalue). Its result can
-     only promote a column to Nullable, never the reverse. The exceptions are a Computed column behind a set
-     operation, which [Set operations](#set-operations) can prove NOT NULL (`SetOperation`), and a Computed column
-     whose expression [Computed columns](#computed-columns) proves NOT NULL (`ComputedExpr`).
+     only promote a column to Nullable, never the reverse. The one exception is a Computed column behind a set
+     operation, which [Set operations](#set-operations) can prove NOT NULL (`SetOperation`).
 4. **Overrides** ([Overrides](#overrides)).
 5. **Defaulting.** An Unknown column becomes Nullable (SQLx). Computed columns therefore
    need `"col!"`.
@@ -177,36 +176,6 @@ For a top-level output position `i`, the node is NOT NULL at `i` when:
 The catalog lookup for the scanned columns is one batched query, and only runs when the plan contains an `Append`,
 `Merge Append` or `SetOp`. If it fails, nothing is proven and the columns stay nullable.
 
-### Computed columns
-
-A Computed column can be proven NOT NULL from the printed `Output` expression of the plan's root node at that output
-position. A proven column becomes NOT NULL with reason `ComputedExpr`. No SQL parser is needed: the expression is
-read with a balanced-parenthesis scan that skips quoted strings and identifiers, never a regex over the whole
-expression. Outer parentheses are stripped only while the first one closes at the end of the text. The expression is
-NOT NULL when it is exactly one of:
-
-- a non-NULL numeric, string (optionally cast to a plain type name) or boolean constant. `NULL::t` is not one;
-- `count(...)` without a `FILTER` clause, plain or followed by `OVER`;
-- `row_number()`, `rank()`, `dense_rank()`, `percent_rank()` or `cume_dist()` with no arguments and an `OVER`
-  clause (the hypothetical-set aggregates `rank(x) WITHIN GROUP` are not these functions);
-- `MERGE_ACTION()`. The plan deparses the built-in as special syntax in capitals, so it needs no guard: `merge_action()`
-  always parses as that syntax and a user-defined function cannot take its place;
-- `COALESCE(a, b, ...)` when any top-level argument is NOT NULL under these rules.
-
-Anything after the call, such as an operator or a cast, makes the expression nullable. An expression that an outer join
-null-extends (the walk's marked set) is nullable. A set-operation proof is tried first, and neither overrides a
-promotion from the walk.
-
-**Shadowing guard.** The plan prints a function by bare name, so with `search_path = myschema, pg_catalog` a
-user-defined `count` or `row_number` is indistinguishable from the built-in and can return NULL. The guard is one
-catalog query, `pg_proc` joined to `pg_namespace` for a function with a whitelisted name in a schema other than
-`pg_catalog`. If it returns a row, or fails, the function-name items are disabled. Constants and `COALESCE` over them
-are unaffected. This avoids parsing `search_path`. The query runs inside `describe`, after the plan pass, and only
-when a function name is what proves a column, so a query that needs no function proof costs no round trip. The result
-is not cached across calls: `describe` holds no per-connection state, the query is cheap, and a cache would go stale
-after `CREATE FUNCTION` or `DROP FUNCTION`. A view definition that is analysed inside the same call runs its own plan
-pass and so its own guard.
-
 ### View columns
 
 A view column has `attnotnull = false`, so base nullability alone is always Nullable. rowx analyses the view's
@@ -265,8 +234,7 @@ Measured on Postgres 18 in the spike and the review. The schema is
 | column with `NOT NULL … NOT VALID` | x | nullable | ✗ | nullable |
 | `FULL JOIN` | both | nullable | nullable | nullable |
 | `LEFT JOIN … WHERE p.title IS NOT NULL` (the planner reduces it to an inner join) | p.title | not null | – | not null ✓ |
-| `upper(name)` | – | – | unknown | unknown → nullable |
-| `count(*)`, `coalesce(name, 'x')`, `1` | not null | – | unknown | not null ([Computed columns](#computed-columns)) |
+| `upper(name)`, `count(*)`, `coalesce(..)`, `1` | – | – | unknown | unknown → nullable |
 
 sqlx gets these wrong for three reasons:
 
@@ -292,6 +260,5 @@ Its `describe` is also `#[doc(hidden)]` and feature-gated. rowx keeps sqlx's **m
 - **Set operations** are NOT NULL only when [the plan proves it](#set-operations). Branches that are joins, subquery
   scans, casts, computed or constant expressions stay nullable. **Recursive CTEs** have `table_oid = 0`, so they are
   Unknown → Nullable. That is safe.
-- **Computed columns** are NOT NULL only when [the whitelist proves it](#computed-columns). Anything else
-  (`upper(name)`, `id + 1`, `count(*) FILTER (...)`, `sum(...)`) is Unknown → Nullable, and a user-defined function
-  that shadows a whitelisted name disables the function items.
+- **Computed columns** are always Unknown → Nullable. NOT NULL narrowing for computed
+  columns would need a parser ([Dependency evaluation](dependencies.md#dependency-evaluation)).

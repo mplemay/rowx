@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{Marked, mark_joins, outputs};
+use super::{Marked, carries_set_operation, mark_joins, outputs};
 
 // functions the plan prints by bare name, so a user-defined function of the same name outside `pg_catalog` would be
 // indistinguishable from the built-in
@@ -160,10 +160,20 @@ fn is_over_clause(rest: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn is_marked(expression: &str, stripped: &str, marked: &Marked) -> bool {
+    marked.contains_key(expression)
+        || marked.contains_key(stripped)
+        || marked.contains_key(&format!("({stripped})"))
+}
+
 // Whether the printed expression is never NULL. `functions` is false when a user-defined function may shadow a
 // whitelisted name.
-fn is_not_null(expression: &str, functions: bool) -> bool {
+fn is_not_null(expression: &str, functions: bool, marked: &Marked) -> bool {
     let text = strip_parens(expression);
+    // checked at every level, so an argument from the nullable side of an outer join cannot prove a COALESCE
+    if is_marked(expression, text, marked) {
+        return false;
+    }
     if is_constant(text) {
         return true;
     }
@@ -182,7 +192,7 @@ fn is_not_null(expression: &str, functions: bool) -> bool {
     match name {
         "COALESCE" if rest.is_empty() => split_args(args)
             .into_iter()
-            .any(|arg| is_not_null(arg, functions)),
+            .any(|arg| is_not_null(arg, functions, marked)),
         // a FILTER clause is the rest, which neither branch accepts
         "count" if functions => rest.is_empty() || is_over_clause(rest),
         _ if functions && RANKING.contains(&name) => args.trim().is_empty() && is_over_clause(rest),
@@ -202,10 +212,9 @@ fn root_outputs(plan: &Value) -> Option<(&Value, Vec<&str>)> {
 #[must_use]
 pub fn needs_function_check(plan: &Value, column_count: usize) -> bool {
     root_outputs(plan).is_some_and(|(_, columns)| {
-        columns
-            .iter()
-            .take(column_count)
-            .any(|expr| is_not_null(expr, true) && !is_not_null(expr, false))
+        columns.iter().take(column_count).any(|expr| {
+            is_not_null(expr, true, &Marked::new()) && !is_not_null(expr, false, &Marked::new())
+        })
     })
 }
 
@@ -216,15 +225,17 @@ pub fn proven_computed(plan: &Value, column_count: usize, functions: bool) -> Ve
     let Some((root, columns)) = root_outputs(plan) else {
         return vec![false; column_count];
     };
+    // a set operation's parents print the first branch's expression, so only the set-operation proof may decide
+    if carries_set_operation(root) {
+        return vec![false; column_count];
+    }
     let mut marked = Marked::new();
     mark_joins(root, None, &mut marked);
     (0..column_count)
         .map(|position| {
-            columns.get(position).is_some_and(|expr| {
-                !marked.contains_key(*expr)
-                    && !marked.contains_key(strip_parens(expr))
-                    && is_not_null(expr, functions)
-            })
+            columns
+                .get(position)
+                .is_some_and(|expr| is_not_null(expr, functions, &marked))
         })
         .collect()
 }
@@ -233,7 +244,11 @@ pub fn proven_computed(plan: &Value, column_count: usize, functions: bool) -> Ve
 mod tests {
     use serde_json::json;
 
-    use super::{is_not_null, needs_function_check, proven_computed};
+    use super::{Marked, needs_function_check, proven_computed};
+
+    fn is_not_null(expression: &str, functions: bool) -> bool {
+        super::is_not_null(expression, functions, &Marked::new())
+    }
 
     #[test]
     fn constants_are_not_null() {
@@ -355,5 +370,35 @@ mod tests {
         let flat = json!([{ "Plan": { "Node Type": "Result", "Output": ["1", "(count(*))"] } }]);
         assert_eq!(proven_computed(&flat, 2, true), vec![true, true]);
         assert_eq!(proven_computed(&flat, 2, false), vec![true, false]);
+    }
+
+    #[test]
+    fn a_marked_coalesce_argument_cannot_prove_the_coalesce() {
+        let mut marked = Marked::new();
+        marked.insert(
+            "(count(*))".to_owned(),
+            crate::describe::NullReason::Computed,
+        );
+        assert!(!super::is_not_null("COALESCE((count(*)))", true, &marked));
+        assert!(!super::is_not_null(
+            "COALESCE(u.a, (count(*)))",
+            true,
+            &marked
+        ));
+        assert!(super::is_not_null("COALESCE((count(*)), 1)", true, &marked));
+    }
+
+    #[test]
+    fn expressions_printed_from_a_set_operation_are_not_trusted() {
+        let branch = |output: &str, relationship: &str| json!({ "Node Type": "Result", "Parent Relationship": relationship, "Output": [output] });
+        let append = json!({ "Node Type": "Append", "Parent Relationship": "Outer",
+            "Plans": [branch("1", "Member"), branch("NULL::integer", "Member")] });
+        let sort = json!({ "Node Type": "Sort", "Parent Relationship": "Outer", "Output": ["(1)"], "Plans": [append] });
+        let unique =
+            json!([{ "Plan": { "Node Type": "Unique", "Output": ["(1)"], "Plans": [sort] } }]);
+        assert_eq!(proven_computed(&unique, 1, true), vec![false]);
+        // an aggregate over the set operation prints its own expression
+        let counted = json!([{ "Plan": { "Node Type": "Aggregate", "Output": ["count(*)"], "Plans": [sort] } }]);
+        assert_eq!(proven_computed(&counted, 1, true), vec![true]);
     }
 }
