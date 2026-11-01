@@ -119,7 +119,8 @@ package. Both import `rowx.postgres` and run the same [`Migrator`](migrations.md
     exits 0 even when it reports drift.
   - They exit **0** on success and **2** on any error (a `MigrateError`, a usage or config error, or an unreachable
     database), matching `check`'s exit-2 class. There is no exit 1.
-- **`database`** connects to a **maintenance database** chosen by a pure function of the URL's options and the target:
+- **`database`** connects to a **maintenance database** chosen by a pure function of the URL's options and the target
+  (`--scratch` and the test plugin use the same rule):
   - the URL's own database, unless that is the target;
   - otherwise `postgres`, or `template1` when the target is itself named `postgres` (as `createdb` does);
   - a URL without a dbname targets the user name;
@@ -138,7 +139,7 @@ package. Both import `rowx.postgres` and run the same [`Migrator`](migrations.md
 
 ## Drift gate and `--scratch`
 
-- **Drift gate.** When `[tool.rowx.migrate]` is configured, `rowx check` reads the history table inside its read-only
+- **Drift gate.** When `[tool.rowx.migrate]` is configured, `rowx check` reads the history table in a read-only checker
   session before describing anything. If any migration is pending, modified, missing or dirty, it exits 2 with a
   summary, for example: "database is 2 migrations behind `migrations/`: …; run `rowx migrate run` or
   `rowx check --scratch`". `--no-drift-check` skips the gate.

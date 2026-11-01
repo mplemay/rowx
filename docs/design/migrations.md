@@ -138,14 +138,20 @@ On one connection:
 
 1. `BEGIN`.
 2. The file.
-3. `SAVEPOINT rowx_probe`. If the file ended rowx's transaction (with `COMMIT` or `ROLLBACK`), the probe fails with
-   25P01. rowx sends `ROLLBACK` if needed and raises `MigrationFailedError` ("the file ended rowx's transaction; mark
-   it `-- no-transaction`") before anything is recorded. Otherwise it releases the savepoint.
+3. `SAVEPOINT rowx_probe`. If the file ended rowx's transaction (with `COMMIT` or `ROLLBACK`) and left none open, the
+   probe fails with 25P01. rowx sends `ROLLBACK` if needed and raises `MigrationFailedError` ("the file ended rowx's
+   transaction; mark it `-- no-transaction`") before anything is recorded. Otherwise it releases the savepoint.
 4. `INSERT` into the history table with `success = true` and `execution_time = -1`.
 5. `COMMIT`.
 
 `execution_time` is then updated, in nanoseconds, outside the transaction (sqlx #1966). rowx does not parse the file to
 detect transaction control; the probe is what catches it.
+
+The probe detects a file that ended rowx's transaction, but it can't undo what that file committed. After a `ROLLBACK`
+in the file, nothing before it survives; after a `COMMIT`, everything before it is committed. Either way, any
+statements after it ran in Postgres's own implicit transaction and are committed too. No history row is written, and
+the error says that the file's changes may be committed but unrecorded. A file that ends
+rowx's transaction and then opens its own with `BEGIN` passes the probe, and the history row joins that transaction.
 
 ### A `-- no-transaction` migration
 
@@ -179,9 +185,9 @@ Neither an error nor a cancellation leaves a lock or a transaction behind.
 - The binding passes a cancelled flag, and the executor checks it before each step, so no step starts after the Python
   future is dropped.
 - A transactional step rolls back and isn't recorded. A non-transactional one is left dirty.
-- Only a migration file's own SQL becomes a `MigrationFailedError`. A failure in the lock or history-table SQL raises
-  `DatabaseError`, unwrapped. `MigrationFailedError` carries `dirty` and the results applied before the failure
-  ([API](api.md#rowxpostgres)).
+- Only a migration file's own SQL, and the `rowx_probe` check after it, becomes a `MigrationFailedError`. A failure in
+  the lock or history-table SQL raises `DatabaseError`, unwrapped. `MigrationFailedError` carries `dirty` and the
+  results applied before the failure ([API](api.md#rowxpostgres)).
 
 ### Schema epoch
 

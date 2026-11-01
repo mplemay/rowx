@@ -105,7 +105,8 @@
   - *Apply:* a transactional file that fails leaves nothing behind. A failed `-- no-transaction` file leaves a dirty row
     and the next run raises `DirtyMigrationError`. `execution_time` is updated after the commit. A `Transaction`
     argument raises `InterfaceError`. A transactional file ending in `ROLLBACK;`, and one ending in `COMMIT;`, each fail
-    with `MigrationFailedError` (the `rowx_probe` check) and record nothing, no row and no DDL.
+    with `MigrationFailedError` (the `rowx_probe` check) and record no row. After `ROLLBACK;` its DDL is gone; after
+    `COMMIT;` its DDL stays committed, unrecorded, and the error says so.
     `MigrationFailedError.dirty`, `.applied` and `.error.sqlstate` are checked. `CREATE INDEX CONCURRENTLY` works as the
     only statement of a `-- no-transaction` file, and fails with `MigrationFailedError` (leaving a dirty row) when the
     file has another statement before it. `ALTER TYPE … ADD VALUE` followed by a use of the value works in a
@@ -147,12 +148,13 @@
     migrations path does, which a unit test checks on the hash).
   - *Config* (`pytester`, `runpytest_subprocess`): `rowx_database_url_env`, `rowx_migrations`, and
     `rowx_require_database` (failing instead of skipping).
-  - *Fixtures:* the fixtures work from pytest-asyncio tests (function and session loop scope) and from an anyio test on
-    its asyncio backend. If any of these fails, the fixtures move to blocking Rust calls on the shared runtime.
+  - *Fixtures:* the fixtures, which make blocking Rust calls, work from pytest-asyncio tests (function and session loop
+    scope) and from an anyio test on its asyncio backend.
   - *Concurrency:* `-n 2` (xdist) builds the template once (shown by a build counter), and stale cleanup removes only
-    the same project's templates, so another project's template (a different path hash) survives, unless
+    the same project's templates, so another project's template (a different `<p>`) survives, unless
     `--rowx-keep-templates` is set.
-  - *Orphans:* a clone orphaned by a SIGKILLed inner session is swept on the next run.
+  - *Orphans:* a clone orphaned by a SIGKILLed inner session is swept on the next run, and another project's old clone
+    is left.
 - **Module split.** `import rowx` loads neither `rowx._core` nor `rowx.postgres`. `rowx._core.postgres` is importable
   and registered in `sys.modules`, its classes report `module == "rowx._core.postgres"`, and `rowx.connect`,
   `rowx.Connection` and `rowx.ping` no longer exist. `Connection`, `Pool` and `Transaction` satisfy `Executor`.
@@ -174,21 +176,30 @@ The plugin gives each test a freshly migrated database. It is opt-in: `pytest_pl
 fixture above, because migrations may create schemas and extensions that a `search_path` can't contain. Roles are
 cluster-wide, so a clone doesn't isolate them.
 
-- A session-scoped template database, `rowx_tpl_<h>`, is built once from the migrations. `<h>` is the first 16 hex
+- **Names.** Every database the plugin creates carries the project's path hash `<p>`, the first 8 hex characters of
+  SHA-256 over the resolved migrations directory path (the rootdir when there are no migrations). It is what makes
+  cleanup project-scoped: `<h>` alone mixes the path with the migrations, so it can't tell an older template of this
+  project from another project's.
+- A session-scoped template database, `rowx_tpl_<p>_<h>`, is built once from the migrations. `<h>` is the first 16 hex
   characters of SHA-256 over the rowx version, the migrations directory path, `table`, `create_schemas` and the sorted
   `(version, checksum)` list, so a template is reused across runs until a migration (or the rowx version or path)
   changes.
-  - It is built as `rowx_tpl_<h>_tmp_<rand>`, migrated (with config `ignore_missing` and `allow_out_of_order`), and its
-    connections closed. Then, under an advisory lock keyed by `<h>` (which serialises concurrent builds under xdist),
-    it is renamed to the final name with `IS_TEMPLATE true, ALLOW_CONNECTIONS false`. A database under the final name
-    is therefore complete by construction.
-  - Stale cleanup only touches templates of the same project (same path hash in the name). It sets `IS_TEMPLATE false`
-    before a plain `DROP` (never FORCE) and ignores errors.
-  - Leftover `_tmp_` databases, and orphaned clones, are swept (below).
-- Each test that uses a fixture gets `CREATE DATABASE rowx_test_<hex> TEMPLATE rowx_tpl_<h>` (the default `wal_log`
-  strategy, so concurrent clones are fine), which is dropped `WITH (FORCE)` at teardown. A clone is tagged with
-  `COMMENT ON DATABASE 'rowx:<pid>@<host>:<unix-ts>'`. At session start, the plugin sweeps the project's `rowx_test_*`
-  clones that are over an hour old and have no sessions.
+  - The build takes an advisory lock keyed by `<h>` **before** it looks for the final name, and holds it until the
+    template is published, so concurrent sessions (xdist workers) build it once: a session that waited finds the
+    template and reuses it. Advisory locks are per database, so the lock is taken in the maintenance database
+    ([Migrate and database commands](checker.md#migrate-and-database-commands)), which is the same for every session of
+    the project.
+  - Under that lock, a missing template is built as `rowx_tpl_<p>_<h>_tmp_<rand>` (tagged like a clone, below),
+    migrated (with config `ignore_missing` and `allow_out_of_order`), and its connections closed. It is then renamed to
+    the final name with `IS_TEMPLATE true, ALLOW_CONNECTIONS false`. A database under the final name is therefore
+    complete by construction.
+  - Stale cleanup only touches the same project's templates (`rowx_tpl_<p>_*`). It sets `IS_TEMPLATE false` before a
+    plain `DROP` (never FORCE) and ignores errors.
+- Each test that uses a fixture gets `CREATE DATABASE rowx_test_<p>_<hex> TEMPLATE rowx_tpl_<p>_<h>` (the default
+  `wal_log` strategy, so concurrent clones are fine), which is dropped `WITH (FORCE)` at teardown. A clone is tagged
+  with `COMMENT ON DATABASE 'rowx:<pid>@<host>:<unix-ts>'`. At session start, the plugin sweeps the project's leftover
+  `rowx_tpl_<p>_*_tmp_*` databases and `rowx_test_<p>_*` clones whose tag is over an hour old and which have no
+  sessions, ignoring errors.
 - The fixtures are `rowx_database_url` (a `str`), `rowx_connection` (a `Connection`) and `rowx_pool` (a `Pool` that does
   no IO until first use), all function-scoped and synchronous. Admin operations and the template build are blocking
   Rust calls on the shared runtime with the GIL released, never `asyncio.run`, so the fixtures work from any event
