@@ -205,6 +205,16 @@ pub fn plan_undo(
     Ok(RunPlan { steps })
 }
 
+// The `undo` target that reverts only the latest applied version, or `0` when nothing is applied
+#[must_use]
+pub fn latest_undo_target(applied: &[AppliedMigration]) -> i64 {
+    applied
+        .iter()
+        .map(|row| row.version)
+        .max()
+        .map_or(0, |latest| latest.saturating_sub(1))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -616,6 +626,19 @@ mod tests {
             undo_versions(&plan_undo(&migrations, &applied, 1, false)),
             [(3, MigrationKind::Down), (2, MigrationKind::Down)]
         );
+    }
+
+    #[test]
+    fn the_latest_undo_target_reverts_only_the_latest_applied_version() {
+        let all = reversible(&[1, 5, 9]);
+        let applied = up_rows(&[1, 5]);
+        let target = latest_undo_target(&applied);
+        assert_eq!(target, 4);
+        assert_eq!(
+            undo_versions(&plan_undo(&all, &applied, target, false)),
+            [(5, MigrationKind::Down)]
+        );
+        assert_eq!(latest_undo_target(&[]), 0);
     }
 
     #[test]

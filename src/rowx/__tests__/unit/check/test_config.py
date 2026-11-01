@@ -6,6 +6,7 @@ from rowx.check.config import (
     DEFAULT_EXCLUDE,
     DEFAULT_STATEMENT_TIMEOUT_MS,
     ConfigError,
+    MigrateConfig,
     find_pyproject,
     load_config,
     parse_duration,
@@ -129,3 +130,82 @@ def test_explicit_config_file(tmp_path: Path) -> None:
 def test_missing_explicit_config_file(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="does not exist"):
         load_config(tmp_path, Path("nope.toml"))
+
+
+def test_migrate_table_is_absent_by_default(tmp_path: Path) -> None:
+    write(tmp_path / "pyproject.toml", '[tool.rowx]\ninclude = ["src"]\n')
+    assert load_config(tmp_path).migrate is None
+
+
+def test_empty_migrate_table_is_configured_with_defaults(tmp_path: Path) -> None:
+    write(tmp_path / "pyproject.toml", "[tool.rowx.migrate]\n")
+    assert load_config(tmp_path).migrate == MigrateConfig(
+        dir="migrations",
+        table="_rowx_migrations",
+        create_schemas=(),
+        versioning="inferred",
+        kind="inferred",
+    )
+
+
+def test_migrate_table_parses_every_key(tmp_path: Path) -> None:
+    write(
+        tmp_path / "pyproject.toml",
+        '[tool.rowx.migrate]\ndir = "db/migrations"\ntable = "_sqlx_migrations"\n'
+        'create_schemas = ["app", "audit"]\nversioning = "sequential"\nkind = "reversible"\n',
+    )
+    assert load_config(tmp_path).migrate == MigrateConfig(
+        dir="db/migrations",
+        table="_sqlx_migrations",
+        create_schemas=("app", "audit"),
+        versioning="sequential",
+        kind="reversible",
+    )
+
+
+def test_migrate_unknown_key_suggests(tmp_path: Path) -> None:
+    write(tmp_path / "pyproject.toml", '[tool.rowx.migrate]\ncreate_schema = ["app"]\n')
+    with pytest.raises(
+        ConfigError, match=r"unknown key 'create_schema' in \[tool.rowx.migrate\].*did you mean 'create_schemas'\?"
+    ):
+        load_config(tmp_path)
+
+
+def test_migrate_unknown_key_without_suggestion(tmp_path: Path) -> None:
+    write(tmp_path / "pyproject.toml", "[tool.rowx.migrate]\nzzzzzz = 1\n")
+    with pytest.raises(ConfigError, match="unknown key 'zzzzzz'") as info:
+        load_config(tmp_path)
+    assert "did you mean" not in str(info.value)
+
+
+def test_misspelled_migrate_table_suggests(tmp_path: Path) -> None:
+    write(tmp_path / "pyproject.toml", "[tool.rowx.migrat]\n")
+    with pytest.raises(ConfigError, match=r"unknown key 'migrat'.*did you mean 'migrate'\?"):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ('versioning = "timestmp"', r"invalid versioning 'timestmp'.*did you mean 'timestamp'\?"),
+        ('versioning = "weekly"', "invalid versioning 'weekly'.*expected one of: inferred, timestamp, sequential"),
+        ("versioning = 1", "invalid versioning 1"),
+        ('kind = "reversable"', r"invalid kind 'reversable'.*did you mean 'reversible'\?"),
+        ('kind = "both"', "invalid kind 'both'.*expected one of: inferred, simple, reversible"),
+        ('dir = ""', "dir must be a non-empty string"),
+        ("dir = 1", "dir must be a non-empty string"),
+        ('table = ""', "table must be a non-empty string"),
+        ('create_schemas = "app"', "create_schemas must be a list of strings"),
+        ("create_schemas = [1]", "create_schemas must be a list of strings"),
+    ],
+)
+def test_migrate_bad_values(tmp_path: Path, body: str, message: str) -> None:
+    write(tmp_path / "pyproject.toml", f"[tool.rowx.migrate]\n{body}\n")
+    with pytest.raises(ConfigError, match=message):
+        load_config(tmp_path)
+
+
+def test_migrate_must_be_a_table(tmp_path: Path) -> None:
+    write(tmp_path / "pyproject.toml", "[tool.rowx]\nmigrate = 1\n")
+    with pytest.raises(ConfigError, match=r"\[tool.rowx.migrate\] must be a table"):
+        load_config(tmp_path)

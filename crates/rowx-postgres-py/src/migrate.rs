@@ -22,8 +22,9 @@ use crate::pool::Pool;
 
 #[derive(Debug, Clone, Copy)]
 enum Op {
-    Run(Option<i64>),
-    Undo(i64),
+    // the target, and whether it is a dry run
+    Run(Option<i64>, bool),
+    Undo(Option<i64>, bool),
     Skip(Option<i64>),
     Info,
 }
@@ -87,8 +88,14 @@ async fn work(conn: &PgConnection, job: &Job) -> Result<Vec<Status>, MigrateErro
     let local = job.migrations.as_slice();
     let details = match job.op {
         Op::Info => pg::info(conn, &job.config, local).await?,
-        Op::Run(target) => pg::run(conn, &job.config, local, options(target)).await?,
-        Op::Undo(target) => pg::undo(conn, &job.config, local, target, job.ignore_missing).await?,
+        Op::Run(target, false) => pg::run(conn, &job.config, local, options(target)).await?,
+        Op::Run(target, true) => pg::run_dry(conn, &job.config, local, options(target)).await?,
+        Op::Undo(target, false) => {
+            pg::undo(conn, &job.config, local, target, job.ignore_missing).await?
+        }
+        Op::Undo(target, true) => {
+            pg::undo_dry(conn, &job.config, local, target, job.ignore_missing).await?
+        }
         Op::Skip(target) => pg::skip(conn, &job.config, local, options(target)).await?,
     };
     Ok(details.into_iter().map(status).collect())
@@ -105,7 +112,7 @@ fn note(access: &Access, cancel: &Cancel, err: &MigrateError) {
 // migrations or a file that changed the schema before it failed, so it drops the plans as well
 fn may_have_changed(op: Op, result: &Result<Vec<Status>, MigrateError>) -> bool {
     match (op, result) {
-        (Op::Info, _)
+        (Op::Info | Op::Run(_, true) | Op::Undo(_, true), _)
         | (
             _,
             Err(MigrateError::Plan(_) | MigrateError::Source(_) | MigrateError::InvalidTable(_)),
@@ -309,23 +316,26 @@ impl Migrator {
         PyList::new(py, rows)
     }
 
-    #[pyo3(signature = (executor, target=None))]
+    #[pyo3(signature = (executor, target=None, dry_run=false))]
     fn run<'py>(
         &self,
         py: Python<'py>,
         executor: &Bound<'py, PyAny>,
         target: Option<i64>,
+        dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.start(py, executor, Op::Run(target))
+        self.start(py, executor, Op::Run(target, dry_run))
     }
 
+    #[pyo3(signature = (executor, target, dry_run=false))]
     fn undo<'py>(
         &self,
         py: Python<'py>,
         executor: &Bound<'py, PyAny>,
-        target: i64,
+        target: Option<i64>,
+        dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.start(py, executor, Op::Undo(target))
+        self.start(py, executor, Op::Undo(target, dry_run))
     }
 
     #[pyo3(signature = (executor, target=None))]

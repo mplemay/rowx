@@ -1,4 +1,5 @@
 import asyncio
+import secrets
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -164,6 +165,71 @@ def test_undo_reverts_newest_first_to_a_target_and_to_zero(schema: str, tmp_path
             assert await migrator.undo(conn, target=0) == ()
             # reverted migrations apply again
             assert [s.version for s in await migrator.run(conn)] == [1, 2, 3]
+
+    asyncio.run(run())
+
+
+def test_undo_without_a_target_reverts_the_latest_only_and_times_it(schema: str, tmp_path: Path) -> None:
+    for version in (1, 5):
+        reversible(tmp_path, version, f"t{version}")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            await migrator.run(conn)
+            (reverted,) = await migrator.undo(conn, target=None)
+            assert (reverted.version, reverted.description, reverted.state) == (5, "t5", "pending")
+            assert reverted.execution_time is not None
+            assert reverted.execution_time.total_seconds() > 0
+            assert await history(conn) == [(1, True)]
+            assert [s.version for s in await migrator.undo(conn, target=None)] == [1]
+            assert await migrator.undo(conn, target=None) == ()
+
+    asyncio.run(run())
+
+
+def test_a_dry_run_returns_the_planned_statuses_and_changes_nothing(schema: str, tmp_path: Path) -> None:
+    for version in (1, 2, 3):
+        reversible(tmp_path, version, f"t{version}")
+    migrator = Migrator(tmp_path)
+    # only ever dry-run, so the schema is never created
+    never = f"mig_dry_{secrets.token_hex(4)}"
+    dry = Migrator(tmp_path, table=f"{never}.history", create_schemas=[never])
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            assert [s.version for s in await dry.run(conn, dry_run=True)] == [1, 2, 3]
+            assert await dry.undo(conn, target=None, dry_run=True) == ()
+            assert not await query[bool](t"SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname = {never})").one(conn)
+
+            planned = await migrator.run(conn, target=2, dry_run=True)
+            assert [(s.version, s.description, s.state) for s in planned] == [
+                (1, "t1", "applied"),
+                (2, "t2", "applied"),
+            ]
+            assert all(s.installed_on is None and s.execution_time is None for s in planned)
+            assert await migrator.undo(conn, target=0, dry_run=True) == ()
+            assert not await table_exists(conn, HISTORY)
+            assert not await table_exists(conn, "t1")
+
+            await migrator.run(conn, target=2)
+            assert [s.version for s in await migrator.run(conn, dry_run=True)] == [3]
+            reverting = await migrator.undo(conn, target=0, dry_run=True)
+            assert [(s.version, s.state) for s in reverting] == [(2, "pending"), (1, "pending")]
+            assert [s.version for s in await migrator.undo(conn, target=None, dry_run=True)] == [2]
+            assert await history(conn) == [(1, True), (2, True)]
+            assert await table_exists(conn, "t2")
+
+            # a dry run raises the real run's errors, in the same order
+            with pytest.raises(MigrationOrderError):
+                await migrator.run(conn, target=1, dry_run=True)
+            # the same up file as a simple migration has the same checksum, but no .down.sql
+            (tmp_path / "1_t1.down.sql").unlink()
+            (tmp_path / "1_t1.up.sql").rename(tmp_path / "1_t1.sql")
+            with pytest.raises(MigrationSourceError) as exc:
+                await Migrator(tmp_path).undo(conn, target=0, dry_run=True)
+            assert exc.value.version == 1
+            assert await history(conn) == [(1, True), (2, True)]
 
     asyncio.run(run())
 

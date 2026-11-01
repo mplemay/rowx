@@ -1,11 +1,12 @@
 import asyncio
 import os
 import sys
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
 from importlib.metadata import version
 from pathlib import Path
 
-from rowx.check.config import ConfigError, load_config
+from rowx.check.config import ConfigError, database_url, load_config
+from rowx.check.migrate import add_parsers, handle as handle_migrate
 from rowx.check.render import render_json, render_text
 from rowx.check.runner import CheckError, RunResult, redact, run_check
 from rowx.check.walk import discover_files
@@ -26,6 +27,7 @@ def _parser() -> ArgumentParser:
     check.add_argument("--output-format", choices=("text", "json"), default="text")
     check.add_argument("--statistics", action="store_true")
     check.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1), metavar="N")
+    add_parsers(subparsers)
     return parser
 
 
@@ -47,7 +49,7 @@ def _check(paths: list[Path], config_file: Path | None, url: str | None, jobs: i
     cwd = Path.cwd()
     config = load_config(cwd, config_file)
     files = discover_files(config, cwd, paths)
-    dsn = url or os.environ.get(config.database_url_env) or ""
+    dsn = database_url(config, url)
     try:
         return asyncio.run(run_check(config, files, dsn, jobs)), config.root
     except CheckError as error:
@@ -57,9 +59,23 @@ def _check(paths: list[Path], config_file: Path | None, url: str | None, jobs: i
         raise CheckError(msg) from None
 
 
+def _migrate(args: Namespace) -> int:
+    try:
+        handle_migrate(args)
+    except (ConfigError, CheckError) as error:
+        print(f"error: {error}", file=sys.stderr)  # ruff: ignore[print]
+        return EXIT_FAILURE
+    except KeyboardInterrupt:
+        print("error: interrupted", file=sys.stderr)  # ruff: ignore[print]
+        return EXIT_FAILURE
+    return EXIT_CLEAN
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == "migrate":
+        return _migrate(args)
     if args.jobs < 1:
         parser.error("-j must be at least 1")
     try:

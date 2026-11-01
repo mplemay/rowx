@@ -1,0 +1,2 @@
+Applied 1/migrate create cli a (<time>)
+Applied 2/migrate create cli b (<time>)

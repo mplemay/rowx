@@ -17,7 +17,8 @@ use rowx_postgres::conn::Connection;
 use rowx_postgres::dsn::ConnectOptions;
 use rowx_postgres::error::Error;
 use rowx_postgres::migrate::{
-    MigrateConfig, MigrateError, MigrationDetail, info, list_applied, lock_key, run, skip, undo,
+    MigrateConfig, MigrateError, MigrationDetail, info, list_applied, lock_key, run, run_dry, skip,
+    undo, undo_dry,
 };
 use rowx_postgres::pool::{PgManager, Pool, PoolOptions, RESET_QUERY};
 use tokio::runtime::Handle;
@@ -246,7 +247,7 @@ async fn a_failure_without_locking_still_leaves_no_open_transaction() -> TestRes
         ),
         [1]
     );
-    let err = undo(&conn, &unlocked, &[up, down], 0, false).await;
+    let err = undo(&conn, &unlocked, &[up, down], Some(0), false).await;
     assert!(
         matches!(err, Err(MigrateError::Failed { version: 1, .. })),
         "{err:?}"
@@ -330,7 +331,7 @@ async fn a_file_that_changes_search_path_keeps_the_history_table() -> TestResult
 
     // a fresh session, so the unqualified name resolves to `public` again
     let mut other = db.connect().await?;
-    let reverted = undo(&other, &config(), &all, 0, false).await?;
+    let reverted = undo(&other, &config(), &all, Some(0), false).await?;
     assert_eq!(
         reverted
             .iter()
@@ -511,7 +512,7 @@ async fn undo_reverts_newest_first_to_a_target_and_to_zero() -> TestResult {
     run(&conn, &config(), &all, PlanOptions::default()).await?;
 
     assert_eq!(
-        versions(undo(&conn, &config(), &all, 1, false).await?),
+        versions(undo(&conn, &config(), &all, Some(1), false).await?),
         [3, 2]
     );
     assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
@@ -524,12 +525,137 @@ async fn undo_reverts_newest_first_to_a_target_and_to_zero() -> TestResult {
         0
     );
 
-    assert_eq!(versions(undo(&conn, &config(), &all, 0, false).await?), [1]);
+    assert_eq!(
+        versions(undo(&conn, &config(), &all, Some(0), false).await?),
+        [1]
+    );
     assert_eq!(history(&conn, TABLE).await?.len(), 0);
     assert_eq!(
-        versions(undo(&conn, &config(), &all, 0, false).await?).len(),
+        versions(undo(&conn, &config(), &all, Some(0), false).await?).len(),
         0
     );
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn undo_without_a_target_reverts_only_the_latest_and_times_each_revert() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let mut all = Vec::new();
+    for (v, t) in [(1, "a"), (5, "b")] {
+        all.extend(reversible(
+            v,
+            &format!("CREATE TABLE {t} (i int)"),
+            &format!("DROP TABLE {t}"),
+        ));
+    }
+    run(&conn, &config(), &all, PlanOptions::default()).await?;
+
+    let reverted = undo(&conn, &config(), &all, None, false).await?;
+    assert_eq!(versions(reverted.clone()), [5]);
+    assert_eq!(reverted[0].info.status, MigrationStatus::Pending);
+    assert!(reverted[0].execution_time.is_some_and(|t| t > 0));
+    assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
+    assert_eq!(
+        versions(undo(&conn, &config(), &all, None, false).await?),
+        [1]
+    );
+    assert_eq!(
+        versions(undo(&conn, &config(), &all, None, false).await?).len(),
+        0
+    );
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_dry_run_plans_like_the_real_one_and_changes_nothing() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let mut all = Vec::new();
+    for (v, t) in [(1, "a"), (2, "b"), (3, "c")] {
+        all.extend(reversible(
+            v,
+            &format!("CREATE TABLE {t} (i int)"),
+            &format!("DROP TABLE {t}"),
+        ));
+    }
+    let tables =
+        format!("SELECT count(*) FROM pg_tables WHERE tablename IN ('{TABLE}', 'a', 'b', 'c')");
+
+    // nothing applied: no history table is created
+    let planned = run_dry(&conn, &config(), &all, target(2)).await?;
+    assert_eq!(versions(planned.clone()), [1, 2]);
+    assert!(
+        planned
+            .iter()
+            .all(|d| d.info.status == MigrationStatus::Applied
+                && d.info.description.as_deref() == Some(&*format!("m{}", d.info.version))
+                && d.installed_on_micros.is_none()
+                && d.execution_time.is_none())
+    );
+    assert_eq!(
+        versions(undo_dry(&conn, &config(), &all, Some(0), false).await?).len(),
+        0
+    );
+    assert_eq!(count(&conn, &tables).await?, 0);
+    assert_eq!(advisory_locks(&conn).await?, 0);
+
+    run(&conn, &config(), &all, target(2)).await?;
+    assert_eq!(
+        versions(run_dry(&conn, &config(), &all, PlanOptions::default()).await?),
+        [3]
+    );
+    let reverting = undo_dry(&conn, &config(), &all, Some(0), false).await?;
+    assert_eq!(versions(reverting.clone()), [2, 1]);
+    assert!(
+        reverting
+            .iter()
+            .all(|d| d.info.status == MigrationStatus::Pending)
+    );
+    assert_eq!(
+        versions(undo_dry(&conn, &config(), &all, None, false).await?),
+        [2]
+    );
+    assert_eq!(history(&conn, TABLE).await?, [(1, true), (2, true)]);
+
+    // the same plan errors as the real operations, and the lock is released after them
+    let err = run_dry(&conn, &config(), &all, target(1)).await;
+    assert!(
+        matches!(
+            err,
+            Err(MigrateError::Plan(PlanError::Order {
+                pending: 1,
+                latest: 2
+            }))
+        ),
+        "{err:?}"
+    );
+    let forward_only = [simple(1, "x"), simple(2, "y")];
+    let modified = [all[0].clone(), all[1].clone(), simple(2, "changed")];
+    let err = undo_dry(&conn, &config(), &modified, Some(0), false).await;
+    assert!(
+        matches!(
+            err,
+            Err(MigrateError::Plan(PlanError::Checksum { version: 2 }))
+        ),
+        "{err:?}"
+    );
+    let err = run_dry(&conn, &config(), &forward_only, PlanOptions::default()).await;
+    assert!(
+        matches!(
+            err,
+            Err(MigrateError::Plan(PlanError::Checksum { version: 1 }))
+        ),
+        "{err:?}"
+    );
+    assert_eq!(advisory_locks(&conn).await?, 0);
+    assert_eq!(history(&conn, TABLE).await?, [(1, true), (2, true)]);
     conn.close().await;
     db.finish().await
 }
@@ -544,7 +670,7 @@ async fn undo_without_a_down_file_reverts_nothing() -> TestResult {
     all.push(simple(2, "CREATE TABLE b (i int)"));
     run(&conn, &config(), &all, PlanOptions::default()).await?;
 
-    let err = undo(&conn, &config(), &all, 0, false)
+    let err = undo(&conn, &config(), &all, Some(0), false)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -570,7 +696,7 @@ async fn a_failing_transactional_revert_keeps_the_row_and_the_schema() -> TestRe
     let all = reversible(1, "CREATE TABLE a (i int)", "DROP TABLE a; SELECT 1/0");
     run(&conn, &config(), &all, PlanOptions::default()).await?;
 
-    let err = undo(&conn, &config(), &all, 0, false)
+    let err = undo(&conn, &config(), &all, Some(0), false)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -600,7 +726,7 @@ async fn a_failing_no_transaction_revert_leaves_a_dirty_row() -> TestResult {
         "-- no-transaction\nDROP TABLE nope",
     );
     run(&conn, &config(), &all, PlanOptions::default()).await?;
-    let err = undo(&conn, &config(), &all, 0, false)
+    let err = undo(&conn, &config(), &all, Some(0), false)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -633,7 +759,10 @@ async fn a_no_transaction_revert_deletes_the_row() -> TestResult {
         "-- no-transaction\nDROP TABLE a",
     );
     run(&conn, &config(), &all, PlanOptions::default()).await?;
-    assert_eq!(versions(undo(&conn, &config(), &all, 0, false).await?), [1]);
+    assert_eq!(
+        versions(undo(&conn, &config(), &all, Some(0), false).await?),
+        [1]
+    );
     assert_eq!(history(&conn, TABLE).await?.len(), 0);
     conn.close().await;
     db.finish().await

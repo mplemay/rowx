@@ -131,11 +131,20 @@ class Migrator:
         /,
         *,
         target: int | None = None,
+        dry_run: bool = False,
     ) -> tuple[MigrationStatus, ...]:
-        return await call(executor, lambda impl: self._impl.run(impl, target))
+        return await call(executor, lambda impl: self._impl.run(impl, target, dry_run))
 
-    async def undo(self, executor: Connection | Pool, /, *, target: int) -> tuple[MigrationStatus, ...]:
-        return await call(executor, lambda impl: self._impl.undo(impl, target))
+    async def undo(
+        self,
+        executor: Connection | Pool,
+        /,
+        *,
+        # required; `None` reverts only the latest applied migration, chosen under the operation's lock
+        target: int | None,
+        dry_run: bool = False,
+    ) -> tuple[MigrationStatus, ...]:
+        return await call(executor, lambda impl: self._impl.undo(impl, target, dry_run))
 
     async def skip(
         self,

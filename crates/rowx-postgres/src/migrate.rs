@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use rowx_core::migrate::{
-    AppliedMigration, Migration, MigrationInfo, PlanError, PlanOptions, SourceError,
-    migration_info, plan_run, plan_skip, plan_undo,
+    AppliedMigration, Migration, MigrationInfo, MigrationStatus, PlanError, PlanOptions,
+    SourceError, latest_undo_target, migration_info, plan_run, plan_skip, plan_undo,
 };
 use thiserror::Error;
 
@@ -415,8 +415,10 @@ pub async fn run(
     .await
 }
 
-/// Reverts every applied version above `target` (`0` for all), newest first, and returns the status
-/// of each, in order.
+/// Reverts every applied version above `target`, newest first, and returns the status of each.
+///
+/// `0` reverts all of them, and `None` only the latest applied version. Each status's
+/// `execution_time` is how long its revert took.
 ///
 /// # Errors
 /// As [`run`]; `Plan(MissingDown)` is raised before anything is reverted.
@@ -424,7 +426,7 @@ pub async fn undo(
     conn: &Connection,
     config: &MigrateConfig,
     local: &[Migration],
-    target: i64,
+    target: Option<i64>,
     ignore_missing: bool,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     quote_table(&config.table)?;
@@ -432,13 +434,84 @@ pub async fn undo(
         ensure_table(conn, &config.table, &config.create_schemas).await?;
         let quoted = resolve_table(conn, &config.table).await?;
         let applied = list_applied(conn, &config.table).await?;
-        let plan = plan_undo(local, &plain(&applied), target, ignore_missing)?;
+        let applied = plain(&applied);
+        // without a target, the latest version is chosen under the same lock as the revert
+        let target = target.unwrap_or_else(|| latest_undo_target(&applied));
+        let plan = plan_undo(local, &applied, target, ignore_missing)?;
         let mut done = Vec::with_capacity(plan.steps.len());
+        let mut elapsed = Vec::with_capacity(plan.steps.len());
         for step in &plan.steps {
+            let started = Instant::now();
             revert(conn, &quoted, step).await?;
             done.push(step.version);
+            elapsed.push(nanos(started));
         }
-        touched(conn, &quoted, local, &done).await
+        // a reverted version has no history row, so its execution_time is how long the revert took
+        let mut details = touched(conn, &quoted, local, &done).await?;
+        for (detail, nanos) in details.iter_mut().zip(elapsed) {
+            detail.execution_time = Some(nanos);
+        }
+        Ok(details)
+    })
+    .await
+}
+
+// The statuses a plan's steps would have afterwards, for a dry run
+fn planned(steps: &[Migration], status: MigrationStatus) -> Vec<MigrationDetail> {
+    steps
+        .iter()
+        .map(|step| MigrationDetail {
+            info: MigrationInfo {
+                version: step.version,
+                description: Some(step.description.clone()),
+                status,
+            },
+            installed_on_micros: None,
+            execution_time: None,
+        })
+        .collect()
+}
+
+/// The statuses [`run`] would return, from the same plan under the same lock, without running
+/// anything. Creates nothing: a missing history table makes everything pending.
+///
+/// # Errors
+/// The `Plan` errors [`run`] raises, `InvalidTable` and `Connection`.
+pub async fn run_dry(
+    conn: &Connection,
+    config: &MigrateConfig,
+    local: &[Migration],
+    options: PlanOptions,
+) -> Result<Vec<MigrationDetail>, MigrateError> {
+    quote_table(&config.table)?;
+    locked(conn, config, async || {
+        let applied = list_applied(conn, &config.table).await?;
+        let plan = plan_run(local, &plain(&applied), options)?;
+        Ok(planned(&plan.steps, MigrationStatus::Applied))
+    })
+    .await
+}
+
+/// The statuses [`undo`] would return (with no `execution_time`), without reverting anything.
+/// Creates nothing.
+///
+/// # Errors
+/// The `Plan` errors [`undo`] raises, `InvalidTable` and `Connection`.
+pub async fn undo_dry(
+    conn: &Connection,
+    config: &MigrateConfig,
+    local: &[Migration],
+    target: Option<i64>,
+    ignore_missing: bool,
+) -> Result<Vec<MigrationDetail>, MigrateError> {
+    quote_table(&config.table)?;
+    locked(conn, config, async || {
+        let applied = list_applied(conn, &config.table).await?;
+        let applied = plain(&applied);
+        // without a target, the latest version is chosen under the same lock as the revert
+        let target = target.unwrap_or_else(|| latest_undo_target(&applied));
+        let plan = plan_undo(local, &applied, target, ignore_missing)?;
+        Ok(planned(&plan.steps, MigrationStatus::Pending))
     })
     .await
 }
