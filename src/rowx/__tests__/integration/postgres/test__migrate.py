@@ -82,6 +82,20 @@ def test_run_on_a_connection_applies_in_version_order(schema: str, tmp_path: Pat
     asyncio.run(run())
 
 
+def test_run_reports_from_the_history_table_it_resolved_before_the_files(schema: str, tmp_path: Path) -> None:
+    # a plain SET outlives the migration's transaction, so an unqualified name would now miss the table
+    write(tmp_path, "1_move.sql", "SET search_path TO pg_catalog;")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            applied = await migrator.run(conn)
+            assert [(s.version, s.state) for s in applied] == [(1, "applied")]
+            assert applied[0].installed_on is not None
+
+    asyncio.run(run())
+
+
 def test_run_on_a_pool_releases_the_connection_and_the_lock(schema: str, tmp_path: Path) -> None:
     write(tmp_path, "1_first.sql", "CREATE TABLE first (id int4);")
     migrator = Migrator(tmp_path)
@@ -510,6 +524,49 @@ def test_a_cancelled_no_transaction_run_leaves_a_dirty_row(schema: str, tmp_path
             assert [s.state for s in await migrator.info(conn)] == ["dirty"]
 
     asyncio.run(run())
+
+
+@pytest.mark.timing
+def test_a_cancelled_run_on_a_pool_still_drops_stale_plans(schema: str, tmp_path: Path) -> None:
+    write(tmp_path, "1_create.sql", "CREATE TABLE epoch_t (a int4); INSERT INTO epoch_t VALUES (1);")
+
+    async def run() -> list[int]:
+        table = query_unchecked[int](t"SELECT a FROM epoch_t")
+        async with Pool(schema, max_size=2) as pool, await connect(schema) as observer:
+            await Migrator(tmp_path).run(pool)
+            async with pool.acquire() as first, pool.acquire() as second:
+                await table.one(first)
+                await table.one(second)
+                pids = [await backend_pid(first), await backend_pid(second)]
+            # the change commits, then the run is cancelled during the next file
+            write(tmp_path, "2_alter.sql", "ALTER TABLE epoch_t ALTER COLUMN a TYPE int8;")
+            write(tmp_path, "3_slow.sql", "SELECT pg_sleep(30);")
+            task = asyncio.ensure_future(Migrator(tmp_path).run(pool))
+            for _ in range(POLL_LIMIT):
+                if await query[bool](
+                    t"SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = ANY({pids}) AND state = 'active' AND query LIKE '%pg_sleep(30)%')",
+                ).one(observer):
+                    break
+            else:
+                pytest.fail("the migration never started")
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            # the migrating connection is idle again only once its task has settled
+            for _ in range(POLL_LIMIT):
+                if pool.idle == 2:
+                    break
+                await query[int](t"SELECT 1").one(observer)
+            else:
+                pytest.fail("the migrating connection never came back")
+            results: list[int] = []
+            async with pool.acquire() as first, pool.acquire() as second:
+                for conn in (first, second):
+                    await query(t"BEGIN").execute(conn)
+                    results.append(await table.one(conn))
+            return results
+
+    assert asyncio.run(run()) == [1, 1]
 
 
 def test_two_migrators_on_one_database_both_finish(schema: str, tmp_path: Path) -> None:

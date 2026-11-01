@@ -17,12 +17,16 @@ use rowx_postgres::conn::Connection;
 use rowx_postgres::dsn::ConnectOptions;
 use rowx_postgres::error::Error;
 use rowx_postgres::migrate::{
-    MigrateConfig, MigrateError, info, list_applied, lock_key, run, skip, undo,
+    MigrateConfig, MigrateError, MigrationDetail, info, list_applied, lock_key, run, skip, undo,
 };
 use rowx_postgres::pool::{PgManager, Pool, PoolOptions, RESET_QUERY};
 use tokio::runtime::Handle;
 
 const TABLE: &str = "_rowx_migrations";
+
+fn versions(details: Vec<MigrationDetail>) -> Vec<i64> {
+    details.into_iter().map(|d| d.info.version).collect()
+}
 
 // a database of its own, so the advisory-lock key is private to the test
 struct TestDb {
@@ -144,13 +148,13 @@ async fn applies_reapplies_and_stops_at_a_target() -> TestResult {
         simple(3, "CREATE TABLE c (i int)"),
     ];
 
-    let first = run(&conn, &config(), &all, target(2)).await?;
+    let first = versions(run(&conn, &config(), &all, target(2)).await?);
     assert_eq!(first, [1, 2]);
     assert_eq!(history(&conn, TABLE).await?, [(1, true), (2, true)]);
 
-    let rest = run(&conn, &config(), &all, PlanOptions::default()).await?;
+    let rest = versions(run(&conn, &config(), &all, PlanOptions::default()).await?);
     assert_eq!(rest, [3]);
-    let again = run(&conn, &config(), &all, PlanOptions::default()).await?;
+    let again = versions(run(&conn, &config(), &all, PlanOptions::default()).await?);
     assert_eq!(again.len(), 0);
     assert_eq!(history(&conn, TABLE).await?.len(), 3);
 
@@ -231,13 +235,15 @@ async fn a_failure_without_locking_still_leaves_no_open_transaction() -> TestRes
     );
     let [up, down] = reversible(1, "CREATE TABLE r (i int)", "DROP TABLE r; SELECT 1/0");
     assert_eq!(
-        run(
-            &conn,
-            &unlocked,
-            &[up.clone(), down.clone()],
-            PlanOptions::default()
-        )
-        .await?,
+        versions(
+            run(
+                &conn,
+                &unlocked,
+                &[up.clone(), down.clone()],
+                PlanOptions::default()
+            )
+            .await?
+        ),
         [1]
     );
     let err = undo(&conn, &unlocked, &[up, down], 0, false).await;
@@ -281,9 +287,22 @@ async fn a_file_that_changes_search_path_keeps_the_history_table() -> TestResult
     .into_iter()
     .flatten()
     .collect();
+    let applied = run(&conn, &config(), &all, PlanOptions::default()).await?;
+    // the statuses come from the table resolved before the files moved `search_path`
     assert_eq!(
-        run(&conn, &config(), &all, PlanOptions::default()).await?,
-        [1, 2, 3]
+        applied
+            .iter()
+            .map(|d| (
+                d.info.version,
+                d.info.status,
+                d.installed_on_micros.is_some()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (1, MigrationStatus::Applied, true),
+            (2, MigrationStatus::Applied, true),
+            (3, MigrationStatus::Applied, true)
+        ]
     );
     let qualified = format!("public.{TABLE}");
     assert_eq!(
@@ -311,7 +330,18 @@ async fn a_file_that_changes_search_path_keeps_the_history_table() -> TestResult
 
     // a fresh session, so the unqualified name resolves to `public` again
     let mut other = db.connect().await?;
-    assert_eq!(undo(&other, &config(), &all, 0, false).await?, [3, 2, 1]);
+    let reverted = undo(&other, &config(), &all, 0, false).await?;
+    assert_eq!(
+        reverted
+            .iter()
+            .map(|d| (d.info.version, d.info.status, d.installed_on_micros))
+            .collect::<Vec<_>>(),
+        [
+            (3, MigrationStatus::Pending, None),
+            (2, MigrationStatus::Pending, None),
+            (1, MigrationStatus::Pending, None)
+        ]
+    );
     assert_eq!(history(&other, &qualified).await?, []);
     other.close().await;
     conn.close().await;
@@ -409,7 +439,7 @@ async fn create_index_concurrently_works_only_as_the_sole_statement() -> TestRes
         ),
     ];
     assert_eq!(
-        run(&conn, &config(), &good, PlanOptions::default()).await?,
+        versions(run(&conn, &config(), &good, PlanOptions::default()).await?),
         [2]
     );
     assert_eq!(
@@ -456,7 +486,7 @@ async fn a_no_transaction_file_can_commit_between_enum_steps() -> TestResult {
         ),
     ];
     assert_eq!(
-        run(&conn, &config(), &all, PlanOptions::default()).await?,
+        versions(run(&conn, &config(), &all, PlanOptions::default()).await?),
         [1, 2]
     );
     assert_eq!(history(&conn, TABLE).await?, [(1, true), (2, true)]);
@@ -480,7 +510,10 @@ async fn undo_reverts_newest_first_to_a_target_and_to_zero() -> TestResult {
     }
     run(&conn, &config(), &all, PlanOptions::default()).await?;
 
-    assert_eq!(undo(&conn, &config(), &all, 1, false).await?, [3, 2]);
+    assert_eq!(
+        versions(undo(&conn, &config(), &all, 1, false).await?),
+        [3, 2]
+    );
     assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
     assert_eq!(
         count(
@@ -491,9 +524,12 @@ async fn undo_reverts_newest_first_to_a_target_and_to_zero() -> TestResult {
         0
     );
 
-    assert_eq!(undo(&conn, &config(), &all, 0, false).await?, [1]);
+    assert_eq!(versions(undo(&conn, &config(), &all, 0, false).await?), [1]);
     assert_eq!(history(&conn, TABLE).await?.len(), 0);
-    assert_eq!(undo(&conn, &config(), &all, 0, false).await?.len(), 0);
+    assert_eq!(
+        versions(undo(&conn, &config(), &all, 0, false).await?).len(),
+        0
+    );
     conn.close().await;
     db.finish().await
 }
@@ -597,7 +633,7 @@ async fn a_no_transaction_revert_deletes_the_row() -> TestResult {
         "-- no-transaction\nDROP TABLE a",
     );
     run(&conn, &config(), &all, PlanOptions::default()).await?;
-    assert_eq!(undo(&conn, &config(), &all, 0, false).await?, [1]);
+    assert_eq!(versions(undo(&conn, &config(), &all, 0, false).await?), [1]);
     assert_eq!(history(&conn, TABLE).await?.len(), 0);
     conn.close().await;
     db.finish().await
@@ -613,7 +649,10 @@ async fn skip_records_without_running() -> TestResult {
         simple(1, "CREATE TABLE a (i int)"),
         simple(2, "CREATE TABLE b (i int)"),
     ];
-    assert_eq!(skip(&conn, &config(), &all, target(1)).await?, [1]);
+    assert_eq!(
+        versions(skip(&conn, &config(), &all, target(1)).await?),
+        [1]
+    );
     assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
     assert_eq!(
         count(
@@ -625,7 +664,7 @@ async fn skip_records_without_running() -> TestResult {
     );
     // the skipped one counts as applied
     assert_eq!(
-        run(&conn, &config(), &all, PlanOptions::default()).await?,
+        versions(run(&conn, &config(), &all, PlanOptions::default()).await?),
         [2]
     );
     let unknown = count(
@@ -771,7 +810,7 @@ async fn reads_a_table_and_checksums_written_by_sqlx() -> TestResult {
     assert_eq!(details[0].info.status, MigrationStatus::Applied);
     assert_eq!(details[0].execution_time, Some(12345));
     assert_eq!(
-        run(&conn, &cfg, &all, PlanOptions::default()).await?,
+        versions(run(&conn, &cfg, &all, PlanOptions::default()).await?),
         [20_240_102_000_000]
     );
 
@@ -838,6 +877,7 @@ async fn concurrent_runs_wait_on_the_lock_then_find_nothing_to_do() -> TestResul
         tasks.push(tokio::spawn(async move {
             let result = run(&conn, &config(), &*all, PlanOptions::default())
                 .await
+                .map(versions)
                 .map_err(|e| e.to_string());
             (conn, result)
         }));
@@ -883,7 +923,7 @@ async fn concurrent_runs_wait_on_the_lock_then_find_nothing_to_do() -> TestResul
         simple(2, "SELECT 2"),
     ];
     assert_eq!(
-        run(&free, &unlocked, &more, PlanOptions::default()).await?,
+        versions(run(&free, &unlocked, &more, PlanOptions::default()).await?),
         [2]
     );
     holder.close().await;

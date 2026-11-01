@@ -76,37 +76,22 @@ fn status(detail: MigrationDetail) -> Status {
     }
 }
 
-// What the call changed is reported with the state the migrations are in afterwards, so the work is
-// followed by an `info` on the same claimed connection
-async fn work(conn: &PgConnection, job: &Job) -> Result<(Vec<Status>, bool), MigrateError> {
+// What the call changed is reported with the state the migrations are in afterwards, which the
+// executor reads under the same lock as the change
+async fn work(conn: &PgConnection, job: &Job) -> Result<Vec<Status>, MigrateError> {
     let options = |target| PlanOptions {
         target,
         ignore_missing: job.ignore_missing,
         allow_out_of_order: job.allow_out_of_order,
     };
     let local = job.migrations.as_slice();
-    let versions = match job.op {
-        Op::Info => {
-            let all = pg::info(conn, &job.config, local).await?;
-            return Ok((all.into_iter().map(status).collect(), false));
-        }
+    let details = match job.op {
+        Op::Info => pg::info(conn, &job.config, local).await?,
         Op::Run(target) => pg::run(conn, &job.config, local, options(target)).await?,
         Op::Undo(target) => pg::undo(conn, &job.config, local, target, job.ignore_missing).await?,
         Op::Skip(target) => pg::skip(conn, &job.config, local, options(target)).await?,
     };
-    let after = pg::info(conn, &job.config, local).await?;
-    let changed = !versions.is_empty();
-    let statuses = versions
-        .iter()
-        .filter_map(|version| {
-            after
-                .iter()
-                .find(|detail| detail.info.version == *version)
-                .cloned()
-                .map(status)
-        })
-        .collect();
-    Ok((statuses, changed))
+    Ok(details.into_iter().map(status).collect())
 }
 
 // the lock and the connection's state follow the same rules as any other statement
@@ -116,12 +101,17 @@ fn note(access: &Access, cancel: &Cancel, err: &MigrateError) {
     }
 }
 
-// A failed file may have changed the schema before it failed, so a failure drops the plans as well
-const fn may_have_changed(result: &Result<(Vec<Status>, bool), MigrateError>) -> bool {
-    match result {
-        Ok((_, changed)) => *changed,
-        Err(MigrateError::Failed { .. }) => true,
-        Err(_) => false,
+// An error before the plan's first step changes nothing; any later one may follow committed
+// migrations or a file that changed the schema before it failed, so it drops the plans as well
+fn may_have_changed(op: Op, result: &Result<Vec<Status>, MigrateError>) -> bool {
+    match (op, result) {
+        (Op::Info, _)
+        | (
+            _,
+            Err(MigrateError::Plan(_) | MigrateError::Source(_) | MigrateError::InvalidTable(_)),
+        ) => false,
+        (_, Ok(statuses)) => !statuses.is_empty(),
+        (_, Err(MigrateError::Failed { .. } | MigrateError::Connection(_))) => true,
     }
 }
 
@@ -134,26 +124,26 @@ async fn run_job(
 ) -> PyResult<Py<PyAny>> {
     let claim = access.settle_claim(&cancel.state, claim).await?;
     let inner = Arc::clone(&cancel.backend.conn);
+    let pool = access.pool.clone();
+    // the invalidation runs in the task, so it also happens when the caller is cancelled
     let pending = cancel::spawn(&cancel, claim, &hook, async move {
         let mut conn = inner.lock().await;
         let result = work(&conn, &job).await;
-        if may_have_changed(&result)
-            && let Ok((_, cache)) = conn.parts()
-        {
+        if may_have_changed(job.op, &result) {
             // the connection's own prepared statements may now be stale
-            cache.clear();
+            if let Ok((_, cache)) = conn.parts() {
+                cache.clear();
+            }
+            if let Some(pool) = &pool {
+                pool.bump_epoch();
+            }
         }
         drop(conn);
         result
     });
     let result = pending.wait().await.map_err(|e| PgError(e.into()))?;
-    if may_have_changed(&result)
-        && let Some(pool) = &access.pool
-    {
-        pool.bump_epoch();
-    }
     match result {
-        Ok((statuses, _)) => Python::attach(|py| to_list(py, statuses)),
+        Ok(statuses) => Python::attach(|py| to_list(py, statuses)),
         Err(err) => {
             note(&access, &cancel, &err);
             Err(MigrateFailure(err).into())
@@ -278,7 +268,10 @@ impl Migrator {
     ) -> PyResult<Self> {
         let path: PathBuf = path.extract()?;
         pg::quote_table(&table).map_err(|e| migrate_to_py_err(py, &e))?;
-        let migrations = resolve(&path).map_err(|e| rowx_py_core::errors::source_error(py, &e))?;
+        // reading and checksumming the files is IO, so it runs without the GIL
+        let migrations = py
+            .detach(|| resolve(&path))
+            .map_err(|e| rowx_py_core::errors::source_error(py, &e))?;
         Ok(Self {
             migrations: Arc::new(migrations),
             config: MigrateConfig {
