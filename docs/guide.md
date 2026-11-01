@@ -539,7 +539,7 @@ async def main(directory: Path) -> None:
     assert migrator.migrations[-1].no_transaction
 
     async with Pool(DSN, max_size=2) as pool:
-        # the plan: no lock, and nothing is written
+        # the plan, read under the migration lock: nothing runs and nothing is written
         planned = await migrator.run(pool, dry_run=True)
         assert [s.version for s in planned] == [1, 2, 3]
         assert [s.state for s in await migrator.info(pool)] == ["pending"] * 3
@@ -586,12 +586,13 @@ rowx migrate run --target-version 20261029120000
 rowx migrate info
 ```
 
-- `run`, `undo`, `skip` and `info` take a `Connection` or a `Pool` and return a `tuple[MigrationStatus, ...]`: one
-  entry per migration applied, reverted or skipped, or per version for `info`. `status.state` is `applied`, `pending`,
-  `modified`, `missing` or `dirty`, and `installed_on` and `execution_time` are set for applied rows.
-  `execution_time` is a `timedelta`, or `None` for a skipped row.
-- A `Transaction` raises `InterfaceError`, because each migration manages its own transaction. The operation holds its
-  connection for the whole run, so a concurrent query on that `Connection` raises `ConnectionBusyError`.
+- `run`, `undo`, `skip` and `info` take a `Connection` or a `Pool` and return a `tuple[MigrationStatus, ...]`: one entry
+  per migration applied, reverted or skipped, or per version for `info`. `status.state` is `applied`, `pending`,
+  `modified`, `missing` or `dirty`, and `installed_on` and `execution_time` are set for applied rows. `execution_time`
+  is a `timedelta`, or `None` for a dry run or a skipped row. For `undo` it is how long the revert took.
+- A `Transaction`, or a `Connection` inside one, raises `InterfaceError`, because each migration manages its own
+  transaction. The operation holds its connection for the whole run, so a concurrent query on that `Connection` raises
+  `ConnectionBusyError`.
 - `migrator.migrations` lists one `Migration` per file (`version`, `description`, `kind` of `simple`, `up` or `down`,
   `checksum`, `no_transaction` and `path`). The files are read when `Migrator` is constructed, so a later edit needs a
   new `Migrator`.
@@ -640,7 +641,8 @@ rowx database setup                # create if missing, then run every migration
 - **Modified.** An applied migration whose file changed raises `MigrationChecksumError`. Fix it with a new migration,
   not by editing history. `rowx migrate info` shows both short checksums.
 - **Missing.** An applied version with no local file raises `MigrationMissingError`, unless `ignore_missing=True` or
-  `--ignore-missing`. Reverting such a version fails with `MigrationSourceError`, since there is no `.down.sql` to run.
+  `--ignore-missing`. Even then, reverting such a version fails with `MigrationSourceError`, since there is no
+  `.down.sql` to run.
 - **Dirty.** A `-- no-transaction` file records its row with `success = false` before it runs. If the file fails, the
   row stays, `info` reports `dirty`, and the next run raises `DirtyMigrationError` rather than guess what half-applied.
   A transactional file rolls back whole and leaves nothing. To recover from a dirty row, inspect the database, undo or
@@ -813,9 +815,10 @@ What differs from sqlx:
   positive.
 - **No `ignored_chars`.** sqlx's `sqlx.toml` option to ignore characters when hashing isn't ported, so a project that
   used it sees `modified` for the affected files.
-- **Table names fold as Postgres folds them.** `table = "MySchema.Migrations"` finds `myschema.migrations`, the table
-  sqlx created from the same string. Quote a part (`"\"MySchema\".migrations"`) to keep its case. Each part is at
-  most 63 bytes, and anything that isn't a one- or two-part identifier raises `ValueError`.
+- **Table names are used as written.** rowx quotes each part of `table` itself, so the case is kept and a `"` is part
+  of the name, not SQL quoting. sqlx puts the string into its SQL unquoted, so Postgres folds it to lower case: for an
+  sqlx table configured as `MySchema.Migrations`, set `table = "myschema.migrations"`. A `.` separates the schema from
+  the table, and an empty part, a third part, a NUL byte or a part over 63 bytes raises `ValueError`.
 - **Dirty rows.** A `-- no-transaction` file that fails leaves a `success = false` row, which sqlx also reports as
   dirty. sqlx itself records nothing when such a file fails.
 - **Locks exclude each other.** Both tools take `pg_advisory_lock` on the same key, derived from the database name, so
@@ -834,7 +837,8 @@ run `rowx migrate run`, or `rowx check --scratch`
 ```
 
 - The gate engages only when at least one query is described, and `--no-drift-check` skips it.
-- The check reads the history table and creates nothing. The role needs `SELECT` on it.
+- The check reads the history table and creates nothing. The role needs `SELECT` on it. It takes the migration lock,
+  so it waits for a migration that is running to finish.
 - Without `[tool.rowx.migrate]`, `rowx check` behaves as it did before.
 
 `rowx check --scratch` needs no database to prepare. It treats the URL as a **server** URL, creates `rowx_check_<hex>`,

@@ -17,22 +17,22 @@ def test_each_test_starts_from_the_migrated_schema(rowx_pool: Pool) -> None:
     async def work() -> int:
         return await query[int](t'SELECT count(*) AS "n!" FROM authors').one(rowx_pool)
 
-    assert asyncio.run(work()) == 0  # ruff: ignore[assert]
+    assert asyncio.run(work()) == 0
 
 
 def test_a_book_belongs_to_an_author(rowx_pool: Pool) -> None:
     async def work() -> None:
         author_id = await add_author(rowx_pool, "Octavia Butler", "Science fiction")
         await add_book(rowx_pool, author_id, "Kindred", date(1979, 6, 1))
-        assert await list_authors(rowx_pool) == [(author_id, "Octavia Butler", "Science fiction")]  # ruff: ignore[assert]
-        assert [title for _, title, _ in await books_by(rowx_pool, author_id)] == ["Kindred"]  # ruff: ignore[assert]
+        assert await list_authors(rowx_pool) == [(author_id, "Octavia Butler", "Science fiction")]
+        assert [title for _, title, _ in await books_by(rowx_pool, author_id)] == ["Kindred"]
 
     asyncio.run(work())
 
 
 def test_a_second_test_does_not_see_the_first_ones_rows(rowx_pool: Pool) -> None:
     async def work() -> None:
-        assert await list_authors(rowx_pool) == []  # ruff: ignore[assert]
+        assert await list_authors(rowx_pool) == []
         await add_author(rowx_pool, "Ursula Le Guin")
 
     asyncio.run(work())

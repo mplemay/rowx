@@ -201,4 +201,7 @@ jobs:
 
       - name: Test the migrations example
         working-directory: examples/migrations
+        env:
+          # fail instead of skipping if the plugin finds no database URL
+          ROWX_REQUIRE_DB: "1"
         run: uv run --project ../.. pytest -p no:cacheprovider

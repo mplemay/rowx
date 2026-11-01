@@ -54,8 +54,8 @@ async def main(dsn: str) -> None:
         author_id = await add_author(pool, "Octavia Butler")
         if not await books_by(pool, author_id):
             await add_book(pool, author_id, "Kindred", date(1979, 6, 1))
-        for _, name, _ in await list_authors(pool):
-            print(f"{name}: {len(await books_by(pool, author_id))} book(s)")  # ruff: ignore[print]
+        for listed_id, name, _ in await list_authors(pool):
+            print(f"{name}: {len(await books_by(pool, listed_id))} book(s)")  # ruff: ignore[print]
 
 
 if __name__ == "__main__":
