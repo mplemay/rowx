@@ -8,16 +8,7 @@ from typing import TYPE_CHECKING, Final
 from rowx import query_unchecked
 from rowx.check.config import MigrateConfig, database_url, load_config
 from rowx.check.runner import CheckError, redact
-from rowx.errors import (
-    DatabaseError,
-    DirtyMigrationError,
-    InterfaceError,
-    MigrateError,
-    MigrationChecksumError,
-    MigrationMissingError,
-    MigrationOrderError,
-    MigrationSourceError,
-)
+from rowx.errors import DatabaseError, InterfaceError, MigrateError
 from rowx.postgres import Migrator, connect
 
 if TYPE_CHECKING:
@@ -36,7 +27,7 @@ PLACEHOLDERS: Final[dict[str, str]] = {
     "up": "-- Add up migration script here\n",
     "down": "-- Add down migration script here\n",
 }
-LABELS: Final[dict[str, str]] = {"simple": "migrate", "up": "migrate", "down": "revert"}
+RESERVED_SUFFIXES: Final[tuple[str, ...]] = (".up", ".down")
 
 
 def utc_now() -> datetime:
@@ -144,8 +135,8 @@ def _is_sequential(versions: list[int]) -> bool:
 
 def add(target: Target, args: Namespace) -> None:
     description = args.description.strip()
-    if not description or "/" in description or "\\" in description:
-        msg = "the description must be non-empty and must not contain a path separator"
+    if not description or any(char in description for char in ("/", "\\", "\0")):
+        msg = "the description must be non-empty and must not contain a path separator or a NUL byte"
         raise CheckError(msg)
     existing = _forward(_load(target, args).migrations) if target.directory.is_dir() else []
     versions = [m.version for m in existing]
@@ -166,6 +157,10 @@ def add(target: Target, args: Namespace) -> None:
         msg = f"refusing to overwrite: migration version {version} already exists in {target.directory}"
         raise CheckError(msg)
 
+    # the file name must read back as the kind it was written as: `x.up` + `.sql` is half of a pair
+    if kind == "simple" and description.endswith(RESERVED_SUFFIXES):
+        msg = f"a simple migration's description must not end in {' or '.join(RESERVED_SUFFIXES)}"
+        raise CheckError(msg)
     stem = f"{version:0{SEQUENTIAL_WIDTH}d}" if versioning == "sequential" else str(version)
     name = f"{stem}_{description.replace(' ', '_')}"
     files = (
@@ -177,15 +172,23 @@ def add(target: Target, args: Namespace) -> None:
     if existing_path := next((path for path in paths if path.exists()), None):
         msg = f"refusing to overwrite {existing_path}"
         raise CheckError(msg)
-    target.directory.mkdir(parents=True, exist_ok=True)
-    for path, (_, file_kind) in zip(paths, files, strict=True):
-        try:
-            with path.open("x", encoding="utf-8", newline="\n") as handle:
-                handle.write(PLACEHOLDERS[file_kind])
-        except FileExistsError:
-            msg = f"refusing to overwrite {path}"
-            raise CheckError(msg) from None
-        sys.stdout.write(f"Created {_shown(path)}\n")
+    try:
+        target.directory.mkdir(parents=True, exist_ok=True)
+        for path, (_, file_kind) in zip(paths, files, strict=True):
+            _create(path, PLACEHOLDERS[file_kind])
+    except OSError as error:
+        msg = f"cannot write the migration: {error}"
+        raise CheckError(msg) from None
+
+
+def _create(path: Path, content: str) -> None:
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+    except FileExistsError:
+        msg = f"refusing to overwrite {path}"
+        raise CheckError(msg) from None
+    sys.stdout.write(f"Created {_shown(path)}\n")
 
 
 def _shown(path: Path) -> Path:
@@ -225,92 +228,24 @@ async def _database_command(target: Target, args: Namespace, dsn: str) -> None:
                 await _info(migrator, conn, target)
 
 
-def _description_of(migrator: Migrator, version: int) -> str:
-    return next((m.description for m in migrator.migrations if m.version == version), "")
-
-
-def _plan_validate(statuses: tuple[MigrationStatus, ...], *, ignore_missing: bool) -> None:
-    # the same order as the migrator: dirty, missing, then modified
-    problems = (
-        (
-            "dirty",
-            True,
-            DirtyMigrationError,
-            "migration {} is dirty: it did not finish; fix the database and its history row",
-        ),
-        (
-            "missing",
-            not ignore_missing,
-            MigrationMissingError,
-            "migration {} is applied but missing from the migration directory",
-        ),
-        ("modified", True, MigrationChecksumError, "migration {} was modified after it was applied"),
-    )
-    for state, enabled, error, message in problems:
-        if enabled and (found := next((s for s in statuses if s.state == state), None)):
-            raise error(message.format(found.version), found.version)
-
-
-def _plan_run(
-    migrator: Migrator,
-    statuses: tuple[MigrationStatus, ...],
-    args: Namespace,
-) -> list[MigrationStatus]:
-    _plan_validate(statuses, ignore_missing=args.ignore_missing)
-    local = {m.version for m in migrator.migrations if m.kind != "down"}
-    latest = max((s.version for s in statuses if s.state != "pending"), default=None)
-    if (version := args.target_version) is not None:
-        if version not in local:
-            msg = f"target migration {version} does not exist"
-            raise MigrationOrderError(msg, version)
-        if latest is not None and version < latest:
-            msg = f"migration {version} is older than the latest applied migration {latest}"
-            raise MigrationOrderError(msg, version)
-    steps = [
-        s
-        for s in sorted(statuses, key=lambda s: s.version)
-        if s.state == "pending" and (args.target_version is None or s.version <= args.target_version)
-    ]
-    if (
-        not args.allow_out_of_order
-        and latest is not None
-        and (stale := next((s for s in steps if s.version < latest), None))
-    ):
-        msg = f"migration {stale.version} is older than the latest applied migration {latest}"
-        raise MigrationOrderError(msg, stale.version)
-    return steps
-
-
 async def _run(migrator: Migrator, conn: Connection, args: Namespace) -> None:
-    if args.dry_run:
-        statuses = await migrator.info(conn)
-        for status in _plan_run(migrator, statuses, args):
+    statuses = await migrator.run(conn, target=args.target_version, dry_run=args.dry_run)
+    for status in statuses:
+        if args.dry_run:
             sys.stdout.write(_line("Would apply", status, "migrate", timed=False))
-        return
-    for status in await migrator.run(conn, target=args.target_version):
-        sys.stdout.write(_line("Applied", status, "migrate", status.execution_time))
+        else:
+            sys.stdout.write(_line("Applied", status, "migrate", status.execution_time))
 
 
 async def _revert(migrator: Migrator, conn: Connection, args: Namespace) -> None:
-    statuses = await migrator.info(conn)
-    _plan_validate(statuses, ignore_missing=False)
-    applied = sorted((s for s in statuses if s.state != "pending"), key=lambda s: s.version, reverse=True)
-    # without a target, only the latest migration is reverted
-    floor = args.target_version if args.target_version is not None else (applied[0].version - 1 if applied else 0)
-    steps = [s for s in applied if s.version > floor]
-    downs = {m.version for m in migrator.migrations if m.kind == "down"}
-    if missing := next((s for s in steps if s.version not in downs), None):
-        msg = f"migration {missing.version} has no .down.sql file to revert it"
-        raise MigrationSourceError(msg, missing.version)
-    for status in steps:
+    # one undo, so the versions are chosen and reverted under one lock; without a target, only the
+    # latest applied migration is reverted
+    statuses = await migrator.undo(conn, target=args.target_version, dry_run=args.dry_run)
+    for status in statuses:
         if args.dry_run:
             sys.stdout.write(_line("Would revert", status, "revert", timed=False))
-            continue
-        started = asyncio.get_running_loop().time()
-        # one version at a time, so each line has its own elapsed time
-        await migrator.undo(conn, target=status.version - 1)
-        elapsed = timedelta(seconds=asyncio.get_running_loop().time() - started)
-        sys.stdout.write(_line("Reverted", status, "revert", elapsed))
+        else:
+            sys.stdout.write(_line("Reverted", status, "revert", status.execution_time))
 
 
 async def _applied_checksums(conn: Connection, table: str) -> dict[int, bytes]:

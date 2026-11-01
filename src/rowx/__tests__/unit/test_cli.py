@@ -211,12 +211,37 @@ def test_add_without_a_pyproject_defaults_to_migrations(
     assert (tmp_path / "migrations").is_dir()
 
 
-@pytest.mark.parametrize("description", ["", "   ", "a/b", "a\\b"])
+@pytest.mark.parametrize("description", ["", "   ", "a/b", "a\\b", "a\0b"])
 def test_add_rejects_a_bad_description(project: Path, capsys: pytest.CaptureFixture[str], description: str) -> None:
     code, out, err = _add(capsys, description)
     assert (code, out) == (2, "")
     assert err.startswith("error: the description")
     assert not (project / "migrations").exists()
+
+
+@pytest.mark.parametrize("description", ["cleanup.up", "cleanup.down"])
+def test_add_rejects_a_simple_description_that_reads_back_as_half_of_a_pair(
+    project: Path, capsys: pytest.CaptureFixture[str], description: str
+) -> None:
+    code, out, err = _add(capsys, "--simple", "--sequential", description)
+    assert (code, out) == (2, "")
+    assert err == "error: a simple migration's description must not end in .up or .down\n"
+    assert not (project / "migrations").exists()
+
+
+def test_add_a_reversible_description_may_end_in_up(project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _add(capsys, "--reversible", "--sequential", "cleanup.up")[0] == 0
+    assert _names(project / "migrations") == ["0001_cleanup.up.down.sql", "0001_cleanup.up.up.sql"]
+    # the directory still loads, so the next add infers from it
+    assert _add(capsys, "next")[0] == 0
+    assert "0002_next.up.sql" in _names(project / "migrations")
+
+
+def test_add_reports_a_directory_it_cannot_create(project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (project / "migrations").write_text("", encoding="utf-8")
+    code, out, err = _add(capsys, "x")
+    assert (code, out) == (2, "")
+    assert err.startswith("error: ")
 
 
 def test_add_reports_a_bad_existing_directory(project: Path, capsys: pytest.CaptureFixture[str]) -> None:

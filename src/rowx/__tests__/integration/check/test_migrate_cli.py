@@ -91,6 +91,22 @@ def test_revert_dry_run_changes_nothing(schema: str, migrations: Path, capsys: p
     assert cli(capsys, schema, migrations, "revert", "--dry-run") == (0, golden("migrate_dry_revert.txt"), "")
     assert exists(schema, "cli_b")
     assert applied_versions(schema) == [1, 2]
+    assert cli(capsys, schema, migrations, "revert", "--target-version", "0", "--dry-run") == (
+        2,
+        "",
+        "error: migration 1 has no .down.sql file to revert it\n",
+    )
+    assert applied_versions(schema) == [1, 2]
+
+
+def test_revert_dry_run_on_a_fresh_database_creates_nothing(
+    schema: str,
+    migrations: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli(capsys, schema, migrations, "revert", "--dry-run") == (0, "", "")
+    assert cli(capsys, schema, migrations, "revert") == (0, "", "")
+    assert not exists(schema, "cli_a")
 
 
 def test_dry_run_reports_the_same_errors_as_a_real_run(
@@ -245,6 +261,11 @@ def test_config_table_and_create_schemas_are_used(
         encoding="utf-8",
     )
     try:
+        # a dry run creates neither the schema nor the table
+        assert cli(capsys, schema, migrations, "run", "--dry-run") == (0, golden("migrate_dry_run.txt"), "")
+        assert not exists(schema, f"{name}.history")
+        with psycopg.connect(schema, autocommit=True) as conn:
+            assert conn.execute("SELECT to_regnamespace(%s)", (name,)).fetchone() == (None,)
         assert cli(capsys, schema, migrations, "run")[0] == 0
         assert exists(schema, f"{name}.history")
         assert not exists(schema, "_rowx_migrations")

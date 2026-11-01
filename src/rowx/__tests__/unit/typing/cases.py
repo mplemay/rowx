@@ -118,9 +118,16 @@ async def migrator_runs_on_connection_or_pool(migrator: Migrator, conn: Connecti
     reveal_type(await migrator.info(pool))  # reveal: tuple[MigrationStatus, ...]
     reveal_type(await migrator.run(pool, target=1))  # reveal: tuple[MigrationStatus, ...]
     reveal_type(await migrator.undo(conn, target=0))  # reveal: tuple[MigrationStatus, ...]
+    reveal_type(await migrator.run(conn, dry_run=True))  # reveal: tuple[MigrationStatus, ...]
+    reveal_type(await migrator.undo(pool, target=None, dry_run=True))  # reveal: tuple[MigrationStatus, ...]
     reveal_type(await migrator.skip(conn))  # reveal: tuple[MigrationStatus, ...]
 
 
 async def negative_migrator(migrator: Migrator, tx: Transaction) -> None:
     await migrator.run(tx)  # error  # ty: ignore[invalid-argument-type]
     await migrator.info(tx)  # error  # ty: ignore[invalid-argument-type]
+
+
+async def negative_migrator_arguments(migrator: Migrator, conn: Connection) -> None:
+    await migrator.undo(conn)  # error  # ty: ignore[missing-argument]
+    await migrator.skip(conn, dry_run=True)  # error  # ty: ignore[unknown-argument]
