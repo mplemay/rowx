@@ -5,6 +5,7 @@ import secrets
 import signal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import quote, urlparse, urlunparse
 
 import psycopg
 import pytest
@@ -481,6 +482,73 @@ def test_scratch_failing_migration_exits_two(
     assert (code, out) == (2, "")
     assert "2" in err
     assert "division by zero" in err
+
+
+def test_scratch_honours_the_migrate_table_and_create_schemas(
+    no_leftovers: str, scratch_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # the history table goes in a schema that only `create_schemas` creates, as `rowx migrate run` would
+    _write(
+        scratch_project,
+        "pyproject.toml",
+        '[tool.rowx.migrate]\ntable = "rowx_meta.history"\ncreate_schemas = ["rowx_meta", "rowx_app"]\n',
+    )
+    _write(scratch_project / "migrations", "1_create_scratch_users.sql", "CREATE TABLE rowx_app.users (id int4);")
+    _write(
+        scratch_project,
+        "q.py",
+        'from rowx import query\n\nquery[tuple[int | None]](t"SELECT id FROM rowx_app.users")\n',
+    )
+    tables: list[tuple[str | None, str | None]] = []
+    original = describe_all_impl
+
+    async def describe_all(dsn: str, *args: Any) -> dict[str, Outcome]:  # ruff: ignore[any-type]
+        conn = Connection(await connect_checker(dsn, 10.0))
+        try:
+            tables.append(
+                await query_unchecked[tuple[str | None, str | None]](
+                    t"SELECT to_regclass('rowx_meta.history')::text, to_regclass('public._rowx_migrations')::text"
+                ).one(conn)
+            )
+        finally:
+            await conn.close()
+        return await original(dsn, *args)
+
+    monkeypatch.setattr("rowx.check.runner.describe_all", describe_all)
+    assert _scratch(capsys, no_leftovers) == (0, "", "")
+    assert tables == [("rowx_meta.history", None)]
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_never_migrates_a_database_named_in_the_query_string(
+    no_leftovers: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parts = urlparse(no_leftovers)
+    if parts.scheme not in {"postgres", "postgresql"}:
+        pytest.skip("ROWX_TEST_DSN is not a URL")
+    with psycopg.connect(no_leftovers, autocommit=True) as conn:
+        row = conn.execute("SELECT current_database()").fetchone()
+    assert row is not None
+    # the driver percent-decodes query keys, so `%64bname` selects a database just as `dbname` does
+    url = urlunparse(parts._replace(query="&".join(filter(None, [parts.query, f"%64bname={quote(row[0])}"]))))
+    described: list[str] = []
+    original = describe_all_impl
+
+    async def describe_all(dsn: str, *args: Any) -> dict[str, Outcome]:  # ruff: ignore[any-type]
+        conn = Connection(await connect_checker(dsn, 10.0))
+        try:
+            described.append(await query_unchecked[str](t"SELECT current_database()::text").one(conn))
+        finally:
+            await conn.close()
+        return await original(dsn, *args)
+
+    monkeypatch.setattr("rowx.check.runner.describe_all", describe_all)
+    assert _scratch(capsys, url) == (0, "", "")
+    assert len(described) == 1
+    assert described[0].startswith("rowx_check_")
+    with psycopg.connect(no_leftovers, autocommit=True) as conn:
+        tables = conn.execute("SELECT to_regclass('scratch_users'), to_regclass('_rowx_migrations')").fetchone()
+    assert tables == (None, None)
 
 
 @pytest.mark.usefixtures("scratch_project")

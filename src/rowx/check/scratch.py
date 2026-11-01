@@ -5,12 +5,11 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING, Final
-from urllib.parse import urlparse, urlunparse
 
 from rowx.check.runner import CheckError, ScratchBuild, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
 from rowx.postgres import connect
-from rowx.postgres._admin import create_database, drop_database
+from rowx.postgres._admin import create_database, drop_database, with_database
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -22,17 +21,6 @@ PREFIX: Final[str] = "rowx_check_"
 TEMPLATE: Final[str] = "template0"
 INSUFFICIENT_PRIVILEGE: Final[str] = "42501"
 CREATEDB_HELP: Final[str] = "`--scratch` needs a role with CREATEDB"
-URL_SCHEMES: Final[tuple[str, ...]] = ("postgres://", "postgresql://")
-
-
-# points `dsn` (a URL or a key=value string) at another database
-def with_database(dsn: str, name: str) -> str:
-    if not dsn.startswith(URL_SCHEMES):
-        return f"{dsn} dbname={name}"
-    parts = urlparse(dsn)
-    # a `dbname` query parameter would override the path
-    query = "&".join(pair for pair in parts.query.split("&") if pair and pair.split("=", 1)[0] != "dbname")
-    return urlunparse(parts._replace(path=f"/{name}", query=query))
 
 
 @dataclass(slots=True)
@@ -49,7 +37,12 @@ class Scratch:
 
     @property
     def url(self) -> str:
-        return with_database(self.server_dsn, self.name)
+        try:
+            return with_database(self.server_dsn, self.name)
+        except InterfaceError, ValueError:
+            # the parser's message can quote the DSN, so it is not repeated
+            msg = "the database URL could not be parsed"
+            raise CheckError(msg) from None
 
     def session(self, migrator: Migrator) -> AbstractAsyncContextManager[ScratchBuild]:
         return self._session(migrator)
@@ -57,11 +50,13 @@ class Scratch:
     @asynccontextmanager
     async def _session(self, migrator: Migrator) -> AsyncGenerator[ScratchBuild]:
         started = perf_counter()
+        # resolved before anything is created, so a URL that can't name the scratch database fails first
+        url = self.url
         self.pending_drop = True
         try:
             await self._create()
-            await self._migrate(migrator)
-            yield ScratchBuild(url=self.url, seconds=perf_counter() - started)
+            await self._migrate(migrator, url)
+            yield ScratchBuild(url=url, seconds=perf_counter() - started)
         finally:
             await self.drop()
 
@@ -78,15 +73,18 @@ class Scratch:
             msg = f"could not create the scratch database: {error}"
             raise CheckError(redact(msg, self.server_dsn)) from None
 
-    async def _migrate(self, migrator: Migrator) -> None:
+    async def _migrate(self, migrator: Migrator, url: str) -> None:
         try:
             # a normal (writable) connection that is closed before the checker session opens; nothing is printed
-            async with await connect(self.url) as conn:
+            async with await connect(url) as conn:
                 await migrator.run(conn)
         except MigrateError as error:
             cause = error.__cause__
             msg = f"the migrations failed on the scratch database: {error}" + (f": {cause}" if cause else "")
             raise CheckError(redact(msg, self.server_dsn)) from None
+        except (DatabaseError, InterfaceError, OSError) as error:
+            msg = f"could not migrate the scratch database: {error}"
+            raise CheckError(redact(redact(msg, url), self.server_dsn)) from None
 
     # a failed drop is recorded, not raised, so it never hides the error that ended the run
     async def drop(self) -> None:
