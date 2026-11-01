@@ -6,8 +6,9 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rowx.check.config import ConfigError, database_url, load_config
+from rowx.check.config import Config, ConfigError, database_url, load_config
 from rowx.check.database import add_parsers as add_database_parsers, handle as handle_database
+from rowx.check.drift import DriftError, check_drift
 from rowx.check.migrate import add_parsers, handle as handle_migrate
 from rowx.check.render import render_json, render_text
 from rowx.check.runner import CheckError, RunResult, redact, run_check
@@ -31,6 +32,7 @@ def _parser() -> ArgumentParser:
     check.add_argument("--config", type=Path, metavar="FILE")
     check.add_argument("--output-format", choices=("text", "json"), default="text")
     check.add_argument("--statistics", action="store_true")
+    check.add_argument("--no-drift-check", action="store_true")
     check.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1), metavar="N")
     add_parsers(subparsers)
     add_database_parsers(subparsers)
@@ -45,19 +47,33 @@ def _statistics(result: RunResult) -> str:
         f"call sites checked: {stats.checked}",
         f"distinct SQL strings described: {stats.distinct_sql}",
         f"query_unchecked calls skipped: {stats.unchecked}",
-        f"diagnostics: {sum(stats.by_rule.values())}",
     ]
+    if stats.migrations is not None:
+        lines.append(f"migrations checked: {stats.migrations}")
+    lines.append(f"diagnostics: {sum(stats.by_rule.values())}")
     lines.extend(f"  {rule}: {count}" for rule, count in sorted(stats.by_rule.items()))
     return "\n".join(lines) + "\n"
 
 
-def _check(paths: list[Path], config_file: Path | None, url: str | None, jobs: int) -> tuple[RunResult, Path]:
+async def _gated(config: Config, files: list[Path], dsn: str, jobs: int, *, drift: bool) -> RunResult:
+    # the gate reads the history before anything is described
+    migrations = await check_drift(config, dsn) if drift else None
+    result = await run_check(config, files, dsn, jobs)
+    result.statistics.migrations = migrations
+    return result
+
+
+def _check(
+    paths: list[Path], config_file: Path | None, url: str | None, jobs: int, *, drift: bool
+) -> tuple[RunResult, Path]:
     cwd = Path.cwd()
     config = load_config(cwd, config_file)
     files = discover_files(config, cwd, paths)
     dsn = database_url(config, url)
     try:
-        return asyncio.run(run_check(config, files, dsn, jobs)), config.root
+        return asyncio.run(_gated(config, files, dsn, jobs, drift=drift)), config.root
+    except DriftError:
+        raise
     except CheckError as error:
         raise CheckError(redact(str(error), dsn)) from None
     except Exception as error:  # ruff: ignore[blind-except]
@@ -87,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.jobs < 1:
         parser.error("-j must be at least 1")
     try:
-        result, root = _check(args.paths, args.config, args.database_url, args.jobs)
+        result, root = _check(args.paths, args.config, args.database_url, args.jobs, drift=not args.no_drift_check)
     except (ConfigError, CheckError) as error:
         print(f"error: {error}", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE

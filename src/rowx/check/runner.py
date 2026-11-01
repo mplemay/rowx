@@ -62,6 +62,8 @@ class Statistics:
     checked: int = 0
     distinct_sql: int = 0
     unchecked: int = 0
+    # None unless the drift gate ran
+    migrations: int | None = None
     by_rule: Counter[Rule] = field(default_factory=Counter)
 
 
