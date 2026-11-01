@@ -4,12 +4,17 @@ import sys
 from argparse import ArgumentParser, Namespace
 from importlib.metadata import version
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rowx.check.config import ConfigError, database_url, load_config
+from rowx.check.database import add_parsers as add_database_parsers, handle as handle_database
 from rowx.check.migrate import add_parsers, handle as handle_migrate
 from rowx.check.render import render_json, render_text
 from rowx.check.runner import CheckError, RunResult, redact, run_check
 from rowx.check.walk import discover_files
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 EXIT_CLEAN = 0
 EXIT_DIAGNOSTICS = 1
@@ -28,6 +33,7 @@ def _parser() -> ArgumentParser:
     check.add_argument("--statistics", action="store_true")
     check.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1), metavar="N")
     add_parsers(subparsers)
+    add_database_parsers(subparsers)
     return parser
 
 
@@ -59,9 +65,9 @@ def _check(paths: list[Path], config_file: Path | None, url: str | None, jobs: i
         raise CheckError(msg) from None
 
 
-def _migrate(args: Namespace) -> int:
+def _subcommand(handler: Callable[[Namespace], None], args: Namespace) -> int:
     try:
-        handle_migrate(args)
+        handler(args)
     except (ConfigError, CheckError) as error:
         print(f"error: {error}", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
@@ -75,7 +81,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     if args.command == "migrate":
-        return _migrate(args)
+        return _subcommand(handle_migrate, args)
+    if args.command == "database":
+        return _subcommand(handle_database, args)
     if args.jobs < 1:
         parser.error("-j must be at least 1")
     try:

@@ -1,19 +1,20 @@
 import asyncio
 import sys
+from argparse import Namespace
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from rowx import query_unchecked
-from rowx.check.config import MigrateConfig, database_url, load_config
+from rowx.check.config import Config, MigrateConfig, database_url, load_config
 from rowx.check.runner import CheckError, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
 from rowx.postgres import Migrator, connect
 
 if TYPE_CHECKING:
-    from argparse import ArgumentParser, Namespace, _SubParsersAction
-    from collections.abc import Iterable
+    from argparse import ArgumentParser, _SubParsersAction
+    from collections.abc import Coroutine, Iterable
 
     from rowx.postgres import Connection, Migration, MigrationStatus
 
@@ -73,21 +74,25 @@ def add_parsers(subparsers: _SubParsersAction[ArgumentParser]) -> None:
         parser.add_argument("--source", type=Path, metavar="DIR")
 
 
-def handle(args: Namespace) -> None:
-    config = load_config(Path.cwd(), args.config)
+def resolve_target(config: Config, source: Path | None) -> Target:
     migrate = config.migrate or MigrateConfig()
     # `--source` is relative to the current directory, the configured `dir` to pyproject.toml
-    directory = args.source if args.source is not None else config.root / migrate.dir
-    target = Target(directory=directory, migrate=migrate)
-    if args.migrate_command == "add":
-        add(target, args)
-        return
-    dsn = database_url(config, args.database_url)
+    directory = source if source is not None else config.root / migrate.dir
+    return Target(directory=directory, migrate=migrate)
+
+
+def require_url(config: Config, url: str | None) -> str:
+    dsn = database_url(config, url)
     if not dsn.strip():
         msg = f"no database URL; pass --database-url or set ${config.database_url_env}"
         raise CheckError(msg)
+    return dsn
+
+
+# runs `work` and maps every database-side failure to a redacted `CheckError`
+def run_guarded(dsn: str, work: Coroutine[Any, Any, None]) -> None:
     try:
-        asyncio.run(_database_command(target, args, dsn))
+        asyncio.run(work)
     except CheckError as error:
         raise CheckError(redact(str(error), dsn)) from None
     except MigrateError as error:
@@ -95,6 +100,26 @@ def handle(args: Namespace) -> None:
     except (InterfaceError, DatabaseError, OSError) as error:
         msg = f"could not reach the database: {redact(str(error), dsn)}"
         raise CheckError(msg) from None
+
+
+def handle(args: Namespace) -> None:
+    config = load_config(Path.cwd(), args.config)
+    target = resolve_target(config, args.source)
+    if args.migrate_command == "add":
+        add(target, args)
+        return
+    dsn = require_url(config, args.database_url)
+    run_guarded(dsn, _database_command(target, args, dsn))
+
+
+# `migrate run` with no flags, split so a caller can validate the files before any database IO
+def load_migrator(target: Target) -> Migrator:
+    return _load(target, Namespace())
+
+
+async def run_pending(migrator: Migrator, dsn: str) -> None:
+    async with await connect(dsn) as conn:
+        await _run(migrator, conn, Namespace(target_version=None, dry_run=False))
 
 
 def _describe(error: MigrateError) -> str:
