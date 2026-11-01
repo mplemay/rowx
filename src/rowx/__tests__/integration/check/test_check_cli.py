@@ -1,19 +1,26 @@
+import asyncio
 import json
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import psycopg
 import pytest
 
+from rowx import query_unchecked
 from rowx.__tests__.integration.check.harness import CASES_DIR, check_case, parse_markers
+from rowx._core.postgres import connect_checker
 from rowx.check.cli import main
+from rowx.check.drift import read_history
+from rowx.errors import DatabaseError
+from rowx.postgres import Connection, Migrator
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from rowx.__tests__.integration.check.harness import Expectation
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
+GOLDEN_DIR: Final[Path] = Path(__file__).resolve().parent / "golden"
 OK_BASIC: Final[Path] = CASES_DIR / "ok_basic.py"
 NULLABILITY_ERROR: Final[str] = """\
 from rowx import query
@@ -242,3 +249,139 @@ def test_source_encoding_is_honoured(schema: str, tmp_path: Path, capsys: pytest
     assert "é" in out
     assert "\ufffd" not in out
     assert ":4:" in out
+
+
+DRIFT_QUERY: Final[str] = 'from rowx import query\n\nquery[int](t"SELECT id FROM users")\n'
+
+
+@pytest.fixture
+def drift_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "pyproject.toml", "[tool.rowx.migrate]\n")
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    _write(migrations, "1_create_drift_a.sql", "CREATE TABLE drift_a (id int4);")
+    _write(migrations, "2_create_drift_b.sql", "CREATE TABLE drift_b (id int4);")
+    _write(tmp_path, "q.py", DRIFT_QUERY)
+    return tmp_path
+
+
+def _migrate(capsys: pytest.CaptureFixture[str], dsn: str, *argv: str) -> int:
+    code = main(["migrate", "run", *argv, "--database-url", dsn])
+    capsys.readouterr()
+    return code
+
+
+def _drift(capsys: pytest.CaptureFixture[str], dsn: str, *argv: str) -> tuple[int, str, str]:
+    return _run(capsys, "q.py", "--database-url", dsn, *argv)
+
+
+def _golden(name: str) -> str:
+    return (GOLDEN_DIR / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.usefixtures("drift_project")
+def test_drift_up_to_date_passes(schema: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _migrate(capsys, schema) == 0
+    assert _drift(capsys, schema) == (0, "", "")
+    code, out, err = _drift(capsys, schema, "--statistics")
+    assert (code, err) == (0, "")
+    assert "migrations checked: 2\n" in out
+
+
+@pytest.mark.usefixtures("drift_project")
+def test_drift_pending_exits_two(schema: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _drift(capsys, schema) == (2, "", _golden("drift_pending.txt"))
+    # the gate creates nothing, and the missing history table counts as every migration pending
+    with psycopg.connect(schema, autocommit=True) as conn:
+        row = conn.execute("SELECT to_regclass('_rowx_migrations') IS NULL").fetchone()
+    assert row == (True,)
+
+
+@pytest.mark.usefixtures("drift_project")
+def test_drift_partially_pending(schema: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _migrate(capsys, schema, "--target-version", "1") == 0
+    code, out, err = _drift(capsys, schema)
+    assert (code, out) == (2, "")
+    assert "  1 pending: 2\n" in err
+
+
+def test_drift_modified_exits_two(schema: str, drift_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _migrate(capsys, schema) == 0
+    _write(drift_project / "migrations", "2_create_drift_b.sql", "CREATE TABLE drift_b (id int8);")
+    assert _drift(capsys, schema) == (2, "", _golden("drift_modified.txt"))
+
+
+def test_drift_missing_exits_two(schema: str, drift_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _migrate(capsys, schema) == 0
+    (drift_project / "migrations" / "2_create_drift_b.sql").unlink()
+    assert _drift(capsys, schema) == (2, "", _golden("drift_missing.txt"))
+
+
+def test_drift_dirty_exits_two(schema: str, drift_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _migrate(capsys, schema) == 0
+    _write(
+        drift_project / "migrations", "3_dirty.sql", "-- no-transaction\nCREATE TABLE drift_c (id int4);\nSELECT 1/0;"
+    )
+    assert _migrate(capsys, schema) == 2
+    assert _drift(capsys, schema) == (2, "", _golden("drift_dirty.txt"))
+
+
+@pytest.mark.usefixtures("drift_project")
+def test_drift_json_keeps_stdout_empty(schema: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = _drift(capsys, schema, "--output-format", "json")
+    assert (code, out) == (2, "")
+    assert err == _golden("drift_pending.txt")
+
+
+@pytest.mark.usefixtures("drift_project")
+def test_no_drift_check_bypasses_the_gate(schema: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = _drift(capsys, schema, "--no-drift-check", "--statistics")
+    assert (code, out.count("migrations checked"), err) == (0, 0, "")
+
+
+def test_without_migrate_config_there_is_no_gate(
+    schema: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "pyproject.toml", "")
+    _write(tmp_path, "q.py", NULLABILITY_ERROR)
+    code, out, err = _run(capsys, "q.py", "--database-url", schema, "--statistics")
+    assert (code, err) == (1, "")
+    assert "migrations checked" not in out
+
+
+def test_drift_gate_skipped_when_nothing_is_described(
+    drift_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # with no query to describe there is no checker session, so neither a URL nor an up-to-date database is needed
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    _write(drift_project, "q.py", "x = 1\n")
+    code, out, err = _run(capsys, "q.py", "--statistics")
+    assert (code, err) == (0, "")
+    assert "migrations checked" not in out
+
+
+@pytest.mark.usefixtures("drift_project")
+def test_drift_password_never_appears(capsys: pytest.CaptureFixture[str]) -> None:
+    url = "postgresql://someone:hunter2secret@127.0.0.1:1/db?connect_timeout=2"
+    code, out, err = _drift(capsys, url)
+    assert code == 2
+    assert "hunter2secret" not in out + err
+
+
+def test_history_is_read_in_a_read_only_session(schema: str, drift_project: Path) -> None:
+    async def run() -> None:
+        migrator = Migrator(drift_project / "migrations")
+        conn = Connection(await connect_checker(schema, 10.0))
+        try:
+            statuses = await read_history(migrator, conn)
+            assert [s.state for s in statuses] == ["pending", "pending"]
+            # the same session refuses a write
+            with pytest.raises(DatabaseError) as raised:
+                await query_unchecked[None](t"CREATE TABLE drift_nope (id int4)").execute(conn)
+            assert raised.value.sqlstate == "25006"
+        finally:
+            await conn.close()
+
+    asyncio.run(run())

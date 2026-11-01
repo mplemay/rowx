@@ -1,0 +1,3 @@
+error: database has drifted from `migrations/`:
+  2 pending: 1, 2
+run `rowx migrate run`, or `rowx check --scratch`
