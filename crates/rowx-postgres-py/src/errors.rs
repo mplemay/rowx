@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use rowx_core::error::CoreError;
 use rowx_core::pool::OptionsError;
 use rowx_postgres::error::Error;
+use rowx_postgres::migrate::MigrateError;
 use rowx_py_core::errors as shared;
 
 // the only place a Postgres driver error becomes a Python exception
@@ -73,4 +74,30 @@ impl From<CoreError> for PgError {
 #[must_use]
 pub fn options_error(err: &OptionsError) -> PyErr {
     PyValueError::new_err(err.to_string())
+}
+
+// the only place a migration error becomes a Python exception
+#[must_use]
+pub fn migrate_to_py_err(py: Python<'_>, err: &MigrateError) -> PyErr {
+    match err {
+        MigrateError::Source(e) => shared::source_error(py, e),
+        MigrateError::Plan(e) => shared::plan_error(py, e),
+        MigrateError::Failed { version, source } => {
+            let failed = shared::migration_failed_error(py, *version, &err.to_string());
+            failed.set_cause(py, Some(to_py_err(py, source)));
+            failed
+        }
+        MigrateError::InvalidTable(message) => PyValueError::new_err(message.clone()),
+        MigrateError::Connection(e) => to_py_err(py, e),
+    }
+}
+
+/// Carries a migration error across an `async` block, where the GIL is not held.
+#[derive(Debug)]
+pub struct MigrateFailure(pub MigrateError);
+
+impl From<MigrateFailure> for PyErr {
+    fn from(err: MigrateFailure) -> Self {
+        Python::attach(|py| migrate_to_py_err(py, &err.0))
+    }
 }

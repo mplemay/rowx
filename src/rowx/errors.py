@@ -4,9 +4,16 @@ __all__: Final[list[str]] = [
     "ConnectionBusyError",
     "DatabaseError",
     "DecodeError",
+    "DirtyMigrationError",
     "EncodeError",
     "Error",
     "InterfaceError",
+    "MigrateError",
+    "MigrationChecksumError",
+    "MigrationFailedError",
+    "MigrationMissingError",
+    "MigrationOrderError",
+    "MigrationSourceError",
     "PoolTimeoutError",
     "RowNotFound",
     "RowShapeError",
@@ -73,4 +80,41 @@ class DecodeError(Error):
 
 
 class EncodeError(Error):
+    pass
+
+
+class MigrateError(Error):
+    version: int | None
+
+    def __init__(self, message: str, version: int | None = None) -> None:
+        super().__init__(message)
+        self.version = version
+
+    @override
+    def __reduce__(self) -> tuple[type[Self], tuple[str, int | None]]:
+        return type(self), (str(self), self.version)
+
+
+class MigrationSourceError(MigrateError):
+    pass
+
+
+class MigrationChecksumError(MigrateError):
+    pass
+
+
+class MigrationMissingError(MigrateError):
+    pass
+
+
+class MigrationOrderError(MigrateError):
+    pass
+
+
+class DirtyMigrationError(MigrateError):
+    pass
+
+
+# `__cause__` is the server's DatabaseError
+class MigrationFailedError(MigrateError):
     pass

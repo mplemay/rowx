@@ -153,8 +153,8 @@ pub async fn list_applied(
     table: &str,
 ) -> Result<Vec<AppliedRecord>, MigrateError> {
     let quoted = quote_table(table)?;
-    let client = conn.client()?;
-    let exists: bool = client
+    let exists: bool = conn
+        .client()?
         .query_one(
             "SELECT pg_catalog.to_regclass($1::text) IS NOT NULL",
             &[&quoted],
@@ -165,7 +165,13 @@ pub async fn list_applied(
     if !exists {
         return Ok(Vec::new());
     }
-    let rows = client
+    list_records(conn, &quoted).await
+}
+
+// the rows of a history table that exists, by its quoted name
+async fn list_records(conn: &Connection, quoted: &str) -> Result<Vec<AppliedRecord>, MigrateError> {
+    let rows = conn
+        .client()?
         .query(
             &format!(
                 "SELECT version, checksum, success, \
@@ -187,6 +193,35 @@ pub async fn list_applied(
             installed_on_micros: row.get(3),
             execution_time: row.get(4),
         })
+        .collect())
+}
+
+fn details(local: &[Migration], applied: &[AppliedRecord]) -> Vec<MigrationDetail> {
+    migration_info(local, &plain(applied))
+        .into_iter()
+        .map(|info| {
+            let record = applied.iter().find(|r| r.migration.version == info.version);
+            MigrationDetail {
+                installed_on_micros: record.map(|r| r.installed_on_micros),
+                execution_time: record.map(|r| r.execution_time),
+                info,
+            }
+        })
+        .collect()
+}
+
+// The status of each version the operation touched, in the order it touched them. It is read under
+// the same lock as the change, from the table resolved before the files ran.
+async fn touched(
+    conn: &Connection,
+    quoted: &str,
+    local: &[Migration],
+    versions: &[i64],
+) -> Result<Vec<MigrationDetail>, MigrateError> {
+    let after = details(local, &list_records(conn, quoted).await?);
+    Ok(versions
+        .iter()
+        .filter_map(|version| after.iter().find(|d| d.info.version == *version).cloned())
         .collect())
 }
 
@@ -354,7 +389,7 @@ async fn resolve_table(conn: &Connection, table: &str) -> Result<String, Migrate
     Ok(row.get(0))
 }
 
-/// Applies every pending migration the plan selects and returns the versions applied.
+/// Applies every pending migration the plan selects and returns the status of each, in order.
 ///
 /// # Errors
 /// `Plan` before anything runs, `Failed` for a file that fails, `Connection` otherwise.
@@ -363,7 +398,7 @@ pub async fn run(
     config: &MigrateConfig,
     local: &[Migration],
     options: PlanOptions,
-) -> Result<Vec<i64>, MigrateError> {
+) -> Result<Vec<MigrationDetail>, MigrateError> {
     quote_table(&config.table)?;
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
@@ -375,12 +410,13 @@ pub async fn run(
             apply(conn, &quoted, step).await?;
             done.push(step.version);
         }
-        Ok(done)
+        touched(conn, &quoted, local, &done).await
     })
     .await
 }
 
-/// Reverts every applied version above `target` (`0` for all), newest first, and returns the versions.
+/// Reverts every applied version above `target` (`0` for all), newest first, and returns the status
+/// of each, in order.
 ///
 /// # Errors
 /// As [`run`]; `Plan(MissingDown)` is raised before anything is reverted.
@@ -390,7 +426,7 @@ pub async fn undo(
     local: &[Migration],
     target: i64,
     ignore_missing: bool,
-) -> Result<Vec<i64>, MigrateError> {
+) -> Result<Vec<MigrationDetail>, MigrateError> {
     quote_table(&config.table)?;
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
@@ -402,12 +438,12 @@ pub async fn undo(
             revert(conn, &quoted, step).await?;
             done.push(step.version);
         }
-        Ok(done)
+        touched(conn, &quoted, local, &done).await
     })
     .await
 }
 
-/// Records the pending migrations as applied without running them.
+/// Records the pending migrations as applied without running them, and returns the status of each.
 ///
 /// # Errors
 /// As [`run`].
@@ -416,7 +452,7 @@ pub async fn skip(
     config: &MigrateConfig,
     local: &[Migration],
     options: PlanOptions,
-) -> Result<Vec<i64>, MigrateError> {
+) -> Result<Vec<MigrationDetail>, MigrateError> {
     quote_table(&config.table)?;
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
@@ -428,7 +464,7 @@ pub async fn skip(
             insert_row(conn, &quoted, step, true).await?;
             done.push(step.version);
         }
-        Ok(done)
+        touched(conn, &quoted, local, &done).await
     })
     .await
 }
@@ -444,18 +480,7 @@ pub async fn info(
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     quote_table(&config.table)?;
     locked(conn, config, async || {
-        let applied = list_applied(conn, &config.table).await?;
-        Ok(migration_info(local, &plain(&applied))
-            .into_iter()
-            .map(|info| {
-                let record = applied.iter().find(|r| r.migration.version == info.version);
-                MigrationDetail {
-                    installed_on_micros: record.map(|r| r.installed_on_micros),
-                    execution_time: record.map(|r| r.execution_time),
-                    info,
-                }
-            })
-            .collect())
+        Ok(details(local, &list_applied(conn, &config.table).await?))
     })
     .await
 }
