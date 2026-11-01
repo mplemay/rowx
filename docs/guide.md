@@ -476,7 +476,7 @@ asyncio.run(main())
 ## The checker
 
 ```text
-rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json] [--statistics] [-j N]
+rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json] [--statistics] [-j N] [--scratch] [--no-drift-check]
 ```
 
 The checker never imports or executes your code. It parses your files, finds every `query[T](t"...")` call, resolves `T`
@@ -508,6 +508,16 @@ The database URL comes from `--database-url`, else from the environment variable
 - Postgres may still **evaluate user-defined IMMUTABLE and STABLE functions while planning**, and it takes locks on
   referenced relations.
 - Run it as a dedicated non-superuser role against a CI or disposable database.
+
+With `--scratch` the statement is amended:
+
+- The checker still never imports or executes your Python, and never executes your checked queries.
+- It does execute the **migration files**, and only in the database it created for the run, as the connecting role.
+  Migration files are trusted code. The role needs `CREATEDB`.
+
+`rowx check --scratch` needs `[tool.rowx.migrate]`. It treats the database URL as a server URL, creates
+`rowx_check_<hex>` (`TEMPLATE template0`), runs the migrations in it, checks against it, and drops it `WITH (FORCE)` on
+every exit path. The drift gate doesn't apply. A missing `CREATEDB` privilege and a failing migration both exit 2.
 
 The checker's session is read-only by default (`default_transaction_read_only = on`) and sets `statement_timeout`,
 `lock_timeout` and `idle_in_transaction_session_timeout`.

@@ -1,7 +1,7 @@
 import ast
 import asyncio
 from collections import Counter, deque
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from re import DOTALL, IGNORECASE, VERBOSE, compile as re_compile
 from typing import TYPE_CHECKING, Final
@@ -19,6 +19,7 @@ from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
     from rowx.check.config import Config
@@ -64,7 +65,23 @@ class Statistics:
     unchecked: int = 0
     # None unless the drift gate ran
     migrations: int | None = None
+    # None unless `--scratch` built a database
+    scratch_seconds: float | None = None
     by_rule: Counter[Rule] = field(default_factory=Counter)
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class ScratchBuild:
+    url: str
+    seconds: float
+
+
+# `gate` runs once, before anything is described, and only when there is something to describe
+# `scratch` builds the database to describe against from the server URL, and drops it when the run ends
+@dataclass(slots=True, kw_only=True, frozen=True)
+class Hooks:
+    gate: Callable[[str], Awaitable[int | None]] | None = None
+    scratch: Callable[[str], AbstractAsyncContextManager[ScratchBuild]] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -465,15 +482,14 @@ def _collect(
     return sites, reports, sources
 
 
-# `gate` runs once, before anything is described, and only when there is something to describe
 async def run_check(
     config: Config,
     files: Iterable[Path],
     dsn: str | None,
     jobs: int,
-    *,
-    gate: Callable[[str], Awaitable[int | None]] | None = None,
+    hooks: Hooks | None = None,
 ) -> RunResult:
+    hooks = hooks or Hooks()
     stats = Statistics()
     sites, reports, sources = _collect(config, files, stats)
     statements = sorted({site.sourcemap.sql for site in sites})
@@ -482,9 +498,15 @@ async def run_check(
         if dsn is None or not dsn.strip():
             msg = f"no database URL; pass --database-url or set ${config.database_url_env}"
             raise CheckError(msg)
-        if gate is not None:
-            stats.migrations = await gate(dsn)
-        outcomes = await describe_all(dsn, statements, jobs, config.statement_timeout_ms)
+        target = dsn
+        async with AsyncExitStack() as stack:
+            if hooks.scratch is not None:
+                built = await stack.enter_async_context(hooks.scratch(dsn))
+                target = built.url
+                stats.scratch_seconds = built.seconds
+            if hooks.gate is not None:
+                stats.migrations = await hooks.gate(target)
+            outcomes = await describe_all(target, statements, jobs, config.statement_timeout_ms)
         for site in sites:
             reports.extend(_evaluate(site, outcomes[site.sourcemap.sql]))
     stats.by_rule.update(report.diagnostic.rule for report in reports)
