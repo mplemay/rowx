@@ -1,15 +1,17 @@
 import asyncio
+import os
 import secrets
+import socket
 import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from time import perf_counter
+from time import perf_counter, time
 from typing import TYPE_CHECKING, Final
 
 from rowx.check.runner import CheckError, ScratchBuild, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
 from rowx.postgres import connect
-from rowx.postgres._admin import create_database, drop_database, with_database
+from rowx.postgres._admin import create_database, drop_database, list_databases, with_database
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -21,6 +23,25 @@ PREFIX: Final[str] = "rowx_check_"
 TEMPLATE: Final[str] = "template0"
 INSUFFICIENT_PRIVILEGE: Final[str] = "42501"
 CREATEDB_HELP: Final[str] = "`--scratch` needs a role with CREATEDB"
+TAG_PREFIX: Final[str] = "rowx:"
+# a database tagged longer ago than this belongs to a run that is gone
+ORPHAN_AGE_SECONDS: Final[int] = 3600
+
+
+# `rowx:<pid>@<host>:<unix-ts>`
+def make_tag() -> str:
+    return f"{TAG_PREFIX}{os.getpid()}@{socket.gethostname()}:{int(time())}"
+
+
+def tag_age(comment: str | None, now: float) -> float | None:
+    if comment is None or not comment.startswith(TAG_PREFIX):
+        return None
+    # the host may contain a colon, so the timestamp is whatever follows the last one
+    _, _, stamp = comment.rpartition(":")
+    try:
+        return now - int(stamp)
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True)
@@ -54,15 +75,29 @@ class Scratch:
         url = self.url
         self.pending_drop = True
         try:
+            await self.sweep_orphans()
             await self._create()
             await self._migrate(migrator, url)
             yield ScratchBuild(url=url, seconds=perf_counter() - started)
         finally:
             await self.drop()
 
+    # best effort: a run that was SIGKILLed or cancelled by CI leaves its database behind; only an old tag with no
+    # sessions is dropped, and any error (a listing that is refused, a database another role owns) is ignored
+    async def sweep_orphans(self) -> None:
+        with suppress(DatabaseError, InterfaceError, OSError):
+            found = await list_databases(self.server_dsn, PREFIX)
+            now = time()
+            for info in found:
+                age = tag_age(info.comment, now)
+                if info.name == self.name or age is None or age <= ORPHAN_AGE_SECONDS or info.sessions > 0:
+                    continue
+                with suppress(DatabaseError, InterfaceError, OSError):
+                    await drop_database(self.server_dsn, info.name)
+
     async def _create(self) -> None:
         try:
-            await create_database(self.server_dsn, self.name, template=TEMPLATE)
+            await create_database(self.server_dsn, self.name, template=TEMPLATE, comment=make_tag())
         except DatabaseError as error:
             if error.sqlstate == INSUFFICIENT_PRIVILEGE:
                 msg = f"could not create the scratch database: {error.message}\nhelp: {CREATEDB_HELP}"

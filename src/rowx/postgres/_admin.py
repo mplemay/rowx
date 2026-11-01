@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Final
 from urllib.parse import quote, unquote, urlencode, urlparse, urlunparse
 
@@ -5,6 +6,7 @@ from rowx._core.postgres import (
     create_database as create_database_impl,
     database_exists as database_exists_impl,
     drop_database as drop_database_impl,
+    list_databases as list_databases_impl,
 )
 from rowx.postgres._options import ConnectOptions
 
@@ -42,8 +44,9 @@ async def create_database(
     name: str | None = None,
     *,
     template: str | None = None,
+    comment: str | None = None,
 ) -> None:
-    await create_database_impl(target, name, template)
+    await create_database_impl(target, name, template, comment)
 
 
 # a missing database is not an error
@@ -54,3 +57,16 @@ async def drop_database(
     force: bool = False,
 ) -> None:
     await drop_database_impl(target, name, force)
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class DatabaseInfo:
+    name: str
+    comment: str | None
+    sessions: int
+
+
+# the databases whose name starts with `prefix`, by name; `sessions` counts the connections open right now
+async def list_databases(target: str | ConnectOptions, prefix: str) -> list[DatabaseInfo]:
+    rows = await list_databases_impl(target, prefix)
+    return [DatabaseInfo(name=name, comment=comment, sessions=sessions) for name, comment, sessions in rows]

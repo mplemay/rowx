@@ -9,7 +9,7 @@ from psycopg.conninfo import make_conninfo
 
 from rowx.errors import DatabaseError, InterfaceError
 from rowx.postgres import ConnectOptions, connect
-from rowx.postgres._admin import create_database, database_exists, drop_database
+from rowx.postgres._admin import create_database, database_exists, drop_database, list_databases
 
 pytestmark = [pytest.mark.integration]
 
@@ -137,5 +137,26 @@ def test_a_wrong_password_never_appears_in_an_error(server_dsn: str) -> None:
         assert exc.value.sqlstate == "28P01"
         assert needle not in str(exc.value)
         assert needle not in repr(exc.value)
+
+    asyncio.run(run())
+
+
+@pytest.mark.db
+def test_a_comment_round_trips_through_list_databases(server_dsn: str) -> None:
+    prefix = unique("rowx_py_cmt")
+    tagged, plain = f"{prefix}_a", f"{prefix}_b"
+    comment = "rowx:1@it's:1700000000"
+
+    async def run() -> None:
+        await create_database(server_dsn, tagged, comment=comment)
+        try:
+            await create_database(server_dsn, plain)
+            try:
+                found = await list_databases(server_dsn, prefix)
+                assert [(d.name, d.comment, d.sessions) for d in found] == [(tagged, comment, 0), (plain, None, 0)]
+            finally:
+                await drop_database(server_dsn, plain)
+        finally:
+            await drop_database(server_dsn, tagged)
 
     asyncio.run(run())

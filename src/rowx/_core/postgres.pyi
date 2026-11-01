@@ -218,6 +218,7 @@ async def create_database(
     options: str | ConnectOptions,
     name: str | None = None,
     template: str | None = None,
+    comment: str | None = None,
     /,
 ) -> None: ...
 async def drop_database(
@@ -226,3 +227,4 @@ async def drop_database(
     force: bool = False,
     /,
 ) -> None: ...
+async def list_databases(options: str | ConnectOptions, prefix: str, /) -> list[tuple[str, str | None, int]]: ...
