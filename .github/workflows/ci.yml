@@ -175,3 +175,33 @@ jobs:
 
       - name: Check the example
         run: uv run rowx check examples/app
+
+      # the migrations example gets a database of its own, because its tables clash with the app example's
+      - name: Create the migrations example database
+        working-directory: examples/migrations
+        env:
+          DATABASE_URL: postgresql://rowx:rowx@localhost:5432/migrations_example
+        run: uv run --project ../.. rowx database create
+
+      - name: Run the migrations example
+        working-directory: examples/migrations
+        env:
+          DATABASE_URL: postgresql://rowx:rowx@localhost:5432/migrations_example
+        run: uv run --project ../.. python bookshelf.py
+
+      - name: Check the migrations example against the migrated database
+        working-directory: examples/migrations
+        env:
+          DATABASE_URL: postgresql://rowx:rowx@localhost:5432/migrations_example
+        run: uv run --project ../.. rowx check
+
+      - name: Check the migrations example with a scratch database
+        working-directory: examples/migrations
+        run: uv run --project ../.. rowx check --scratch
+
+      - name: Test the migrations example
+        working-directory: examples/migrations
+        env:
+          # fail instead of skipping if the plugin finds no database URL
+          ROWX_REQUIRE_DB: "1"
+        run: uv run --project ../.. pytest -p no:cacheprovider

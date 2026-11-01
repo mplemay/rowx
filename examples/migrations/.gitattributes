@@ -1,0 +1,2 @@
+# checksums are over the raw bytes, so a checkout must never rewrite line endings
+migrations/*.sql text eol=lf
