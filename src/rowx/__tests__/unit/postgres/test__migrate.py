@@ -133,11 +133,28 @@ def test_a_bad_create_schema_is_a_value_error(tmp_path: Path, schema: str) -> No
 
 
 @pytest.mark.parametrize(
-    "table",
-    ["_rowx_migrations", "app._rowx_migrations", "MySchema.Migrations", '"My"."T"', '"We""ird"', '"Mixed Case"'],
+    ("table", "parts"),
+    [
+        ("_rowx_migrations", ("_rowx_migrations",)),
+        ("app._rowx_migrations", ("app", "_rowx_migrations")),
+        ("MySchema.Migrations", ("myschema", "migrations")),
+        ('"My"."T"', ("My", "T")),
+        ('"We""ird"', ('We"ird',)),
+        ('"Mixed Case"', ("Mixed Case",)),
+        ('"a.b"', ("a.b",)),
+    ],
 )
-def test_a_valid_table_is_accepted(tmp_path: Path, table: str) -> None:
-    Migrator(tmp_path, table=table, create_schemas=["app"], locking=False, ignore_missing=True, allow_out_of_order=True)
+def test_a_valid_table_is_accepted(tmp_path: Path, table: str, parts: tuple[str, ...]) -> None:
+    migrator = Migrator(
+        tmp_path,
+        table=table,
+        create_schemas=["app"],
+        locking=False,
+        ignore_missing=True,
+        allow_out_of_order=True,
+    )
+    # the parsed parts, as the server stores them, are what callers quote
+    assert migrator._impl.table == parts
 
 
 def test_create_schemas_must_not_be_a_bare_string(tmp_path: Path) -> None:

@@ -322,6 +322,15 @@ impl Migrator {
         PyList::new(py, rows)
     }
 
+    // the parsed history table, `(name,)` or `(schema, name)`, each part as the server stores it
+    // (folded or unquoted), so a caller can quote it without parsing the configured string again
+    #[getter]
+    fn table<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let table = &self.config.table;
+        let parts: Vec<&str> = table.schema().into_iter().chain([table.name()]).collect();
+        PyTuple::new(py, parts)
+    }
+
     #[pyo3(signature = (executor, target=None, dry_run=false))]
     fn run<'py>(
         &self,
