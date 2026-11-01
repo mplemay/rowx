@@ -463,6 +463,11 @@ name = "rowx"
 version = "0.1.0"
 source = { editable = "." }
 
+[package.optional-dependencies]
+pytest = [
+    { name = "pytest" },
+]
+
 [package.dev-dependencies]
 bench = [
     { name = "asyncpg" },
@@ -487,6 +492,8 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.1.1" }]
+provides-extras = ["pytest"]
 
 [package.metadata.requires-dev]
 bench = [{ name = "asyncpg", specifier = ">=0.31.0" }]
