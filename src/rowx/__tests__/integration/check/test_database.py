@@ -188,3 +188,20 @@ def test_a_password_is_never_printed(
     wrong = make_conninfo(server_dsn, dbname=name, password=secret)
     _, out, err = cli(capsys, wrong, "create")
     assert secret not in out + err
+
+
+def test_invalid_migrations_fail_before_any_database_change(
+    server_dsn: str, target: tuple[str, str], project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn, name = target
+    (project / "1_duplicate.sql").write_text("SELECT 1;", encoding="utf-8")
+    assert cli(capsys, dsn, "setup", "--source", str(project))[0] == 2
+    assert not exists(server_dsn, name)
+    cli(capsys, dsn, "create")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE TABLE kept (id int4)")
+    code, _, err = cli(capsys, dsn, "reset", "-y", "--source", str(project))
+    assert code == 2
+    assert err
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        assert conn.execute("SELECT to_regclass('kept') IS NOT NULL").fetchone() == (True,)

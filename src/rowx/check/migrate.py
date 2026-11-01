@@ -112,11 +112,14 @@ def handle(args: Namespace) -> None:
     run_guarded(dsn, _database_command(target, args, dsn))
 
 
-async def run_pending(target: Target, dsn: str) -> None:
-    args = Namespace(target_version=None, dry_run=False, allow_out_of_order=False, ignore_missing=False)
-    migrator = _load(target, args)
+# `migrate run` with no flags, split so a caller can validate the files before any database IO
+def load_migrator(target: Target) -> Migrator:
+    return _load(target, Namespace())
+
+
+async def run_pending(migrator: Migrator, dsn: str) -> None:
     async with await connect(dsn) as conn:
-        await _run(migrator, conn, args)
+        await _run(migrator, conn, Namespace(target_version=None, dry_run=False))
 
 
 def _describe(error: MigrateError) -> str:

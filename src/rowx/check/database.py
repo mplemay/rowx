@@ -2,14 +2,16 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rowx.check.config import Config, load_config
-from rowx.check.migrate import require_url, resolve_target, run_guarded, run_pending
+from rowx.check.config import load_config
+from rowx.check.migrate import load_migrator, require_url, resolve_target, run_guarded, run_pending
 from rowx.check.runner import CheckError
 from rowx.postgres import ConnectOptions
 from rowx.postgres._admin import create_database, database_exists, drop_database
 
 if TYPE_CHECKING:
     from argparse import ArgumentParser, Namespace, _SubParsersAction
+
+    from rowx.postgres import Migrator
 
 
 def add_parsers(subparsers: _SubParsersAction[ArgumentParser]) -> None:
@@ -82,18 +84,21 @@ def handle(args: Namespace) -> None:
             if _confirmed("drop", name, yes=args.yes):
                 run_guarded(dsn, _drop(dsn, name, force=args.force))
         case "reset":
+            # the migrations are read first, so a broken directory fails before anything is dropped
+            migrator = load_migrator(resolve_target(config, args.source))
             if _confirmed("reset", name, yes=args.yes):
-                run_guarded(dsn, _reset(config, args, dsn, name))
+                run_guarded(dsn, _reset(migrator, dsn, name, force=args.force))
         case _:
-            run_guarded(dsn, _setup(config, args, dsn, name))
+            migrator = load_migrator(resolve_target(config, args.source))
+            run_guarded(dsn, _setup(migrator, dsn, name))
 
 
-async def _reset(config: Config, args: Namespace, dsn: str, name: str) -> None:
-    await _drop(dsn, name, force=args.force)
+async def _reset(migrator: Migrator, dsn: str, name: str, *, force: bool) -> None:
+    await _drop(dsn, name, force=force)
     await _create(dsn, name)
-    await run_pending(resolve_target(config, args.source), dsn)
+    await run_pending(migrator, dsn)
 
 
-async def _setup(config: Config, args: Namespace, dsn: str, name: str) -> None:
+async def _setup(migrator: Migrator, dsn: str, name: str) -> None:
     await _create(dsn, name)
-    await run_pending(resolve_target(config, args.source), dsn)
+    await run_pending(migrator, dsn)
