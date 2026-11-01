@@ -9,6 +9,10 @@ authors = [
 requires-python = ">=3.14"
 dependencies = []
 
+[project.optional-dependencies]
+# only for the opt-in `rowx.testing` pytest plugin; `import rowx` never imports pytest
+pytest = ["pytest>=9.1.1"]
+
 [project.scripts]
 rowx = "rowx.check.cli:main"
 

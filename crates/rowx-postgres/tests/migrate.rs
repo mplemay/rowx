@@ -34,6 +34,7 @@ struct TestDb {
     base: ConnectOptions,
     name: String,
     options: ConnectOptions,
+    dropped: bool,
 }
 
 impl TestDb {
@@ -55,6 +56,7 @@ impl TestDb {
             base,
             name,
             options,
+            dropped: false,
         }))
     }
 
@@ -62,9 +64,34 @@ impl TestDb {
         Connection::connect(&self.options, &Handle::current()).await
     }
 
-    async fn finish(self) -> TestResult {
+    async fn finish(mut self) -> TestResult {
         drop_database(&self.base, &self.name, true, &Handle::current()).await?;
+        self.dropped = true;
         Ok(())
+    }
+}
+
+// a test that fails (an early `?` or a panicking assert) never reaches `finish`, so the database is dropped here; the
+// test's own runtime may be unwinding, so the drop runs on a fresh runtime in its own thread
+impl Drop for TestDb {
+    fn drop(&mut self) {
+        if self.dropped {
+            return;
+        }
+        let base = self.base.clone();
+        let name = self.name.clone();
+        let cleanup = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            let handle = runtime.handle().clone();
+            // best effort: a failure here must not mask the test's own failure
+            let _ = runtime.block_on(drop_database(&base, &name, true, &handle));
+        });
+        let _ = cleanup.join();
     }
 }
 
