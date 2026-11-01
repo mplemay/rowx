@@ -1,22 +1,30 @@
 import asyncio
 import json
 import os
+import secrets
+import signal
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import psycopg
 import pytest
+from psycopg import sql
+from psycopg.conninfo import make_conninfo
 
 from rowx import query_unchecked
 from rowx.__tests__.integration.check.harness import CASES_DIR, check_case, parse_markers
 from rowx._core.postgres import connect_checker
 from rowx.check.cli import main
 from rowx.check.drift import read_history
+from rowx.check.runner import CheckError, describe_all as describe_all_impl
 from rowx.errors import DatabaseError
 from rowx.postgres import Connection, Migrator
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from rowx.__tests__.integration.check.harness import Expectation
+    from rowx.check.runner import Outcome
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -385,3 +393,214 @@ def test_history_is_read_in_a_read_only_session(schema: str, drift_project: Path
             await conn.close()
 
     asyncio.run(run())
+
+
+SCRATCH_MIGRATION: Final[str] = "CREATE TABLE scratch_users (id int4 PRIMARY KEY, name text NOT NULL, email text);"
+SCRATCH_CLEAN_QUERY: Final[str] = (
+    'from rowx import query\n\nquery[tuple[int, str]](t"SELECT id, name FROM scratch_users")\n'
+)
+SCRATCH_DIAGNOSTIC_QUERY: Final[str] = (
+    'from rowx import query\n\nquery[tuple[int, str, str]](t"SELECT id, name, email FROM scratch_users")\n'
+)
+
+
+@pytest.fixture
+def scratch_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "pyproject.toml", "[tool.rowx.migrate]\n")
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    _write(migrations, "1_create_scratch_users.sql", SCRATCH_MIGRATION)
+    _write(tmp_path, "q.py", SCRATCH_CLEAN_QUERY)
+    return tmp_path
+
+
+def _scratch_databases(dsn: str) -> set[str]:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute("SELECT datname FROM pg_database WHERE datname LIKE 'rowx\\_check\\_%'").fetchall()
+    return {row[0] for row in rows}
+
+
+@pytest.fixture
+def no_leftovers() -> Iterator[str]:
+    dsn = _dsn()
+    before = _scratch_databases(dsn)
+    yield dsn
+    leaked = _scratch_databases(dsn) - before
+    assert not leaked, f"scratch databases were not dropped: {sorted(leaked)}"
+
+
+def _scratch(capsys: pytest.CaptureFixture[str], dsn: str, *argv: str) -> tuple[int, str, str]:
+    return _run(capsys, "q.py", "--database-url", dsn, "--scratch", *argv)
+
+
+def test_scratch_without_migrate_config_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "pyproject.toml", "")
+    _write(tmp_path, "q.py", SCRATCH_CLEAN_QUERY)
+    code, out, err = _scratch(capsys, "postgresql://u@127.0.0.1:1/db")
+    assert (code, out) == (2, "")
+    assert "[tool.rowx.migrate]" in err
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_clean_run_when_the_target_lacks_the_tables(
+    no_leftovers: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # the drift gate would reject this database, which has no history table
+    assert _drift(capsys, no_leftovers)[0] == 2
+    assert _scratch(capsys, no_leftovers) == (0, "", "")
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_reports_diagnostics_against_the_scratch_schema(
+    no_leftovers: str, scratch_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(scratch_project, "q.py", SCRATCH_DIAGNOSTIC_QUERY)
+    code, out, err = _scratch(capsys, no_leftovers)
+    assert (code, err) == (1, "")
+    assert "q.py:3" in out
+    assert "nullable" in out
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_never_touches_the_target_database(no_leftovers: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _scratch(capsys, no_leftovers)[0] == 0
+    with psycopg.connect(no_leftovers, autocommit=True) as conn:
+        row = conn.execute("SELECT to_regclass('scratch_users'), to_regclass('_rowx_migrations')").fetchone()
+    assert row == (None, None)
+
+
+def test_scratch_failing_migration_exits_two(
+    no_leftovers: str, scratch_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(scratch_project / "migrations", "2_explode.sql", "SELECT 1/0;")
+    code, out, err = _scratch(capsys, no_leftovers)
+    assert (code, out) == (2, "")
+    assert "2" in err
+    assert "division by zero" in err
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_without_createdb_exits_two_with_help(no_leftovers: str, capsys: pytest.CaptureFixture[str]) -> None:
+    role = f"rowx_nocreatedb_{secrets.token_hex(6)}"
+    password = secrets.token_hex(8)
+    with psycopg.connect(no_leftovers, autocommit=True) as conn:
+        conn.execute(
+            sql.SQL("CREATE ROLE {} LOGIN NOCREATEDB PASSWORD {}").format(sql.Identifier(role), sql.Literal(password))
+        )
+    try:
+        url = make_conninfo(no_leftovers, user=role, password=password)
+        code, out, err = _scratch(capsys, url)
+    finally:
+        with psycopg.connect(no_leftovers, autocommit=True) as conn:
+            conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+    assert (code, out) == (2, "")
+    assert "`--scratch` needs a role with CREATEDB" in err
+    assert password not in err
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_unreachable_server_never_prints_the_password(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = _scratch(capsys, "postgresql://someone:hunter2secret@127.0.0.1:1/db?connect_timeout=2")
+    assert code == 2
+    assert "hunter2secret" not in out + err
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_statistics_report_the_build_time(no_leftovers: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = _scratch(capsys, no_leftovers, "--statistics")
+    assert (code, err) == (0, "")
+    assert "scratch database built in: " in out
+    assert "migrations checked" not in out
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_is_not_built_when_nothing_is_described(
+    scratch_project: Path, no_leftovers: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(scratch_project, "q.py", "x = 1\n")
+    code, out, err = _scratch(capsys, no_leftovers, "--statistics")
+    assert (code, err) == (0, "")
+    assert "scratch database built" not in out
+
+
+def _during_check(monkeypatch: pytest.MonkeyPatch, action: Callable[[], None]) -> list[str]:
+    seen: list[str] = []
+
+    async def describe_all(dsn: str, *_: object) -> dict[str, Outcome]:
+        seen.append(dsn)
+        action()
+        # reached only by an action that returns, such as a signal, which cancels the run
+        await asyncio.Event().wait()
+        return {}
+
+    monkeypatch.setattr("rowx.check.runner.describe_all", describe_all)
+    return seen
+
+
+def _raise_interrupt() -> None:
+    raise KeyboardInterrupt
+
+
+def _raise_internal() -> None:
+    msg = "boom"
+    raise RuntimeError(msg)
+
+
+def _raise_describe_failure() -> None:
+    msg = "lost the database connection"
+    raise CheckError(msg)
+
+
+def _signal_interrupt() -> None:
+    # the real path: asyncio.run turns SIGINT into a cancellation of the main task
+    signal.raise_signal(signal.SIGINT)
+
+
+@pytest.mark.usefixtures("scratch_project")
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        (_raise_interrupt, "interrupted"),
+        (_signal_interrupt, "interrupted"),
+        (_raise_internal, "internal error"),
+        (_raise_describe_failure, "lost the database connection"),
+    ],
+)
+def test_scratch_is_dropped_when_the_check_is_interrupted_or_fails(
+    no_leftovers: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: Callable[[], None],
+    expected: str,
+) -> None:
+    seen = _during_check(monkeypatch, action)
+    code, out, err = _scratch(capsys, no_leftovers)
+    assert (code, out) == (2, "")
+    assert expected in err
+    # the check ran against a scratch database, which is gone once the fixture has checked pg_database
+    assert len(seen) == 1
+    assert "/rowx_check_" in seen[0]
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_check_session_is_read_only(
+    no_leftovers: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    states: list[str] = []
+    original = describe_all_impl
+
+    async def describe_all(dsn: str, *args: Any) -> dict[str, Outcome]:  # ruff: ignore[any-type]
+        conn = Connection(await connect_checker(dsn, 10.0))
+        try:
+            states.append(await query_unchecked[str](t"SHOW default_transaction_read_only").one(conn))
+        finally:
+            await conn.close()
+        return await original(dsn, *args)
+
+    monkeypatch.setattr("rowx.check.runner.describe_all", describe_all)
+    assert _scratch(capsys, no_leftovers)[0] == 0
+    assert states == ["on"]
