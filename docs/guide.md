@@ -492,9 +492,9 @@ migrations/
 ```
 
 - **Names.** `<VERSION>_<DESCRIPTION>.sql` is a simple migration, and `<VERSION>_<DESCRIPTION>.up.sql` with
-  `<VERSION>_<DESCRIPTION>.down.sql` is a reversible one. The version is ASCII digits and positive, and leading zeros
-  are allowed (`1_a.sql` and `001_b.sql` are the same version). `_` in the description reads as a space. Simple and
-  reversible migrations can be mixed.
+  `<VERSION>_<DESCRIPTION>.down.sql` is a reversible one. The version is ASCII digits that fit an `i64`: `0` is
+  valid, and leading zeros are allowed (`1_a.sql` and `001_b.sql` are the same version). `_` in the description reads
+  as a space. Simple and reversible migrations can be mixed.
 - **Errors at construction.** A `.sql` file that doesn't match the grammar, a duplicate version, an `.up.sql` without
   its `.down.sql` (or the reverse), and a file that isn't UTF-8 each raise `MigrationSourceError` naming the file. Files
   that don't end in `.sql` and subdirectories are ignored.
@@ -811,14 +811,13 @@ with TemporaryDirectory() as tmp:
 What differs from sqlx:
 
 - **Unpaired files are errors.** An `.up.sql` without its `.down.sql` (or the reverse) raises `MigrationSourceError`.
-  sqlx tolerates it. A `.sql` file whose name doesn't match the grammar is also an error, and the version must be
-  positive.
+  sqlx tolerates it. A `.sql` file whose name doesn't match the grammar is also an error.
 - **No `ignored_chars`.** sqlx's `sqlx.toml` option to ignore characters when hashing isn't ported, so a project that
   used it sees `modified` for the affected files.
-- **Table names are used as written.** rowx quotes each part of `table` itself, so the case is kept and a `"` is part
-  of the name, not SQL quoting. sqlx puts the string into its SQL unquoted, so Postgres folds it to lower case: for an
-  sqlx table configured as `MySchema.Migrations`, set `table = "myschema.migrations"`. A `.` separates the schema from
-  the table, and an empty part, a third part, a NUL byte or a part over 63 bytes raises `ValueError`.
+- **Table names follow Postgres rules.** `table` and `create_schemas` are parsed like identifiers in SQL: an unquoted
+  part matches `[A-Za-z_][A-Za-z0-9_$]*` and is folded to lower case, so sqlx's `MySchema.Migrations` finds the same
+  table in rowx. A `"…"` part is kept verbatim, with `""` for a `"`. A `.` outside quotes separates the schema from the
+  table, and an empty part, a third part, a NUL byte, a bad character or a part over 63 bytes raises `ValueError`.
 - **Dirty rows.** A `-- no-transaction` file that fails leaves a `success = false` row, which sqlx also reports as
   dirty. sqlx itself records nothing when such a file fails.
 - **Locks exclude each other.** Both tools take `pg_advisory_lock` on the same key, derived from the database name, so

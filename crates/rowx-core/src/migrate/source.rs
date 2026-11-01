@@ -152,14 +152,12 @@ fn parse_name(name: &str) -> Result<(i64, String, MigrationKind), &'static str> 
         .split_once('_')
         .ok_or("expected <VERSION>_<DESCRIPTION>.sql")?;
     if version.is_empty() || !version.bytes().all(|b| b.is_ascii_digit()) {
-        return Err("the version must be a positive integer");
+        return Err("the version must be a non-negative integer");
     }
+    // leading zeros are fine: `001` is version 1
     let version: i64 = version
         .parse()
         .map_err(|_| "the version does not fit in a 64-bit integer")?;
-    if version < 1 {
-        return Err("the version must be a positive integer");
-    }
     Ok((version, description.replace('_', " "), kind))
 }
 
@@ -301,8 +299,6 @@ mod tests {
             "1.up.sql",
             "_users.sql",
             "abc_users.sql",
-            "0_users.sql",
-            "00_users.sql",
             "-1_users.sql",
             "+1_users.sql",
             "1 2_users.sql",
@@ -405,10 +401,29 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_version_is_an_error() {
-        let error = error_for(&[("0_init.sql", b"")]);
-        assert!(matches!(error, SourceError::InvalidName { .. }));
-        assert_eq!(file_name(&error), "0_init.sql");
+    fn version_zero_and_leading_zeros_are_accepted() {
+        assert_eq!(
+            parse_name("0_init.sql"),
+            Ok((0, "init".to_owned(), MigrationKind::Simple))
+        );
+        assert_eq!(parse_name("00_init.sql").map(|(v, ..)| v), Ok(0));
+        assert_eq!(parse_name("007_x.sql").map(|(v, ..)| v), Ok(7));
+        let dir = dir_with(&[("0_init.sql", b"select 0;"), ("007_x.sql", b"select 7;")]);
+        assert_eq!(
+            names(dir.path()),
+            [
+                (0, MigrationKind::Simple, "init".to_owned()),
+                (7, MigrationKind::Simple, "x".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_version_with_leading_zeros_duplicates_the_plain_one() {
+        let error = error_for(&[("1_a.sql", b""), ("001_b.sql", b"")]);
+        assert!(matches!(error, SourceError::Duplicate { version: 1, .. }));
+        let error = error_for(&[("0_a.sql", b""), ("000_b.sql", b"")]);
+        assert!(matches!(error, SourceError::Duplicate { version: 0, .. }));
     }
 
     #[test]

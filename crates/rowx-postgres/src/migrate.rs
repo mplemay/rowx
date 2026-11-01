@@ -2,7 +2,8 @@ use std::time::Instant;
 
 use rowx_core::migrate::{
     AppliedMigration, Migration, MigrationInfo, MigrationStatus, PlanError, PlanOptions,
-    SourceError, latest_undo_target, migration_info, plan_run, plan_skip, plan_undo,
+    RevertTarget, SchemaName, SourceError, TableName, migration_info, plan_run, plan_skip,
+    plan_undo,
 };
 use thiserror::Error;
 
@@ -11,8 +12,6 @@ use crate::error::Error;
 
 // sqlx's multiplier, so a sqlx migrator and a rowx migrator exclude each other
 const LOCK_MULTIPLIER: i64 = 0x3d32_ad9e;
-// NAMEDATALEN - 1: the server silently truncates longer identifiers
-const MAX_IDENT_BYTES: usize = 63;
 // the `execution_time` of a row whose time is not known yet (sqlx #1966)
 const UNKNOWN_EXECUTION_TIME: i64 = -1;
 
@@ -29,25 +28,22 @@ pub enum MigrateError {
         #[source]
         source: Error,
     },
-    #[error("{0}")]
-    InvalidTable(String),
     #[error(transparent)]
     Connection(#[from] Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrateConfig {
-    // one or two identifiers, `name` or `schema.name`
-    pub table: String,
-    pub create_schemas: Vec<String>,
+    pub table: TableName,
+    pub create_schemas: Vec<SchemaName>,
     pub locking: bool,
 }
 
 impl MigrateConfig {
     #[must_use]
-    pub fn new(table: impl Into<String>) -> Self {
+    pub const fn new(table: TableName) -> Self {
         Self {
-            table: table.into(),
+            table,
             create_schemas: Vec::new(),
             locking: true,
         }
@@ -70,43 +66,6 @@ pub struct MigrationDetail {
     pub execution_time: Option<i64>,
 }
 
-fn quote_part(part: &str) -> Result<String, MigrateError> {
-    if part.is_empty() {
-        return Err(MigrateError::InvalidTable(
-            "a table or schema name must not be empty".to_owned(),
-        ));
-    }
-    if part.contains('\0') {
-        return Err(MigrateError::InvalidTable(
-            "a table or schema name must not contain a NUL byte".to_owned(),
-        ));
-    }
-    if part.len() > MAX_IDENT_BYTES {
-        return Err(MigrateError::InvalidTable(format!(
-            "a table or schema name must be at most {MAX_IDENT_BYTES} bytes"
-        )));
-    }
-    Ok(format!("\"{}\"", part.replace('"', "\"\"")))
-}
-
-/// Quotes a one- or two-part table name, each part as its own identifier.
-///
-/// # Errors
-/// `InvalidTable` for any other shape (empty, three parts) or an unusable identifier.
-pub fn quote_table(table: &str) -> Result<String, MigrateError> {
-    let parts: Vec<&str> = table.split('.').collect();
-    if parts.len() > 2 {
-        return Err(MigrateError::InvalidTable(format!(
-            "the table {table:?} must be `name` or `schema.name`"
-        )));
-    }
-    Ok(parts
-        .into_iter()
-        .map(quote_part)
-        .collect::<Result<Vec<_>, _>>()?
-        .join("."))
-}
-
 /// sqlx's advisory-lock key for a database name.
 #[must_use]
 pub fn lock_key(database: &str) -> i64 {
@@ -116,19 +75,16 @@ pub fn lock_key(database: &str) -> i64 {
 /// `CREATE SCHEMA IF NOT EXISTS` for each schema, then `CREATE TABLE IF NOT EXISTS`.
 ///
 /// # Errors
-/// `InvalidTable` for an unusable name, `Connection` for a server error.
+/// `Connection` for a server error.
 pub async fn ensure_table(
     conn: &Connection,
-    table: &str,
-    create_schemas: &[String],
+    table: &TableName,
+    create_schemas: &[SchemaName],
 ) -> Result<(), MigrateError> {
-    let quoted = quote_table(table)?;
+    let quoted = table.quoted();
     for schema in create_schemas {
-        conn.simple(&format!(
-            "CREATE SCHEMA IF NOT EXISTS {}",
-            quote_part(schema)?
-        ))
-        .await?;
+        conn.simple(&format!("CREATE SCHEMA IF NOT EXISTS {}", schema.quoted()))
+            .await?;
     }
     conn.simple(&format!(
         "CREATE TABLE IF NOT EXISTS {quoted} (\n\
@@ -147,12 +103,12 @@ pub async fn ensure_table(
 /// The history rows by version; no rows when the table doesn't exist, so nothing is created.
 ///
 /// # Errors
-/// `InvalidTable` for an unusable name, `Connection` for a server error.
+/// `Connection` for a server error.
 pub async fn list_applied(
     conn: &Connection,
-    table: &str,
+    table: &TableName,
 ) -> Result<Vec<AppliedRecord>, MigrateError> {
-    let quoted = quote_table(table)?;
+    let quoted = table.quoted();
     let exists: bool = conn
         .client()?
         .query_one(
@@ -373,8 +329,8 @@ async fn locked<T>(
 // The existing history table as a schema-qualified, quoted name. A file may change `search_path`
 // (`SET LOCAL` in its transaction, or `SET` for the session), so the bookkeeping after it must not
 // resolve an unqualified name again.
-async fn resolve_table(conn: &Connection, table: &str) -> Result<String, MigrateError> {
-    let quoted = quote_table(table)?;
+async fn resolve_table(conn: &Connection, table: &TableName) -> Result<String, MigrateError> {
+    let quoted = table.quoted();
     let row = conn
         .client()?
         .query_one(
@@ -399,7 +355,6 @@ pub async fn run(
     local: &[Migration],
     options: PlanOptions,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
-    quote_table(&config.table)?;
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
         let quoted = resolve_table(conn, &config.table).await?;
@@ -415,10 +370,9 @@ pub async fn run(
     .await
 }
 
-/// Reverts every applied version above `target`, newest first, and returns the status of each.
+/// Reverts the applied versions `target` selects, newest first, and returns the status of each.
 ///
-/// `0` reverts all of them, and `None` only the latest applied version. Each status's
-/// `execution_time` is how long its revert took.
+/// Each status's `execution_time` is how long its revert took.
 ///
 /// # Errors
 /// As [`run`]; `Plan(MissingDown)` is raised before anything is reverted.
@@ -426,17 +380,15 @@ pub async fn undo(
     conn: &Connection,
     config: &MigrateConfig,
     local: &[Migration],
-    target: Option<i64>,
+    target: RevertTarget,
     ignore_missing: bool,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
-    quote_table(&config.table)?;
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
         let quoted = resolve_table(conn, &config.table).await?;
         let applied = list_applied(conn, &config.table).await?;
         let applied = plain(&applied);
-        // without a target, the latest version is chosen under the same lock as the revert
-        let target = target.unwrap_or_else(|| latest_undo_target(&applied));
+        // `Latest` is resolved by the plan, under the same lock as the revert
         let plan = plan_undo(local, &applied, target, ignore_missing)?;
         let mut done = Vec::with_capacity(plan.steps.len());
         let mut elapsed = Vec::with_capacity(plan.steps.len());
@@ -476,14 +428,13 @@ fn planned(steps: &[Migration], status: MigrationStatus) -> Vec<MigrationDetail>
 /// anything. Creates nothing: a missing history table makes everything pending.
 ///
 /// # Errors
-/// The `Plan` errors [`run`] raises, `InvalidTable` and `Connection`.
+/// The `Plan` errors [`run`] raises and `Connection`.
 pub async fn run_dry(
     conn: &Connection,
     config: &MigrateConfig,
     local: &[Migration],
     options: PlanOptions,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
-    quote_table(&config.table)?;
     locked(conn, config, async || {
         let applied = list_applied(conn, &config.table).await?;
         let plan = plan_run(local, &plain(&applied), options)?;
@@ -496,20 +447,18 @@ pub async fn run_dry(
 /// Creates nothing.
 ///
 /// # Errors
-/// The `Plan` errors [`undo`] raises, `InvalidTable` and `Connection`.
+/// The `Plan` errors [`undo`] raises and `Connection`.
 pub async fn undo_dry(
     conn: &Connection,
     config: &MigrateConfig,
     local: &[Migration],
-    target: Option<i64>,
+    target: RevertTarget,
     ignore_missing: bool,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
-    quote_table(&config.table)?;
     locked(conn, config, async || {
         let applied = list_applied(conn, &config.table).await?;
         let applied = plain(&applied);
-        // without a target, the latest version is chosen under the same lock as the revert
-        let target = target.unwrap_or_else(|| latest_undo_target(&applied));
+        // `Latest` is resolved by the plan, under the same lock as the revert
         let plan = plan_undo(local, &applied, target, ignore_missing)?;
         Ok(planned(&plan.steps, MigrationStatus::Pending))
     })
@@ -526,7 +475,6 @@ pub async fn skip(
     local: &[Migration],
     options: PlanOptions,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
-    quote_table(&config.table)?;
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
         let quoted = resolve_table(conn, &config.table).await?;
@@ -545,13 +493,12 @@ pub async fn skip(
 /// The status of every version. Creates nothing: a missing table makes everything pending.
 ///
 /// # Errors
-/// `InvalidTable` for an unusable name, `Connection` for a server error.
+/// `Connection` for a server error.
 pub async fn info(
     conn: &Connection,
     config: &MigrateConfig,
     local: &[Migration],
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
-    quote_table(&config.table)?;
     locked(conn, config, async || {
         Ok(details(local, &list_applied(conn, &config.table).await?))
     })
@@ -560,29 +507,12 @@ pub async fn info(
 
 #[cfg(test)]
 mod tests {
-    use super::{lock_key, quote_table};
+    use super::lock_key;
 
     #[test]
     fn lock_key_matches_sqlx() {
         // 0x3d32ad9e * crc32(name), computed independently with zlib.crc32
         assert_eq!(lock_key("postgres"), 368_907_709_894_077_238);
         assert_eq!(lock_key("rowx"), 2_710_434_580_532_335_694);
-    }
-
-    #[test]
-    fn quotes_each_part() {
-        assert_eq!(
-            quote_table("_rowx_migrations").ok().as_deref(),
-            Some("\"_rowx_migrations\"")
-        );
-        assert_eq!(quote_table("app.m").ok().as_deref(), Some("\"app\".\"m\""));
-        assert_eq!(quote_table("a\"b").ok().as_deref(), Some("\"a\"\"b\""));
-    }
-
-    #[test]
-    fn rejects_other_shapes() {
-        for bad in ["", "a.b.c", ".m", "a.", "a\0b", &"x".repeat(64)] {
-            assert!(quote_table(bad).is_err(), "{bad:?}");
-        }
     }
 }

@@ -44,6 +44,21 @@ def test_resolves_files_without_a_database(tmp_path: Path) -> None:
     assert all(len(m.checksum) == 48 for m in migrations)
 
 
+def test_version_zero_and_leading_zeros_are_accepted(tmp_path: Path) -> None:
+    write(tmp_path, "0_init.sql")
+    write(tmp_path, "007_x.sql")
+
+    assert [(m.version, m.description) for m in Migrator(tmp_path).migrations] == [(0, "init"), (7, "x")]
+
+
+def test_a_leading_zero_version_duplicates_the_plain_one(tmp_path: Path) -> None:
+    write(tmp_path, "1_a.sql")
+    write(tmp_path, "001_b.sql")
+
+    with pytest.raises(MigrationSourceError):
+        Migrator(tmp_path)
+
+
 def test_accepts_a_str_path_and_checksums_the_raw_bytes(tmp_path: Path) -> None:
     write(tmp_path, "1_a.sql")
 
@@ -58,7 +73,7 @@ def test_an_empty_directory_has_no_migrations(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["not_a_version.sql", "0_zero.sql", "-1_negative.sql", "1.sql", "99999999999999999999_big.sql"],
+    ["not_a_version.sql", "-1_negative.sql", "1.sql", "99999999999999999999_big.sql"],
 )
 def test_a_badly_named_file_is_a_source_error_naming_the_file(tmp_path: Path, name: str) -> None:
     write(tmp_path, name)
@@ -102,15 +117,44 @@ def test_a_missing_directory_is_a_source_error(tmp_path: Path) -> None:
         Migrator(tmp_path / "absent")
 
 
-@pytest.mark.parametrize("table", ["", "a.b.c", ".m", "a.", "a\0b", "x" * 64])
+@pytest.mark.parametrize(
+    "table",
+    ["", "a.b.c", ".m", "a.", "a\0b", "x" * 64, "Mixed Case", 'we"ird', "1abc", '"open', '"a"b', '""'],
+)
 def test_a_bad_table_is_a_value_error(tmp_path: Path, table: str) -> None:
-    with pytest.raises(ValueError, match=r"name|empty|NUL|bytes"):
+    with pytest.raises(ValueError, match=r"name|identifier|empty|NUL|bytes|quote"):
         Migrator(tmp_path, table=table)
 
 
-@pytest.mark.parametrize("table", ["_rowx_migrations", "app._rowx_migrations", 'we"ird', "Mixed Case"])
-def test_a_valid_table_is_accepted(tmp_path: Path, table: str) -> None:
-    Migrator(tmp_path, table=table, create_schemas=["app"], locking=False, ignore_missing=True, allow_out_of_order=True)
+@pytest.mark.parametrize("schema", ["", "a.b", "my app", "x" * 64, '"open'])
+def test_a_bad_create_schema_is_a_value_error(tmp_path: Path, schema: str) -> None:
+    with pytest.raises(ValueError, match=r"schema"):
+        Migrator(tmp_path, create_schemas=["ok", schema])
+
+
+@pytest.mark.parametrize(
+    ("table", "parts"),
+    [
+        ("_rowx_migrations", ("_rowx_migrations",)),
+        ("app._rowx_migrations", ("app", "_rowx_migrations")),
+        ("MySchema.Migrations", ("myschema", "migrations")),
+        ('"My"."T"', ("My", "T")),
+        ('"We""ird"', ('We"ird',)),
+        ('"Mixed Case"', ("Mixed Case",)),
+        ('"a.b"', ("a.b",)),
+    ],
+)
+def test_a_valid_table_is_accepted(tmp_path: Path, table: str, parts: tuple[str, ...]) -> None:
+    migrator = Migrator(
+        tmp_path,
+        table=table,
+        create_schemas=["app"],
+        locking=False,
+        ignore_missing=True,
+        allow_out_of_order=True,
+    )
+    # the parsed parts, as the server stores them, are what callers quote
+    assert migrator._impl.table == parts
 
 
 def test_create_schemas_must_not_be_a_bare_string(tmp_path: Path) -> None:

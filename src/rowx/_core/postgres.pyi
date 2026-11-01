@@ -189,6 +189,8 @@ class Migrator:
     ) -> None: ...
     @property
     def migrations(self) -> list[tuple[int, str, Literal["simple", "up", "down"], bytes, bool, Path]]: ...
+    @property
+    def table(self) -> tuple[str] | tuple[str, str]: ...
     async def run(
         self,
         executor: Connection | Pool,
@@ -199,6 +201,7 @@ class Migrator:
         self,
         executor: Connection | Pool,
         target: int | None,
+        revert_all: bool = False,
         dry_run: bool = False,
     ) -> list[MigrationRow]: ...
     async def skip(self, executor: Connection | Pool, target: int | None = None) -> list[MigrationRow]: ...

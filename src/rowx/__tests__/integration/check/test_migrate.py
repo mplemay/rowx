@@ -235,6 +235,30 @@ def test_info_shows_both_checksums_of_a_modified_migration(
     assert second == "2/applied create cli b (<time>)"
 
 
+@pytest.mark.parametrize(
+    ("table", "stored"),
+    [("Rowx_History", "rowx_history"), ('"Rowx ""History"""', 'Rowx "History"')],
+)
+def test_info_reads_the_applied_checksum_from_the_parsed_history_table(
+    schema: str,
+    migrations: Path,
+    capsys: pytest.CaptureFixture[str],
+    table: str,
+    stored: str,
+) -> None:
+    (migrations.parent / "pyproject.toml").write_text(f"[tool.rowx.migrate]\ntable = '{table}'\n", encoding="utf-8")
+    assert cli(capsys, schema, migrations, "run")[0] == 0
+    with psycopg.connect(schema, autocommit=True) as conn:
+        query = "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() AND tablename ILIKE '%history%'"
+        tables = [row[0] for row in conn.execute(query)]
+    # one history table, under the name the server folded or unquoted
+    assert tables == [stored]
+    write(migrations, "1_create_cli_a.sql", "CREATE TABLE cli_a (id int8);")
+    code, out, err = cli(capsys, schema, migrations, "info")
+    assert (code, err) == (0, "")
+    assert re.fullmatch(r"1/modified create cli a \(local [0-9a-f]{8}, applied [0-9a-f]{8}\)", out.splitlines()[0])
+
+
 def test_a_failing_migration_exits_two_with_the_server_message(
     schema: str,
     migrations: Path,

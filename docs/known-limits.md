@@ -55,8 +55,6 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
   connection after the run, until a pool's reset clears it. Use `SET LOCAL`, or a schema-qualified `table`.
 - **A failed run reports no partial progress.** `run` returns nothing when it raises, so the `Applied` lines of
   migrations that committed before the failing one are not printed. `rowx migrate info` shows the state.
-- **Table names.** A `.` always separates the schema from the table, so a name that contains a dot can't be expressed.
-  Each part is quoted as written, so its case is kept, unlike sqlx, whose unquoted name Postgres folds to lower case.
 - **`rowx check --scratch` and `rowx.testing` execute migration files.** `rowx check` does so only with `--scratch`,
   in the database it creates, and the plugin in its template databases. Migration files are trusted code.
 - **The test plugin is asyncio only.** Trio is unsupported, and roles created by a test are cluster-wide, so a database

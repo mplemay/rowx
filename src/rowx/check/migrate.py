@@ -250,7 +250,7 @@ async def _database_command(target: Target, args: Namespace, dsn: str) -> None:
             case "revert":
                 await _revert(migrator, conn, args)
             case _:
-                await _info(migrator, conn, target)
+                await _info(migrator, conn)
 
 
 async def _run(migrator: Migrator, conn: Connection, args: Namespace) -> None:
@@ -273,19 +273,17 @@ async def _revert(migrator: Migrator, conn: Connection, args: Namespace) -> None
             sys.stdout.write(_line("Reverted", status, "revert", status.execution_time))
 
 
-async def _applied_checksums(conn: Connection, table: str) -> dict[int, bytes]:
-    schema, dot, name = table.rpartition(".")
-    ident = (schema, name) if dot else name
-    rows = await query_unchecked[tuple[int, bytes]](t"SELECT version, checksum FROM {ident:ident}").all(conn)
+async def _applied_checksums(migrator: Migrator, conn: Connection) -> dict[int, bytes]:
+    # the migrator's parsed name, so `MySchema.Migrations` and `"My"."T"` resolve to the same table it uses
+    table = migrator._impl.table  # ruff: ignore[private-member-access]
+    rows = await query_unchecked[tuple[int, bytes]](t"SELECT version, checksum FROM {table:ident}").all(conn)
     return dict(rows)
 
 
-async def _info(migrator: Migrator, conn: Connection, target: Target) -> None:
+async def _info(migrator: Migrator, conn: Connection) -> None:
     statuses = await migrator.info(conn)
     local = {m.version: m.checksum for m in migrator.migrations if m.kind != "down"}
-    applied = (
-        await _applied_checksums(conn, target.migrate.table) if any(s.state == "modified" for s in statuses) else {}
-    )
+    applied = await _applied_checksums(migrator, conn) if any(s.state == "modified" for s in statuses) else {}
     for status in statuses:
         line = f"{status.version}/{status.state}"
         if status.description:

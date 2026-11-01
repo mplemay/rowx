@@ -1,6 +1,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rowx_core::error::CoreError;
+use rowx_core::migrate::NameError;
 use rowx_core::pool::OptionsError;
 use rowx_postgres::error::Error;
 use rowx_postgres::migrate::MigrateError;
@@ -87,9 +88,14 @@ pub fn migrate_to_py_err(py: Python<'_>, err: &MigrateError) -> PyErr {
             failed.set_cause(py, Some(to_py_err(py, source)));
             failed
         }
-        MigrateError::InvalidTable(message) => PyValueError::new_err(message.clone()),
         MigrateError::Connection(e) => to_py_err(py, e),
     }
+}
+
+/// A bad `table` or `create_schemas` name is a `ValueError`.
+#[must_use]
+pub fn name_to_py_err(err: &NameError) -> PyErr {
+    PyValueError::new_err(err.to_string())
 }
 
 /// Carries a migration error across an `async` block, where the GIL is not held.
