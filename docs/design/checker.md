@@ -63,6 +63,8 @@ Unknown keys are an error (exit 2), with a did-you-mean suggestion; port the log
 dir = "migrations"                 # relative to pyproject.toml
 table = "_rowx_migrations"         # "_sqlx_migrations" adopts an existing sqlx project
 create_schemas = []
+ignore_missing = false
+allow_out_of_order = false
 versioning = "inferred"            # inferred | timestamp | sequential  (for `migrate add`)
 kind = "inferred"                  # inferred | simple | reversible     (for `migrate add`)
 ```
@@ -71,14 +73,20 @@ kind = "inferred"                  # inferred | simple | reversible     (for `mi
 (even as an empty table) is what "configured" means for the drift gate. The semantics of `table` and `create_schemas`
 are in [Migrations](migrations.md#history-table).
 
+`ignore_missing` and `allow_out_of_order` are the defaults for `rowx migrate`, and are also used by the drift gate
+(`ignore_missing` lets `missing` pass), `--scratch` and the test plugin's template build. A CLI flag overrides the
+config, which overrides inference. `dir` is relative to `pyproject.toml`, while `--source` is relative to the cwd.
+Without `[tool.rowx.migrate]`, `rowx migrate` defaults to `migrations/`, and `migrate add` prints a one-line tip.
+
 ## Migrate and database commands
 
 ```text
-rowx migrate add <description> [--reversible | --simple] [--timestamp | --sequential]
-rowx migrate run    [--target-version V] [--dry-run] [--allow-out-of-order] [--ignore-missing]
-rowx migrate revert [--target-version V] [--dry-run]
-rowx migrate info
-rowx database create | drop [--force] [-y] | reset [--force] [-y] | setup
+rowx migrate add <description> [--reversible | --simple] [--timestamp | --sequential] [--source DIR]
+rowx migrate run    [--target-version V] [--dry-run] [--allow-out-of-order] [--ignore-missing] [--source DIR]
+rowx migrate revert [--target-version V | --all] [--dry-run] [--ignore-missing] [--source DIR]
+rowx migrate skip   [--target-version V] [--dry-run] [--allow-out-of-order] [--ignore-missing] [--source DIR]
+rowx migrate info   [--output-format text|json] [--source DIR]
+rowx database create | drop [--force] [-y] | reset [--force] [-y] | setup   # reset and setup also take --source DIR
 ```
 
 The handlers are `check/migrate.py` (`migrate`) and `check/database.py` (`database`), so `rowx.check` is the CLI
@@ -86,7 +94,8 @@ package. Both import `rowx.postgres` and run the same [`Migrator`](migrations.md
 
 - **Database URL.** Every command finds it as `check` does: `--database-url`, else the variable named by
   `database_url_env`. `--config` and the upward search for `pyproject.toml` also work as for `check`. The DSN and
-  password are never printed.
+  password are never printed. `--connect-timeout SECONDS` (default 10) on `migrate` and `database` retries connection
+  refusals and 57P03 (starting up) until it expires. `migrate add` needs no URL.
 - **`migrate add`** creates the file or files in `dir`, creating the directory if needed, and needs no database.
   - *Versioning.* Unless a flag or `versioning` says otherwise, it is inferred by sqlx's rule: if the last two versions
     differ by 1, or the only version is 0 or 1, the new version is sequential (the last plus 1). Otherwise it is a
@@ -94,38 +103,63 @@ package. Both import `rowx.postgres` and run the same [`Migrator`](migrations.md
   - *Kind.* Unless a flag or `kind` says otherwise, it is the kind of the latest migration (simple when there is none).
     `--reversible` writes `<VERSION>_<description>.up.sql` and `.down.sql`, and `--simple` writes one `.sql` file.
   - The description has spaces replaced with `_`.
-- **`migrate run`, `revert` and `info`** print one line per migration, for example
+- **`migrate run`, `revert`, `skip` and `info`** print one line per migration, for example
   `Applied 20261029120000/migrate create users (12.3ms)`.
   - `run` maps to `Migrator.run`: `--target-version` is `target`, and the flags set `allow_out_of_order` and
     `ignore_missing`.
-  - `revert` maps to `Migrator.undo`. With no `--target-version` it reverts only the latest migration; with one, it
-    reverts every version above it, and `0` reverts all.
+  - `revert` maps to `Migrator.revert`. With no `--target-version` it reverts only the latest migration; with one, it
+    reverts every version above it, and `--all` reverts everything. `--all` with `--target-version` is a usage error
+    (exit 2). `--ignore-missing` is accepted, but a missing version in range still fails
+    ([Plan rules](migrations.md#plan-rules)).
+  - `skip` maps to `Migrator.skip` and follows `run`'s rules and flags.
   - `--dry-run` prints the lines the command would print (with a `Would apply` or `Would revert` verb), changes nothing
     and creates no history table.
-  - `info` prints one line per version with its state, from `Migrator.info`.
+  - `info` prints one line per version with its state, from `Migrator.info`. `--output-format json` writes a JSON array
+    of `MigrationStatus` objects (checksums in hex, ISO timestamps, `execution_time` in nanoseconds or `null`). `info`
+    exits 0 even when it reports drift.
   - They exit **0** on success and **2** on any error (a `MigrateError`, a usage or config error, or an unreachable
     database), matching `check`'s exit-2 class. There is no exit 1.
-- **`database`** connects to the **maintenance database**: `postgres`, or `template1` when the target database is itself
-  named `postgres` (as `createdb` does). The target name comes from the URL, and names are quoted identifiers.
-  - `create` creates the database. It is an error if it exists.
-  - `drop` drops it, and `reset` drops and creates it. Both ask for confirmation on a TTY, and need `-y` otherwise.
-  - `--force` uses `DROP DATABASE … WITH (FORCE)`, which disconnects other sessions.
+- **`database`** connects to a **maintenance database** chosen by a pure function of the URL's options and the target
+  (`--scratch` and the test plugin use the same rule):
+  - the URL's own database, unless that is the target;
+  - otherwise `postgres`, or `template1` when the target is itself named `postgres` (as `createdb` does);
+  - a URL without a dbname targets the user name;
+  - on a connection failure with 3D000 or 42501, `postgres` falls back to `template1`, for managed providers where
+    `postgres` is missing or not allowed.
+
+  Names are quoted identifiers.
+  - `create` creates the database. If it exists, it prints `Database '<name>' already exists` and exits 0 (shipped
+    behaviour, so `setup`-style scripts are idempotent).
+  - `drop` drops it. `reset` drops and creates it, then runs every migration, as `setup` does. Both prompt on a TTY
+    (default No; only `y` or `yes` confirms), and need `-y` otherwise.
+  - `--force` uses `DROP DATABASE … WITH (FORCE)`, which disconnects other sessions. When the role lacks the privilege,
+    the error says that it needs `pg_signal_backend` or ownership of the database.
   - `setup` runs `create` when the database is missing, then `migrate run`.
   - They exit 0 or 2 as above.
 
 ## Drift gate and `--scratch`
 
-- **Drift gate.** When `[tool.rowx.migrate]` is configured, `rowx check` reads the history table inside its read-only
+- **Drift gate.** When `[tool.rowx.migrate]` is configured, `rowx check` reads the history table in a read-only checker
   session before describing anything. If any migration is pending, modified, missing or dirty, it exits 2 with a
   summary, for example: "database is 2 migrations behind `migrations/`: …; run `rowx migrate run` or
-  `rowx check --scratch`". The read creates nothing: a missing history table counts as every migration pending.
-  `--no-drift-check` skips the gate.
+  `rowx check --scratch`". `--no-drift-check` skips the gate.
+  - It runs before any describe, and whether or not any queries were found. The checker opens one `connect_checker`
+    session, runs `info`, and closes it. `info` takes no lock and creates nothing: a missing history table counts as
+    every migration pending, and the gate never waits behind a running deploy.
+  - `missing` passes when config `ignore_missing` is set.
+  - stdout stays empty, as with every exit-2 failure.
+  - A `MigrationSourceError` exits 2 naming the file. A role without `SELECT` on the history table (42501) exits 2 with
+    "grant SELECT on `<table>` to the checker role".
 - **`--scratch`.** The configured URL is used as a **server** URL.
-  - *Naming and creation.* The checker creates `rowx_check_<hex>` (`TEMPLATE template0`).
-  - *Migrating.* It runs the migrations in that database as the connecting role.
+  - *Naming and creation.* The checker creates `rowx_check_<16 hex>` (`TEMPLATE template0`), tagged with
+    `COMMENT ON DATABASE 'rowx:<pid>@<host>:<unix-ts>'`.
+  - *Migrating.* It runs the migrations in that database as the connecting role, using config `ignore_missing` and
+    `allow_out_of_order`.
   - *Checking.* It then opens its usual [read-only session](nullability.md#interface-and-checker-session) on that
-    database for the run.
-  - *Cleanup.* The scratch database is dropped `WITH (FORCE)` on **every** exit path, including errors and Ctrl-C.
+    database for the run, through a URL re-rendered by the Rust DSN builder.
+  - *Cleanup.* The scratch database is dropped `WITH (FORCE)` on **every** exit path, including errors and Ctrl-C. At
+    startup, the checker also sweeps `rowx_check_*` databases whose tag is over an hour old and which have no
+    sessions, ignoring errors, so a SIGKILLed or cancelled run doesn't leak its database.
   - *Requirements.* The role needs `CREATEDB`. The drift gate doesn't apply, because the database is built from the
     files.
   - If `[tool.rowx.migrate]` is not configured, `--scratch` is a usage error (exit 2).

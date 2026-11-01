@@ -208,32 +208,43 @@ class Transaction:                                         # an Executor
 
 ```python
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Migration:
+class Migration:                                           # one entry per version
     version: int
     description: str
-    kind: Literal["simple", "up", "down"]
-    checksum: bytes                                        # SHA-384 of the raw file bytes
+    kind: Literal["simple", "reversible"]
+    path: Path                                             # the simple file, or the .up.sql
+    down_path: Path | None                                 # the .down.sql of a reversible migration
+    checksum: bytes                                        # SHA-384 of the up file's raw bytes
+    down_checksum: bytes | None
     no_transaction: bool
-    path: Path
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MigrationResult:
+    migration: Migration
+    elapsed: timedelta | None                              # None for a dry run or a skip
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class MigrationStatus:
     version: int
     description: str
     state: Literal["applied", "pending", "modified", "missing", "dirty"]
+    kind: Literal["simple", "reversible"] | None = None    # None when the migration is missing locally
     installed_on: datetime | None = None                   # applied (and modified, dirty) rows
-    execution_time: timedelta | None = None
+    execution_time: timedelta | None = None                # None when not applied, or recorded as -1
+    local_checksum: bytes | None = None
+    applied_checksum: bytes | None = None
 
 class Migrator:
     def __init__(self, path: str | PathLike[str], /, *, table: str = "_rowx_migrations",
                  create_schemas: Iterable[str] = (), locking: bool = True, ignore_missing: bool = False,
                  allow_out_of_order: bool = False) -> None: ...
-    migrations: tuple[Migration, ...]                      # property; sorted by (version, kind)
+    path: Path; migrations: tuple[Migration, ...]          # properties; migrations sorted by version
     async def run(self, executor: Connection | Pool, /, *, target: int | None = None,
-                  dry_run: bool = False) -> tuple[MigrationStatus, ...]: ...
-    async def undo(self, executor: Connection | Pool, /, *, target: int,
-                   dry_run: bool = False) -> tuple[MigrationStatus, ...]: ...
-    async def skip(self, executor: Connection | Pool, /, *, target: int | None = None) -> tuple[MigrationStatus, ...]: ...
+                  dry_run: bool = False) -> tuple[MigrationResult, ...]: ...
+    async def revert(self, executor: Connection | Pool, /, *, target: int | None = None, all: bool = False,
+                     dry_run: bool = False) -> tuple[MigrationResult, ...]: ...
+    async def skip(self, executor: Connection | Pool, /, *, target: int | None = None,
+                   dry_run: bool = False) -> tuple[MigrationResult, ...]: ...
     async def info(self, executor: Connection | Pool, /) -> tuple[MigrationStatus, ...]: ...
 ```
 
@@ -242,8 +253,8 @@ class Migrator:
 | Module | Exports |
 |---|---|
 | `rowx` | `query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor`, errors |
-| `rowx.postgres` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `RESET_QUERY`, and the value types `Range`, `Interval`, `Money`, `Cube`, `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle` (added by the type-parity features, [Type mapping](type-mapping.md)), plus `Migrator`, `Migration` and `MigrationStatus` ([Migrations](migrations.md)) |
-| `rowx.errors` | adds `PoolTimeoutError(InterfaceError)`, and `MigrateError(Error)` with its subclasses ([Migrations](migrations.md)) |
+| `rowx.postgres` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `RESET_QUERY`, and the value types `Range`, `Interval`, `Money`, `Cube`, `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle` (added by the type-parity features, [Type mapping](type-mapping.md)), plus `Migrator`, `Migration`, `MigrationStatus` and `MigrationResult` ([Migrations](migrations.md)) |
+| `rowx.errors` | adds `PoolTimeoutError(InterfaceError)`, and `MigrateError(Error)` with its subclasses ([Migrations](migrations.md)); all are re-exported from `rowx` |
 | `rowx.testing` | opt-in pytest plugin: `rowx_database_url`, `rowx_connection`, `rowx_pool` ([Test plugin](testing.md#test-plugin-rowxtesting)) |
 
 - **Hard move, no aliases.** `rowx.connect` and `rowx.Connection` are removed, and `rowx.ping` is removed
@@ -265,14 +276,22 @@ class Migrator:
 - **`Transaction`**: semantics are in [Transactions](driver.md#transactions).
 - **`Migrator`** is constructed synchronously and resolves and validates the files immediately, with no database IO, so
   a bad file fails at startup. Its semantics are in [Migrations](migrations.md).
-  - `run`, `undo`, `skip` and `info` take a `Connection` or a `Pool`, claim one connection for the whole operation, and
-    raise `InterfaceError` for a `Transaction`.
-  - They return one `MigrationStatus` per migration that the call applied, reverted or skipped, in the order it
-    happened; `info` returns one per version. With `dry_run=True` nothing is executed and the statuses are those the
-    call would produce.
-  - `target` is a version: `run(target=None)` applies everything, and `undo` requires a `target`, where `0` means all.
-  - `table` is parsed into one or two quoted identifiers, and anything else raises `ValueError`.
-  - `Migration` and `MigrationStatus` are frozen, slotted, keyword-only dataclasses.
+  - The path is resolved against the cwd. A missing path, or one that isn't a directory, raises `MigrationSourceError`;
+    an empty directory is valid.
+  - `run`, `revert`, `skip` and `info` take a `Connection` or a `Pool`, claim one connection for the whole operation,
+    and raise `InterfaceError` for a `Transaction` or a `Connection` with an open transaction.
+  - `run`, `revert` and `skip` return one `MigrationResult` per migration that the call applied, reverted or skipped,
+    in the order it happened. `elapsed` is `None` for a dry run or a skip. With `dry_run=True` nothing is executed
+    and the results are those the call would produce. `info` returns one `MigrationStatus` per version.
+  - `target` is a version: `run(target=None)` applies everything. `revert(target=None)` reverts the latest applied
+    version only, `revert(target=V)` every applied version above `V`, and `revert(all=True)` everything. `target` with
+    `all`, an unknown target and a target above the latest applied version are `ValueError`s.
+  - **`revert` replaces `undo`**, a hard rename with no alias, because 0.1.0 is untagged.
+  - `table` and `create_schemas` follow Postgres identifier rules ([History table](migrations.md#history-table)), and
+    anything invalid raises `ValueError`.
+  - `Migration` has one entry per version: a reversible pair is a single `Migration` with `down_path` and
+    `down_checksum`. `checksum` is the up file's, and the down checksum is never compared against the database.
+  - `Migration`, `MigrationResult` and `MigrationStatus` are frozen, slotted, keyword-only dataclasses.
 - **Pool operations never raise `ConnectionBusyError`**: waiting longer than `acquire_timeout` raises
   `PoolTimeoutError`, and a closed pool raises `InterfaceError`.
 
@@ -512,13 +531,15 @@ rowx.Error(Exception)
 ├── RowShapeError           # arity mismatch / NULL in non-nullable position
 ├── DecodeError             # value can't be represented as the Python type (infinity, interval months, …)
 ├── EncodeError             # Python value not accepted for the param's type (Type mapping); names "$n" and both types
-└── MigrateError            # Migrator failures; subclasses carry .version where it applies
-    ├── MigrationSourceError    # bad filename, duplicate version, unpaired up/down, non-UTF-8 file, undo without .down.sql
-    ├── MigrationChecksumError  # an applied migration's file changed
-    ├── MigrationMissingError   # an applied migration has no local file
-    ├── MigrationOrderError     # a pending version is below the highest applied one, or a bad target
-    ├── DirtyMigrationError     # a history row with success = false
-    └── MigrationFailedError    # the file failed; __cause__ is the server's DatabaseError
+└── MigrateError            # Migrator failures; typed attributes per subclass
+    ├── MigrationSourceError    # .path .version: bad filename, duplicate version, unpaired up/down, non-UTF-8 file,
+    │   │                       # missing or non-directory path
+    │   └── IrreversibleMigrationError  # .version: revert reaches a simple migration
+    ├── MigrationChecksumError  # .version .local_checksum .applied_checksum: an applied migration's file changed
+    ├── MigrationMissingError   # .versions (tuple): applied migrations with no local file
+    ├── MigrationOrderError     # .version .latest: a pending version is below the highest applied one
+    ├── DirtyMigrationError     # .version: a history row with success = false
+    └── MigrationFailedError    # .version .path .dirty .applied .error: the file failed; __cause__ is .error
 ```
 
 - **Construction-time misuse** raises a plain `TypeError` from `__init__`. Examples: a
@@ -526,8 +547,14 @@ rowx.Error(Exception)
 - **Fetch-time row-type problems** raise `InterfaceError`.
 - `DatabaseError.sqlstate` is a 5-character `str`, and `.position` is an `int | None`
   holding the 1-based character position.
-- **Migration errors** ([Migrations](migrations.md)) are all `MigrateError`s and carry `.version` where it applies. A
-  server failure while a file runs is `MigrationFailedError`, with the `DatabaseError` as `__cause__`. Misuse (a
-  `Transaction` argument, an invalid `table`) is `InterfaceError` or `ValueError`.
+- **Migration errors** ([Migrations](migrations.md)) are all `MigrateError`s, defined in `rowx.errors` and re-exported
+  from `rowx` (each is in `__all__`). Each keeps keyword constructors and pickles as `DatabaseError` does.
+  - A server failure while a migration file runs is `MigrationFailedError(version, path, dirty, applied, error)`.
+    `error` is the `DatabaseError` (also `__cause__`), `dirty` says whether a history row was left `success = false`,
+    and `applied` is the `tuple[MigrationResult, ...]` completed before the failure. A failure in the lock or
+    history-table SQL is a plain `DatabaseError`.
+  - A revert that reaches a simple migration raises `IrreversibleMigrationError` before anything is reverted.
+  - Misuse (a `Transaction` argument) is `InterfaceError`; an invalid `table`, `create_schemas` entry or target is
+    `ValueError`.
 - Sqlstate-specific subclasses are deferred.
 - No error message or `repr` may include the DSN password.
