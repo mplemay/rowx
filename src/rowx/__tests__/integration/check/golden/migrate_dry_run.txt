@@ -1,0 +1,2 @@
+Would apply 1/migrate create cli a
+Would apply 2/migrate create cli b

@@ -1,3 +1,4 @@
+import os
 import tomllib
 from dataclasses import dataclass, field
 from difflib import get_close_matches
@@ -22,12 +23,27 @@ DEFAULT_EXCLUDE: Final[tuple[str, ...]] = (
     "build",
     "dist",
 )
-KEYS: Final[tuple[str, ...]] = ("include", "exclude", "database_url_env", "statement_timeout")
+KEYS: Final[tuple[str, ...]] = ("include", "exclude", "database_url_env", "statement_timeout", "migrate")
+MIGRATE_KEYS: Final[tuple[str, ...]] = ("dir", "table", "create_schemas", "versioning", "kind")
+DEFAULT_MIGRATE_DIR: Final[str] = "migrations"
+DEFAULT_MIGRATE_TABLE: Final[str] = "_rowx_migrations"
+VERSIONINGS: Final[tuple[str, ...]] = ("inferred", "timestamp", "sequential")
+KINDS: Final[tuple[str, ...]] = ("inferred", "simple", "reversible")
 DURATION_UNITS_MS: Final[dict[str, int]] = {"ms": 1, "s": 1000, "min": 60_000}
 
 
 class ConfigError(Exception):
     pass
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class MigrateConfig:
+    # relative to pyproject.toml
+    dir: str = DEFAULT_MIGRATE_DIR
+    table: str = DEFAULT_MIGRATE_TABLE
+    create_schemas: tuple[str, ...] = ()
+    versioning: str = "inferred"
+    kind: str = "inferred"
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -39,6 +55,8 @@ class Config:
     database_url_env: str = DEFAULT_DATABASE_URL_ENV
     statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS
     source: Path | None = field(default=None)
+    # None when `[tool.rowx.migrate]` is absent; an empty table is configured
+    migrate: MigrateConfig | None = None
 
     @property
     def all_excludes(self) -> tuple[str, ...]:
@@ -101,7 +119,46 @@ def _load(path: Path) -> Config:
             else DEFAULT_STATEMENT_TIMEOUT_MS
         ),
         source=path,
+        migrate=_migrate(path, table["migrate"]) if "migrate" in table else None,
     )
+
+
+def database_url(config: Config, url: str | None) -> str:
+    return url or os.environ.get(config.database_url_env) or ""
+
+
+def _migrate(path: Path, raw: object) -> MigrateConfig:
+    if not isinstance(raw, dict):
+        msg = f"{path}: [tool.rowx.migrate] must be a table"
+        raise ConfigError(msg)
+    table: dict[str, object] = {str(key): value for key, value in raw.items()}
+    for key in table:
+        if key not in MIGRATE_KEYS:
+            hint = f" (did you mean {close[0]!r}?)" if (close := get_close_matches(key, MIGRATE_KEYS, n=1)) else ""
+            msg = (
+                f"{path}: unknown key {key!r} in [tool.rowx.migrate]{hint}; expected one of: {', '.join(MIGRATE_KEYS)}"
+            )
+            raise ConfigError(msg)
+    return MigrateConfig(
+        dir=_string(path, table, "dir", DEFAULT_MIGRATE_DIR),
+        table=_string(path, table, "table", DEFAULT_MIGRATE_TABLE),
+        create_schemas=_strings(path, table, "create_schemas", ()),
+        versioning=_choice(path, table, "versioning", VERSIONINGS),
+        kind=_choice(path, table, "kind", KINDS),
+    )
+
+
+def _choice(path: Path, table: dict[str, object], key: str, choices: tuple[str, ...]) -> str:
+    value = table.get(key, choices[0])
+    if not isinstance(value, str) or value not in choices:
+        hint = (
+            f" (did you mean {close[0]!r}?)"
+            if isinstance(value, str) and (close := get_close_matches(value, choices, n=1))
+            else ""
+        )
+        msg = f"{path}: invalid {key} {value!r} in [tool.rowx.migrate]{hint}; expected one of: {', '.join(choices)}"
+        raise ConfigError(msg)
+    return value
 
 
 def _duration(path: Path, value: object) -> int:
