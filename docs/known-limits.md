@@ -36,3 +36,27 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
 - **Extension types are verified once per statement.** The owning extension of `citext`, `hstore`, `ltree`, `lquery` and
   `cube` is checked when a statement is prepared. `DROP EXTENSION` or `ALTER EXTENSION` while a connection holds a
   cached statement is not noticed until that statement is prepared again.
+
+## Migration limits
+
+- **`-- no-transaction` is still one implicit transaction.** The file is sent as a single simple-protocol query, so
+  Postgres runs a multi-statement file as one transaction block. A statement that can't run in one
+  (`CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `REINDEX ... CONCURRENTLY`, `VACUUM`) must be the only
+  statement in its file, and an enum value from `ALTER TYPE ... ADD VALUE` can't be used in the same file unless the
+  file commits in between with its own `BEGIN` and `COMMIT`.
+- **PgBouncer in transaction mode is unsupported.** The migration lock is a session-level advisory lock, which a
+  transaction-mode pooler doesn't keep. Migrate over a direct or session-mode connection.
+- **A file that ends rowx's transaction is not detected.** A transactional file containing `COMMIT` or `ROLLBACK` runs,
+  but what follows it is outside the transaction rowx opened, and the history row is written after the fact. Mark such
+  files `-- no-transaction`.
+- **Migrations don't set timeouts.** `statement_timeout` and `lock_timeout` come from the role, the database or the URL.
+  `SET LOCAL` works in a transactional file but can't share a file with `CREATE INDEX CONCURRENTLY`.
+- **A `SET` in a file outlives it on a `Connection`.** A session-level `SET` (such as `search_path`) stays on that
+  connection after the run, until a pool's reset clears it. Use `SET LOCAL`, or a schema-qualified `table`.
+- **A failed run reports no partial progress.** `run` returns nothing when it raises, so the `Applied` lines of
+  migrations that committed before the failing one are not printed. `rowx migrate info` shows the state.
+- **Table names.** A `.` always separates the schema from the table, so a name that contains a dot can't be expressed.
+- **`rowx check` and `rowx.testing` execute migration files.** Only with `--scratch`, and only in the database they
+  create. Migration files are trusted code.
+- **The test plugin is asyncio only.** Trio is unsupported, and roles created by a test are cluster-wide, so a database
+  clone doesn't isolate them.

@@ -1,0 +1,19 @@
+[project]
+name = "rowx-example-migrations"
+version = "0.0.0"
+description = "A small app with SQL file migrations, a drift-checked schema and migrated test databases"
+requires-python = ">=3.14"
+dependencies = ["rowx"]
+
+[tool.rowx]
+include = ["."]
+database_url_env = "DATABASE_URL"
+statement_timeout = "10s"
+
+# its presence turns on the drift gate, `rowx check --scratch` and the test plugin
+[tool.rowx.migrate]
+dir = "migrations"
+
+# pytest's rootdir decides where the plugin looks for [tool.rowx], so this table keeps it here
+[tool.pytest.ini_options]
+pythonpath = ["."]
