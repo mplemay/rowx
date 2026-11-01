@@ -18,7 +18,7 @@ from rowx.check.sourcemap import SourceMap, SourceMapper
 from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Awaitable, Callable, Iterable, Iterator
     from pathlib import Path
 
     from rowx.check.config import Config
@@ -465,7 +465,15 @@ def _collect(
     return sites, reports, sources
 
 
-async def run_check(config: Config, files: Iterable[Path], dsn: str | None, jobs: int) -> RunResult:
+# `gate` runs once, before anything is described, and only when there is something to describe
+async def run_check(
+    config: Config,
+    files: Iterable[Path],
+    dsn: str | None,
+    jobs: int,
+    *,
+    gate: Callable[[str], Awaitable[int | None]] | None = None,
+) -> RunResult:
     stats = Statistics()
     sites, reports, sources = _collect(config, files, stats)
     statements = sorted({site.sourcemap.sql for site in sites})
@@ -474,6 +482,8 @@ async def run_check(config: Config, files: Iterable[Path], dsn: str | None, jobs
         if dsn is None or not dsn.strip():
             msg = f"no database URL; pass --database-url or set ${config.database_url_env}"
             raise CheckError(msg)
+        if gate is not None:
+            stats.migrations = await gate(dsn)
         outcomes = await describe_all(dsn, statements, jobs, config.statement_timeout_ms)
         for site in sites:
             reports.extend(_evaluate(site, outcomes[site.sourcemap.sql]))

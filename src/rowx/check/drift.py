@@ -2,7 +2,6 @@ from collections import Counter
 from typing import TYPE_CHECKING, Final
 
 from rowx._core.postgres import connect_checker
-from rowx.check.config import Config, database_url
 from rowx.check.migrate import load_migrator, resolve_target
 from rowx.check.runner import CheckError, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
@@ -11,6 +10,7 @@ from rowx.postgres import Connection
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from rowx.check.config import Config
     from rowx.postgres import MigrationStatus, Migrator
 
 DRIFT_STATES: Final[tuple[str, ...]] = ("pending", "modified", "missing", "dirty")
@@ -49,13 +49,9 @@ async def read_history(migrator: Migrator, conn: Connection) -> tuple[MigrationS
 
 
 # returns the number of migrations checked, or None when the project has no `[tool.rowx.migrate]`
-async def check_drift(config: Config, url: str | None) -> int | None:
+async def check_drift(config: Config, dsn: str) -> int | None:
     if config.migrate is None:
         return None
-    dsn = database_url(config, url)
-    if not dsn.strip():
-        msg = f"no database URL; pass --database-url or set ${config.database_url_env}"
-        raise CheckError(msg)
     target = resolve_target(config, None)
     migrator = load_migrator(target)
     try:

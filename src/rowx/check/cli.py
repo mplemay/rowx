@@ -2,11 +2,12 @@ import asyncio
 import os
 import sys
 from argparse import ArgumentParser, Namespace
+from functools import partial
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rowx.check.config import Config, ConfigError, database_url, load_config
+from rowx.check.config import ConfigError, database_url, load_config
 from rowx.check.database import add_parsers as add_database_parsers, handle as handle_database
 from rowx.check.drift import DriftError, check_drift
 from rowx.check.migrate import add_parsers, handle as handle_migrate
@@ -55,14 +56,6 @@ def _statistics(result: RunResult) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def _gated(config: Config, files: list[Path], dsn: str, jobs: int, *, drift: bool) -> RunResult:
-    # the gate reads the history before anything is described
-    migrations = await check_drift(config, dsn) if drift else None
-    result = await run_check(config, files, dsn, jobs)
-    result.statistics.migrations = migrations
-    return result
-
-
 def _check(
     paths: list[Path], config_file: Path | None, url: str | None, jobs: int, *, drift: bool
 ) -> tuple[RunResult, Path]:
@@ -71,7 +64,8 @@ def _check(
     files = discover_files(config, cwd, paths)
     dsn = database_url(config, url)
     try:
-        return asyncio.run(_gated(config, files, dsn, jobs, drift=drift)), config.root
+        gate = partial(check_drift, config) if drift and config.migrate is not None else None
+        return asyncio.run(run_check(config, files, dsn, jobs, gate=gate)), config.root
     except DriftError:
         raise
     except CheckError as error:

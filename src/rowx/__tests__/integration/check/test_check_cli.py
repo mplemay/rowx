@@ -351,6 +351,17 @@ def test_without_migrate_config_there_is_no_gate(
     assert "migrations checked" not in out
 
 
+def test_drift_gate_skipped_when_nothing_is_described(
+    drift_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # with no query to describe there is no checker session, so neither a URL nor an up-to-date database is needed
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    _write(drift_project, "q.py", "x = 1\n")
+    code, out, err = _run(capsys, "q.py", "--statistics")
+    assert (code, err) == (0, "")
+    assert "migrations checked" not in out
+
+
 @pytest.mark.usefixtures("drift_project")
 def test_drift_password_never_appears(capsys: pytest.CaptureFixture[str]) -> None:
     url = "postgresql://someone:hunter2secret@127.0.0.1:1/db?connect_timeout=2"
