@@ -7,7 +7,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
-use rowx_core::migrate::{Migration, MigrationKind, MigrationStatus, PlanOptions, resolve};
+use rowx_core::migrate::{
+    Migration, MigrationKind, MigrationStatus, PlanOptions, RevertTarget, SchemaName, TableName,
+    resolve,
+};
 use rowx_core::state::Claim;
 use rowx_postgres::cancel::{self, Cancel, Hook};
 use rowx_postgres::conn::Connection as PgConnection;
@@ -16,7 +19,7 @@ use rowx_postgres::migrate::{self as pg, MigrateConfig, MigrateError, MigrationD
 use rowx_postgres::pool::Pool as PgPool;
 
 use crate::conn::Connection;
-use crate::errors::{MigrateFailure, PgError, migrate_to_py_err, to_py_err};
+use crate::errors::{MigrateFailure, PgError, name_to_py_err, to_py_err};
 use crate::exec::{Access, watch, watch_flag};
 use crate::pool::Pool;
 
@@ -24,7 +27,7 @@ use crate::pool::Pool;
 enum Op {
     // the target, and whether it is a dry run
     Run(Option<i64>, bool),
-    Undo(Option<i64>, bool),
+    Undo(RevertTarget, bool),
     Skip(Option<i64>),
     Info,
 }
@@ -113,10 +116,7 @@ fn note(access: &Access, cancel: &Cancel, err: &MigrateError) {
 fn may_have_changed(op: Op, result: &Result<Vec<Status>, MigrateError>) -> bool {
     match (op, result) {
         (Op::Info | Op::Run(_, true) | Op::Undo(_, true), _)
-        | (
-            _,
-            Err(MigrateError::Plan(_) | MigrateError::Source(_) | MigrateError::InvalidTable(_)),
-        ) => false,
+        | (_, Err(MigrateError::Plan(_) | MigrateError::Source(_))) => false,
         (_, Ok(statuses)) => !statuses.is_empty(),
         (_, Err(MigrateError::Failed { .. } | MigrateError::Connection(_))) => true,
     }
@@ -267,14 +267,20 @@ impl Migrator {
     fn new(
         py: Python<'_>,
         path: &Bound<'_, PyAny>,
-        table: String,
+        table: &str,
         create_schemas: Vec<String>,
         locking: bool,
         ignore_missing: bool,
         allow_out_of_order: bool,
     ) -> PyResult<Self> {
         let path: PathBuf = path.extract()?;
-        pg::quote_table(&table).map_err(|e| migrate_to_py_err(py, &e))?;
+        // a bad name is a ValueError before any IO
+        let table = TableName::parse(table).map_err(|e| name_to_py_err(&e))?;
+        let create_schemas = create_schemas
+            .into_iter()
+            .map(|schema| SchemaName::parse(&schema))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| name_to_py_err(&e))?;
         // reading and checksumming the files is IO, so it runs without the GIL
         let migrations = py
             .detach(|| resolve(&path))
@@ -327,14 +333,22 @@ impl Migrator {
         self.start(py, executor, Op::Run(target, dry_run))
     }
 
-    #[pyo3(signature = (executor, target, dry_run=false))]
+    // `revert_all` reverts everything, otherwise `None` is the latest applied version only and
+    // `Some(V)` every applied version above `V`
+    #[pyo3(signature = (executor, target, revert_all=false, dry_run=false))]
     fn undo<'py>(
         &self,
         py: Python<'py>,
         executor: &Bound<'py, PyAny>,
         target: Option<i64>,
+        revert_all: bool,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let target = match (revert_all, target) {
+            (true, _) => RevertTarget::All,
+            (false, None) => RevertTarget::Latest,
+            (false, Some(version)) => RevertTarget::Above(version),
+        };
         self.start(py, executor, Op::Undo(target, dry_run))
     }
 

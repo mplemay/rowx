@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use common::TestResult;
 use rowx_core::migrate::{
-    Migration, MigrationKind, MigrationStatus, PlanError, PlanOptions, checksum,
+    Migration, MigrationKind, MigrationStatus, PlanError, PlanOptions, RevertTarget, SchemaName,
+    TableName, checksum,
 };
 use rowx_postgres::admin::{create_database, drop_database};
 use rowx_postgres::cancel::{Hook, spawn};
@@ -118,8 +119,16 @@ fn reversible(version: i64, up: &str, down: &str) -> [Migration; 2] {
     ]
 }
 
+fn table(name: &str) -> TableName {
+    TableName::parse(name).unwrap_or_else(|e| unreachable!("{e}"))
+}
+
+fn schema(name: &str) -> SchemaName {
+    SchemaName::parse(name).unwrap_or_else(|e| unreachable!("{e}"))
+}
+
 fn config() -> MigrateConfig {
-    MigrateConfig::new(TABLE)
+    MigrateConfig::new(table(TABLE))
 }
 
 fn target(version: i64) -> PlanOptions {
@@ -274,7 +283,7 @@ async fn a_failure_without_locking_still_leaves_no_open_transaction() -> TestRes
         ),
         [1]
     );
-    let err = undo(&conn, &unlocked, &[up, down], Some(0), false).await;
+    let err = undo(&conn, &unlocked, &[up, down], RevertTarget::All, false).await;
     assert!(
         matches!(err, Err(MigrateError::Failed { version: 1, .. })),
         "{err:?}"
@@ -358,7 +367,7 @@ async fn a_file_that_changes_search_path_keeps_the_history_table() -> TestResult
 
     // a fresh session, so the unqualified name resolves to `public` again
     let mut other = db.connect().await?;
-    let reverted = undo(&other, &config(), &all, Some(0), false).await?;
+    let reverted = undo(&other, &config(), &all, RevertTarget::All, false).await?;
     assert_eq!(
         reverted
             .iter()
@@ -539,7 +548,7 @@ async fn undo_reverts_newest_first_to_a_target_and_to_zero() -> TestResult {
     run(&conn, &config(), &all, PlanOptions::default()).await?;
 
     assert_eq!(
-        versions(undo(&conn, &config(), &all, Some(1), false).await?),
+        versions(undo(&conn, &config(), &all, RevertTarget::Above(1), false).await?),
         [3, 2]
     );
     assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
@@ -553,12 +562,12 @@ async fn undo_reverts_newest_first_to_a_target_and_to_zero() -> TestResult {
     );
 
     assert_eq!(
-        versions(undo(&conn, &config(), &all, Some(0), false).await?),
+        versions(undo(&conn, &config(), &all, RevertTarget::All, false).await?),
         [1]
     );
     assert_eq!(history(&conn, TABLE).await?.len(), 0);
     assert_eq!(
-        versions(undo(&conn, &config(), &all, Some(0), false).await?).len(),
+        versions(undo(&conn, &config(), &all, RevertTarget::All, false).await?).len(),
         0
     );
     conn.close().await;
@@ -581,17 +590,17 @@ async fn undo_without_a_target_reverts_only_the_latest_and_times_each_revert() -
     }
     run(&conn, &config(), &all, PlanOptions::default()).await?;
 
-    let reverted = undo(&conn, &config(), &all, None, false).await?;
+    let reverted = undo(&conn, &config(), &all, RevertTarget::Latest, false).await?;
     assert_eq!(versions(reverted.clone()), [5]);
     assert_eq!(reverted[0].info.status, MigrationStatus::Pending);
     assert!(reverted[0].execution_time.is_some_and(|t| t > 0));
     assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
     assert_eq!(
-        versions(undo(&conn, &config(), &all, None, false).await?),
+        versions(undo(&conn, &config(), &all, RevertTarget::Latest, false).await?),
         [1]
     );
     assert_eq!(
-        versions(undo(&conn, &config(), &all, None, false).await?).len(),
+        versions(undo(&conn, &config(), &all, RevertTarget::Latest, false).await?).len(),
         0
     );
     conn.close().await;
@@ -627,7 +636,7 @@ async fn a_dry_run_plans_like_the_real_one_and_changes_nothing() -> TestResult {
                 && d.execution_time.is_none())
     );
     assert_eq!(
-        versions(undo_dry(&conn, &config(), &all, Some(0), false).await?).len(),
+        versions(undo_dry(&conn, &config(), &all, RevertTarget::All, false).await?).len(),
         0
     );
     assert_eq!(count(&conn, &tables).await?, 0);
@@ -638,7 +647,7 @@ async fn a_dry_run_plans_like_the_real_one_and_changes_nothing() -> TestResult {
         versions(run_dry(&conn, &config(), &all, PlanOptions::default()).await?),
         [3]
     );
-    let reverting = undo_dry(&conn, &config(), &all, Some(0), false).await?;
+    let reverting = undo_dry(&conn, &config(), &all, RevertTarget::All, false).await?;
     assert_eq!(versions(reverting.clone()), [2, 1]);
     assert!(
         reverting
@@ -646,7 +655,7 @@ async fn a_dry_run_plans_like_the_real_one_and_changes_nothing() -> TestResult {
             .all(|d| d.info.status == MigrationStatus::Pending)
     );
     assert_eq!(
-        versions(undo_dry(&conn, &config(), &all, None, false).await?),
+        versions(undo_dry(&conn, &config(), &all, RevertTarget::Latest, false).await?),
         [2]
     );
     assert_eq!(history(&conn, TABLE).await?, [(1, true), (2, true)]);
@@ -665,7 +674,7 @@ async fn a_dry_run_plans_like_the_real_one_and_changes_nothing() -> TestResult {
     );
     let forward_only = [simple(1, "x"), simple(2, "y")];
     let modified = [all[0].clone(), all[1].clone(), simple(2, "changed")];
-    let err = undo_dry(&conn, &config(), &modified, Some(0), false).await;
+    let err = undo_dry(&conn, &config(), &modified, RevertTarget::All, false).await;
     assert!(
         matches!(
             err,
@@ -697,7 +706,7 @@ async fn undo_without_a_down_file_reverts_nothing() -> TestResult {
     all.push(simple(2, "CREATE TABLE b (i int)"));
     run(&conn, &config(), &all, PlanOptions::default()).await?;
 
-    let err = undo(&conn, &config(), &all, Some(0), false)
+    let err = undo(&conn, &config(), &all, RevertTarget::All, false)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -723,7 +732,7 @@ async fn a_failing_transactional_revert_keeps_the_row_and_the_schema() -> TestRe
     let all = reversible(1, "CREATE TABLE a (i int)", "DROP TABLE a; SELECT 1/0");
     run(&conn, &config(), &all, PlanOptions::default()).await?;
 
-    let err = undo(&conn, &config(), &all, Some(0), false)
+    let err = undo(&conn, &config(), &all, RevertTarget::All, false)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -753,7 +762,7 @@ async fn a_failing_no_transaction_revert_leaves_a_dirty_row() -> TestResult {
         "-- no-transaction\nDROP TABLE nope",
     );
     run(&conn, &config(), &all, PlanOptions::default()).await?;
-    let err = undo(&conn, &config(), &all, Some(0), false)
+    let err = undo(&conn, &config(), &all, RevertTarget::All, false)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -787,7 +796,7 @@ async fn a_no_transaction_revert_deletes_the_row() -> TestResult {
     );
     run(&conn, &config(), &all, PlanOptions::default()).await?;
     assert_eq!(
-        versions(undo(&conn, &config(), &all, Some(0), false).await?),
+        versions(undo(&conn, &config(), &all, RevertTarget::All, false).await?),
         [1]
     );
     assert_eq!(history(&conn, TABLE).await?.len(), 0);
@@ -840,8 +849,8 @@ async fn a_schema_qualified_table_and_create_schemas() -> TestResult {
     };
     let mut conn = db.connect().await?;
     let cfg = MigrateConfig {
-        table: "my app.history".to_owned(),
-        create_schemas: vec!["my app".to_owned(), "other".to_owned()],
+        table: table("\"my app\".history"),
+        create_schemas: vec![schema("\"my app\""), schema("other")],
         locking: true,
     };
     run(
@@ -860,10 +869,10 @@ async fn a_schema_qualified_table_and_create_schemas() -> TestResult {
         .await?,
         2
     );
-    assert_eq!(list_applied(&conn, "my app.history").await?.len(), 1);
+    assert_eq!(list_applied(&conn, &cfg.table).await?.len(), 1);
 
     // a missing schema without create_schemas is the server's error, not a silent creation
-    let bare = MigrateConfig::new("absent.history");
+    let bare = MigrateConfig::new(table("absent.history"));
     let err = run(&conn, &bare, &[], PlanOptions::default())
         .await
         .err()
@@ -873,10 +882,6 @@ async fn a_schema_qualified_table_and_create_schemas() -> TestResult {
         "{err:?}"
     );
 
-    for bad in ["a.b.c", "", "a."] {
-        let err = run(&conn, &MigrateConfig::new(bad), &[], PlanOptions::default()).await;
-        assert!(matches!(err, Err(MigrateError::InvalidTable(_))), "{bad:?}");
-    }
     conn.close().await;
     db.finish().await
 }
@@ -908,7 +913,7 @@ async fn info_creates_nothing_and_reports_every_state() -> TestResult {
         .await?,
         0
     );
-    assert_eq!(list_applied(&conn, TABLE).await?.len(), 0);
+    assert_eq!(list_applied(&conn, &table(TABLE)).await?.len(), 0);
 
     run(&conn, &cfg, &all[..1], PlanOptions::default()).await?;
     let after = info(&conn, &cfg, &all).await?;
@@ -953,7 +958,7 @@ async fn reads_a_table_and_checksums_written_by_sqlx() -> TestResult {
             12345);",
     )
     .await?;
-    let cfg = MigrateConfig::new("_sqlx_migrations");
+    let cfg = MigrateConfig::new(table("_sqlx_migrations"));
 
     let sqlx_file = Migration {
         description: "create users".to_owned(),
@@ -989,6 +994,150 @@ async fn reads_a_table_and_checksums_written_by_sqlx() -> TestResult {
             version: 20_240_101_000_000
         }))
     ));
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_mixed_case_table_resolves_to_the_unquoted_table_sqlx_created() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    // sqlx puts the configured name into its SQL unquoted, so Postgres folds it to lower case
+    conn.simple(
+        "CREATE SCHEMA MySchema;
+        CREATE TABLE MySchema.Migrations (
+            version BIGINT PRIMARY KEY,
+            description TEXT NOT NULL,
+            installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+            success BOOLEAN NOT NULL,
+            checksum BYTEA NOT NULL,
+            execution_time BIGINT NOT NULL
+        );",
+    )
+    .await?;
+    let first = simple(1, "SELECT 1");
+    conn.client()?
+        .execute(
+            "INSERT INTO myschema.migrations (version, description, success, checksum, execution_time)
+             VALUES (1, 'm1', TRUE, $1, 5)",
+            &[&first.checksum.to_vec()],
+        )
+        .await?;
+
+    let cfg = MigrateConfig::new(table("MySchema.Migrations"));
+    let all = [first, simple(2, "CREATE TABLE two (i int)")];
+    let before = info(&conn, &cfg, &all).await?;
+    assert_eq!(before[0].info.status, MigrationStatus::Applied);
+    assert_eq!(before[0].execution_time, Some(5));
+    assert_eq!(
+        versions(run(&conn, &cfg, &all, PlanOptions::default()).await?),
+        [2]
+    );
+    assert_eq!(
+        history(&conn, "myschema.migrations").await?,
+        [(1, true), (2, true)]
+    );
+    // no second, case-preserved table was created next to it
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM pg_tables WHERE tablename ILIKE 'migrations'"
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM pg_namespace WHERE nspname ILIKE 'myschema'"
+        )
+        .await?,
+        1
+    );
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_run_target_below_the_latest_applied_needs_out_of_order() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let all = [
+        simple(1, "CREATE TABLE a (i int)"),
+        simple(2, "CREATE TABLE b (i int)"),
+        simple(3, "CREATE TABLE c (i int)"),
+    ];
+    run(&conn, &config(), &all[1..], PlanOptions::default()).await?;
+    let denied = run(&conn, &config(), &all, target(1)).await;
+    assert!(
+        matches!(
+            denied,
+            Err(MigrateError::Plan(PlanError::Order {
+                pending: 1,
+                latest: 3
+            }))
+        ),
+        "{denied:?}"
+    );
+    let allowed = PlanOptions {
+        allow_out_of_order: true,
+        ..target(1)
+    };
+    assert_eq!(versions(run(&conn, &config(), &all, allowed).await?), [1]);
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn revert_targets_and_missing_versions_are_checked_before_reverting() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let [up1, down1] = reversible(1, "CREATE TABLE a (i int)", "DROP TABLE a");
+    let [up2, down2] = reversible(2, "CREATE TABLE b (i int)", "DROP TABLE b");
+    let both = [up1.clone(), down1.clone(), up2.clone(), down2.clone()];
+    run(&conn, &config(), &both, PlanOptions::default()).await?;
+
+    let too_new = undo(&conn, &config(), &both, RevertTarget::Above(3), false).await;
+    assert!(
+        matches!(
+            too_new,
+            Err(MigrateError::Plan(PlanError::TargetNotFound { target: 3 }))
+        ),
+        "{too_new:?}"
+    );
+    // with the files of version 2 gone, reverting it is a missing-file error even with ignore_missing
+    let only_first = [up1, down1];
+    let missing = undo(&conn, &config(), &only_first, RevertTarget::All, true).await;
+    assert!(
+        matches!(
+            &missing,
+            Err(MigrateError::Plan(PlanError::Missing { versions })) if versions == &[2]
+        ),
+        "{missing:?}"
+    );
+    // nothing was reverted
+    assert_eq!(history(&conn, TABLE).await?, [(1, true), (2, true)]);
+    assert_eq!(
+        versions(undo(&conn, &config(), &both, RevertTarget::Above(1), false).await?),
+        [2]
+    );
+    let beyond = undo(&conn, &config(), &both, RevertTarget::Above(2), false).await;
+    assert!(
+        matches!(
+            beyond,
+            Err(MigrateError::Plan(PlanError::TargetTooNew {
+                target: 2,
+                latest: 1
+            }))
+        ),
+        "{beyond:?}"
+    );
     conn.close().await;
     db.finish().await
 }

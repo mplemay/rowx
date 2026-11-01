@@ -144,7 +144,13 @@ class Migrator:
         target: int | None,
         dry_run: bool = False,
     ) -> tuple[MigrationStatus, ...]:
-        return await call(executor, lambda impl: self._impl.undo(impl, target, dry_run))
+        # the binding takes `all` explicitly; the legacy `target=0` keeps meaning "everything" until the
+        # `revert` API replaces `undo`
+        revert_all = target == 0
+        return await call(
+            executor,
+            lambda impl: self._impl.undo(impl, None if revert_all else target, revert_all, dry_run),
+        )
 
     async def skip(
         self,

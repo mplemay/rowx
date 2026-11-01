@@ -169,7 +169,9 @@ pub fn plan_error(py: Python<'_>, err: &PlanError) -> PyErr {
             "MigrationChecksumError",
             args,
         ),
-        PlanError::Order { .. } | PlanError::TargetNotFound { .. } => {
+        PlanError::Order { .. }
+        | PlanError::TargetNotFound { .. }
+        | PlanError::TargetTooNew { .. } => {
             build(py, &MIGRATION_ORDER_ERROR, "MigrationOrderError", args)
         }
         PlanError::MissingDown { .. } => {
