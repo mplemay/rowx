@@ -10,12 +10,12 @@ from rowx.postgres._options import ConnectOptions
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from rowx._core.postgres import Connection as ConnectionImpl, RowStream as RowStreamImpl
+    from rowx._core.postgres import Connection as ConnectionImpl, RowShape, RowStream as RowStreamImpl
     from rowx._executor import StreamHandle
     from rowx.postgres._transaction import Transaction
 
 type Hook = Callable[[Connection], Awaitable[None]]
-type StreamArgs = tuple[str, list[object], Sequence[int] | None, bool, int | None, int]
+type StreamArgs = tuple[str, list[object], Sequence[int] | None, bool, int | None, int, RowShape | None]
 
 DEFAULT_MAX_SIZE: Final[int] = 10
 DEFAULT_ACQUIRE_TIMEOUT: Final[float] = 30.0
@@ -333,11 +333,12 @@ class Pool:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
+        shape: RowShape | None,
     ) -> list[object]:
         if self._hooked:
             async with self.acquire() as conn:
-                return await conn._fetch(sql, params, mask, scalar, limit_one, arity)  # ruff: ignore[private-member-access]
-        return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity)  # ruff: ignore[private-member-access]
+                return await conn._fetch(sql, params, mask, scalar, limit_one, arity, shape)  # ruff: ignore[private-member-access]
+        return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity, shape)  # ruff: ignore[private-member-access]
 
     def _stream(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         self,
@@ -347,10 +348,11 @@ class Pool:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,
+        shape: RowShape | None,
     ) -> RowStreamImpl | PooledStream:
         if self._hooked:
-            return PooledStream(self, (sql, params, mask, scalar, arity, batch_size))
-        return self._impl._stream(sql, params, mask, scalar, arity, batch_size)  # ruff: ignore[private-member-access]
+            return PooledStream(self, (sql, params, mask, scalar, arity, batch_size, shape))
+        return self._impl._stream(sql, params, mask, scalar, arity, batch_size, shape)  # ruff: ignore[private-member-access]
 
     async def _execute(self, sql: str, params: list[object]) -> int:
         if self._hooked:

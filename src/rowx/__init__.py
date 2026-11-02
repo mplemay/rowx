@@ -16,6 +16,7 @@ from rowx.errors import (
     MigrationOrderError,
     MigrationSourceError,
     PoolTimeoutError,
+    RowConstructError,
     RowNotFound,
     RowShapeError,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "MigrationSourceError",
     "PoolTimeoutError",
     "QueryResult",
+    "RowConstructError",
     "RowNotFound",
     "RowShapeError",
     "RowStream",

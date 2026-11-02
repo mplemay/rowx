@@ -152,7 +152,7 @@ def fetch_scalar(dsn: str, sql: str, params: list[object] | None = None) -> list
     async def run() -> list[object]:
         conn = await connect(dsn)
         try:
-            return await conn._impl._fetch(sql, params or [], None, scalar=True, limit_one=True, arity=1)
+            return await conn._impl._fetch(sql, params or [], None, scalar=True, limit_one=True, arity=1, shape=None)
         finally:
             await conn.close()
 

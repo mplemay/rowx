@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 
 use crate::errors::{PgError, interface_error, to_py_err};
 use crate::exec::{self, Access, Depth, FetchArgs};
+use crate::named::RowShape;
 use crate::stream::{RowStream, StreamArgs};
 use rowx_py_core::runtime;
 
@@ -145,6 +146,7 @@ impl Connection {
         scalar: bool,
         limit_one: bool,
         arity: Option<usize>,
+        shape: Option<Py<RowShape>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let args = FetchArgs {
             sql,
@@ -152,6 +154,7 @@ impl Connection {
             scalar,
             limit_one,
             arity,
+            shape,
         };
         exec::fetch(py, &self.cancel, &self.access, params, args)
     }
@@ -168,6 +171,7 @@ impl Connection {
         scalar: bool,
         arity: Option<usize>,
         batch_size: usize,
+        shape: Option<Py<RowShape>>,
     ) -> PyResult<RowStream> {
         let args = StreamArgs {
             sql,
@@ -175,6 +179,7 @@ impl Connection {
             scalar,
             arity,
             batch_size,
+            shape,
         };
         RowStream::new(py, &self.cancel, &self.access, params, args)
     }

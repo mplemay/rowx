@@ -6,7 +6,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from types import TracebackType
 
-    from rowx._core.postgres import RowStream as RowStreamImpl
+    from rowx._core.postgres import RowShape, RowStream as RowStreamImpl
     from rowx._executor import StreamHandle
     from rowx.postgres._connection import Connection
 
@@ -73,10 +73,11 @@ class Transaction:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
+        shape: RowShape | None,
     ) -> list[object]:
         self._check_active()
         # the connection records failures, so queries run on it directly are tracked as well
-        return await self._conn._fetch(sql, params, mask, scalar, limit_one, arity)  # ruff: ignore[private-member-access]
+        return await self._conn._fetch(sql, params, mask, scalar, limit_one, arity, shape)  # ruff: ignore[private-member-access]
 
     def _stream(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         self,
@@ -86,9 +87,10 @@ class Transaction:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,
+        shape: RowShape | None,
     ) -> StreamHandle:
         self._check_active()
-        return self._conn._stream(sql, params, mask, scalar, arity, batch_size)  # ruff: ignore[private-member-access]
+        return self._conn._stream(sql, params, mask, scalar, arity, batch_size, shape)  # ruff: ignore[private-member-access]
 
     async def _execute(self, sql: str, params: list[object]) -> int:
         self._check_active()

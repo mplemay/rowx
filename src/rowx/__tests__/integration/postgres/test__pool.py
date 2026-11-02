@@ -52,7 +52,7 @@ def test_stream_created_in_acquire_and_iterated_after_it_raises(schema: str) -> 
         async with Pool(schema, max_size=1) as pool:
             async with pool.acquire() as conn:
                 stream = query[int](t"SELECT g FROM generate_series(1, 5) g").fetch(conn)
-                raw = conn._impl._stream("SELECT g FROM generate_series(1, 5) g", [], [False], True, 1, 10)  # ruff: ignore[boolean-positional-value-in-call]
+                raw = conn._impl._stream("SELECT g FROM generate_series(1, 5) g", [], [False], True, 1, 10, None)  # ruff: ignore[boolean-positional-value-in-call]
             with pytest.raises(InterfaceError):
                 _ = [row async for row in stream]
             # the next holder gets the same backend, and the stale stream cannot claim it

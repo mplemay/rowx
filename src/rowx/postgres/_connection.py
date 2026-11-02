@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from types import TracebackType
 
-    from rowx._core.postgres import Connection as ConnectionImpl
+    from rowx._core.postgres import Connection as ConnectionImpl, RowShape
     from rowx._executor import StreamHandle
     from rowx.postgres._pool import Pool
 
@@ -50,9 +50,10 @@ class Connection:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
+        shape: RowShape | None,
     ) -> list[object]:
         try:
-            return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity)  # ruff: ignore[private-member-access]
+            return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity, shape)  # ruff: ignore[private-member-access]
         except ConnectionBusyError:
             # nothing ran, so a transaction is untouched
             raise
@@ -68,8 +69,9 @@ class Connection:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,
+        shape: RowShape | None,
     ) -> StreamHandle:
-        stream = self._impl._stream(sql, params, mask, scalar, arity, batch_size)  # ruff: ignore[private-member-access]
+        stream = self._impl._stream(sql, params, mask, scalar, arity, batch_size, shape)  # ruff: ignore[private-member-access]
         # a plain connection keeps the bare stream, so only a transaction pays for the wrapper
         return TrackedStream(stream, self._note_failure) if self._tx is not None else stream
 

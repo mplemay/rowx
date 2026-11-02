@@ -23,6 +23,7 @@ class FakeImpl:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         _limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int,
+        _shape: object,
     ) -> list[object]:
         self.fetches.append((mask, scalar, arity))
         return []

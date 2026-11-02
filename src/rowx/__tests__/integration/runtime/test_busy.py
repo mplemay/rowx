@@ -19,7 +19,7 @@ POLL_LIMIT: Final[int] = 2000
 
 async def fetch(conn: ConnectionImpl, sql: str, *, scalar: bool = False) -> list[object]:
     mask = [False] if scalar else None
-    return await conn._fetch(sql, [], mask, scalar, scalar, 1 if scalar else None)
+    return await conn._fetch(sql, [], mask, scalar, scalar, 1 if scalar else None, None)
 
 
 async def select_one(conn: ConnectionImpl) -> list[object]:

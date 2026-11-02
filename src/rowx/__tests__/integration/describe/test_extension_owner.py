@@ -95,7 +95,9 @@ def finding_rules(described: Describe, leaf: str) -> list[str]:
 def fetch(dsn: str, statement: str, params: list[object]) -> object:
     async def run() -> object:
         async with await connect(dsn) as conn:
-            return (await conn._impl._fetch(statement, params, None, scalar=True, limit_one=True, arity=1))[0]
+            return (await conn._impl._fetch(statement, params, None, scalar=True, limit_one=True, arity=1, shape=None))[
+                0
+            ]
 
     return asyncio.run(run())
 
@@ -205,7 +207,7 @@ def test_statement_cache_keeps_serving_a_statement_after_the_owner_check(scratch
             return [
                 (
                     await conn._impl._fetch(
-                        "SELECT $1::ext.hstore", [{"k": str(i)}], None, scalar=True, limit_one=True, arity=1
+                        "SELECT $1::ext.hstore", [{"k": str(i)}], None, scalar=True, limit_one=True, arity=1, shape=None
                     )
                 )[0]
                 for i in range(5)

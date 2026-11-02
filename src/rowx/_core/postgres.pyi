@@ -80,6 +80,60 @@ class Describe:
     @property
     def columns(self) -> list[ColumnInfo]: ...
 
+type RowFormName = Literal["positional", "keyword", "dict", "validator"]
+type MatchingName = Literal["by_name", "positional"]
+type IssueKind = Literal[
+    "missing-column",
+    "unexpected-column",
+    "duplicate-column",
+    "ambiguous-column",
+    "column-name-mismatch",
+    "arity-mismatch",
+]
+
+class RowShape:
+    def __init__(
+        self,
+        ctor: object,
+        form: RowFormName,
+        matching: MatchingName,
+        type_name: str,
+        fields: Sequence[tuple[str, Sequence[str] | None, bool, int]],
+        /,
+        *,
+        validate: bool = True,
+    ) -> None: ...
+    @property
+    def ctor(self) -> object: ...
+    @property
+    def form(self) -> RowFormName: ...
+    @property
+    def matching(self) -> MatchingName: ...
+    @property
+    def type_name(self) -> str: ...
+
+class ShapeIssue:
+    @property
+    def kind(self) -> IssueKind: ...
+    @property
+    def columns(self) -> list[int]: ...
+    @property
+    def fields(self) -> list[int]: ...
+    @property
+    def name(self) -> str | None: ...
+    @property
+    def min(self) -> int | None: ...
+    @property
+    def max(self) -> int | None: ...
+    @property
+    def actual(self) -> int | None: ...
+
+def map_columns(
+    columns: Sequence[str],
+    fields: Sequence[tuple[Sequence[str] | None, bool]],
+    positional: bool,
+) -> tuple[list[int | None], list[ShapeIssue]]: ...
+
 class RowStream:
     async def _next(self) -> list[object]: ...
     def close(self) -> None: ...
@@ -95,6 +149,7 @@ class Connection:
         scalar: bool,
         limit_one: bool,
         arity: int | None,
+        shape: RowShape | None,
     ) -> list[object]: ...
     def _stream(
         self,
@@ -104,6 +159,7 @@ class Connection:
         scalar: bool,
         arity: int | None,
         batch_size: int,
+        shape: RowShape | None,
     ) -> RowStream: ...
     async def _execute(self, sql: str, params: list[object]) -> int: ...
     async def ping(self) -> None: ...
@@ -155,6 +211,7 @@ class Pool:
         scalar: bool,
         limit_one: bool,
         arity: int | None,
+        shape: RowShape | None,
     ) -> list[object]: ...
     def _stream(
         self,
@@ -164,6 +221,7 @@ class Pool:
         scalar: bool,
         arity: int | None,
         batch_size: int,
+        shape: RowShape | None,
     ) -> RowStream: ...
     async def _execute(self, sql: str, params: list[object]) -> int: ...
     @property

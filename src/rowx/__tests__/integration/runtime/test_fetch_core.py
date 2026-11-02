@@ -24,7 +24,7 @@ async def fetch(  # ruff: ignore[too-many-arguments]
     limit_one: bool = False,
     arity: int | None = None,
 ) -> list[object]:
-    return await conn._fetch(sql, params or [], mask, scalar, limit_one, arity)
+    return await conn._fetch(sql, params or [], mask, scalar, limit_one, arity, None)
 
 
 async def execute(conn: ConnectionImpl, sql: str) -> int:

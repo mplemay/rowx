@@ -28,7 +28,7 @@ def run_with_conn[T](dsn: str, body: Callable[[Connection], Awaitable[T]]) -> T:
 
 def read(dsn: str, sql: str, params: list[object] | None = None) -> Any:  # ruff: ignore[any-type]
     async def run(conn: Connection) -> Any:  # ruff: ignore[any-type]
-        return (await conn._impl._fetch(sql, params or [], None, scalar=True, limit_one=True, arity=1))[0]
+        return (await conn._impl._fetch(sql, params or [], None, scalar=True, limit_one=True, arity=1, shape=None))[0]
 
     return run_with_conn(dsn, run)
 
@@ -85,11 +85,17 @@ def test_money_is_read_through_a_query(schema: str) -> None:
 )
 def test_minor_units_follow_the_session_locale_without_a_stored_scale(schema: str, locale: str, scale: int) -> None:
     async def body(conn: Connection) -> tuple[object, object, object]:
-        before = (await conn._impl._fetch("SELECT '1000'::money", [], None, scalar=True, limit_one=True, arity=1))[0]
+        before = (
+            await conn._impl._fetch("SELECT '1000'::money", [], None, scalar=True, limit_one=True, arity=1, shape=None)
+        )[0]
         await conn._impl._execute(f"SET lc_monetary = '{locale}'", [])
-        after = (await conn._impl._fetch("SELECT '1000'::money", [], None, scalar=True, limit_one=True, arity=1))[0]
+        after = (
+            await conn._impl._fetch("SELECT '1000'::money", [], None, scalar=True, limit_one=True, arity=1, shape=None)
+        )[0]
         # the same connection and statement cache, a fresh read after the setting changed
-        again = (await conn._impl._fetch("SELECT '1000'::money", [], None, scalar=True, limit_one=True, arity=1))[0]
+        again = (
+            await conn._impl._fetch("SELECT '1000'::money", [], None, scalar=True, limit_one=True, arity=1, shape=None)
+        )[0]
         return before, after, again
 
     try:

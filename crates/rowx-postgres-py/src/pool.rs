@@ -15,6 +15,7 @@ use rowx_py_core::{errors as shared, runtime};
 use crate::conn::{Connection, options_from_py};
 use crate::errors::{PgError, options_error, to_py_err};
 use crate::exec::{self, Access, FetchArgs, watch, watch_flag};
+use crate::named::RowShape;
 use crate::stream::{RowStream, StreamArgs};
 
 fn seconds(name: &str, secs: f64) -> PyResult<Duration> {
@@ -235,6 +236,7 @@ impl Pool {
         scalar: bool,
         limit_one: bool,
         arity: Option<usize>,
+        shape: Option<Py<RowShape>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         self.check_process(py)?;
         let params = crate::codec::extract(py, params)?;
@@ -244,6 +246,7 @@ impl Pool {
             scalar,
             limit_one,
             arity,
+            shape,
         };
         let pool = self.inner.clone();
         let hook = Hook::default();
@@ -316,6 +319,7 @@ impl Pool {
         scalar: bool,
         arity: Option<usize>,
         batch_size: usize,
+        shape: Option<Py<RowShape>>,
     ) -> PyResult<RowStream> {
         self.check_process(py)?;
         let args = StreamArgs {
@@ -324,6 +328,7 @@ impl Pool {
             scalar,
             arity,
             batch_size,
+            shape,
         };
         RowStream::for_pool(py, self.inner.clone(), params, args)
     }

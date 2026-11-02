@@ -50,7 +50,7 @@ def _kv(dsn: str, *, host: str | None = None, **extra: str) -> str:
 
 async def _fetch(conn: Connection, sql: str, *, scalar: bool = False) -> list[object]:
     mask = [False] if scalar else None
-    return await conn._impl._fetch(sql, [], mask, scalar, scalar, 1 if scalar else None)
+    return await conn._impl._fetch(sql, [], mask, scalar, scalar, 1 if scalar else None, None)
 
 
 async def _scalar(conn: Connection, sql: str) -> object:

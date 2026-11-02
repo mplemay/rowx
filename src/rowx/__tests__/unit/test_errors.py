@@ -23,6 +23,7 @@ from rowx.errors import (
     MigrationOrderError,
     MigrationSourceError,
     PoolTimeoutError,
+    RowConstructError,
     RowNotFound,
     RowShapeError,
 )
@@ -81,6 +82,27 @@ def test_database_error_pickles() -> None:
     err = pickle.loads(pickle.dumps(DatabaseError("42P01", "missing", position=3)))  # ruff: ignore[suspicious-pickle-usage]
     assert isinstance(err, DatabaseError)
     assert (err.sqlstate, err.message, err.position) == ("42P01", "missing", 3)
+
+
+def test_row_construct_error_is_a_decode_error_with_attributes() -> None:
+    err = RowConstructError("User row 3: ValueError('x')", "User", 3)
+    assert isinstance(err, DecodeError)
+    assert (str(err), err.type_name, err.row_index) == ("User row 3: ValueError('x')", "User", 3)
+    assert rowx.RowConstructError is RowConstructError
+
+
+def test_row_construct_error_keyword_constructor() -> None:
+    err = RowConstructError("m", type_name="User", row_index=1)
+    assert (err.type_name, err.row_index) == ("User", 1)
+
+
+def test_row_construct_error_pickles_without_its_cause() -> None:
+    err = RowConstructError("User row 3: ValueError('x')", "User", 3)
+    err.__cause__ = ValueError("x")
+    clone = pickle.loads(pickle.dumps(err))  # ruff: ignore[suspicious-pickle-usage]
+    assert type(clone) is RowConstructError
+    assert (str(clone), clone.type_name, clone.row_index) == (str(err), "User", 3)
+    assert clone.__cause__ is None
 
 
 MIGRATION = Migration(

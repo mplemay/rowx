@@ -13,6 +13,7 @@ static POOL_TIMEOUT_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static BUSY_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ROW_SHAPE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DECODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static ROW_CONSTRUCT_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ENCODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static MIGRATION_SOURCE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static IRREVERSIBLE_MIGRATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -49,6 +50,7 @@ pub fn init(py: Python<'_>) -> PyResult<()> {
     class(py, &POOL_TIMEOUT_ERROR, "PoolTimeoutError")?;
     class(py, &ROW_SHAPE_ERROR, "RowShapeError")?;
     class(py, &DECODE_ERROR, "DecodeError")?;
+    class(py, &ROW_CONSTRUCT_ERROR, "RowConstructError")?;
     class(py, &ENCODE_ERROR, "EncodeError")?;
     class(py, &MIGRATION_SOURCE_ERROR, "MigrationSourceError")?;
     class(
@@ -103,6 +105,25 @@ pub fn row_shape_error(py: Python<'_>, message: &str) -> PyErr {
 #[must_use]
 pub fn decode_error(py: Python<'_>, message: &str) -> PyErr {
     build(py, &DECODE_ERROR, "DecodeError", (message,))
+}
+
+/// A named row's constructor or validator raised `cause`, which becomes the `__cause__`.
+#[must_use]
+pub fn row_construct_error(
+    py: Python<'_>,
+    message: &str,
+    type_name: &str,
+    row_index: usize,
+    cause: PyErr,
+) -> PyErr {
+    let err = build(
+        py,
+        &ROW_CONSTRUCT_ERROR,
+        "RowConstructError",
+        (message, type_name, row_index),
+    );
+    err.set_cause(py, Some(cause));
+    err
 }
 
 #[must_use]

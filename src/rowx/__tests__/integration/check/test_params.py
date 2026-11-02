@@ -54,7 +54,7 @@ def test_inferred_types_encode_with_the_inferred_branch(schema: str) -> None:
             found: list[tuple[str, object, object]] = []
             for sql_type, value in bound:
                 rows = await conn._impl._fetch(
-                    f"SELECT $1::{sql_type}", [value], None, scalar=True, limit_one=True, arity=1
+                    f"SELECT $1::{sql_type}", [value], None, scalar=True, limit_one=True, arity=1, shape=None
                 )
                 found.append((sql_type, value, rows[0]))
             return found

@@ -320,7 +320,7 @@ fn named<'a>(fields: &'a [FieldSpec], mask: &'a [bool]) -> Shape<'a> {
 
 fn shape_errors(err: Error) -> TestResult<Vec<ShapeError>> {
     match err {
-        Error::Shape(errors) => Ok(errors.into_iter().collect()),
+        Error::Shape { errors, .. } => Ok(errors.into_iter().collect()),
         other => Err(Box::new(other)),
     }
 }
@@ -465,7 +465,9 @@ async fn named_fetch_rejects_null_in_a_non_nullable_field() -> TestResult {
         fetched.err().ok_or("no error")?,
         Error::NullField {
             column: 1,
-            field: 0
+            field: 0,
+            row: 0,
+            name: "b".into()
         }
     );
 
@@ -517,7 +519,9 @@ async fn named_stream_rejects_null_after_the_rows_before_it() -> TestResult {
         end.err().ok_or("no error")?,
         Error::NullField {
             column: 0,
-            field: 0
+            field: 0,
+            row: 2,
+            name: "v".into()
         }
     );
 
