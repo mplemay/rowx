@@ -476,7 +476,7 @@ and is checked in the same way as a tuple, field by field.
 | `@dataclass` (stdlib) | by name | keyword arguments (`keyword`) | a field with no `default` or `default_factory` |
 | `typing.NamedTuple` | by position, and names must match | positional arguments (`positional`) | a field not in `_field_defaults` |
 | `TypedDict` (`typing` or `typing_extensions`) | by key | the row is the dict (`dict`) | `__required_keys__` |
-| pydantic `BaseModel` or pydantic dataclass | by name | `__pydantic_validator__.validate_python(row_dict)` (`validator`) | `FieldInfo.is_required()` |
+| pydantic `BaseModel` or pydantic dataclass | by name | `__pydantic_validator__.validate_python(row_dict)` for a model, `cls(**row_dict)` for a pydantic dataclass (`validator`) | `FieldInfo.is_required()` |
 
 - **Dataclasses** may use `slots`, `frozen`, `kw_only`, `field(kw_only=…)` and `KW_ONLY`. The fields are the entries of
   `__dataclass_fields__` that are plain fields with `init=True`.
@@ -518,10 +518,12 @@ defaults relax one side:
 - every column needs a field, or it is `unexpected-column`. This holds for a pydantic model with `extra="allow"` and a
   TypedDict with `extra_items` (`typing_extensions` only on 3.14);
 - every field without a default needs a column, or it is `missing-column`;
-- two columns that map to the same field are `duplicate-column`: the same name twice, or (pydantic) two of one field's
-  accepted names, such as `id` and `user_id` for `id: int = Field(alias="user_id")` under `populate_by_name`, where
-  pydantic would silently keep one. `?column?` is matched like any other name, so two unnamed expressions are
-  `duplicate-column`;
+- two columns of a by-name row with the same stripped name (`?column?` included), or, for pydantic, two accepted names
+  of one field, are `duplicate-column`. An example of the latter is `id` and `user_id` for
+  `id: int = Field(alias="user_id")` under `populate_by_name`, where pydantic would silently keep one. A name that
+  appears on two or more columns is `duplicate-column` whether or not a field has that name (`field` is `None` when
+  none does, as for `?column?`). Columns reported in a `duplicate-column` are not also reported as
+  `unexpected-column`;
 - one column that matches the names of two or more fields is `ambiguous-column`: equal aliases, or an alias equal to
   another field's name, with or without `populate_by_name`. Only pydantic can produce it. For example,
   `x: int = Field(alias="y")` next to `y: int` makes pydantic fill both from one `y`.
@@ -538,8 +540,9 @@ defaults relax one side:
 **All errors are collected.** The mapping reports every violation, not the first. The runtime `RowShapeError` message
 names the row type and lists them. The checker emits one diagnostic for each.
 
-- **Order.** Column-indexed issues come first, by column index, then `missing-column` by field declaration order. The
-  runtime message uses the same order.
+- **Order.** Column-indexed issues come first, by column index, then `missing-column` by field declaration order. A
+  `duplicate-column` sorts by its second (reported) column index, which is also its JSON `column_index`; an
+  `ambiguous-column` sorts by its column. The runtime message uses the same order.
 - **Message formats.** The checker's diagnostic messages and the runtime issue messages are the same text, in the
   `column N "name"` style (columns are 1-based). `type_name` is `cls.__name__`, not the qualname, and for a substituted
   generic it renders the arguments (`Page[int]`).
@@ -555,12 +558,18 @@ names the row type and lists them. The checker emits one diagnostic for each.
   | `type-mismatch` | ``column 2 "age" is `int` but field "age" of `User` is `str` `` |
   | `nullability-mismatch` | ``column 3 "email" may be NULL but field "email" of `User` is `str` `` |
 
-  `RowShapeError` reads ``{type_name}: {msg}; {msg}``, one message per issue. A positional arity mismatch keeps the
-  tuple wording of the shape.
+  `RowShapeError` reads ``{type_name}: {msg}; {msg}``, one message per issue. A tuple or scalar arity mismatch keeps its
+  existing wording.
 
-**Pydantic.** Rows are validated: Rust calls `__pydantic_validator__.validate_python(row_dict)` with a dict keyed by
-column name, so validators, constraints, aliases and a custom `__init__` behave as in `Model.model_validate`.
+**Pydantic.** Rows are validated. For a `BaseModel`, Rust calls `__pydantic_validator__.validate_python(row_dict)`; for
+a pydantic dataclass it calls the class, `cls(**row_dict)`, which runs the same validator through `__init__`. The dict
+is keyed by column name and includes pass-through columns, so validators, constraints, aliases and a custom `__init__`
+behave as in `Model.model_validate`.
 
+- **Why a dataclass is called.** `validate_python(dict)` on a pydantic dataclass's validator raises
+  `dataclass_exact_type` under `ConfigDict(strict=True)` (checked on pydantic 2.14.2), while `cls(**row_dict)` works
+  under `strict=True` with aliases, `AliasChoices` and strict types intact. A failure of either call is a
+  `ValidationError`, wrapped in `RowConstructError` the same way.
 - An incomplete model (`__pydantic_complete__` is false) gets `model_rebuild(raise_errors=False)` (for a pydantic
   dataclass, `pydantic.dataclasses.rebuild_dataclass(cls, raise_errors=False)`) while the plan is built, and
   `__pydantic_complete__` is tested afterwards. If it is still incomplete, that is an `InterfaceError` naming the class
@@ -573,8 +582,9 @@ column name, so validators, constraints, aliases and a custom `__init__` behave 
   keyword: literal class keywords on a model merge into its config, and the child wins. A non-literal one makes the
   names unknown, in the checker.
 - **Pydantic dataclass config** is the decorator's literal `config=ConfigDict(...)` in the checker (a non-literal value
-  makes the names unknown), and `__pydantic_config__` at runtime. `init=False` or an `InitVar` on a pydantic dataclass
-  is rejected on both sides (the runtime checks `__dataclass_fields__` for `InitVar`).
+  makes the names unknown), and `__pydantic_config__` at runtime. The decorator's `init=False`, or an `InitVar` field,
+  on a pydantic dataclass is rejected on both sides (the runtime checks `__dataclass_fields__` for `InitVar`);
+  `Field(init=False)` on a field just makes it a non-field.
 - **Unknown names.** This is a deliberate exception to "uncheckable is an error", for parity with sqlty. It has two
   scopes:
   - An `AliasChoices`, an `AliasPath` or a non-literal alias makes **that field's** names unknown.
@@ -652,7 +662,7 @@ accepts them, and any failure surfaces as `RowConstructError`:
 
 The runtime can't see a decorator or a class keyword once the class exists. It can see a hand-written `__init__`, but it
 doesn't reject one, because a failing constructor already has a runtime error. A pydantic model **may** define
-`__init__`, because `validate_python` calls it. Conformance rows record these as runtime-ok and checker-invalid.
+`__init__`, because the validator calls it. Conformance rows record these as runtime-ok and checker-invalid.
 
 ### Runtime validation
 

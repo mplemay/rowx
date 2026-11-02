@@ -385,11 +385,11 @@ field add `note: field defined at path:line:col`.
 | `missing-row-type` | `T` is `None` and the statement returns at least one non-`void` column. |
 | `unexpected-row-type` | `T` is not `None` and the statement returns 0 columns, counting a statement whose columns are all `void` as 0. |
 | `arity-mismatch` | A tuple's arity differs from the column count, or a scalar `T` doesn't face exactly 1 column. For a NamedTuple, the column count is outside the range from its required fields to its total fields. When this fires, no per-element rules run for that call. |
-| `missing-column` | A named row's field has no default and no column matches its names. Help: `select a column named "name", alias one with AS name, or give the field a default`. |
-| `unexpected-column` | A column matches no field of a by-name row, even for a model with `extra="allow"` or a TypedDict with `extra_items`. Help: add a field for the column, or remove it from the SELECT. |
-| `duplicate-column` | Two columns of a by-name row map to the same field: the same name after the override suffix is stripped (`?column?` included), or, for pydantic, two of one field's accepted names. Help: alias one of the columns with `AS`, or select only one of the two names. |
-| `ambiguous-column` | One column matches the names of two or more fields (equal aliases, or an alias equal to another field's name, with or without `populate_by_name`). Only pydantic can produce it. Help: give the fields distinct aliases, or remove `populate_by_name` if it causes the overlap. |
-| `column-name-mismatch` | A NamedTuple field and the column at the same position have different names (case-sensitive, after stripping). Help: reorder the SELECT or alias the column to the field's name, or rename the field. |
+| `missing-column` | A named row's field has no default and no column matches its names. Help: see [Output](#output). |
+| `unexpected-column` | A column matches no field of a by-name row, even for a model with `extra="allow"` or a TypedDict with `extra_items`. Help: see [Output](#output). |
+| `duplicate-column` | Two columns of a by-name row have the same stripped name (`?column?` included), or, for pydantic, are two accepted names of one field. A name on two or more columns is reported whether or not a field has that name, and those columns are not also `unexpected-column`. Help: see [Output](#output). |
+| `ambiguous-column` | One column matches the names of two or more fields (equal aliases, or an alias equal to another field's name, with or without `populate_by_name`). Only pydantic can produce it. Help: see [Output](#output). |
+| `column-name-mismatch` | A NamedTuple field and the column at the same position have different names (case-sensitive, after stripping). Help: see [Output](#output). |
 | `unsupported-type` | A column or parameter type isn't in the table, or has `typsend = 0`. |
 | `type-mismatch` | The column's Python type ([Type mapping](type-mapping.md#type-mapping-single-source-of-truth)) differs from the element's leaf, ignoring `None`. `bool` and `int` are distinct. Naive versus aware datetimes are not checked. For a named row, the message names the field. |
 | `nullability-mismatch` | The column is nullable but the element lacks `None`, **or** the column is NOT NULL but the element includes `None` (exact). For a named row, the message names the field. |
@@ -529,7 +529,8 @@ item has these fields:
 `column_index` is set for every column-related rule: `unexpected-column`, `duplicate-column` (the second occurrence; the
 others are named in the message), `ambiguous-column`, `column-name-mismatch`, `type-mismatch` and
 `nullability-mismatch`. `field` is the field name for field-related rules: `missing-column`, `column-name-mismatch`,
-`type-mismatch`, `nullability-mismatch`, and the pydantic two-names kind of `duplicate-column`. Otherwise it is `null`,
-so `missing-column` leaves `column_index` null. `ambiguous-column` adds one `field defined at` note for each field.
+`type-mismatch`, `nullability-mismatch`, and the pydantic two-names kind of `duplicate-column`. It is `null` when no
+field is involved (a `duplicate-column` on `?column?` or on a name no field has). Otherwise it is `null`, so
+`missing-column` leaves `column_index` null. `ambiguous-column` adds one `field defined at` note for each field.
 
 Exit-2 failures go to stderr as text. The DSN or password is never printed.

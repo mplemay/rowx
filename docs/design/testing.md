@@ -85,14 +85,15 @@
     `RowShapeError` before execution (also on an empty result, and after a table gains a column); a NULL in a
     non-nullable field in `fetch` and in a stream; and a constructor that raises as `RowConstructError` with `__cause__`
     and `row_index` across a `batch_size=2` boundary. `query_unchecked[User]` is included.
-  - *The pydantic matrix:* a model, an inherited model and a pydantic dataclass; `Field(alias=...)`, `validation_alias`
-    and `Annotated` aliases; `populate_by_name`, `validate_by_name` and `validate_by_alias=False`; `alias_generator`;
-    `AliasChoices`, `AliasPath` and a before-validator (unknown names, and a model that receives every column); defaults
-    and `default_factory`; an incomplete model; a custom `__init__`; a failing `Field(gt=0)` and after-validator as
-    `RowConstructError` whose `__cause__` is a `ValidationError`; `extra="allow"` against an extra column; an alias
-    overlap (`ambiguous-column`) and a field fed by two of its names (`duplicate-column`); `model_rebuild` of an
-    incomplete model; `RootModel`, pydantic v1 and `EmailStr` rejected; and the `rowx.postgres` value classes passing
-    through unchanged with and without `strict=True`. Pydantic is a dev-group dependency only.
+  - *The pydantic matrix:* a model, an inherited model, a pydantic dataclass and a pydantic dataclass with `strict=True`
+    (built with `cls(**row_dict)`); `Field(alias=...)`, `validation_alias` and `Annotated` aliases; `populate_by_name`,
+    `validate_by_name` and `validate_by_alias=False`; `alias_generator`; `AliasChoices`, `AliasPath` and a
+    before-validator (unknown names, and a model that receives every column); defaults and `default_factory`; an
+    incomplete model; a custom `__init__`; a failing `Field(gt=0)` and after-validator as `RowConstructError` whose
+    `__cause__` is a `ValidationError`; `extra="allow"` against an extra column; an alias overlap (`ambiguous-column`)
+    and a field fed by two of its names (`duplicate-column`); `model_rebuild` of an incomplete model; `RootModel`,
+    pydantic v1 and `EmailStr` rejected; and the `rowx.postgres` value classes passing through unchanged with and
+    without `strict=True`. Pydantic is a dev-group dependency only.
   - *Typing:* a `ty` case shows `query[User](...).one(conn)` typed `User`, and a TypedDict row typed as the TypedDict.
   - *Benchmark:* the per-form variants of `bench/fetch_100k.py`; the only gate is no tuple or scalar regression.
 - **Checker cases.**

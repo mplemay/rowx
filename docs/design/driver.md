@@ -118,14 +118,16 @@ in `rowx-postgres`, and the construction runs in `rowx-postgres-py`.
   |---|---|---|
   | `UnexpectedColumn { index, name }` | `ByName`: a column no field's names contain | `unexpected-column` |
   | `MissingColumn { field }` | `ByName`: a required field with no column | `missing-column` |
-  | `DuplicateColumn { field, indices }` | `ByName`: two columns map to one field, by the same name or by two of the field's accepted names | `duplicate-column` |
+  | `DuplicateColumn { field: Option<usize>, indices }` | `ByName`: a name on two or more columns, or two accepted names of one field. `field` is `None` when no field has the name (`?column?`) | `duplicate-column` |
   | `AmbiguousColumn { index, name, fields }` | `ByName`: one column in the names of two or more fields | `ambiguous-column` |
   | `Arity { min, max, actual }` | `Positional`: the count is outside the required-to-total range | `arity-mismatch` |
   | `NameMismatch { position, field, column }` | `Positional`: position *i*'s name differs, reported for each position | `column-name-mismatch` |
 
   If any field's names are `Unknown`, a column that matches nothing passes through and the four `ByName` errors are not
   raised, for the whole model. `Positional` runs the name rules only when the arity is right. Issues are ordered by
-  column index, then `MissingColumn` by field index.
+  column index, then `MissingColumn` by field index. A `duplicate-column` sorts by its second (reported) column index,
+  which is also its JSON `column_index`; an `ambiguous-column` sorts by its column. A name on two or more columns is a
+  `DuplicateColumn` whether or not a field has that name, and its columns are not also `UnexpectedColumn`.
 - `Mapping` holds, for each column, the field it maps to or a pass-through, and the optional fields that no column
   fills (the absent fields: the field indices that are not in the mapping).
 
@@ -148,8 +150,8 @@ is per field.
 
 - **`RowShape`** is a pyclass exported from `_core.postgres`. It is immutable, and Python builds it once per plan. It
   holds:
-  - `ctor`: the class, or for pydantic the `__pydantic_validator__`;
-  - `form`: `positional`, `keyword`, `dict` or `validator`;
+  - `ctor`: the class, or for a pydantic model its `__pydantic_validator__` (a pydantic dataclass uses the class);
+  - `form`: `positional`, `keyword`, `dict` or `validator`; the `validator` form records which call it makes;
   - `matching`, and `type_name`;
   - for each field: an interned key `PyString`, the accepted names (or unknown), `required`, and flags (bit 0
     nullable, bit 1 `Interval`).
@@ -164,10 +166,10 @@ is per field.
   | `positional` | one `PyTuple` in field order, then `ctor(*args)` |
   | `keyword` | a kwargs dict, without the absent optional fields, then `ctor(**kwargs)` |
   | `dict` | the row is the dict itself, without the absent `NotRequired` keys |
-  | `validator` | `ctor.validate_python(dict)`, keyed by column name and including pass-through columns |
+  | `validator` | `ctor.validate_python(dict)` for a model, `cls(**dict)` for a pydantic dataclass; the dict is keyed by column name and includes pass-through columns |
 
-  The `keyword` form may call a dataclass positionally when it has no keyword-only fields and nothing is absent, if
-  the benchmark shows a gain.
+  The `keyword` form may call a dataclass positionally when it has no keyword-only fields and nothing is absent, if the
+  benchmark shows a gain.
 - **Stream layout.** `exec::stream` returns the `Mapping` with the `RowBatches`. The layout is fixed for the stream, and
   a mapping error is raised from the first `__anext__`.
 - **Errors.** An exception from the constructor or validator becomes `RowConstructError`, with `type_name`, a 0-based
@@ -184,8 +186,8 @@ is per field.
   optional fields are the field indices not in the mapping), and the issues.
   - `ShapeIssue` is a frozen pyclass with `kind` (the rule name: `"missing-column"`, `"unexpected-column"`,
     `"duplicate-column"`, `"ambiguous-column"`, `"column-name-mismatch"`, `"arity-mismatch"`), `columns: list[int]`
-    (0-based), `fields: list[int]`, `name: str | None` (the stripped column name), and, for arity, `min`, `max` and
-    `actual` (`None` otherwise).
+    (0-based), `fields: list[int]` (empty when no field), `name: str | None` (the stripped column name), and, for arity,
+    `min`, `max` and `actual` (`None` otherwise).
 
 **Acceptance.** The mapping cases are `cargo` tests in `row_shape.rs` and the same cases through `map_columns`. DB tests
 cover a mapping error on an empty result, the re-prepare after a table gains a column, a NULL in a mapped non-nullable
