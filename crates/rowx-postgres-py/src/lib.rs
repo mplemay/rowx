@@ -31,6 +31,7 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_function(wrap_pyfunction!(admin::database_exists, &m)?)?;
     m.add_function(wrap_pyfunction!(admin::create_database, &m)?)?;
     m.add_function(wrap_pyfunction!(admin::drop_database, &m)?)?;
+    m.add_function(wrap_pyfunction!(admin::list_databases, &m)?)?;
     m.add_class::<conn::Connection>()?;
     m.add_function(wrap_pyfunction!(conn::connect, &m)?)?;
     m.add_function(wrap_pyfunction!(conn::parse_dsn, &m)?)?;

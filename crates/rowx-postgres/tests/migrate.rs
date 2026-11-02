@@ -48,7 +48,7 @@ impl TestDb {
             "rowx_mig_{:016x}",
             RandomState::new().build_hasher().finish()
         );
-        create_database(&base, &name, None, &Handle::current()).await?;
+        create_database(&base, &name, None, None, &Handle::current()).await?;
         let options = ConnectOptions {
             database: Some(name.clone()),
             ..base.clone()

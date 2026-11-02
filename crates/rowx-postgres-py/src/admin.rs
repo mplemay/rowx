@@ -47,19 +47,26 @@ pub fn database_exists<'py>(
 /// # Errors
 /// As `database_exists`; `DatabaseError` when the database exists already.
 #[pyfunction]
-#[pyo3(signature = (options, name=None, template=None))]
+#[pyo3(signature = (options, name=None, template=None, comment=None))]
 pub fn create_database<'py>(
     py: Python<'py>,
     options: &Bound<'py, PyAny>,
     name: Option<String>,
     template: Option<String>,
+    comment: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let (options, name) = resolve(py, options, name)?;
     let handle = runtime::handle()?;
     future_into_py(py, async move {
-        pg::create_database(&options, &name, template.as_deref(), &handle)
-            .await
-            .map_err(PgError)?;
+        pg::create_database(
+            &options,
+            &name,
+            template.as_deref(),
+            comment.as_deref(),
+            &handle,
+        )
+        .await
+        .map_err(PgError)?;
         Ok(())
     })
 }
@@ -81,5 +88,27 @@ pub fn drop_database<'py>(
             .await
             .map_err(PgError)?;
         Ok(())
+    })
+}
+
+/// # Errors
+/// As `database_exists`. Each row is `(name, comment, sessions)`.
+#[pyfunction]
+#[pyo3(signature = (options, prefix))]
+pub fn list_databases<'py>(
+    py: Python<'py>,
+    options: &Bound<'py, PyAny>,
+    prefix: String,
+) -> PyResult<Bound<'py, PyAny>> {
+    let (options, _) = resolve(py, options, Some(String::new()))?;
+    let handle = runtime::handle()?;
+    future_into_py(py, async move {
+        let found = pg::list_databases(&options, &prefix, &handle)
+            .await
+            .map_err(PgError)?;
+        Ok(found
+            .into_iter()
+            .map(|d| (d.name, d.comment, d.sessions))
+            .collect::<Vec<_>>())
     })
 }

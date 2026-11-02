@@ -1044,6 +1044,12 @@ With `--scratch` the statement is amended:
 `rowx_check_<hex>` (`TEMPLATE template0`), runs the migrations in it, checks against it, and drops it `WITH (FORCE)` on
 every exit path. The drift gate doesn't apply. A missing `CREATEDB` privilege and a failing migration both exit 2.
 
+The scratch database is tagged with `COMMENT ON DATABASE 'rowx:<pid>@<host>:<unix-ts>'`. At startup the checker drops
+any `rowx_check_*` database whose tag is over an hour old and which has no sessions, ignoring errors, so a SIGKILLed or
+cancelled CI run doesn't leak its database. Administrative connections use the URL's own database, or `postgres`
+(`template1` when the target is `postgres`), and fall back from `postgres` to `template1` where `postgres` is missing or
+refused.
+
 The checker's session is read-only by default (`default_transaction_read_only = on`) and sets `statement_timeout`,
 `lock_timeout` and `idle_in_transaction_session_timeout`.
 
