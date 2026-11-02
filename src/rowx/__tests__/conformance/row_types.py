@@ -1,15 +1,22 @@
 from typing import Final
 
+type FieldRow = tuple[str, tuple[str, ...] | None, bool, bool]
 type Plan = tuple[str, int, tuple[bool, ...]]
-type Row = tuple[str, Plan | str, str]
+# a named plan is `named`, the form, the matching, then one `(key, names, nullable, required)` per field
+type NamedPlan = tuple[str, str, str, tuple[FieldRow, ...]]
+type Row = tuple[str, Plan | NamedPlan | str, str]
 
 PRELUDE: Final[str] = """\
+import collections
 import datetime
 import decimal
 import ipaddress
+import typing
+import typing_extensions
 import uuid
+from dataclasses import KW_ONLY, InitVar, dataclass, field
 from rowx.postgres import Box, Circle, Cube, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
-from typing import Annotated, Any, Literal, Optional, TypeVar, Union
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple, NotRequired, Optional, Protocol, ReadOnly, Required, TypeVar, TypedDict, Union
 """
 
 NONE: Final[Plan] = ("none", 0, ())
@@ -118,3 +125,161 @@ ROWS: Final[list[Row]] = [
     ("T = tuple[tuple[int, int], str]", "InterfaceError", "invalid-row-type"),
     ("class C: ...\nT = C", "InterfaceError", "invalid-row-type"),
 ]
+
+# The checker resolves a class binding to `invalid-row-type` until #187 adds the named forms. A row whose verdict is
+# `PENDING_187` flips to `ok` there; the other `invalid-row-type` rows are rejected on both sides for good.
+PENDING_187: Final[str] = "invalid-row-type"
+REJECTED: Final[str] = "invalid-row-type"
+
+
+def keyword(*fields: FieldRow) -> NamedPlan:
+    return ("named", "keyword", "by_name", fields)
+
+
+def positional(*fields: FieldRow) -> NamedPlan:
+    return ("named", "positional", "positional", fields)
+
+
+def dict_form(*fields: FieldRow) -> NamedPlan:
+    return ("named", "dict", "by_name", fields)
+
+
+def f(key: str, *, nullable: bool = False, required: bool = True) -> FieldRow:
+    return (key, (key,), nullable, required)
+
+
+NAMED_ROWS: Final[list[Row]] = [
+    # stdlib dataclasses
+    (
+        "@dataclass\nclass T:\n    id: int\n    name: str | None\n    tags: list[str] = field(default_factory=list)",
+        keyword(f("id"), f("name", nullable=True), f("tags", required=False)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "@dataclass(slots=True, frozen=True, kw_only=True)\nclass T:\n    a: int\n    b: int = 0",
+        keyword(f("a"), f("b", required=False)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "@dataclass\nclass T:\n    a: int\n    _: KW_ONLY\n    b: str\n    c: str = field(kw_only=True, default='')",
+        keyword(f("a"), f("b"), f("c", required=False)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        (
+            "@dataclass\nclass Base:\n    a: int\n    b: str\n@dataclass\nclass Mid(Base):\n    c: int\n"
+            "@dataclass\nclass T(Mid):\n    b: str | None\n    d: bool = False"
+        ),
+        keyword(f("a"), f("b", nullable=True), f("c"), f("d", required=False)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "@dataclass\nclass T:\n    a: int\n    c: ClassVar[int] = 0\n    d: int = field(init=False, default=1)",
+        keyword(f("a")),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "@dataclass\nclass T:\n    a: Annotated[int, 'm']\n    b: Any\n    c: None\n    d: Interval | None\n    e: Range[int]",
+        keyword(f("a"), f("b", nullable=True), f("c", nullable=True), f("d", nullable=True), f("e")),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "@dataclass\nclass T:\n    m: Money\n    p: Point\n    r: Range[datetime.date] | None\n    h: dict[str, str | None]",
+        keyword(f("m"), f("p"), f("r", nullable=True), f("h")),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    ("@dataclass\nclass U:\n    id: int\ntype A = U\nT = A", keyword(f("id")), PENDING_187),  # #187 flips to "ok"
+    # a hand-written `__init__` is a checker-only rejection: the runtime accepts it
+    (
+        "@dataclass\nclass T:\n    id: int\n    def __init__(self, id: int) -> None:\n        self.id = id",
+        keyword(f("id")),
+        REJECTED,
+    ),
+    # typing.NamedTuple
+    (
+        "class T(NamedTuple):\n    id: int\n    name: str | None\n    note: str = ''",
+        positional(f("id"), f("name", nullable=True), f("note", required=False)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "T = NamedTuple('T', [('id', int), ('name', str | None)])",
+        positional(f("id"), f("name", nullable=True)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "class Base(NamedTuple):\n    id: int\nclass T(Base):\n    extra: str",
+        positional(f("id")),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    # TypedDict
+    (
+        "class T(TypedDict):\n    id: int\n    name: str | None\n    note: NotRequired[str]",
+        dict_form(f("id"), f("name", nullable=True), f("note", required=False)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "class T(TypedDict, total=False):\n    a: int\n    b: Required[str]\n    c: ReadOnly[int]",
+        dict_form(f("a", required=False), f("b"), f("c", required=False)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "T = TypedDict('T', {'id': int, 'name': str | None})",
+        dict_form(f("id"), f("name", nullable=True)),
+        PENDING_187,
+    ),  # #187 flips to "ok"
+    (
+        "class T(typing_extensions.TypedDict):\n    id: int\n    n: typing_extensions.NotRequired[str]",
+        dict_form(f("id"), f("n", required=False)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        (
+            "class Base(TypedDict):\n    a: int\n    b: str\nclass Mid(Base, total=False):\n    c: int\n"
+            "class T(Mid):\n    b: str | None\n    d: int"
+        ),
+        dict_form(f("a"), f("b", nullable=True), f("c", required=False), f("d")),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    # quoted qualifiers are missed by `__required_keys__`; requiredness follows the resolved annotation
+    (
+        "class T(TypedDict):\n    id: int\n    n: 'NotRequired[str]'\n    m: NotRequired['str']",
+        dict_form(f("id"), f("n", required=False), f("m", required=False)),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "class T(TypedDict, total=False):\n    id: int\n    n: 'Required[str]'\n    m: 'Required[ReadOnly[int]]'",
+        dict_form(f("id", required=False), f("n"), f("m")),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    (
+        "class T(typing_extensions.TypedDict):\n    n: 'typing_extensions.NotRequired[str]'\n    m: int",
+        dict_form(f("n", required=False), f("m")),
+        PENDING_187,  # #187 flips to "ok"
+    ),
+    # rejections on both sides
+    ("class P2(Point): ...\nT = P2", "InterfaceError", REJECTED),
+    ("@dataclass(frozen=True)\nclass P2(Point):\n    z: int\nT = P2", "InterfaceError", REJECTED),
+    ("class S(Range[int]): ...\nT = S", "InterfaceError", REJECTED),
+    ("class I2(Interval): ...\nT = I2", "InterfaceError", REJECTED),
+    ("class M2(Money): ...\nT = M2", "InterfaceError", REJECTED),
+    ("class C2(Cube): ...\nT = C2", "InterfaceError", REJECTED),
+    # generic row types are rejected by the runtime until #189; the checker has no class binding for them yet
+    ("@dataclass\nclass T[X]:\n    a: int", "InterfaceError", REJECTED),  # #189 lifts this
+    ("class T(Protocol):\n    id: int", "InterfaceError", REJECTED),
+    ("T = collections.namedtuple('T', ['id', 'name'])", "InterfaceError", REJECTED),
+    ("@dataclass(init=False)\nclass T:\n    id: int", "InterfaceError", REJECTED),
+    ("@dataclass\nclass T:\n    id: int\n    scale: InitVar[int]", "InterfaceError", REJECTED),
+    ("@dataclass\nclass T: ...", "InterfaceError", REJECTED),
+    ("class T(NamedTuple): ...", "InterfaceError", REJECTED),
+    ("class T(TypedDict): ...", "InterfaceError", REJECTED),
+    ("@dataclass\nclass U:\n    id: int\nT = U | None", "InterfaceError", REJECTED),
+    ("@dataclass\nclass U:\n    id: int\nT = Optional[U]", "InterfaceError", REJECTED),
+    ("@dataclass\nclass U:\n    id: int\nT = tuple[U, int]", "InterfaceError", REJECTED),
+    ("@dataclass\nclass U:\n    id: int\nT = list[U]", "InterfaceError", REJECTED),
+    ("@dataclass\nclass U:\n    id: int\nT = U | int", "InterfaceError", REJECTED),
+    ("@dataclass\nclass U:\n    id: int\n@dataclass\nclass T:\n    u: U", "InterfaceError", REJECTED),
+    ("class T(NamedTuple):\n    a: tuple[int, int]", "InterfaceError", REJECTED),
+    ("class T(TypedDict):\n    a: int | str", "InterfaceError", REJECTED),
+]
+
+ROWS.extend(NAMED_ROWS)

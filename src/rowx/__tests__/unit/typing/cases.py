@@ -1,5 +1,6 @@
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal, reveal_type
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, reveal_type
 
 from rowx import query, query_unchecked
 
@@ -8,6 +9,56 @@ if TYPE_CHECKING:
 
 type Pair = tuple[int, str]
 type UserId = int
+
+
+@dataclass
+class User:
+    id: int
+    name: str
+
+
+class UserRow(NamedTuple):
+    id: int
+    name: str
+
+
+class UserDict(TypedDict):
+    id: int
+    name: str
+
+
+def takes_int(value: int) -> None: ...
+
+
+def takes_user_row(value: UserRow) -> None: ...
+
+
+def takes_user_dict(value: UserDict) -> None: ...
+
+
+def takes_user_dicts(value: list[UserDict]) -> None: ...
+
+
+async def named_rows(conn: Connection) -> None:
+    user = query[User](t"SELECT id, name FROM users")
+    reveal_type(user)  # reveal: query[User]
+    reveal_type(await user.one(conn))  # reveal: User
+    reveal_type(await user.optional(conn))  # reveal: User | None
+    reveal_type(await user.all(conn))  # reveal: list[User]
+    reveal_type(user.fetch(conn))  # reveal: RowStream[User]
+
+    # mypy spells a NamedTuple and a TypedDict out structurally, so these are checked by assignment
+    row = query[UserRow](t"SELECT id, name FROM users")
+    takes_user_row(await row.one(conn))
+    takes_int(await row.one(conn))  # error  # ty: ignore[invalid-argument-type]
+
+    typed = query[UserDict](t"SELECT id, name FROM users")
+    takes_user_dict(await typed.one(conn))
+    takes_user_dicts(await typed.all(conn))
+    takes_int(await typed.one(conn))  # error  # ty: ignore[invalid-argument-type]
+
+    unchecked = query_unchecked[User](t"SELECT id, name FROM users")
+    reveal_type(await unchecked.one(conn))  # reveal: User
 
 
 async def positive(conn: Connection) -> None:
