@@ -1,6 +1,7 @@
 import asyncio
 from argparse import ArgumentTypeError, Namespace
 from itertools import pairwise
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -122,7 +123,8 @@ def run_attempts(
 ) -> tuple[list[float | None], Exception | None, Clock]:
     clock = Clock()
     monkeypatch.setattr("rowx.check.migrate.monotonic", clock.monotonic)
-    monkeypatch.setattr("rowx.check.migrate.asyncio.sleep", clock.sleep)
+    # replace the module binding so the patch does not change the shared asyncio.sleep
+    monkeypatch.setattr("rowx.check.migrate.asyncio", SimpleNamespace(sleep=clock.sleep))
     timeouts: list[float | None] = []
 
     async def attempt(given: ConnectOptions) -> str:

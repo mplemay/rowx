@@ -81,8 +81,10 @@ pub fn decode(raw: &[u8]) -> Result<Numeric, NumericError> {
         return Err(NumericError::Scale(scale));
     }
     let digits = body
-        .chunks_exact(2)
-        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_be_bytes(*c))
         .map(|d| {
             if d < BASE {
                 Ok(d)
