@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
 CASE_FILES: Final[list[Path]] = sorted(path for path in CASES_DIR.rglob("*.py") if path.name != "__init__.py")
+# only pydantic can produce `ambiguous-column`, and the checker reads pydantic from #188 on
+UNREACHABLE: Final[frozenset[str]] = frozenset({"ambiguous-column"})
 # a file that does not parse cannot live in the tree, because the linters would reject it
 SYNTAX_ERROR: Final[str] = "from rowx import query\n\nquery[int](t'SELECT 1'  # error: [syntax-error]\n"
 
@@ -31,7 +33,7 @@ def test_every_rule_has_a_marker() -> None:
     rules = set(get_args(Rule.__value__))
     marked = {expectation.rule for path in CASE_FILES for expectation in parse_markers(path.read_text("utf-8"))}
     marked.update(expectation.rule for expectation in parse_markers(SYNTAX_ERROR))
-    assert rules - marked == set()
+    assert rules - marked - UNREACHABLE == set()
     assert marked - rules == set()
 
 

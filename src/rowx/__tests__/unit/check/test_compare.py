@@ -1,10 +1,12 @@
+from pathlib import Path
 from typing import Final
 
 import pytest
 
 from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
+from rowx.check.model import Span
 from rowx.check.params import ParamName, ParamType
-from rowx.check.resolve import Elem, RowType
+from rowx.check.resolve import Elem, NamedField, RowType
 from rowx.postgres._vocab import LeafName, TypeKey
 
 
@@ -466,3 +468,168 @@ def test_extension_parameter_takes_only_its_own_class(key: TypeKey, _leaf: LeafN
     assert compare_param(0, key, key, ParamType(name)) is None
     for wrong in ("str", "int", "float", "list", "Money"):
         assert compare_param(0, key, key, ParamType(wrong)) is not None, (key, wrong)
+
+
+def field(
+    key: str,
+    leaf: LeafName = "int",
+    *,
+    nullable: bool = False,
+    required: bool = True,
+    # an empty tuple means the field's own name
+    names: tuple[str, ...] | None = (),
+) -> NamedField:
+    return NamedField(
+        key=key,
+        names=names if names != () else (key,),
+        elem=Elem(leaf, nullable=nullable),
+        required=required,
+        path=Path("models.py"),
+        span=Span(line=3, col=5, end_line=3, end_col=10),
+    )
+
+
+def named(*fields: NamedField, form: str = "keyword", matching: str = "by_name") -> RowType:
+    return RowType(kind="named", form=form, matching=matching, type_name="M", fields=fields)  # ty: ignore[invalid-argument-type]
+
+
+def column(name: str, key: str = "int4", *, raw: str | None = None, nullable: bool = False) -> ColumnDesc:
+    return col(key, name=name, nullable=nullable, raw_name=raw)
+
+
+def test_a_named_row_maps_by_name_in_any_order() -> None:
+    row = named(field("id"), field("name", "str", nullable=True))
+    assert run(row, column("name", "text", nullable=True), column("id")) == []
+
+
+def test_the_raw_names_are_stripped_once_by_map_columns() -> None:
+    row = named(field("id"), field("total"))
+    assert run(row, column("id", raw="id!"), column("total", raw="total?")) == []
+    # `id!!` is `id!` after one strip, which no field has
+    findings = run(named(field("id")), column("id!", raw="id!!"))
+    assert rules(findings) == ["unexpected-column", "missing-column"]
+
+
+def test_the_by_name_rules_and_their_messages() -> None:
+    row = named(field("id"), field("name", "str"), field("opt", required=False))
+    findings = run(row, column("id"), column("age"), column("id"), column("?column?"), column("?column?"))
+    assert [(f.rule, f.column, f.fields) for f in findings] == [
+        ("unexpected-column", 1, ()),
+        ("duplicate-column", 2, ()),
+        ("duplicate-column", 4, ()),
+        ("missing-column", None, (1,)),
+    ]
+    by_rule = {f.rule: f for f in findings}
+    assert by_rule["missing-column"].message == 'field "name" of `M` has no column'
+    assert by_rule["missing-column"].help == (
+        'select a column named "name", alias one with AS name, or give the field a default'
+    )
+    assert by_rule["unexpected-column"].message == 'column 2 "age" matches no field of `M`'
+    assert by_rule["unexpected-column"].help == 'add a field named "age" to `M`, or remove the column from the SELECT'
+
+
+def test_findings_come_by_column_then_missing_columns_by_field() -> None:
+    row = named(field("a"), field("b"), field("c", "str"))
+    findings = run(row, column("zzz"), column("a", "text"), column("yyy"))
+    assert [(f.rule, f.column, f.fields) for f in findings] == [
+        ("unexpected-column", 0, ()),
+        ("type-mismatch", 1, (0,)),
+        ("unexpected-column", 2, ()),
+        ("missing-column", None, (1,)),
+        ("missing-column", None, (2,)),
+    ]
+
+
+def test_duplicate_columns_are_not_also_unexpected_or_type_checked() -> None:
+    row = named(field("id", "str"))
+    findings = run(row, column("id"), column("id"), column("zzz"))
+    assert [(f.rule, f.column) for f in findings] == [("duplicate-column", 1), ("unexpected-column", 2)]
+    assert findings[0].message == 'columns 1 and 2 are both named "id"'
+    assert findings[0].help == "alias one of the columns with AS"
+    triple = run(named(field("x")), column("id"), column("id"), column("id"), column("x"))
+    assert triple[0].message == 'columns 1, 2 and 3 are all named "id"'
+
+
+def test_an_unnamed_duplicate_says_so() -> None:
+    findings = run(named(field("a", required=False)), column("?column?"), column("?column?"))
+    assert [(f.rule, f.column, f.help) for f in findings] == [("duplicate-column", 1, "alias the expression")]
+    assert findings[0].message == "columns 1 and 2 are both unnamed (`?column?`)"
+
+
+def test_per_field_rules_run_on_cleanly_mapped_columns_after_by_name_errors() -> None:
+    row = named(field("id", "str"), field("missing"))
+    findings = run(row, column("id"), column("extra"))
+    assert rules(findings) == ["type-mismatch", "unexpected-column", "missing-column"]
+    assert findings[0].message == 'column 1 "id" is `int` but field "id" of `M` is `str`'
+    assert findings[0].fields == (0,)
+
+
+def test_a_nullability_mismatch_names_the_field() -> None:
+    row = named(field("email", "str"))
+    [finding] = run(row, column("email", "text", nullable=True))
+    assert finding.message == 'column 1 "email" may be NULL but field "email" of `M` is `str`'
+    assert finding.fields == (0,)
+    [finding] = run(named(field("email", "str", nullable=True)), column("email", "text"))
+    assert finding.message == 'column 1 "email" is NOT NULL but field "email" of `M` is `str | None`'
+
+
+def test_an_ambiguous_column_names_each_field_and_is_skipped_by_the_type_rules() -> None:
+    row = named(field("x", "str", names=("y",)), field("y", "str"))
+    [finding] = run(row, column("y"))
+    assert (finding.rule, finding.column, finding.fields) == ("ambiguous-column", 0, (0, 1))
+    assert finding.message == 'column 1 "y" matches fields "x" and "y" of `M`'
+    assert finding.help == "give the fields distinct aliases, or remove populate_by_name if it causes the overlap"
+
+
+def test_two_names_of_one_field_are_a_duplicate_with_that_field() -> None:
+    row = named(field("id", names=("id", "user_id")))
+    [finding] = run(row, column("id"), column("user_id"))
+    assert (finding.rule, finding.column, finding.fields) == ("duplicate-column", 1, (0,))
+    assert finding.message == 'columns 1 "id" and 2 "user_id" both map to field "id" of `M`'
+    assert finding.help == 'select only one of "id" and "user_id"'
+
+
+def test_unknown_names_skip_the_by_name_rules_but_not_the_type_rules() -> None:
+    row = named(field("id", "str"), field("other", names=None))
+    findings = run(row, column("id"), column("anything"))
+    assert rules(findings) == ["type-mismatch"]
+
+
+def test_the_missing_column_help_for_a_typeddict_says_notrequired() -> None:
+    row = named(field("id"), field("n", "str"), form="dict")
+    [finding] = run(row, column("id"))
+    assert finding.help == 'select a column named "n", alias one with AS n, or mark the key `NotRequired`'
+    missing = next(f for f in run(named(field("Name", "str")), column("id")) if f.rule == "missing-column")
+    assert 'alias one with AS "Name"' in (missing.help or "")
+
+
+def test_a_positional_row_checks_arity_and_names_and_then_stops() -> None:
+    row = named(
+        field("id"),
+        field("name", "str"),
+        field("note", "str", required=False),
+        form="positional",
+        matching="positional",
+    )
+    assert run(row, column("id"), column("name", "text")) == []
+    findings = run(row, column("name", "text"), column("id", "int4"))
+    assert [(f.rule, f.column, f.fields) for f in findings] == [
+        ("column-name-mismatch", 0, (0,)),
+        ("column-name-mismatch", 1, (1,)),
+    ]
+    assert findings[0].message == 'column 1 "name" faces field "id" of `M` (position 1)'
+    assert findings[0].help == "reorder the SELECT, alias the column AS id, or rename the field"
+    [finding] = run(row, column("id"))
+    assert finding.rule == "arity-mismatch"
+    assert finding.message == "the query returns 1 columns but `M` takes between 2 and 3"
+    assert finding.help == "select between 2 and 3 columns"
+    [finding] = run(named(field("id"), form="positional", matching="positional"), column("id"), column("x"))
+    assert finding.message == "the query returns 2 columns but `M` takes exactly 1"
+    assert finding.help == "select exactly 1 columns"
+    # a type mismatch is not reported next to a name error
+    assert rules(run(row, column("name", "int4"), column("name", "text"))) == ["column-name-mismatch"]
+
+
+def test_a_void_column_faces_a_field_typed_none() -> None:
+    row = named(field("v", "none", nullable=True), field("id"))
+    assert run(row, column("v", "void"), column("id")) == []

@@ -6,9 +6,10 @@ from typing import Final, get_args
 
 import pytest
 
-from rowx.check.discover import discover_source
+from rowx.check.discover import discover_file, discover_source
 from rowx.check.model import Diagnostic, Span
 from rowx.check.render import NULL_NOTES, Report, null_reason_note, render_json, render_text
+from rowx.check.resolve import ModuleGraph, resolve_row_type
 from rowx.check.sourcemap import SourceMapper
 from rowx.postgres._vocab import NullReasonName
 
@@ -218,3 +219,127 @@ def test_unicode_line_separator_is_not_a_line_break() -> None:
     diagnostic = Diagnostic(rule="sql-error", message="m", path=PATH, span=Span(line=2, col=1, end_line=2, end_col=5))
     text = render_text([Report(diagnostic=diagnostic)], {PATH: source})
     assert "2 | rows = 1\n  | ^^^^\n" in text
+
+
+def test_json_carries_the_field_and_order_keeps_a_named_rows_findings_in_sequence() -> None:
+    span = Span(line=4, col=7, end_line=4, end_col=11)
+    first = Diagnostic(rule="unexpected-column", message="b", path=PATH, span=span)
+    second = Diagnostic(rule="duplicate-column", message="a", path=PATH, span=span)
+    reports = [
+        Report(diagnostic=second, order=1, column_index=1),
+        Report(diagnostic=first, order=0, column_index=0, field="id"),
+    ]
+    items = json.loads(render_json(reports))
+    assert [(item["rule"], item["field"], item["column_index"]) for item in items] == [
+        ("unexpected-column", "id", 0),
+        ("duplicate-column", None, 1),
+    ]
+
+
+RESOLVER_SOURCE: Final[str] = """\
+import abc
+from dataclasses import dataclass
+from thirdparty import Model
+from typing import TYPE_CHECKING, TypedDict
+
+from rowx import query
+
+if TYPE_CHECKING:
+    import datetime
+
+
+def deco(cls):
+    return cls
+
+
+class Meta(type): ...
+
+
+class Base:
+    def __init_subclass__(cls, flag=False, **kwargs): ...
+
+
+@dataclass
+class Dated:
+    when: datetime.date
+
+
+type When = datetime.date
+
+
+class Aliased(TypedDict):
+    when: When
+
+
+@deco
+@dataclass
+class Decorated:
+    id: int
+
+
+@dataclass
+class Custom:
+    id: int
+
+    def __init__(self, id: int) -> None:
+        self.id = id
+
+
+@dataclass
+class Meta2(metaclass=Meta):
+    id: int
+
+
+@dataclass
+class Keyword(Base, flag=True):
+    id: int
+
+
+@dataclass
+class Abstract(abc.ABC):
+    id: int
+
+
+@dataclass
+class Conditional:
+    id: int
+    if True:
+        extra: int
+
+
+query[Dated](t"select 1")
+query[Aliased](t"select 1")
+query[Model](t"select 1")
+query[Decorated](t"select 1")
+query[Custom](t"select 1")
+query[Meta2](t"select 1")
+query[Keyword](t"select 1")
+query[Abstract](t"select 1")
+query[Conditional](t"select 1")
+"""
+
+
+def resolver_reports(tmp_path: Path) -> tuple[list[Report], dict[Path, str]]:
+    path = tmp_path / "queries.py"
+    path.write_text(RESOLVER_SOURCE)
+    graph = ModuleGraph()
+    reports: list[Report] = []
+    for call in discover_file(path).calls:
+        resolution = resolve_row_type(graph, call, (tmp_path,))
+        assert resolution.diagnostic is not None
+        reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
+    return reports, {path: RESOLVER_SOURCE}
+
+
+def relative(text: str, tmp_path: Path) -> str:
+    return text.replace(str(tmp_path.resolve()), "<root>").replace(str(tmp_path), "<root>")
+
+
+def test_named_row_resolver_text(tmp_path: Path) -> None:
+    reports, sources = resolver_reports(tmp_path)
+    golden("named_rows_resolver.txt", relative(render_text(reports, sources, tmp_path), tmp_path))
+
+
+def test_named_row_resolver_json(tmp_path: Path) -> None:
+    reports, _ = resolver_reports(tmp_path)
+    golden("named_rows_resolver.json.txt", relative(render_json(reports, tmp_path), tmp_path))
