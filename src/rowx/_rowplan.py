@@ -64,7 +64,7 @@ NETWORK_PAIRS: Final[frozenset[frozenset[type]]] = frozenset(
 RANGE_SUBTYPES: Final[frozenset[type]] = frozenset({int, decimal.Decimal, dt.date, dt.datetime})
 
 type PlanKind = Literal["none", "scalar", "tuple", "named"]
-type RowForm = Literal["positional", "keyword", "dict"]
+type RowForm = Literal["positional", "keyword", "dict", "validator"]
 type Matching = Literal["by_name", "positional"]
 
 # the wrappers a named type's field annotation may carry around its element
@@ -89,7 +89,7 @@ VALUE_CLASSES: Final[tuple[tuple[str, str], ...]] = (
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FieldPlan:
     key: str
-    # the column names the field accepts; `None` is unknown (not used until a form can have aliases)
+    # the column names the field accepts; `None` is unknown (a pydantic `AliasChoices` or a before validator)
     names: tuple[str, ...] | None
     nullable: bool
     interval: bool
@@ -263,9 +263,19 @@ def _is_typeddict(t: object) -> bool:
     return module is not None and bool(module.is_typeddict(t))
 
 
+# a pydantic class is looked up only when pydantic was imported, and rowx never imports it
+def _pydantic_dataclass(t: type) -> bool:
+    module = sys.modules.get("pydantic.dataclasses")
+    return module is not None and bool(module.is_pydantic_dataclass(t))
+
+
 def _is_pydantic(t: type) -> bool:
-    return sys.modules.get("pydantic") is not None and (
-        hasattr(t, "__pydantic_validator__") or hasattr(t, "__pydantic_fields__")
+    pydantic = sys.modules.get("pydantic")
+    if pydantic is None:
+        return False
+    v1 = sys.modules.get("pydantic.v1")
+    return (
+        issubclass(t, pydantic.BaseModel) or (v1 is not None and issubclass(t, v1.BaseModel)) or _pydantic_dataclass(t)
     )
 
 
@@ -389,6 +399,7 @@ def _hints(t: type, keys: list[str]) -> dict[str, object]:
 class Spec:
     key: str
     required: bool
+    names: tuple[str, ...] | None
 
 
 def _is_initvar(t: type, key: str, declared: dict[str, tuple[type, object]]) -> bool:
@@ -415,13 +426,15 @@ def _dataclass_specs(t: type) -> list[Spec]:
         if _is_initvar(t, key, declared):
             raise _reject(t, f"InitVar field {key!r} is not supported")
     return [
-        Spec(key=f.name, required=f.default is MISSING and f.default_factory is MISSING) for f in init_fields if f.init
+        Spec(key=f.name, required=f.default is MISSING and f.default_factory is MISSING, names=(f.name,))
+        for f in init_fields
+        if f.init
     ]
 
 
 def _namedtuple_specs(t: type) -> list[Spec]:
     defaults = getattr(t, "_field_defaults", {})
-    return [Spec(key=key, required=key not in defaults) for key in t._fields]  # ty: ignore[unresolved-attribute]
+    return [Spec(key=key, required=key not in defaults, names=(key,)) for key in t._fields]  # ty: ignore[unresolved-attribute]
 
 
 def _typeddict_required(t: type, key: str, hint: object) -> bool:
@@ -442,21 +455,115 @@ def _typeddict_required(t: type, key: str, hint: object) -> bool:
 
 
 def _typeddict_specs(t: type, hints: dict[str, object]) -> list[Spec]:
-    return [Spec(key=key, required=_typeddict_required(t, key, hint)) for key, hint in hints.items()]
+    return [Spec(key=key, required=_typeddict_required(t, key, hint), names=(key,)) for key, hint in hints.items()]
 
 
-def _build_shape(t: type, form: RowForm, matching: Matching, fields: tuple[FieldPlan, ...]) -> RowShape:
+def _build_shape(
+    t: type, form: RowForm, fields: tuple[FieldPlan, ...], ctor: object = None, *, validate: bool = True
+) -> RowShape:
     # `rowx._core` is the backend, which `import rowx` must not load, so it is imported when a plan needs it
     from rowx._core.postgres import RowShape as RowShapeImpl  # ruff: ignore[import-outside-top-level]
 
     flags = [(int(f.nullable) | (int(f.interval) << 1)) for f in fields]
     return RowShapeImpl(
-        t,
+        t if ctor is None else ctor,
         form,
-        matching,
+        # only a tuple is matched by position
+        "positional" if form == "positional" else "by_name",
         t.__name__,
         [(f.key, f.names, f.required, flag) for f, flag in zip(fields, flags, strict=True)],
+        validate=validate,
     )
+
+
+def _pydantic_rebuild(t: type, *, dataclass: bool, raise_errors: bool) -> None:
+    # an explicit empty namespace stops pydantic using this frame's locals (`t`, `dataclass`) as the parent namespace;
+    # the class still resolves names from its own module
+    if dataclass:
+        sys.modules["pydantic.dataclasses"].rebuild_dataclass(t, raise_errors=raise_errors, _types_namespace={})
+    else:
+        t.model_rebuild(raise_errors=raise_errors, _types_namespace={})  # ty: ignore[unresolved-attribute]
+
+
+# a model whose forward references resolved after it was defined is rebuilt once here; the plan then holds the rebuilt
+# validator
+def _pydantic_complete(t: type, *, dataclass: bool) -> None:
+    if t.__pydantic_complete__:  # ty: ignore[unresolved-attribute]
+        return
+    try:
+        _pydantic_rebuild(t, dataclass=dataclass, raise_errors=False)
+        if t.__pydantic_complete__:  # ty: ignore[unresolved-attribute]
+            return
+        _pydantic_rebuild(t, dataclass=dataclass, raise_errors=True)
+    except Exception as err:
+        name = getattr(err, "name", None) if isinstance(err, NameError) else None
+        detail = f"it needs {name!r}" if name else str(err)
+        hint = "; call model_rebuild() where the name is in scope" if name else ""
+        msg = f"{t.__name__} is not fully defined ({detail}){hint}; define what its annotations name before the first query"
+        raise InterfaceError(msg) from err
+    msg = f"{t.__name__} is not fully defined; define what its annotations name before the first query"
+    raise InterfaceError(msg)
+
+
+def _pydantic_config(t: type, *, dataclass: bool) -> dict[str, object]:
+    config = getattr(t, "__pydantic_config__", None) if dataclass else getattr(t, "model_config", None)
+    return {str(k): v for k, v in config.items()} if isinstance(config, dict) else {}
+
+
+# a before or wrap model validator anywhere in the MRO (pydantic merges the bases' decorators into the class's own)
+# can rewrite the input, so no field's names can be known
+def _pydantic_rewrites_input(t: type) -> bool:
+    decorators = getattr(t, "__pydantic_decorators__", None)
+    validators = getattr(decorators, "model_validators", {})
+    return any(getattr(d.info, "mode", None) in {"before", "wrap"} for d in validators.values())
+
+
+def _pydantic_name_flags(config: dict[str, object]) -> tuple[bool, bool]:
+    # mirrors pydantic._internal._config._build_effective_config
+    by_alias = config.get("validate_by_alias", True) is not False
+    by_name = config.get("validate_by_name")
+    if by_name is None:
+        if (pbn := config.get("populate_by_name")) is not None:
+            by_alias, by_name = True, bool(pbn)
+        elif not by_alias:
+            by_name = True
+    return by_alias, bool(by_name)
+
+
+def _pydantic_names(key: str, info: object, config: dict[str, object]) -> tuple[str, ...] | None:
+    validation_alias = getattr(info, "validation_alias", None)
+    alias = validation_alias if validation_alias is not None else getattr(info, "alias", None)
+    if alias is not None and not isinstance(alias, str):
+        return None
+    by_alias, by_name = _pydantic_name_flags(config)
+    if alias is None or not by_alias:
+        return (key,)
+    return (alias, key) if by_name and alias != key else (alias,)
+
+
+def _pydantic_specs(t: type, *, dataclass: bool) -> tuple[list[Spec], dict[str, object]]:
+    if dataclass:
+        # the decorator's `init` can only be `False`, which pydantic reads as "keep my validating `__init__`", so
+        # there is no `init=False` to reject here; only an `InitVar` is
+        init_fields = {f.name for f in fields(t)}  # ty: ignore[invalid-argument-type]
+        declared = _declared(t)
+        for key in t.__dataclass_fields__.keys() - init_fields:  # ty: ignore[unresolved-attribute]
+            if _is_initvar(t, key, declared):
+                raise _reject(t, f"InitVar field {key!r} is not supported")
+    infos = t.__pydantic_fields__ if dataclass else t.model_fields  # ty: ignore[unresolved-attribute]
+    config = _pydantic_config(t, dataclass=dataclass)
+    unknown = _pydantic_rewrites_input(t)
+    specs: list[Spec] = []
+    hints: dict[str, object] = {}
+    for key, info in infos.items():
+        # only a pydantic dataclass's validator ignores an `init=False` field's input; a model still requires it
+        if dataclass and info.init is False:
+            continue
+        names = None if unknown else _pydantic_names(key, info, config)
+        specs.append(Spec(key=key, required=info.is_required(), names=names))
+        # pydantic has already moved the `Annotated` metadata into the field, so this is the bare type
+        hints[key] = info.annotation
+    return specs, hints
 
 
 def _specs(t: type, kind: str) -> tuple[list[Spec], RowForm, Matching, dict[str, object]]:
@@ -471,16 +578,35 @@ def _specs(t: type, kind: str) -> tuple[list[Spec], RowForm, Matching, dict[str,
     return specs, form, matching, _hints(t, [spec.key for spec in specs])
 
 
+def _reject_pydantic(t: type) -> None:
+    pydantic = sys.modules["pydantic"]
+    if issubclass(t, pydantic.RootModel):
+        raise _reject(t, "a pydantic RootModel is not a row type")
+    v1 = sys.modules.get("pydantic.v1")
+    if v1 is not None and issubclass(t, v1.BaseModel):
+        raise _reject(t, "a pydantic v1 model is not supported")
+
+
 def _named(t: type, kind: str) -> RowPlan:
     match kind:
         case "protocol":
             raise _reject(t, "a Protocol is not a row type")
-        case "pydantic":
-            raise _reject(t, "pydantic models are not supported yet")
     # #189 lifts this: a generic row type will be substituted through its type parameters
     if getattr(t, "__type_params__", ()) or getattr(t, "__parameters__", ()):
         raise _reject(t, "generic row types are not supported yet")
-    specs, form, matching, hints = _specs(t, kind)
+    ctor: object = None
+    validate = True
+    if kind == "pydantic":
+        dataclass = _pydantic_dataclass(t)
+        _reject_pydantic(t)
+        _pydantic_complete(t, dataclass=dataclass)
+        specs, hints = _pydantic_specs(t, dataclass=dataclass)
+        form, matching = "validator", "by_name"
+        # a model is validated with its validator, but a pydantic dataclass's validator rejects a dict under
+        # `strict=True`, so the class is called with the row as keywords instead
+        ctor, validate = (t, False) if dataclass else (t.__pydantic_validator__, True)  # ty: ignore[unresolved-attribute]
+    else:
+        specs, form, matching, hints = _specs(t, kind)
     if not specs:
         raise _reject(t, "has no fields")
     plans: list[FieldPlan] = []
@@ -497,7 +623,7 @@ def _named(t: type, kind: str) -> RowPlan:
             msg = f"{err} (field {spec.key!r} of {t.__name__})"
             raise InterfaceError(msg) from err
         plans.append(
-            FieldPlan(key=spec.key, names=(spec.key,), nullable=nullable, interval=interval, required=spec.required),
+            FieldPlan(key=spec.key, names=spec.names, nullable=nullable, interval=interval, required=spec.required),
         )
     fields = tuple(plans)
     return RowPlan(
@@ -509,7 +635,7 @@ def _named(t: type, kind: str) -> RowPlan:
         form=form,
         matching=matching,
         type_name=t.__name__,
-        shape=_build_shape(t, form, matching, fields),
+        shape=_build_shape(t, form, fields, ctor, validate=validate),
     )
 
 

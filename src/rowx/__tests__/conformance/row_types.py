@@ -11,10 +11,12 @@ import collections
 import datetime
 import decimal
 import ipaddress
+import pydantic
 import typing
 import typing_extensions
 import uuid
 from dataclasses import KW_ONLY, InitVar, dataclass, field
+from pydantic import AliasChoices, BaseModel, ConfigDict, AnyUrl, Field, PositiveInt, RootModel, SecretStr, model_validator
 from rowx.postgres import Box, Circle, Cube, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
 from typing import Annotated, Any, ClassVar, Literal, NamedTuple, NotRequired, Optional, Protocol, ReadOnly, Required, TypeVar, TypedDict, Union
 """
@@ -129,6 +131,10 @@ ROWS: Final[list[Row]] = [
 # The checker resolves a class binding to `invalid-row-type` until #187 adds the named forms. A row whose verdict is
 # `PENDING_187` flips to `ok` there; the other `invalid-row-type` rows are rejected on both sides for good.
 PENDING_187: Final[str] = "invalid-row-type"
+# `PENDING_188` is the same for the pydantic rows the checker accepts from #188 on
+PENDING_188: Final[str] = "invalid-row-type"
+# the runtime accepts these and the checker rejects them for good (a checker-only rejection)
+CHECKER_ONLY: Final[str] = "invalid-row-type"
 REJECTED: Final[str] = "invalid-row-type"
 
 
@@ -142,6 +148,10 @@ def positional(*fields: FieldRow) -> NamedPlan:
 
 def dict_form(*fields: FieldRow) -> NamedPlan:
     return ("named", "dict", "by_name", fields)
+
+
+def validator(*fields: FieldRow) -> NamedPlan:
+    return ("named", "validator", "by_name", fields)
 
 
 def f(key: str, *, nullable: bool = False, required: bool = True) -> FieldRow:
@@ -256,6 +266,74 @@ NAMED_ROWS: Final[list[Row]] = [
         dict_form(f("n", required=False), f("m")),
         PENDING_187,  # #187 flips to "ok"
     ),
+    # pydantic models and dataclasses
+    (
+        "class T(BaseModel):\n    id: int\n    name: str | None\n    tags: list[str] = []",
+        validator(f("id"), f("name", nullable=True), f("tags", required=False)),
+        PENDING_188,  # #188 flips to "ok"
+    ),
+    (
+        "class T(BaseModel):\n    id: int = Field(alias='user_id')\n    n: str = Field(validation_alias='nm', alias='x')",
+        validator(("id", ("user_id",), False, True), ("n", ("nm",), False, True)),
+        PENDING_188,  # #188 flips to "ok"
+    ),
+    (
+        "class T(BaseModel, populate_by_name=True):\n    id: int = Field(alias='user_id')\n    n: str",
+        validator(("id", ("user_id", "id"), False, True), f("n")),
+        PENDING_188,  # #188 flips to "ok"
+    ),
+    (
+        (
+            "class T(BaseModel):\n    model_config = ConfigDict(validate_by_alias=False, validate_by_name=True)\n"
+            "    id: int = Field(alias='user_id')"
+        ),
+        validator(f("id")),
+        PENDING_188,  # #188 flips to "ok"
+    ),
+    (
+        "class T(BaseModel):\n    id: int = Field(validation_alias=AliasChoices('a', 'b'))\n    n: str",
+        validator(("id", None, False, True), f("n")),
+        PENDING_188,  # #188 flips to "ok", with `note: names not checked` for the field
+    ),
+    (
+        (
+            "class T(BaseModel):\n    id: int\n    n: str\n    @model_validator(mode='before')\n    @classmethod\n"
+            "    def pre(cls, data):\n        return data"
+        ),
+        validator(("id", None, False, True), ("n", None, False, True)),
+        PENDING_188,  # #188 flips to "ok", with `note: names not checked` for the model
+    ),
+    (
+        "class T(BaseModel):\n    model_config = ConfigDict(alias_generator=lambda name: name.upper())\n    id: int",
+        validator(("id", ("ID",), False, True)),
+        # #188 gives the checker its unknown-names verdict; the runtime sees the generated aliases
+        PENDING_188,
+    ),
+    (
+        "@pydantic.dataclasses.dataclass(config=ConfigDict(strict=True))\nclass T:\n    id: int\n    name: str | None",
+        validator(f("id"), f("name", nullable=True)),
+        PENDING_188,  # #188 flips to "ok"
+    ),
+    (
+        "class T(BaseModel):\n    id: int\n    count: int = Field(init=False)",
+        validator(f("id"), f("count")),
+        PENDING_188,  # #188 flips to "ok"; `init=False` excludes a field only on a pydantic dataclass
+    ),
+    (
+        "class T(BaseModel, populate_by_name=True, validate_by_name=False):\n    id: int = Field(alias='user_id')",
+        validator(("id", ("user_id",), False, True)),
+        PENDING_188,  # #188 flips to "ok"
+    ),
+    ("class T(BaseModel):\n    id: PositiveInt", validator(f("id")), CHECKER_ONLY),
+    ("class T(BaseModel):\n    j: pydantic.Json[list[int]]", validator(f("j")), CHECKER_ONLY),
+    ("class T(BaseModel):\n    id: pydantic.constr(min_length=1)", validator(f("id")), CHECKER_ONLY),
+    ("class T(RootModel[int]): ...", "InterfaceError", REJECTED),
+    # `EmailStr` needs the optional email-validator package to even define the class; `AnyUrl` and `SecretStr` are
+    # the same kind of pydantic-only class
+    ("class T(BaseModel):\n    url: AnyUrl", "InterfaceError", REJECTED),
+    ("class T(BaseModel):\n    secret: SecretStr", "InterfaceError", REJECTED),
+    ("class T(BaseModel): ...", "InterfaceError", REJECTED),
+    ("@pydantic.dataclasses.dataclass\nclass T:\n    id: int\n    scale: InitVar[int]", "InterfaceError", REJECTED),
     # rejections on both sides
     ("class P2(Point): ...\nT = P2", "InterfaceError", REJECTED),
     ("@dataclass(frozen=True)\nclass P2(Point):\n    z: int\nT = P2", "InterfaceError", REJECTED),
