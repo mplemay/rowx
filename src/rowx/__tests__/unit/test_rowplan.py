@@ -1,4 +1,5 @@
 import importlib
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 import types
 from typing import TYPE_CHECKING, Final
@@ -380,13 +381,283 @@ def test_named_rejections_have_their_messages(source: str, message: str, evaluat
         row_plan(evaluate(source))
 
 
-def test_a_pydantic_class_is_rejected_for_now(monkeypatch: pytest.MonkeyPatch) -> None:
-    # detection goes through `sys.modules` and the class attributes, so a stand-in is enough
-    monkeypatch.setitem(sys.modules, "pydantic", types.ModuleType("pydantic"))
-    ns: dict[str, object] = {}
-    exec("from dataclasses import dataclass\n@dataclass\nclass T:\n    id: int\n    __pydantic_validator__ = 1", ns)  # ruff: ignore[exec-builtin]
-    with pytest.raises(InterfaceError, match="pydantic"):
-        row_plan(ns["T"])
+type Names = Callable[[str], dict[str, tuple[str, ...] | None]]
+
+
+@pytest.fixture
+def names(evaluate: Evaluate) -> Names:
+    def run(source: str) -> dict[str, tuple[str, ...] | None]:
+        return {f.key: f.names for f in row_plan(evaluate(source)).fields}
+
+    return run
+
+
+def test_a_pydantic_model_is_a_validator_plan_over_its_validator(evaluate: Evaluate) -> None:
+    t = evaluate("class T(BaseModel):\n    id: int\n    name: str | None")
+    plan = row_plan(t)
+    assert (plan.kind, plan.form, plan.matching, plan.type_name) == ("named", "validator", "by_name", "T")
+    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[unresolved-attribute]
+    assert plan.nullable_mask == (False, True)
+
+
+def test_a_pydantic_dataclass_is_called_with_keywords(evaluate: Evaluate) -> None:
+    t = evaluate("@pydantic.dataclasses.dataclass\nclass T:\n    id: int\n    name: str = 'a'")
+    plan = row_plan(t)
+    assert (plan.form, plan.matching) == ("validator", "by_name")
+    assert plan.shape.ctor is t  # ty: ignore[unresolved-attribute]
+    assert [(f.key, f.required) for f in plan.fields] == [("id", True), ("name", False)]
+
+
+def test_an_inherited_model_keeps_the_base_fields_first(names: Names) -> None:
+    source = "class Base(BaseModel):\n    id: int\nclass T(Base):\n    name: str"
+    assert names(source) == {"id": ("id",), "name": ("name",)}
+
+
+def test_a_pydantic_dataclass_that_inherits_a_stdlib_dataclass_is_a_pydantic_one(evaluate: Evaluate) -> None:
+    source = "@dataclass\nclass Base:\n    id: int\n@pydantic.dataclasses.dataclass\nclass T(Base):\n    name: str"
+    plan = row_plan(evaluate(source))
+    assert plan.form == "validator"
+    assert [f.key for f in plan.fields] == ["id", "name"]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("class T(BaseModel):\n    id: int = Field(alias='a')", ("a",)),
+        ("class T(BaseModel):\n    id: int = Field(validation_alias='v')", ("v",)),
+        ("class T(BaseModel):\n    id: int = Field(alias='a', validation_alias='v')", ("v",)),
+        ("class T(BaseModel):\n    id: Annotated[int, Field(alias='a')]", ("a",)),
+        ("class T(BaseModel):\n    id: Annotated[int | None, Field(alias='a')] = None", ("a",)),
+        ("class T(BaseModel, populate_by_name=True):\n    id: int = Field(alias='a')", ("a", "id")),
+        ("class T(BaseModel, validate_by_name=True):\n    id: int = Field(alias='a')", ("a", "id")),
+        (
+            "class T(BaseModel):\n    model_config = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='a')",
+            ("a", "id"),
+        ),
+        ("class T(BaseModel, validate_by_alias=False):\n    id: int = Field(alias='a')", ("id",)),
+        ("class T(BaseModel, populate_by_name=True):\n    id: int", ("id",)),
+        ("class T(BaseModel):\n    id: int = Field(alias='id')", ("id",)),
+        (
+            "class T(BaseModel):\n    model_config = ConfigDict(alias_generator=lambda name: name.upper())\n    id: int",
+            ("ID",),
+        ),
+        (
+            (
+                "class T(BaseModel):\n    model_config = ConfigDict(alias_generator=lambda name: 'x_' + name,"
+                " populate_by_name=True)\n    id: int"
+            ),
+            ("x_id", "id"),
+        ),
+        (
+            (
+                "@pydantic.dataclasses.dataclass(config=ConfigDict(populate_by_name=True))\nclass T:\n"
+                "    id: int = Field(alias='a')"
+            ),
+            ("a", "id"),
+        ),
+        ("@pydantic.dataclasses.dataclass\nclass T:\n    id: int = Field(alias='a')", ("a",)),
+    ],
+)
+def test_a_pydantic_field_accepts_its_alias_and_its_name_by_config(
+    source: str, expected: tuple[str, ...], names: Names
+) -> None:
+    assert names(source) == {"id": expected}
+
+
+def test_a_child_model_class_keyword_overrides_the_base_config(names: Names) -> None:
+    source = (
+        "class Base(BaseModel, populate_by_name=True):\n    id: int = Field(alias='a')\n"
+        "class T(Base, populate_by_name=False):\n    pass"
+    )
+    assert names(source) == {"id": ("a",)}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "class T(BaseModel):\n    id: int = Field(validation_alias=AliasChoices('a', 'b'))",
+        "class T(BaseModel):\n    id: int = Field(validation_alias=AliasPath('a', 0))",
+    ],
+)
+def test_alias_choices_and_alias_path_make_only_that_field_unknown(source: str, names: Names) -> None:
+    source = source.replace("\n    id", "\n    other: str\n    id", 1).replace("BaseModel):", "BaseModel):", 1)
+    source = "from pydantic import AliasPath\n" + source
+    assert names(source) == {"other": ("other",), "id": None}
+
+
+@pytest.mark.parametrize("mode", ["before", "wrap"])
+def test_a_before_or_wrap_model_validator_makes_every_field_unknown(mode: str, names: Names) -> None:
+    wrap = ", handler" if mode == "wrap" else ""
+    ret = "handler(data)" if mode == "wrap" else "data"
+    source = (
+        f"class T(BaseModel):\n    id: int\n    n: str\n    @model_validator(mode='{mode}')\n    @classmethod\n"
+        f"    def check(cls, data{wrap}):\n        return {ret}"
+    )
+    assert names(source) == {"id": None, "n": None}
+
+
+def test_a_before_validator_inherited_from_a_base_makes_every_field_unknown(names: Names) -> None:
+    source = (
+        "class Base(BaseModel):\n    @model_validator(mode='before')\n    @classmethod\n"
+        "    def check(cls, data):\n        return data\nclass T(Base):\n    id: int"
+    )
+    assert names(source) == {"id": None}
+
+
+def test_an_after_model_validator_keeps_the_names_known(names: Names) -> None:
+    source = "class T(BaseModel):\n    id: int\n    @model_validator(mode='after')\n    def check(self):\n        return self"
+    assert names(source) == {"id": ("id",)}
+
+
+def test_unknown_names_still_drive_the_null_check_flag(evaluate: Evaluate) -> None:
+    plan = row_plan(evaluate("class T(BaseModel):\n    id: int = Field(validation_alias=AliasChoices('a', 'b'))"))
+    assert [(f.names, f.nullable) for f in plan.fields] == [(None, False)]
+
+
+def test_pydantic_members_that_are_not_fields_are_excluded(names: Names) -> None:
+    source = (
+        "class T(BaseModel):\n    id: int\n    _secret: int = 0\n    _hidden: int = pydantic.PrivateAttr(default=1)\n"
+        "    kind: ClassVar[str] = 'x'\n    @pydantic.computed_field\n    @property\n    def total(self) -> int:\n"
+        "        return 1"
+    )
+    assert names(source) == {"id": ("id",)}
+
+
+def test_a_pydantic_dataclass_field_with_init_false_is_not_a_field(names: Names) -> None:
+    source = "@pydantic.dataclasses.dataclass\nclass T:\n    id: int\n    derived: int = Field(default=1, init=False)"
+    assert names(source) == {"id": ("id",)}
+
+
+def test_pydantic_defaults_are_not_required(evaluate: Evaluate) -> None:
+    source = (
+        "class T(BaseModel):\n    a: int\n    b: int = 1\n    c: list[int] = Field(default_factory=list)\n"
+        "    d: int | None = None\n    e: int | None"
+    )
+    plan = row_plan(evaluate(source))
+    assert [(f.key, f.required) for f in plan.fields] == [
+        ("a", True),
+        ("b", False),
+        ("c", False),
+        ("d", False),
+        ("e", True),
+    ]
+
+
+def test_a_model_with_a_forward_reference_resolved_later_is_rebuilt(evaluate: Evaluate) -> None:
+    t = evaluate("class T(BaseModel):\n    id: 'Later'\nLater = int")
+    assert not t.__pydantic_complete__  # ty: ignore[unresolved-attribute]
+    plan = row_plan(t)
+    assert t.__pydantic_complete__  # ty: ignore[unresolved-attribute]
+    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[unresolved-attribute]
+    assert plan.kind == "named"
+
+
+def test_a_pydantic_dataclass_with_a_forward_reference_resolved_later_is_rebuilt(evaluate: Evaluate) -> None:
+    t = evaluate("@pydantic.dataclasses.dataclass\nclass T:\n    id: 'Later'\nLater = int")
+    assert row_plan(t).kind == "named"
+    assert t.__pydantic_complete__  # ty: ignore[unresolved-attribute]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "class T(BaseModel):\n    id: 'Never'",
+        "@pydantic.dataclasses.dataclass\nclass T:\n    id: 'Never'",
+    ],
+)
+def test_a_model_that_stays_incomplete_is_an_interface_error_naming_the_missing_name(
+    source: str, evaluate: Evaluate
+) -> None:
+    with pytest.raises(InterfaceError, match=r"T is not fully defined \(it needs 'Never'\)"):
+        row_plan(evaluate(source))
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ("class T(RootModel[int]): ...", "RootModel"),
+        ("import pydantic.v1\nclass T(pydantic.v1.BaseModel):\n    id: int", "pydantic v1"),
+        ("class T(BaseModel):\n    url: AnyUrl", "not derivable"),
+        ("class T(BaseModel):\n    secret: SecretStr", "not derivable"),
+        ("class T(BaseModel): ...", "has no fields"),
+        ("class T(BaseModel):\n    _only: int = 0", "has no fields"),
+        ("@pydantic.dataclasses.dataclass\nclass T:\n    id: int\n    scale: InitVar[int]", "InitVar"),
+        (
+            "class U(BaseModel):\n    id: int\nclass T(BaseModel):\n    u: U",
+            "named row type is only allowed as the row",
+        ),
+        ("class T[X](BaseModel):\n    id: int", "generic row types"),
+    ],
+)
+def test_pydantic_rejections_have_their_messages(source: str, message: str, evaluate: Evaluate) -> None:
+    with pytest.raises(InterfaceError, match=message):
+        row_plan(evaluate(source))
+
+
+def test_email_str_is_rejected_when_the_optional_package_is_installed(evaluate: Evaluate) -> None:
+    pytest.importorskip("email_validator")
+    with pytest.raises(InterfaceError, match="not derivable"):
+        row_plan(evaluate("class T(BaseModel):\n    email: pydantic.EmailStr"))
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    ["PositiveInt", "pydantic.constr(min_length=1)", "Annotated[int, Field(gt=0)]", "pydantic.conint(gt=0) | None"],
+)
+def test_pydantic_constraint_aliases_are_accepted_at_runtime(annotation: str, evaluate: Evaluate) -> None:
+    plan = row_plan(evaluate(f"class T(BaseModel):\n    id: {annotation}"))
+    assert plan.kind == "named"
+
+
+def test_value_classes_are_accepted_as_pydantic_field_types(evaluate: Evaluate) -> None:
+    source = "class T(BaseModel):\n    i: Interval\n    r: Range[int]\n    m: Money | None\n    p: Point\n    c: Cube"
+    plan = row_plan(evaluate(source))
+    assert plan.interval_mask == (True, False, False, False, False)
+    assert plan.nullable_mask == (False, False, True, False, False)
+
+
+def test_a_stdlib_dataclass_is_not_taken_for_a_pydantic_one(evaluate: Evaluate) -> None:
+    plan = row_plan(evaluate("@dataclass\nclass T:\n    id: int"))
+    assert plan.form == "keyword"
+
+
+NEVER_IMPORTS_PYDANTIC: Final[str] = """
+import sys
+sys.modules.pop("pydantic", None)
+from dataclasses import dataclass
+from typing import NamedTuple, TypedDict
+from rowx._rowplan import row_plan
+
+@dataclass
+class D:
+    id: int
+
+class N(NamedTuple):
+    id: int
+
+class Z(TypedDict):
+    id: int
+
+before = set(sys.modules)
+for t in (int, tuple[int, str]):
+    row_plan(t)
+assert set(sys.modules) == before, sorted(set(sys.modules) - before)
+for t in (D, N, Z):
+    row_plan(t)
+# a named plan loads the backend, but nothing else
+assert not [m for m in set(sys.modules) - before if not m.startswith("rowx.")], "something was imported"
+assert not [m for m in sys.modules if m.split(".")[0] == "pydantic"], "pydantic was imported"
+"""
+
+
+def test_planning_never_imports_pydantic() -> None:
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [sys.executable, "-I", "-c", NEVER_IMPORTS_PYDANTIC],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 FUTURE: Final[list[str]] = ["", "from __future__ import annotations\n"]

@@ -3,7 +3,7 @@ import sys
 import types
 from dataclasses import dataclass, field
 from string.templatelib import Template
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 
@@ -104,16 +104,10 @@ def build_shape_arguments(monkeypatch: pytest.MonkeyPatch, t: object) -> tuple[s
     captured: list[tuple[str, str, list[ShapeField]]] = []
     original = core_postgres.RowShape
 
-    def spy(
-        ctor: object,
-        form: str,
-        matching: str,
-        type_name: str,
-        fields: list[ShapeField],
-        /,
-    ) -> RowShape:
-        captured.append((form, matching, fields))
-        return original(ctor, form, matching, type_name, fields)  # ty: ignore[invalid-argument-type]
+    def spy(*args: object, validate: bool = True) -> RowShape:
+        _, form, matching, _, fields = args
+        captured.append((cast("str", form), cast("str", matching), cast("list[ShapeField]", fields)))
+        return original(*args, validate=validate)  # ty: ignore[invalid-argument-type]
 
     monkeypatch.setattr(core_postgres, "RowShape", spy)
     row_plan(t)
