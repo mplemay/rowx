@@ -643,14 +643,26 @@ def test_a_typeddict_accepts_its_known_keywords_and_rejects_others(tmp_path: Pat
         "from typing import NamedTuple\nclass T(NamedTuple):\n    a: tuple[int, int]\n",
         "from typing import TypedDict\nclass T(TypedDict):\n    a: int | str\n",
         "from dataclasses import dataclass\n@dataclass\nclass T:\n    a: 'not a type'\n",
-        "from dataclasses import dataclass\n@dataclass\nclass T(Exception):\n    a: int\n",
-        "from dataclasses import dataclass\nimport abc\n@dataclass\nclass T(abc.ABC):\n    a: int\n",
         "import enum\nclass T(enum.Enum):\n    a = 1\n",
         "from typing import NamedTuple, TypedDict\nclass A(NamedTuple):\n    a: int\nclass T(A, TypedDict):\n    b: int\n",
     ],
 )
 def test_rejections_on_both_sides(tmp_path: Path, source: str) -> None:
     assert rejected(named(tmp_path, source)) == "invalid-row-type"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from dataclasses import dataclass\n@dataclass\nclass T(Exception):\n    a: int\n",
+        "from dataclasses import dataclass\nimport abc\n@dataclass\nclass T(abc.ABC):\n    a: int\n",
+        "from dataclasses import dataclass\nimport abc\nclass M(abc.ABC): ...\n@dataclass\nclass T(M):\n    a: int\n",
+    ],
+)
+def test_a_base_outside_the_project_is_a_checker_only_rejection_with_help(tmp_path: Path, source: str) -> None:
+    resolution = named(tmp_path, source)
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.help == "inherit only from project classes and the row-type base"
 
 
 def test_a_nullable_named_row_says_to_use_optional(tmp_path: Path) -> None:
@@ -796,3 +808,119 @@ def test_user_code_is_never_imported(tmp_path: Path) -> None:
         assert row_type(resolve(tmp_path, "use.py")).kind == "named"
     assert set(sys.modules) == before
     assert "boom" not in sys.modules
+
+
+TYPE_CHECKING_HEADER = (
+    "from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict\nfrom dataclasses import dataclass\n"
+    "if TYPE_CHECKING:\n    from fractions import Fraction\n"
+)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "type D = Fraction\n",
+        "D = Fraction\n",
+        "D: TypeAlias = Fraction\n",
+        "type D = list[Fraction]\n",
+        "D = Fraction | None\n",
+        "type E = Fraction\ntype D = E\n",
+    ],
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@dataclass\nclass T:\n    a: D\n",
+        "@dataclass\nclass T:\n    a: list[D]\n",
+        "@dataclass\nclass T:\n    a: D | None\n",
+        "class T(NamedTuple):\n    a: D\n",
+        "class T(TypedDict):\n    a: D\n",
+        "T = TypedDict('T', {'a': D})\n",
+    ],
+)
+def test_a_type_checking_only_name_behind_an_alias_in_a_field_is_rejected(
+    tmp_path: Path, alias: str, body: str
+) -> None:
+    resolution = named(tmp_path, TYPE_CHECKING_HEADER + alias + body)
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.help == "import `Fraction` at runtime"
+
+
+def test_a_type_checking_only_name_behind_an_alias_from_another_module_is_rejected(tmp_path: Path) -> None:
+    source = "from dataclasses import dataclass\nfrom aliases import D\n@dataclass\nclass T:\n    a: D\n"
+    extra = {
+        "aliases.py": "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import datetime\ntype D = datetime.date\n"
+    }
+    resolution = named(tmp_path, source, extra=extra)
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.help == "import `datetime` at runtime"
+
+
+def test_an_alias_of_a_runtime_name_is_fine_in_a_field_and_a_quoted_alias_body_stays_rejected(tmp_path: Path) -> None:
+    header = "from dataclasses import dataclass\nimport datetime\n"
+    source = header + "type D = datetime.date\n@dataclass\nclass T:\n    a: D\n    b: list[D | None]\n"
+    assert fields(named(tmp_path, source)) == [("a", False, True), ("b", False, True)]
+    quoted = header + "type D = 'datetime.date'\n@dataclass\nclass T:\n    a: D\n"
+    assert rejected(named(tmp_path, quoted)) == "invalid-row-type"
+
+
+def test_an_inconsistent_mro_is_unresolved(tmp_path: Path) -> None:
+    source = (
+        "from dataclasses import dataclass\nclass A: ...\nclass B(A): ...\n@dataclass\nclass T(A, B):\n    x: int\n"
+    )
+    resolution = named(tmp_path, source)
+    assert rejected(resolution) == "unresolved-row-type"
+    assert "method resolution order" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+
+
+def test_a_class_that_inherits_from_itself_is_unresolved(tmp_path: Path) -> None:
+    source = "from dataclasses import dataclass\n@dataclass\nclass A(B):\n    a: int\n@dataclass\nclass B(A):\n    b: int\nT = A\n"
+    resolution = named(tmp_path, source)
+    assert rejected(resolution) == "unresolved-row-type"
+    assert "inherits from itself" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+
+
+def test_an_inheritance_chain_has_no_depth_cap(tmp_path: Path) -> None:
+    depth = 40
+    lines = ["from dataclasses import dataclass", "@dataclass", "class C0:", "    a: int"]
+    for index in range(1, depth):
+        lines += ["@dataclass", f"class C{index}(C{index - 1}):", f"    f{index}: int"]
+    lines.append(f"T = C{depth - 1}")
+    resolution = named(tmp_path, "\n".join(lines) + "\n")
+    assert [key for key, _, _ in fields(resolution)] == ["a", *(f"f{index}" for index in range(1, depth))]
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "    if True:\n        b: int\n",
+        "    try:\n        b: int\n    except ImportError:\n        pass\n",
+        "    with open('x') as handle:\n        b: int\n",
+        "    for _ in ():\n        b: int\n",
+    ],
+)
+@pytest.mark.parametrize("head", ["@dataclass\nclass T:\n    a: int\n", "class T(TypedDict):\n    a: int\n"])
+def test_a_field_in_a_conditional_block_is_rejected(tmp_path: Path, head: str, block: str) -> None:
+    resolution = named(tmp_path, "from dataclasses import dataclass\nfrom typing import TypedDict\n" + head + block)
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.diagnostic is not None
+    assert resolution.diagnostic.message == "a field declared inside a conditional block can't be checked"
+
+
+def test_a_conditional_assignment_without_an_annotation_is_not_a_field(tmp_path: Path) -> None:
+    source = "from dataclasses import dataclass\n@dataclass\nclass T:\n    a: int\n    if True:\n        c = 1\n"
+    assert fields(named(tmp_path, source)) == [("a", False, True)]
+
+
+def test_a_private_field_is_keyed_by_its_mangled_name(tmp_path: Path) -> None:
+    source = (
+        "from dataclasses import dataclass\n@dataclass\nclass _T:\n    __x: int\n    __y__: int\n    _z: int\nT = _T\n"
+    )
+    assert [key for key, _, _ in fields(named(tmp_path, source))] == ["_T__x", "__y__", "_z"]
+
+
+def test_a_known_root_never_resolves_into_a_project_module(tmp_path: Path) -> None:
+    source = "from rowx.postgres import Money\nT = Money\n"
+    stub = "class Money:\n    pass\n"
+    extra = {"rowx/postgres/_money.py": stub, "rowx/postgres/__init__.py": "from ._money import Money\n"}
+    assert leaves(named(tmp_path, source, extra=extra)) == [("rowx.postgres.Money", False)]

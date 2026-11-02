@@ -353,6 +353,40 @@ def test_an_annotation_imported_only_under_type_checking_names_the_field_and_the
         row_plan(evaluate(source))
 
 
+def test_a_type_checking_only_name_behind_an_alias_names_the_field_and_the_name(evaluate: Evaluate) -> None:
+    source = (
+        "if typing.TYPE_CHECKING:\n    from fractions import Fraction\ntype D = Fraction\ntype E = list[D]\n"
+        "@dataclass\nclass T:\n    id: int\n    ratio: E"
+    )
+    with pytest.raises(InterfaceError, match=r"T: field 'ratio' names 'Fraction', which is not available at runtime"):
+        row_plan(evaluate(source))
+
+
+def test_a_type_checking_only_name_behind_a_row_level_alias_is_an_interface_error(evaluate: Evaluate) -> None:
+    source = "if typing.TYPE_CHECKING:\n    from fractions import Fraction\ntype T = Fraction"
+    with pytest.raises(InterfaceError, match=r"it names 'Fraction', which is not available at runtime"):
+        row_plan(evaluate(source))
+
+
+def test_a_type_checking_only_name_behind_an_alias_from_another_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    load_module(
+        tmp_path,
+        monkeypatch,
+        "alias_rows",
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from fractions import Fraction\ntype D = Fraction\n",
+    )
+    module = load_module(
+        tmp_path,
+        monkeypatch,
+        "alias_user",
+        "from dataclasses import dataclass\nfrom alias_rows import D\n@dataclass\nclass T:\n    a: D | None\n",
+    )
+    with pytest.raises(InterfaceError, match=r"field 'a' names 'Fraction'"):
+        row_plan(module.T)
+
+
 @pytest.mark.parametrize(
     ("source", "message"),
     [

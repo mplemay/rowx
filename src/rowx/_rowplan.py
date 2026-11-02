@@ -128,6 +128,23 @@ def _reject(t: object, why: str) -> InterfaceError:
     return InterfaceError(f"unsupported row type {t!r}: {why}")
 
 
+class _NameUnavailableError(InterfaceError):
+    def __init__(self, t: object, name: str | None) -> None:
+        super().__init__(
+            f"unsupported row type {t!r}: it names {name!r}, which is not available at runtime; "
+            "import it outside `TYPE_CHECKING`"
+        )
+        self.name = name
+
+
+# a `type` statement evaluates its value lazily, so a name imported only under `TYPE_CHECKING` fails here
+def _alias_value(t: TypeAliasType) -> object:
+    try:
+        return t.__value__
+    except NameError as err:
+        raise _NameUnavailableError(t, err.name) from err
+
+
 def _unwrap(t: object) -> object:
     for _ in range(MAX_ALIAS_DEPTH + 1):
         if get_origin(t) is Annotated:
@@ -135,7 +152,7 @@ def _unwrap(t: object) -> object:
         elif isinstance(t, TypeAliasType):
             if t.__type_params__:
                 raise _reject(t, "generic aliases are not supported")
-            t = t.__value__
+            t = _alias_value(t)
         else:
             return t
     msg = f"alias chain deeper than {MAX_ALIAS_DEPTH}"
@@ -332,7 +349,7 @@ def _unwrap_field(t: object) -> object:
         if origin is Annotated or _qualifier(origin) is not None:
             t = get_args(t)[0]
         elif isinstance(t, TypeAliasType) and not t.__type_params__:
-            t = t.__value__
+            t = _alias_value(t)
         else:
             return t
     return t
@@ -615,10 +632,16 @@ def _named(t: type, kind: str) -> RowPlan:
             raise _reject(
                 t, f"field {spec.key!r} has no type annotation; use typing.NamedTuple, not collections.namedtuple"
             )
-        annotation = _unwrap_field(hints[spec.key])
         try:
+            annotation = _unwrap_field(hints[spec.key])
             nullable = _elem(annotation)
             interval = _is_interval_elem(annotation)
+        except _NameUnavailableError as err:
+            msg = (
+                f"{t.__name__}: field {spec.key!r} names {err.name!r}, which is not available at runtime; "
+                "import it outside `TYPE_CHECKING`"
+            )
+            raise InterfaceError(msg) from err
         except InterfaceError as err:
             msg = f"{err} (field {spec.key!r} of {t.__name__})"
             raise InterfaceError(msg) from err

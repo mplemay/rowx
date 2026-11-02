@@ -99,3 +99,73 @@ error[unexpected-column]: column 3 "other" matches no field of `Movie`
    |       ^^^^^ row type
    |
    = help: add a field named "other" to `Movie`, or remove the column from the SELECT
+
+error[missing-column]: field "slug" of `Doc` has no column
+  --> queries.py:18:7
+   |
+18 | query[Doc](t"SELECT id FROM users")
+   |       ^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:56:5
+   = help: select a column named "slug", alias one with AS slug, or mark the key `NotRequired`
+
+error[unexpected-column]: column 3 "?column?" matches no field of `Small`
+  --> queries.py:19:7
+   |
+19 | query[Small](t"SELECT id, name, 1 FROM users")
+   |       ^^^^^ row type
+   |
+   = help: alias the expression
+
+error[unexpected-column]: column 1 "id!" matches no field of `Small`
+  --> queries.py:20:7
+   |
+20 | query[Small](t'SELECT id AS "id!!", name FROM users')
+   |       ^^^^^ row type
+   |
+   = help: add a field named "id!" to `Small`, or remove the column from the SELECT
+
+error[missing-column]: field "id" of `Small` has no column
+  --> queries.py:20:7
+   |
+20 | query[Small](t'SELECT id AS "id!!", name FROM users')
+   |       ^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:14:5
+   = help: select a column named "id", alias one with AS id, or give the field a default
+
+error[column-name-mismatch]: column 2 "email" faces field "name" of `Triple` (position 2)
+  --> queries.py:21:7
+   |
+21 | query[Triple](t"SELECT id, email, name FROM users")
+   |       ^^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:67:5
+   = help: reorder the SELECT, alias the column AS name, or rename the field
+
+error[column-name-mismatch]: column 3 "name" faces field "email" of `Triple` (position 3)
+  --> queries.py:21:7
+   |
+21 | query[Triple](t"SELECT id, email, name FROM users")
+   |       ^^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:68:5
+   = help: reorder the SELECT, alias the column AS email, or rename the field
+
+error[type-mismatch]: column 1 "id" is `int` but field "id" of `Labeled` is `str`
+  --> queries.py:22:7
+   |
+22 | query[Labeled](t"SELECT id, name, email FROM users")
+   |       ^^^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:60:5
+
+error[nullability-mismatch]: column 3 "email" may be NULL but field "email" of `Labeled` is `str`
+  --> queries.py:22:7
+   |
+22 | query[Labeled](t"SELECT id, name, email FROM users")
+   |       ^^^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:62:5
+   = note: nullable because the column has no NOT NULL constraint
+   = help: annotate `str | None`, or alias the column as "email!" if it can't be NULL

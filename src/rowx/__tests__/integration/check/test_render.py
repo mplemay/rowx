@@ -61,9 +61,26 @@ class Movie(TypedDict):
     id: int
     name: str
     email: NotRequired[str | None]
+
+
+class Doc(TypedDict):
+    id: int
+    slug: str
+
+
+class Labeled(TypedDict):
+    id: str
+    name: str
+    email: str
+
+
+class Triple(NamedTuple):
+    id: int
+    name: str
+    email: str | None
 """
 QUERIES: Final[str] = """\
-from app.models import Loose, Movie, Pair, Small, Strict, Trailing, Typed, User
+from app.models import Doc, Labeled, Loose, Movie, Pair, Small, Strict, Trailing, Triple, Typed, User
 from rowx import query
 
 query[User](t"SELECT id FROM users")
@@ -80,6 +97,11 @@ query[User](t"SELECT email, name, id FROM users")
 query[Trailing](t"SELECT id FROM users")
 query[Movie](t"SELECT id, name FROM users")
 query[Small](t'SELECT id, name AS "name!" FROM users')
+query[Doc](t"SELECT id FROM users")
+query[Small](t"SELECT id, name, 1 FROM users")
+query[Small](t'SELECT id AS "id!!", name FROM users')
+query[Triple](t"SELECT id, email, name FROM users")
+query[Labeled](t"SELECT id, name, email FROM users")
 """
 
 

@@ -128,6 +128,7 @@ ROWS: Final[list[Row]] = [
     ("class C: ...\nT = C", "InterfaceError", "invalid-row-type"),
 ]
 
+TYPE_CHECKING_ALIAS: Final[str] = "if typing.TYPE_CHECKING:\n    from fractions import Fraction\ntype D = Fraction\n"
 # a pydantic row is `invalid-row-type` in the checker until #188 accepts it, and then flips to `ok`
 PENDING_188: Final[str] = "invalid-row-type"
 # the runtime accepts these and the checker rejects them for good (a checker-only rejection)
@@ -374,6 +375,86 @@ NAMED_ROWS: Final[list[Row]] = [
     ("@dataclass\nclass U:\n    id: int\n@dataclass\nclass T:\n    u: U", "InterfaceError", REJECTED),
     ("class T(NamedTuple):\n    a: tuple[int, int]", "InterfaceError", REJECTED),
     ("class T(TypedDict):\n    a: int | str", "InterfaceError", REJECTED),
+    # a name imported only under `TYPE_CHECKING` stays unavailable through a `type` alias, which reads its value lazily
+    *[
+        (f"{TYPE_CHECKING_ALIAS}{body}", "InterfaceError", REJECTED)
+        for body in (
+            "@dataclass\nclass T:\n    a: D",
+            "@dataclass\nclass T:\n    a: list[D]",
+            "@dataclass\nclass T:\n    a: D | None",
+            "@dataclass\nclass T:\n    a: Optional[D]",
+            "@dataclass\nclass T:\n    a: Annotated[D, 'm']",
+            "type E = D\n@dataclass\nclass T:\n    a: E",
+            "type E = list[D]\n@dataclass\nclass T:\n    a: E",
+            "class T(NamedTuple):\n    a: D",
+            "class T(NamedTuple):\n    a: list[D]",
+            "class T(TypedDict):\n    a: D",
+            "class T(TypedDict):\n    a: NotRequired[D]",
+        )
+    ],
+    # a redeclared field takes its default from the class attribute of that name found along the MRO
+    *[
+        (source, keyword(f("x", required=False)), "ok")
+        for source in (
+            "@dataclass\nclass Base:\n    x: int = 1\n@dataclass\nclass T(Base):\n    x: int",
+            "@dataclass\nclass Base:\n    x: int = field(default=1)\n@dataclass\nclass T(Base):\n    x: int",
+            "@dataclass\nclass Base:\n    x: int = 1\nclass Mid(Base):\n    x: int\n@dataclass\nclass T(Mid):\n    x: int",
+            "class Mixin:\n    x = 9\n@dataclass\nclass T(Mixin):\n    x: int",
+            "@dataclass\nclass A:\n    x: int = 1\n@dataclass\nclass B:\n    x: int\n@dataclass\nclass T(A, B):\n    x: int",
+            "@dataclass\nclass T:\n    x: int\n    x = 5",
+            "@dataclass\nclass A:\n    x: int\n@dataclass\nclass B:\n    x: int = 1\n@dataclass\nclass T(A, B):\n    x: int",
+            "class Mixin:\n    def x(self): ...\n@dataclass\nclass T(Mixin):\n    x: int",
+        )
+    ],
+    *[
+        (source, keyword(f("x")), "ok")
+        for source in (
+            "@dataclass\nclass Base:\n    x: int = field(default_factory=int)\n@dataclass\nclass T(Base):\n    x: int",
+            "@dataclass\nclass Base:\n    x: int = field(kw_only=True)\n@dataclass\nclass T(Base):\n    x: int",
+        )
+    ],
+    # the fields of an undecorated subclass are the first dataclass's in the MRO, not a union of the bases
+    (
+        "@dataclass\nclass A:\n    a: int\n@dataclass\nclass B:\n    b: int\nclass T(A, B): ...",
+        keyword(f("a")),
+        "ok",
+    ),
+    (
+        "@dataclass\nclass A:\n    a: int\nclass Mid(A): ...\n@dataclass\nclass B:\n    b: int\nclass T(Mid, B): ...",
+        keyword(f("a")),
+        "ok",
+    ),
+    # the fields are collected along the real C3 linearization, not the bases in the order written
+    (
+        (
+            "@dataclass\nclass C0:\n    a: int\n    e: int\n@dataclass\nclass C1:\n    d: int\n    b: int\n    c: int\n"
+            "@dataclass\nclass C2:\n    e: int\n@dataclass\nclass C3(C2, C1, C0):\n    a: int\n"
+            "@dataclass\nclass C4(C3): ...\n@dataclass\nclass T(C3, C2): ..."
+        ),
+        keyword(f("a"), f("e"), f("d"), f("b"), f("c")),
+        "ok",
+    ),
+    (
+        (
+            "@dataclass\nclass A:\n    a: int\n@dataclass\nclass B(A):\n    b: int\n@dataclass\nclass C(A):\n    c: int\n"
+            "@dataclass\nclass T(B, C):\n    d: int"
+        ),
+        keyword(f("a"), f("c"), f("b"), f("d")),
+        "ok",
+    ),
+    # the runtime accepts a base from outside the project, and the checker rejects it: it only follows project classes
+    ("import abc\n@dataclass\nclass T(abc.ABC):\n    id: int", keyword(f("id")), CHECKER_ONLY),
+    ("@dataclass\nclass T(Exception):\n    id: int", keyword(f("id")), CHECKER_ONLY),
+    # a field declared in a conditional block is a field at runtime, and the checker can't tell whether it is
+    ("@dataclass\nclass T:\n    a: int\n    if True:\n        b: int", keyword(f("a"), f("b")), CHECKER_ONLY),
+    (
+        "class T(TypedDict):\n    a: int\n    try:\n        b: int\n    except ImportError:\n        pass",
+        dict_form(f("a"), f("b")),
+        CHECKER_ONLY,
+    ),
+    # a private name is stored under its mangled name, which is what the row's field is called
+    ("@dataclass\nclass T:\n    __x: int\n    _y: int", keyword(f("_T__x"), f("_y")), "ok"),
+    ("class T(TypedDict):\n    __x: int", dict_form(f("_T__x")), "ok"),
 ]
 
 ROWS.extend(NAMED_ROWS)

@@ -3,7 +3,6 @@ import builtins
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from re import compile as re_compile
 from sys import stdlib_module_names
 from tokenize import detect_encoding
 from typing import TYPE_CHECKING, Final, Literal, get_args
@@ -95,11 +94,12 @@ VALUE_CLASSES: Final[dict[str, str]] = {
 }
 FIELD_QUALIFIERS: Final[frozenset[str]] = frozenset({"typing.Required", "typing.NotRequired", "typing.ReadOnly"})
 TYPED_DICT_KEYWORDS: Final[frozenset[str]] = frozenset({"total", "closed", "extra_items"})
-LOWERCASE_IDENTIFIER: Final = re_compile(r"[a-z_][a-z0-9_]*")
 DECORATOR_HELP: Final[str] = "remove the decorator, or use `@dataclass`"
 INIT_HELP: Final[str] = "remove `__init__` and use `__post_init__`"
 KEYWORD_HELP: Final[str] = "remove the metaclass or class keyword"
 OUTSIDE_HELP: Final[str] = "define the row type inside the project"
+BASE_HELP: Final[str] = "inherit only from project classes and the row-type base"
+CONDITIONAL_FIELD: Final[str] = "a field declared inside a conditional block can't be checked"
 
 SCOPE_TYPES: Final = (
     ast.FunctionDef,
@@ -124,6 +124,8 @@ FORMS: Final[dict[Form, tuple[RowForm, Matching]]] = {
     "typeddict": ("dict", "by_name"),
 }
 FUNCTIONAL_ARGS: Final[int] = 2
+type ClassKey = tuple[Path, int, int]
+DEF_TYPES: Final = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 MIN_ANNOTATED: Final[int] = 2
 
 
@@ -274,43 +276,53 @@ class _Source:
     total: bool = True
 
 
+# a name a class body leaves as a class attribute; `value` is None for a `def`, a `class` or a destructuring target
+@dataclass(slots=True, frozen=True, eq=False)
+class _Attr:
+    module: _Module
+    value: ast.expr | None
+
+
 # `fields` maps a name to its source, or to None for a name that is declared but is not a field (a dataclass
-# `ClassVar` or `init=False`), which still shadows the base's field of that name
+# `ClassVar` or `init=False`), which still shadows the base's field of that name; for a dataclass it is what
+# `__dataclass_fields__` would be. `attrs` are the class attributes left once the decorator has run.
 @dataclass(slots=True, kw_only=True)
 class _Info:
     form: Form | None
     fields: dict[str, _Source | None] = field(default_factory=dict)
     init: bool = True
+    decorated: bool = False
+    attrs: dict[str, _Attr] = field(default_factory=dict)
 
 
-class _Reject(Exception):  # ruff: ignore[error-suffix-on-exception-name]
+class RejectError(Exception):
     def __init__(
         self,
         rule: Rule,
         message: str,
         *,
-        help: str | None = None,  # ruff: ignore[builtin-argument-shadowing]
+        help_: str | None = None,
         notes: tuple[str, ...] = (),
     ) -> None:
         super().__init__(message)
         self.rule: Rule = rule
         self.message = message
-        self.help = help
+        self.help = help_
         self.notes = notes
 
 
-def _invalid(message: str, *, help: str | None = None) -> _Reject:  # ruff: ignore[builtin-argument-shadowing]
-    return _Reject("invalid-row-type", message, help=help)
+def _invalid(message: str, *, help_: str | None = None) -> RejectError:
+    return RejectError("invalid-row-type", message, help_=help_)
 
 
-def _unresolved(message: str, *, help: str | None = None) -> _Reject:  # ruff: ignore[builtin-argument-shadowing]
-    return _Reject("unresolved-row-type", message, help=help)
+def _unresolved(message: str, *, help_: str | None = None) -> RejectError:
+    return RejectError("unresolved-row-type", message, help_=help_)
 
 
-def _external_reject(qualname: str) -> _Reject:
+def _external_reject(qualname: str) -> RejectError:
     if qualname.split(".", maxsplit=1)[0] in KNOWN_ROOTS:
         return _invalid(f"`{qualname}` isn't a supported row type")
-    return _unresolved(f"`{qualname}` is defined outside the project", help=OUTSIDE_HELP)
+    return _unresolved(f"`{qualname}` is defined outside the project", help_=OUTSIDE_HELP)
 
 
 def _is_type_checking(test: ast.expr) -> bool:
@@ -544,7 +556,7 @@ class ModuleGraph:
 
     def find_absolute(self, dotted: str, roots: tuple[Path, ...]) -> _Module | None:
         parts = dotted.split(".")
-        if parts[0] in stdlib_module_names:
+        if parts[0] in KNOWN_ROOTS:
             return None
         return next((found for root in roots if (found := self.find_in(root, parts)) is not None), None)
 
@@ -590,6 +602,40 @@ def _to_elem(node: _Node, *, allow_none: bool) -> Elem:
     return Elem(member.leaf, nullable=node.none, item=member.item)
 
 
+def _class_key(klass: _Class) -> ClassKey:
+    return (klass.module.path, klass.node.lineno, klass.node.col_offset)
+
+
+# `__x` in a class body is stored as `_Class__x`, which is the key the runtime sees
+def _mangle(class_name: str, name: str) -> str:
+    stripped = class_name.lstrip("_")
+    if name.startswith("__") and not name.endswith("__") and stripped:
+        return f"_{stripped}{name}"
+    return name
+
+
+def _nested_statements(node: ast.AST) -> Iterable[ast.stmt]:
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.stmt):
+            yield child
+            if not isinstance(child, DEF_TYPES):
+                yield from _nested_statements(child)
+        elif isinstance(child, ast.ExceptHandler | ast.match_case):
+            yield from _nested_statements(child)
+
+
+def _c3_merge(sequences: list[list[ClassKey]]) -> list[ClassKey] | None:
+    merged: list[ClassKey] = []
+    pending = [seq for seq in sequences if seq]
+    while pending:
+        head = next((seq[0] for seq in pending if not any(seq[0] in other[1:] for other in pending)), None)
+        if head is None:
+            return None
+        merged.append(head)
+        pending = [seq for seq in ([item for item in seq if item != head] for seq in pending) if seq]
+    return merged
+
+
 class _Resolver:
     def __init__(self, graph: ModuleGraph, roots: tuple[Path, ...]) -> None:
         self._graph = graph
@@ -598,6 +644,11 @@ class _Resolver:
         # set while a named type's field annotation is evaluated: a string is parsed, and a name imported only under
         # `TYPE_CHECKING` is rejected, because `get_type_hints` would fail on it
         self._in_field = False
+        # set while an alias body is evaluated: a string there stays unsupported, but a `TYPE_CHECKING` name is still
+        # rejected, because a `TypeAliasType` evaluates its value when the field is read
+        self._in_alias = False
+        self._infos: dict[ClassKey, _Info] = {}
+        self._mros: dict[ClassKey, list[_Class]] = {}
 
     def _find(self, module: _Module, level: int, dotted: str | None) -> _Module | None:
         if level == 0:
@@ -664,7 +715,7 @@ class _Resolver:
         if tc := [binding for binding in unique if binding.tc]:
             if self._in_field and len(tc) == len(unique):
                 msg = f"`{name}` is imported only under `TYPE_CHECKING`"
-                raise _invalid(msg, help=f"import `{name}` at runtime")
+                raise _invalid(msg, help_=f"import `{name}` at runtime")
             unique = tc[:1]
         if len(unique) > 1:
             msg = f"`{name}` is bound more than once at module level"
@@ -709,7 +760,7 @@ class _Resolver:
             raise _invalid(msg)
         try:
             func = self._resolve_ref(call.func, module, ())
-        except _Reject:
+        except RejectError:
             func = None
         if not isinstance(func, _External) or self._normalize(func.qualname) not in FUNCTIONAL:
             msg = f"`{name}` is not a type expression"
@@ -764,7 +815,7 @@ class _Resolver:
             case ast.Constant(value=None):
                 return _Node((), none=True)
             case ast.Constant(value=str() as text):
-                if not self._in_field:
+                if not self._in_field or self._in_alias:
                     msg = "a quoted type isn't supported"
                     raise _invalid(msg)
                 return self._eval(self._parse_quoted(text), module, chain)
@@ -790,12 +841,11 @@ class _Resolver:
             case _Alias():
                 if self.alias is None:
                     self.alias = AliasSite(path=value.module.path, span=value.site)
-                # an alias is evaluated as a row type is, so a string in it stays unsupported
-                in_field, self._in_field = self._in_field, False
+                in_alias, self._in_alias = self._in_alias, True
                 try:
                     return self._eval(value.expr, value.module, value.chain)
                 finally:
-                    self._in_field = in_field
+                    self._in_alias = in_alias
             case _External(qualname):
                 normalized = self._normalize(qualname)
                 if (leaf := LEAVES.get(normalized)) is not None:
@@ -892,11 +942,11 @@ class _Resolver:
         # the normalized qualified name of `expr`, or None when it is not an import-resolved name
         try:
             value = self._resolve_ref(expr, module, ())
-        except _Reject:
+        except RejectError:
             return None
         return self._normalize(value.qualname) if isinstance(value, _External) else None
 
-    def _base(self, expr: ast.expr, klass: _Class, stack: tuple[_Class, ...]) -> _Info | str:
+    def _base(self, expr: ast.expr, klass: _Class, stack: tuple[ClassKey, ...]) -> _Info | str:
         subscripted = isinstance(expr, ast.Subscript)
         target = expr.value if isinstance(expr, ast.Subscript) else expr
         if not isinstance(target, ast.Name | ast.Attribute):
@@ -909,7 +959,7 @@ class _Resolver:
                 if subscripted:
                     msg = f"`{base.name}` is subscripted, and generic row types are not supported yet"
                     raise _invalid(msg)
-                return self._info(base, (*stack, klass))
+                return self._info(base, (*stack, _class_key(klass)))
         msg = f"a base of `{klass.name}` isn't a class"
         raise _invalid(msg)
 
@@ -932,6 +982,9 @@ class _Resolver:
             raise _invalid(msg)
         if normalized in {"typing.NamedTuple", "typing.TypedDict", "builtins.object"}:
             return normalized.rsplit(".", maxsplit=1)[-1]
+        if qualname.split(".", maxsplit=1)[0] in KNOWN_ROOTS:
+            msg = f"`{qualname}` isn't a supported row type"
+            raise _invalid(msg, help_=BASE_HELP)
         raise _external_reject(qualname)
 
     @staticmethod
@@ -947,7 +1000,7 @@ class _Resolver:
         func = call.func if call is not None else decorator
         try:
             value = self._resolve_ref(func, klass.module, ())
-        except _Reject as reject:
+        except RejectError as reject:
             if reject.rule != "invalid-row-type":
                 raise
             value = None
@@ -959,7 +1012,7 @@ class _Resolver:
             raise _invalid(msg)
         if name != "dataclasses.dataclass":
             msg = f"the decorator `{ast.unparse(func)}` on `{klass.name}` is unknown, so its effect on the constructor is not checked"
-            raise _invalid(msg, help=DECORATOR_HELP)
+            raise _invalid(msg, help_=DECORATOR_HELP)
         init = True
         for keyword in call.keywords if call is not None else ():
             if keyword.arg is None:
@@ -996,9 +1049,9 @@ class _Resolver:
             if keyword.arg not in known:
                 what = "the metaclass" if keyword.arg == "metaclass" else f"the class keyword `{keyword.arg}`"
                 msg = f"{what} of `{node.name}` is unknown, so its effect on the constructor is not checked"
-                raise _invalid(msg, help=KEYWORD_HELP)
+                raise _invalid(msg, help_=KEYWORD_HELP)
 
-    def _bases(self, node: ast.ClassDef, klass: _Class, stack: tuple[_Class, ...]) -> tuple[list[_Info], set[str]]:
+    def _bases(self, node: ast.ClassDef, klass: _Class, stack: tuple[ClassKey, ...]) -> tuple[list[_Info], set[str]]:
         bases = [self._base(base, klass, stack) for base in node.bases]
         direct = {base for base in bases if isinstance(base, str)} - {"object"}
         if len(direct) > 1:
@@ -1017,10 +1070,16 @@ class _Resolver:
             raise _invalid(msg)
         return next(iter(forms), None)
 
-    def _info(self, klass: _Class, stack: tuple[_Class, ...]) -> _Info:
-        if klass in stack or len(stack) >= MAX_HOPS:
-            msg = f"`{klass.name}` inherits from itself or is more than {MAX_HOPS} bases deep"
+    def _info(self, klass: _Class, stack: tuple[ClassKey, ...]) -> _Info:
+        key = _class_key(klass)
+        if key in stack:
+            msg = f"`{klass.name}` inherits from itself"
             raise _unresolved(msg)
+        if (cached := self._infos.get(key)) is None:
+            cached = self._infos[key] = self._build_info(klass, stack)
+        return cached
+
+    def _build_info(self, klass: _Class, stack: tuple[ClassKey, ...]) -> _Info:
         node = klass.node
         if isinstance(node, ast.Call):
             return self._functional_info(klass, node)
@@ -1031,17 +1090,82 @@ class _Resolver:
         decorated, init = self._decorators(node, klass)
         form = self._form(klass, infos, direct, decorated=decorated)
         self._check_keywords(node, known=TYPED_DICT_KEYWORDS if form == "typeddict" else frozenset())
-        info = _Info(form=form)
+        info = _Info(form=form, decorated=decorated, init=init)
+        raw = self._raw_attrs(node, klass)
         match form:
             case "dataclass":
-                bases = [base for base in infos if base.form == "dataclass"]
-                self._dataclass_fields(info, node, klass, bases, decorated=decorated)
-                info.init = init if decorated else next((base.init for base in bases), True)
+                self._dataclass_fields(info, node, klass, raw)
             case "namedtuple":
                 self._namedtuple_fields(info, node, klass, infos, direct=bool(direct))
             case "typeddict":
                 self._typeddict_fields(info, node, klass, infos)
+        info.attrs = self._final_attrs(node, klass, raw, decorated=decorated)
         return info
+
+    def _project_bases(self, klass: _Class) -> list[_Class]:
+        if not isinstance(klass.node, ast.ClassDef):
+            return []
+        found: list[_Class] = []
+        for base in klass.node.bases:
+            target = base.value if isinstance(base, ast.Subscript) else base
+            if isinstance(target, ast.Name | ast.Attribute) and isinstance(
+                value := self._ref(target, klass.module), _Class
+            ):
+                found.append(value)
+        return found
+
+    # the C3 linearization over the project classes; a base outside the project is already rejected
+    def _mro(self, klass: _Class) -> list[_Class]:
+        key = _class_key(klass)
+        if (cached := self._mros.get(key)) is not None:
+            return cached
+        bases = self._project_bases(klass)
+        linearized = [self._mro(base) for base in bases]
+        by_key = {_class_key(member): member for seq in linearized for member in seq}
+        merged = _c3_merge([[_class_key(m) for m in seq] for seq in linearized] + [[_class_key(b) for b in bases]])
+        if merged is None:
+            msg = f"`{klass.name}` has no consistent method resolution order"
+            raise _unresolved(msg)
+        self._mros[key] = result = [klass, *(by_key[member] for member in merged)]
+        return result
+
+    # the names the class body leaves as class attributes, before the dataclass decorator runs
+    @staticmethod
+    def _raw_attrs(node: ast.ClassDef, klass: _Class) -> dict[str, _Attr]:
+        attrs: dict[str, _Attr] = {}
+        statements = [*node.body, *(nested for stmt in node.body for nested in _nested_statements(stmt))]
+        for stmt in statements:
+            match stmt:
+                case ast.Assign(targets=targets, value=value):
+                    for target in targets:
+                        for name in _stored_names(target):
+                            direct = isinstance(target, ast.Name)
+                            attrs[_mangle(node.name, name)] = _Attr(klass.module, value if direct else None)
+                case ast.AnnAssign(target=ast.Name(id=name), value=value) if value is not None:
+                    attrs[_mangle(node.name, name)] = _Attr(klass.module, value)
+                case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef():
+                    attrs[_mangle(node.name, stmt.name)] = _Attr(klass.module, None)
+        return attrs
+
+    # a decorated dataclass deletes the attribute of a `field(...)` without a `default`, and replaces the others
+    # with their default
+    def _final_attrs(
+        self, node: ast.ClassDef, klass: _Class, raw: dict[str, _Attr], *, decorated: bool
+    ) -> dict[str, _Attr]:
+        if not decorated:
+            return raw
+        attrs = dict(raw)
+        for stmt in node.body:
+            if not (isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)):
+                continue
+            key = _mangle(node.name, stmt.target.id)
+            value = stmt.value
+            if isinstance(value, ast.Call) and self._external_name(value.func, klass.module) == "dataclasses.field":
+                if any(keyword.arg == "default" for keyword in value.keywords):
+                    attrs[key] = _Attr(klass.module, None)
+                else:
+                    attrs.pop(key, None)
+        return attrs
 
     def _namedtuple_fields(
         self, info: _Info, node: ast.ClassDef, klass: _Class, infos: list[_Info], *, direct: bool
@@ -1062,8 +1186,12 @@ class _Resolver:
 
     @staticmethod
     def _annotated(node: ast.ClassDef) -> list[tuple[ast.AnnAssign, str]]:
+        for stmt in node.body:
+            for nested in _nested_statements(stmt) if not isinstance(stmt, DEF_TYPES) else ():
+                if isinstance(nested, ast.AnnAssign) and isinstance(nested.target, ast.Name):
+                    raise _invalid(CONDITIONAL_FIELD)
         return [
-            (stmt, stmt.target.id)
+            (stmt, _mangle(node.name, stmt.target.id))
             for stmt in node.body
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
         ]
@@ -1092,23 +1220,22 @@ class _Resolver:
         specials = {"typing.ClassVar": "ClassVar", "dataclasses.InitVar": "InitVar", "dataclasses.KW_ONLY": "KW_ONLY"}
         return specials.get(self._external_name(head, module) or "")
 
-    def _dataclass_fields(
-        self,
-        info: _Info,
-        node: ast.ClassDef,
-        klass: _Class,
-        bases: list[_Info],
-        *,
-        decorated: bool,
-    ) -> None:
-        # the library collects the bases from the last to the first, and a redeclared field keeps its place
-        for base in reversed(bases):
-            info.fields.update(base.fields)
-        if not decorated:
+    def _dataclass_fields(self, info: _Info, node: ast.ClassDef, klass: _Class, raw: dict[str, _Attr]) -> None:
+        # the infos of the project classes after this one, in method resolution order
+        rest = [self._info(member, ()) for member in self._mro(klass)[1:]]
+        if not info.decorated:
+            # `__dataclass_fields__` is read as an attribute, so the first dataclass in the MRO supplies it
+            if (first := next((base for base in rest if base.decorated), None)) is not None:
+                info.fields = dict(first.fields)
+                info.init = first.init
             return
+        # the library collects the bases from the last to the first, and a redeclared field keeps its place
+        for base in reversed(rest):
+            info.fields.update(base.fields)
         if any(isinstance(stmt, ast.FunctionDef) and stmt.name == "__init__" for stmt in node.body):
             msg = f"`{klass.name}` defines `__init__`, so its effect on the constructor is not checked"
-            raise _invalid(msg, help=INIT_HELP)
+            raise _invalid(msg, help_=INIT_HELP)
+        inherited = [raw, *(base.attrs for base in rest)]
         for stmt, key in self._annotated(node):
             match self._special(stmt.annotation, klass.module):
                 case "ClassVar":
@@ -1119,12 +1246,22 @@ class _Resolver:
                     msg = f"`{klass.name}` has the InitVar field `{key}`, which is not supported"
                     raise _invalid(msg)
                 case _:
-                    info.fields[key] = self._dataclass_field(stmt, key, klass)
+                    info.fields[key] = self._dataclass_field(stmt, key, klass, inherited)
 
-    def _dataclass_field(self, stmt: ast.AnnAssign, key: str, klass: _Class) -> _Source | None:
-        value = stmt.value
-        if not (isinstance(value, ast.Call) and self._external_name(value.func, klass.module) == "dataclasses.field"):
-            return self._source(stmt, key, klass, default=value is not None)
+    # a field with no value in the body takes its default from the first class attribute of that name in the MRO
+    def _dataclass_field(
+        self, stmt: ast.AnnAssign, key: str, klass: _Class, inherited: list[dict[str, _Attr]]
+    ) -> _Source | None:
+        value, module = stmt.value, klass.module
+        if value is None:
+            hit = next((attrs[key] for attrs in inherited if key in attrs), None)
+            if hit is None:
+                return self._source(stmt, key, klass, default=False)
+            if hit.value is None:
+                return self._source(stmt, key, klass, default=True)
+            value, module = hit.value, hit.module
+        if not (isinstance(value, ast.Call) and self._external_name(value.func, module) == "dataclasses.field"):
+            return self._source(stmt, key, klass, default=True)
         default = False
         for keyword in value.keywords:
             if keyword.arg is None:
@@ -1218,10 +1355,10 @@ class _Resolver:
         try:
             expr, override = self._strip_field(source.annotation, source.module)
             elem = _to_elem(self._eval(expr, source.module, ()), allow_none=True)
-        except _Reject as reject:
+        except RejectError as reject:
             note = f"field defined at {source.module.path}:{span.line}:{span.col}"
             message = f'{reject.message} (field "{source.key}" of `{type_name}`)'
-            raise _Reject(reject.rule, message, help=reject.help, notes=(*reject.notes, note)) from None
+            raise RejectError(reject.rule, message, help_=reject.help, notes=(*reject.notes, note)) from None
         finally:
             self._in_field = False
         # only a TypedDict is optional by its qualifier or `total`; the others are by their default
@@ -1281,7 +1418,7 @@ class _Resolver:
         if isinstance(member, _NamedRef):
             if node.none:
                 msg = f"`{member.klass.name}` is a named row type, which can't be nullable"
-                raise _invalid(msg, help="use .optional()")
+                raise _invalid(msg, help_="use .optional()")
             return self._named_row(member.klass)
         if isinstance(member, _Tuple):
             return self._tuple_row(node, member)
@@ -1298,7 +1435,7 @@ def resolve_row_type(graph: ModuleGraph, call: QueryCall, roots: tuple[Path, ...
     resolver = _Resolver(graph, roots)
     try:
         return Resolution(row_type=resolver.resolve(call))
-    except _Reject as reject:
+    except RejectError as reject:
         notes = ()
         if (alias := resolver.alias) is not None:
             notes = (f"alias defined at {alias.path}:{alias.span.line}:{alias.span.col}",)

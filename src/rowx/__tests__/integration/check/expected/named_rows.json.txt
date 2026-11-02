@@ -191,5 +191,138 @@
     "sql": null,
     "column_index": 2,
     "field": null
+  },
+  {
+    "rule": "missing-column",
+    "message": "field \"slug\" of `Doc` has no column",
+    "file": "queries.py",
+    "line": 18,
+    "col": 7,
+    "end_line": 18,
+    "end_col": 10,
+    "notes": [
+      "field defined at <root>/app/models.py:56:5"
+    ],
+    "help": "select a column named \"slug\", alias one with AS slug, or mark the key `NotRequired`",
+    "sqlstate": null,
+    "sql": null,
+    "column_index": null,
+    "field": "slug"
+  },
+  {
+    "rule": "unexpected-column",
+    "message": "column 3 \"?column?\" matches no field of `Small`",
+    "file": "queries.py",
+    "line": 19,
+    "col": 7,
+    "end_line": 19,
+    "end_col": 12,
+    "notes": [],
+    "help": "alias the expression",
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 2,
+    "field": null
+  },
+  {
+    "rule": "unexpected-column",
+    "message": "column 1 \"id!\" matches no field of `Small`",
+    "file": "queries.py",
+    "line": 20,
+    "col": 7,
+    "end_line": 20,
+    "end_col": 12,
+    "notes": [],
+    "help": "add a field named \"id!\" to `Small`, or remove the column from the SELECT",
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 0,
+    "field": null
+  },
+  {
+    "rule": "missing-column",
+    "message": "field \"id\" of `Small` has no column",
+    "file": "queries.py",
+    "line": 20,
+    "col": 7,
+    "end_line": 20,
+    "end_col": 12,
+    "notes": [
+      "field defined at <root>/app/models.py:14:5"
+    ],
+    "help": "select a column named \"id\", alias one with AS id, or give the field a default",
+    "sqlstate": null,
+    "sql": null,
+    "column_index": null,
+    "field": "id"
+  },
+  {
+    "rule": "column-name-mismatch",
+    "message": "column 2 \"email\" faces field \"name\" of `Triple` (position 2)",
+    "file": "queries.py",
+    "line": 21,
+    "col": 7,
+    "end_line": 21,
+    "end_col": 13,
+    "notes": [
+      "field defined at <root>/app/models.py:67:5"
+    ],
+    "help": "reorder the SELECT, alias the column AS name, or rename the field",
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 1,
+    "field": "name"
+  },
+  {
+    "rule": "column-name-mismatch",
+    "message": "column 3 \"name\" faces field \"email\" of `Triple` (position 3)",
+    "file": "queries.py",
+    "line": 21,
+    "col": 7,
+    "end_line": 21,
+    "end_col": 13,
+    "notes": [
+      "field defined at <root>/app/models.py:68:5"
+    ],
+    "help": "reorder the SELECT, alias the column AS email, or rename the field",
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 2,
+    "field": "email"
+  },
+  {
+    "rule": "type-mismatch",
+    "message": "column 1 \"id\" is `int` but field \"id\" of `Labeled` is `str`",
+    "file": "queries.py",
+    "line": 22,
+    "col": 7,
+    "end_line": 22,
+    "end_col": 14,
+    "notes": [
+      "field defined at <root>/app/models.py:60:5"
+    ],
+    "help": null,
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 0,
+    "field": "id"
+  },
+  {
+    "rule": "nullability-mismatch",
+    "message": "column 3 \"email\" may be NULL but field \"email\" of `Labeled` is `str`",
+    "file": "queries.py",
+    "line": 22,
+    "col": 7,
+    "end_line": 22,
+    "end_col": 14,
+    "notes": [
+      "field defined at <root>/app/models.py:62:5",
+      "nullable because the column has no NOT NULL constraint"
+    ],
+    "help": "annotate `str | None`, or alias the column as \"email!\" if it can't be NULL",
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 2,
+    "field": "email"
   }
 ]
