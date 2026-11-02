@@ -424,6 +424,7 @@ async fn run(
                 scalar: args.scalar,
                 limit_one: false,
                 arity: args.arity,
+                ..Shape::default()
             };
             pg::stream(
                 client,

@@ -2,8 +2,9 @@ use std::pin::Pin;
 
 use bytes::BytesMut;
 use futures_util::{FutureExt, TryStreamExt, pin_mut};
+use rowx_core::row_shape::{FieldSpec, Mapping, Matching, map_columns};
 use tokio_postgres::types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
-use tokio_postgres::{Client, Row, RowStream, Statement};
+use tokio_postgres::{Client, Column, Row, RowStream, Statement};
 
 use crate::describe;
 use crate::error::Error;
@@ -235,26 +236,34 @@ impl Retrier {
 /// What the caller expects of the result, checked before and while rows stream in.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Shape<'a> {
-    /// `true` marks a nullable column, so `false` rejects NULL there.
+    /// `true` marks a nullable column, so `false` rejects NULL there. For a named shape (`fields`
+    /// set) it is per field instead, and the per-column mask comes from the mapping.
     pub mask: Option<&'a [bool]>,
     pub scalar: bool,
     pub limit_one: bool,
     pub arity: Option<usize>,
+    /// The fields of a named row type; the columns are mapped onto them before execution.
+    pub fields: Option<&'a [FieldSpec]>,
+    pub matching: Matching,
 }
 
+/// The rows, and the column-to-field mapping when the shape is named.
+pub type Fetched = (Vec<Row>, Option<Mapping>);
+
 /// # Errors
-/// `RowShape` for an arity, scalar or NULL-mask violation, `Db`/`Interface` for driver failures.
+/// `RowShape` for an arity, scalar or NULL-mask violation, `Shape` for a mapping failure,
+/// `NullField` for a NULL in a non-nullable mapped field, `Db`/`Interface` for driver failures.
 pub async fn fetch(
     client: &Client,
     cache: &mut StmtCache<Statement>,
     sql: &str,
     shape: &Shape<'_>,
     encode: impl Encode,
-) -> Result<Vec<Row>, Error> {
+) -> Result<Fetched, Error> {
     let mut retrier = Retrier::default();
     loop {
         match fetch_once(client, cache, sql, shape, &encode).await {
-            Ok(rows) => return Ok(rows),
+            Ok(fetched) => return Ok(fetched),
             Err(err) => retrier.on_error(err, cache, sql)?,
         }
     }
@@ -266,13 +275,22 @@ async fn fetch_once(
     sql: &str,
     shape: &Shape<'_>,
     encode: &impl Encode,
-) -> Result<Vec<Row>, Error> {
-    let stream = open(client, cache, sql, shape, encode).await?;
+) -> Result<Fetched, Error> {
+    let (stream, mapping) = open(client, cache, sql, shape, encode).await?;
     pin_mut!(stream);
+    let owned = mapping
+        .as_ref()
+        .map(|m| column_mask(shape, m))
+        .transpose()?;
+    let mask = if mapping.is_some() {
+        owned.as_deref()
+    } else {
+        shape.mask
+    };
     let mut rows = Vec::new();
     while let Some(row) = stream.try_next().await? {
-        if let Some(mask) = shape.mask {
-            check_nulls(&row, mask)?;
+        if let Some(mask) = mask {
+            check_nulls(&row, mask, mapping.as_ref())?;
         }
         rows.push(row);
         // dropping the stream discards the rest of the result; the connection task drains it
@@ -280,7 +298,39 @@ async fn fetch_once(
             break;
         }
     }
-    Ok(rows)
+    Ok((rows, mapping))
+}
+
+// the per-column mask of a named shape: a mapped column takes its field's flag, a pass-through
+// column is nullable. `check_shape` guarantees one flag per field, so a miss is a caller bug.
+fn column_mask(shape: &Shape<'_>, mapping: &Mapping) -> Result<Vec<bool>, Error> {
+    let fields = shape.mask.ok_or_else(missing_field_mask)?;
+    mapping
+        .columns
+        .iter()
+        .map(|field| {
+            field.map_or(Ok(true), |f| {
+                fields.get(f).copied().ok_or_else(missing_field_mask)
+            })
+        })
+        .collect()
+}
+
+fn missing_field_mask() -> Error {
+    Error::Interface("a named shape needs one nullability flag per field".to_owned())
+}
+
+// a named shape must carry a flag for every field, or NULL checks would silently switch off
+fn check_field_mask(fields: &[FieldSpec], mask: Option<&[bool]>) -> Result<(), Error> {
+    match mask {
+        Some(mask) if mask.len() == fields.len() => Ok(()),
+        Some(mask) => Err(Error::Interface(format!(
+            "the nullability mask covers {} fields, the named shape has {}",
+            mask.len(),
+            fields.len()
+        ))),
+        None => Err(missing_field_mask()),
+    }
 }
 
 // prepare, shape check, encode and send; errors here all precede the first row, so the retrier wraps it
@@ -290,18 +340,18 @@ async fn open(
     sql: &str,
     shape: &Shape<'_>,
     encode: &impl Encode,
-) -> Result<RowStream, Error> {
+) -> Result<(RowStream, Option<Mapping>), Error> {
     let (mut stmt, cached) = prepare(client, cache, sql).await?;
-    if cached && check_shape(shape, stmt.columns().len()).is_err() {
+    if cached && check_shape(shape, stmt.columns()).is_err() {
         // a schema change since caching can alter the columns, and the server only reports it on
         // execution, which the shape check would prevent; judge the shape on a fresh prepare
         cache.remove(sql);
         (stmt, _) = prepare(client, cache, sql).await?;
     }
     // checked before executing so a statement with no rows still reports a wrong shape
-    check_shape(shape, stmt.columns().len())?;
+    let mapping = check_shape(shape, stmt.columns())?;
     let params = encode.encode(stmt.params())?;
-    Ok(client.query_raw(&stmt, &params).await?)
+    Ok((client.query_raw(&stmt, &params).await?, mapping))
 }
 
 /// One trip of a stream.
@@ -317,6 +367,7 @@ pub enum Batch {
 pub struct RowBatches {
     stream: Option<Pin<Box<RowStream>>>,
     mask: Option<Vec<bool>>,
+    mapping: Option<Mapping>,
     batch_size: usize,
     pending: Option<Error>,
     rows_affected: Option<u64>,
@@ -332,6 +383,12 @@ impl std::fmt::Debug for RowBatches {
 }
 
 impl RowBatches {
+    /// The column-to-field mapping of a named shape; fixed for the whole stream.
+    #[must_use]
+    pub const fn mapping(&self) -> Option<&Mapping> {
+        self.mapping.as_ref()
+    }
+
     /// Waits for one row, then takes the rows that are ready without waiting, up to `batch_size`.
     /// A failure after some rows were taken is returned by the next call.
     ///
@@ -361,7 +418,7 @@ impl RowBatches {
                     let checked = self
                         .mask
                         .as_deref()
-                        .map_or(Ok(()), |m| check_nulls(&row, m));
+                        .map_or(Ok(()), |m| check_nulls(&row, m, self.mapping.as_ref()));
                     match checked {
                         Ok(()) => {
                             rows.push(row);
@@ -408,43 +465,55 @@ pub async fn stream(
     batch_size: usize,
 ) -> Result<RowBatches, Error> {
     let mut retrier = Retrier::default();
-    let stream = loop {
+    let (stream, mapping) = loop {
         match open(client, cache, sql, shape, &encode).await {
-            Ok(stream) => break stream,
+            Ok(opened) => break opened,
             Err(err) => retrier.on_error(err, cache, sql)?,
         }
     };
+    let mask = mapping.as_ref().map_or_else(
+        || Ok(shape.mask.map(<[bool]>::to_vec)),
+        |m| column_mask(shape, m).map(Some),
+    )?;
     Ok(RowBatches {
         stream: Some(Box::pin(stream)),
-        mask: shape.mask.map(<[bool]>::to_vec),
+        mask,
+        mapping,
         batch_size: batch_size.max(1),
         pending: None,
         rows_affected: None,
     })
 }
 
-fn check_shape(shape: &Shape<'_>, columns: usize) -> Result<(), Error> {
+fn check_shape(shape: &Shape<'_>, columns: &[Column]) -> Result<Option<Mapping>, Error> {
+    let count = columns.len();
     if let Some(arity) = shape.arity
-        && arity != columns
+        && arity != count
     {
         return Err(Error::RowShape(format!(
-            "expected {arity} columns, the query returns {columns}"
+            "expected {arity} columns, the query returns {count}"
         )));
     }
-    if shape.scalar && columns != 1 {
+    if shape.scalar && count != 1 {
         return Err(Error::RowShape(format!(
-            "a scalar result needs exactly 1 column, the query returns {columns}"
+            "a scalar result needs exactly 1 column, the query returns {count}"
         )));
+    }
+    // a named shape's mask is per field, so the mapping replaces the column length check
+    if let Some(fields) = shape.fields {
+        check_field_mask(fields, shape.mask)?;
+        let names: Vec<&str> = columns.iter().map(Column::name).collect();
+        return Ok(Some(map_columns(&names, fields, shape.matching)?));
     }
     if let Some(mask) = shape.mask
-        && mask.len() != columns
+        && mask.len() != count
     {
         return Err(Error::RowShape(format!(
-            "the nullability mask covers {} columns, the query returns {columns}",
+            "the nullability mask covers {} columns, the query returns {count}",
             mask.len()
         )));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// # Errors
@@ -475,13 +544,53 @@ async fn execute_once(
     Ok(client.execute_raw(&stmt, &params).await?)
 }
 
-fn check_nulls(row: &Row, mask: &[bool]) -> Result<(), Error> {
+fn check_nulls(row: &Row, mask: &[bool], mapping: Option<&Mapping>) -> Result<(), Error> {
     for (index, nullable) in mask.iter().enumerate() {
         if !nullable && row.try_get::<_, Raw>(index)?.0.is_none() {
+            // a named shape reports the field too, so the binding can render its message
+            if let Some(field) = mapping.and_then(|m| m.columns.get(index).copied().flatten()) {
+                return Err(Error::NullField {
+                    column: index,
+                    field,
+                });
+            }
             return Err(Error::RowShape(format!(
                 "NULL in a non-nullable column at index {index}"
             )));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rowx_core::row_shape::{FieldSpec, Names};
+
+    use super::{Error, check_field_mask};
+
+    fn fields(count: usize) -> Vec<FieldSpec> {
+        (0..count)
+            .map(|_| FieldSpec {
+                names: Names::Unknown,
+                required: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn field_mask_must_cover_every_field() {
+        assert_eq!(check_field_mask(&fields(2), Some(&[true, false])), Ok(()));
+        assert!(matches!(
+            check_field_mask(&fields(2), Some(&[true])),
+            Err(Error::Interface(_))
+        ));
+        assert!(matches!(
+            check_field_mask(&fields(2), Some(&[true, false, true])),
+            Err(Error::Interface(_))
+        ));
+        assert!(matches!(
+            check_field_mask(&fields(2), None),
+            Err(Error::Interface(_))
+        ));
+    }
 }
