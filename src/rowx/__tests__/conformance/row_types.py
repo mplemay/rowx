@@ -392,6 +392,19 @@ NAMED_ROWS: Final[list[Row]] = [
             "class T(TypedDict):\n    a: NotRequired[D]",
         )
     ],
+    # a row-level `type` alias of a name imported only under `TYPE_CHECKING` is unavailable at runtime too
+    (
+        "if typing.TYPE_CHECKING:\n    from decimal import Decimal as D0\ntype T = D0",
+        "InterfaceError",
+        REJECTED,
+    ),
+    # the body of `if TYPE_CHECKING:` in a class never runs, and its `else:` body always does
+    ("@dataclass\nclass T:\n    a: int\n    if typing.TYPE_CHECKING:\n        b: int", keyword(f("a")), "ok"),
+    (
+        "@dataclass\nclass T:\n    a: int\n    if typing.TYPE_CHECKING:\n        ...\n    else:\n        b: int = 1",
+        keyword(f("a"), f("b", required=False)),
+        "ok",
+    ),
     # a redeclared field takes its default from the class attribute of that name found along the MRO
     *[
         (source, keyword(f("x", required=False)), "ok")

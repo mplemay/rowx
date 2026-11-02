@@ -559,9 +559,11 @@ def test_a_type_checking_only_name_outside_the_selected_fields_is_ignored(tmp_pa
     ]
 
 
-def test_a_type_checking_only_alias_stays_valid_as_the_row_type(tmp_path: Path) -> None:
+def test_a_type_checking_only_alias_is_rejected_as_the_row_type(tmp_path: Path) -> None:
     source = "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    type A = int\nT = A\n"
-    assert leaves(named(tmp_path, source)) == [("int", False)]
+    resolution = named(tmp_path, source)
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.help == "import `A` at runtime"
 
 
 def test_the_dataclass_decorator_under_an_alias_and_final(tmp_path: Path) -> None:
@@ -924,3 +926,15 @@ def test_a_known_root_never_resolves_into_a_project_module(tmp_path: Path) -> No
     stub = "class Money:\n    pass\n"
     extra = {"rowx/postgres/_money.py": stub, "rowx/postgres/__init__.py": "from ._money import Money\n"}
     assert leaves(named(tmp_path, source, extra=extra)) == [("rowx.postgres.Money", False)]
+
+
+def test_a_type_checking_block_in_a_class_body_adds_no_field(tmp_path: Path) -> None:
+    source = "from typing import TYPE_CHECKING\nfrom dataclasses import dataclass\n"
+    source += "@dataclass\nclass T:\n    a: int\n    if TYPE_CHECKING:\n        b: int\n"
+    assert fields(named(tmp_path, source)) == [("a", False, True)]
+
+
+def test_the_else_of_a_type_checking_block_in_a_class_body_adds_fields(tmp_path: Path) -> None:
+    source = "from typing import TYPE_CHECKING\nfrom dataclasses import dataclass\n"
+    source += "@dataclass\nclass T:\n    a: int\n    if TYPE_CHECKING:\n        ...\n    else:\n        b: int = 1\n"
+    assert fields(named(tmp_path, source)) == [("a", False, True), ("b", False, False)]

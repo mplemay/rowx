@@ -614,7 +614,22 @@ def _mangle(class_name: str, name: str) -> str:
     return name
 
 
+# the statements a class body runs: the body of `if TYPE_CHECKING:` never does, and its `else:` always does
+def _plain_statements(body: list[ast.stmt]) -> Iterable[ast.stmt]:
+    for stmt in body:
+        if isinstance(stmt, ast.If) and _is_type_checking(stmt.test):
+            yield from _plain_statements(stmt.orelse)
+        else:
+            yield stmt
+
+
 def _nested_statements(node: ast.AST) -> Iterable[ast.stmt]:
+    if isinstance(node, ast.If) and _is_type_checking(node.test):
+        for stmt in _plain_statements(node.orelse):
+            yield stmt
+            if not isinstance(stmt, DEF_TYPES):
+                yield from _nested_statements(stmt)
+        return
     for child in ast.iter_child_nodes(node):
         if isinstance(child, ast.stmt):
             yield child
@@ -713,7 +728,7 @@ class _Resolver:
         unique = list(dict.fromkeys(bindings))
         # a `TYPE_CHECKING` binding is the one a type checker sees, so the first one wins
         if tc := [binding for binding in unique if binding.tc]:
-            if self._in_field and len(tc) == len(unique):
+            if (self._in_field or self._in_alias) and len(tc) == len(unique):
                 msg = f"`{name}` is imported only under `TYPE_CHECKING`"
                 raise _invalid(msg, help_=f"import `{name}` at runtime")
             unique = tc[:1]
@@ -1133,7 +1148,8 @@ class _Resolver:
     @staticmethod
     def _raw_attrs(node: ast.ClassDef, klass: _Class) -> dict[str, _Attr]:
         attrs: dict[str, _Attr] = {}
-        statements = [*node.body, *(nested for stmt in node.body for nested in _nested_statements(stmt))]
+        body = list(_plain_statements(node.body))
+        statements = [*body, *(nested for stmt in body for nested in _nested_statements(stmt))]
         for stmt in statements:
             match stmt:
                 case ast.Assign(targets=targets, value=value):
@@ -1155,7 +1171,7 @@ class _Resolver:
         if not decorated:
             return raw
         attrs = dict(raw)
-        for stmt in node.body:
+        for stmt in _plain_statements(node.body):
             if not (isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)):
                 continue
             key = _mangle(node.name, stmt.target.id)
@@ -1186,13 +1202,14 @@ class _Resolver:
 
     @staticmethod
     def _annotated(node: ast.ClassDef) -> list[tuple[ast.AnnAssign, str]]:
-        for stmt in node.body:
+        body = list(_plain_statements(node.body))
+        for stmt in body:
             for nested in _nested_statements(stmt) if not isinstance(stmt, DEF_TYPES) else ():
                 if isinstance(nested, ast.AnnAssign) and isinstance(nested.target, ast.Name):
                     raise _invalid(CONDITIONAL_FIELD)
         return [
             (stmt, _mangle(node.name, stmt.target.id))
-            for stmt in node.body
+            for stmt in body
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
         ]
 

@@ -75,12 +75,6 @@ PACKAGE_CASES: Final[list[PackageCase]] = [
         expected="tuple[int, str | None]",
     ),
     PackageCase(
-        name="type_checking",
-        files={"defs.py": "type Pair = tuple[int, str | None]\n"},
-        main="from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from .defs import Pair\n\ntype T = Pair\n",
-        expected="tuple[int, str | None]",
-    ),
-    PackageCase(
         name="scalar_chain",
         files={"defs.py": "type A = int | None\ntype B = A\n"},
         main="from .defs import B\n\nT = B\n",
