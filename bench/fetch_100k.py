@@ -49,6 +49,8 @@ async def main(dsn: str) -> None:
     try:
         select = rowx.query[tuple[int, str, datetime]](t"SELECT id, body, created_at FROM rowx_bench_100k")
 
+        scalar = rowx.query[int](t"SELECT id FROM rowx_bench_100k")
+
         async with await connect(dsn) as conn:
 
             async def run_rowx() -> int:
@@ -61,6 +63,16 @@ async def main(dsn: str) -> None:
 
             fetch_ms = await median_ms(run_rowx_fetch)
 
+            async def run_scalar() -> int:
+                return len(await scalar.all(conn))
+
+            scalar_ms = await median_ms(run_scalar)
+
+            async def run_scalar_fetch() -> int:
+                return len([row async for row in scalar.fetch(conn)])
+
+            scalar_fetch_ms = await median_ms(run_scalar_fetch)
+
         async with asyncpg.create_pool(dsn, min_size=1, max_size=1) as pool:
 
             async def run_asyncpg() -> int:
@@ -71,9 +83,10 @@ async def main(dsn: str) -> None:
         await setup.execute(DROP_SQL)
         await setup.close()
 
-    print("rowx_ms asyncpg_ms ratio fetch_ms fetch_vs_all")  # ruff: ignore[print]
+    print("rowx_ms asyncpg_ms ratio fetch_ms fetch_vs_all scalar_ms scalar_fetch_ms")  # ruff: ignore[print]
     print(  # ruff: ignore[print]
-        f"{rowx_ms:.1f} {asyncpg_ms:.1f} {rowx_ms / asyncpg_ms:.2f} {fetch_ms:.1f} {fetch_ms / rowx_ms:.2f}",
+        f"{rowx_ms:.1f} {asyncpg_ms:.1f} {rowx_ms / asyncpg_ms:.2f} {fetch_ms:.1f} {fetch_ms / rowx_ms:.2f}"
+        f" {scalar_ms:.1f} {scalar_fetch_ms:.1f}",
     )
 
 
