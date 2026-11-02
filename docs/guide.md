@@ -535,25 +535,26 @@ async def main(directory: Path) -> None:
 
     # reads and validates the files now, with no database IO
     migrator = Migrator(directory)
-    assert [m.version for m in migrator.migrations if m.kind != "down"] == [1, 2, 3]
+    assert [m.version for m in migrator.migrations] == [1, 2, 3]
     assert migrator.migrations[-1].no_transaction
+    assert migrator.migrations[0].kind == "reversible"
+    assert migrator.migrations[0].down_path is not None
 
     async with Pool(DSN, max_size=2) as pool:
         # the plan, read without the migration lock: nothing runs and nothing is written
         planned = await migrator.run(pool, dry_run=True)
-        assert [s.version for s in planned] == [1, 2, 3]
+        assert [r.migration.version for r in planned] == [1, 2, 3]
         assert [s.state for s in await migrator.info(pool)] == ["pending"] * 3
 
-        for status in await migrator.run(pool):
-            assert status.state == "applied"
-            assert status.execution_time is not None
+        for result in await migrator.run(pool):
+            assert result.elapsed is not None
         assert await migrator.run(pool) == ()
 
         # no target reverts only the latest migration
-        assert [s.version for s in await migrator.undo(pool, target=None)] == [3]
-        # a target reverts every applied version above it, newest first; 0 reverts them all
-        assert [s.version for s in await migrator.undo(pool, target=0, dry_run=True)] == [2, 1]
-        assert [s.version for s in await migrator.undo(pool, target=1)] == [2]
+        assert [r.migration.version for r in await migrator.revert(pool)] == [3]
+        # a target reverts every applied version above it, newest first; all=True reverts them all
+        assert [r.migration.version for r in await migrator.revert(pool, all=True, dry_run=True)] == [2, 1]
+        assert [r.migration.version for r in await migrator.revert(pool, target=1)] == [2]
         assert [s.state for s in await migrator.info(pool)] == ["applied", "pending", "pending"]
 
 
@@ -574,8 +575,8 @@ migrator = Migrator("migrations")
 async def start(dsn: str) -> Pool:
     pool = Pool(dsn)
     await pool.open()
-    for status in await migrator.run(pool):
-        print(f"applied {status.version} {status.description} in {status.execution_time}")
+    for result in await migrator.run(pool):
+        print(f"applied {result.migration.version} {result.migration.description} in {result.elapsed}")
     return pool
 ```
 
@@ -586,17 +587,21 @@ rowx migrate run --target-version 20261029120000
 rowx migrate info
 ```
 
-- `run`, `undo`, `skip` and `info` take a `Connection` or a `Pool` and return a `tuple[MigrationStatus, ...]`: one entry
-  per migration applied, reverted or skipped, or per version for `info`. `status.state` is `applied`, `pending`,
-  `modified`, `missing` or `dirty`, and `installed_on` and `execution_time` are set for applied rows. `execution_time`
-  is a `timedelta`, or `None` for a dry run or a skipped row. For `undo` it is how long the revert took.
+- `run`, `revert` and `skip` take a `Connection` or a `Pool` and return a `tuple[MigrationResult, ...]`: one
+  `MigrationResult(migration, elapsed)` per migration applied, reverted or skipped, in the order it happened. `elapsed`
+  is a `timedelta` (for `revert`, how long the revert took), or `None` for a dry run or a skip. `skip` takes `dry_run`
+  too.
+- `info` returns a `tuple[MigrationStatus, ...]`, one per version. `status.state` is `applied`, `pending`, `modified`,
+  `missing` or `dirty`; `kind` is `simple` or `reversible` (`None` when the file is missing); `installed_on` and
+  `execution_time` are set for applied rows; and `local_checksum` and `applied_checksum` are the two SHA-384 values.
 - `info` and `dry_run=True` take no advisory lock and create nothing, so they return even while a migration is running.
   If the call is cancelled, no further migration starts and the lock is released.
 - A `Transaction`, or a `Connection` inside one, raises `InterfaceError`, because each migration manages its own
   transaction. The operation holds its connection for the whole run, so a concurrent query on that `Connection` raises
   `ConnectionBusyError`.
-- `migrator.migrations` lists one `Migration` per file (`version`, `description`, `kind` of `simple`, `up` or `down`,
-  `checksum`, `no_transaction` and `path`). The files are read when `Migrator` is constructed, so a later edit needs a
+- `migrator.migrations` lists one `Migration` per version (`version`, `description`, `kind` of `simple` or
+  `reversible`, `path`, `down_path`, `checksum`, `down_checksum` and `no_transaction`); a reversible pair is a single
+  entry, and `checksum` is the up file's. The files are read when `Migrator` is constructed, so a later edit needs a
   new `Migrator`.
 - `Migrator.skip` records pending migrations as applied without running them, to baseline a database. It has no CLI
   command.
@@ -640,10 +645,11 @@ rowx database setup                # create if missing, then run every migration
 - **Out of order.** A pending migration older than the latest applied one raises `MigrationOrderError`. A branch that
   merged late is the usual cause. `Migrator(..., allow_out_of_order=True)` or `rowx migrate run --allow-out-of-order`
   applies it, in version order.
-- **Modified.** An applied migration whose file changed raises `MigrationChecksumError`. Fix it with a new migration,
-  not by editing history. `rowx migrate info` shows both short checksums.
+- **Modified.** An applied migration whose file changed raises `MigrationChecksumError` (`version`, `local_checksum`,
+  `applied_checksum`). Fix it with a new migration, not by editing history. `rowx migrate info` shows both short
+  checksums.
 - **Missing.** An applied version with no local file raises `MigrationMissingError`, unless `ignore_missing=True` or
-  `--ignore-missing`. Even then, reverting such a version fails with `MigrationSourceError`, since there is no
+  `--ignore-missing`. Even then, reverting such a version raises `MigrationMissingError`, since there is no
   `.down.sql` to run.
 - **A file that ends the transaction.** A transactional file that runs `COMMIT` or `ROLLBACK` itself, and doesn't open
   another transaction, raises `MigrationFailedError` and records nothing. What the file committed stays committed but
@@ -680,7 +686,7 @@ async def main(directory: Path) -> None:
         except MigrationOrderError as error:
             assert error.version == 2
         applied = await Migrator(directory, allow_out_of_order=True).run(conn)
-        assert [s.version for s in applied] == [2]
+        assert [r.migration.version for r in applied] == [2]
 
         # an applied file changed
         (directory / "1_accounts.sql").write_text("CREATE TABLE accounts (id bigint PRIMARY KEY);\n")
@@ -708,20 +714,22 @@ async def main(directory: Path) -> None:
         (directory / "4_broken.sql").write_text("-- no-transaction\nCREATE TABLE IF NOT EXISTS broken (id int);\n")
         await query_unchecked(t"DELETE FROM {TABLE:ident} WHERE version = {4}").execute(conn)
         # a Migrator reads its files when it is constructed, so it is rebuilt after the edit
-        assert [s.version for s in await Migrator(directory).run(conn)] == [4]
+        assert [r.migration.version for r in await Migrator(directory).run(conn)] == [4]
 
 
 with TemporaryDirectory() as tmp:
     asyncio.run(main(Path(tmp)))
 ```
 
-- **Revert.** `undo(target=None)` reverts only the latest applied migration. `undo(target=V)` reverts every applied
-  version above `V`, newest first, and `target=0` reverts them all. `rowx migrate revert` and
-  `rowx migrate revert --target-version V` do the same. If any version in the range has no `.down.sql`, nothing is
-  reverted and `MigrationSourceError` names the version. A transactional `.down.sql` runs in a transaction with the
-  history row's deletion, and a `-- no-transaction` one leaves a dirty row when it fails.
-- **Failures.** A statement that fails inside a migration raises `MigrationFailedError` with the server's error as
-  `__cause__`. Migrations that committed before it stay applied.
+- **Revert.** `revert()` reverts only the latest applied migration. `revert(target=V)` reverts every applied version
+  above `V`, newest first, and `revert(all=True)` reverts them all. `target` with `all`, an unknown `target`, and a
+  `target` above the latest applied version are `ValueError`s. `rowx migrate revert` and
+  `rowx migrate revert --target-version V` do the same. If any version in the range is a simple migration (no
+  `.down.sql`), nothing is reverted and `IrreversibleMigrationError` names the version. A transactional `.down.sql` runs
+  in a transaction with the history row's deletion, and a `-- no-transaction` one leaves a dirty row when it fails.
+- **Failures.** A statement that fails inside a migration raises `MigrationFailedError` with the server's
+  `DatabaseError` as `error` (and `__cause__`). It also has `version`, `path`, `dirty` (a history row was left
+  `success = false`) and `applied`, the `MigrationResult`s that completed before it, which stay applied.
 - **Trusted code.** Migration files run with the connecting role's privileges and are not parsed or sandboxed. A file
   that ends the transaction rowx opened (`COMMIT` or `ROLLBACK`) is not detected: mark such a file `-- no-transaction`
   and write its own `BEGIN` and `COMMIT`.
@@ -806,7 +814,7 @@ async def main(directory: Path) -> None:
             (20240101000000, "applied"),
             (20240102000000, "pending"),
         ]
-        assert [s.version for s in await migrator.run(conn)] == [20240102000000]
+        assert [r.migration.version for r in await migrator.run(conn)] == [20240102000000]
 
 
 with TemporaryDirectory() as tmp:

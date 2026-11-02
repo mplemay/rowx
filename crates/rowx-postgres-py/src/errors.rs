@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rowx_core::error::CoreError;
-use rowx_core::migrate::NameError;
+use rowx_core::migrate::{Migration, NameError};
 use rowx_core::pool::OptionsError;
 use rowx_postgres::error::Error;
 use rowx_postgres::migrate::MigrateError;
@@ -79,20 +81,57 @@ pub fn options_error(err: &OptionsError) -> PyErr {
 
 // the only place a migration error becomes a Python exception
 #[must_use]
-pub fn migrate_to_py_err(py: Python<'_>, err: &MigrateError) -> PyErr {
+pub fn migrate_to_py_err(
+    py: Python<'_>,
+    err: &MigrateError,
+    migrations: &[Migration],
+    reverting: bool,
+) -> PyErr {
     match err {
         MigrateError::Source(e) => shared::source_error(py, e),
         MigrateError::Plan(e) => shared::plan_error(py, e),
         MigrateError::Failed {
-            version, source, ..
+            version,
+            source,
+            dirty,
+            applied,
+            ..
         } => {
-            let failed = shared::migration_failed_error(py, *version, &err.to_string());
-            failed.set_cause(py, Some(to_py_err(py, source)));
-            failed
+            let cause = to_py_err(py, source);
+            // only a server error is a failure of the file itself; anything else (a lost connection)
+            // is raised as it is
+            if !matches!(source, Error::Db { .. }) {
+                return cause;
+            }
+            // a revert runs the `.down.sql` file, everything else the forward one
+            let path = migrations
+                .iter()
+                .find(|m| m.version == *version && m.kind.is_down() == reverting)
+                .map(|m| m.path.as_path());
+            let applied: Vec<(i64, Option<i64>)> = applied
+                .iter()
+                .map(|d| (d.info.version, d.execution_time))
+                .collect();
+            let error = cause.value(py).clone().into_any();
+            match shared::migration_failed_error(
+                py,
+                &err.to_string(),
+                *version,
+                path,
+                *dirty,
+                &applied,
+                error,
+            ) {
+                Ok(failed) => {
+                    failed.set_cause(py, Some(cause));
+                    failed
+                }
+                Err(e) => e,
+            }
         }
         MigrateError::Connection(e) => to_py_err(py, e),
         MigrateError::Cancelled => shared::interface_error(py, &err.to_string()),
-        MigrateError::Unclean(inner) => migrate_to_py_err(py, inner),
+        MigrateError::Unclean(inner) => migrate_to_py_err(py, inner, migrations, reverting),
     }
 }
 
@@ -102,12 +141,17 @@ pub fn name_to_py_err(err: &NameError) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
-/// Carries a migration error across an `async` block, where the GIL is not held.
+/// Carries a migration error across an `async` block, where the GIL is not held. It also carries
+/// what the error needs to name the file that failed.
 #[derive(Debug)]
-pub struct MigrateFailure(pub MigrateError);
+pub struct MigrateFailure {
+    pub error: MigrateError,
+    pub migrations: Arc<Vec<Migration>>,
+    pub reverting: bool,
+}
 
 impl From<MigrateFailure> for PyErr {
     fn from(err: MigrateFailure) -> Self {
-        Python::attach(|py| migrate_to_py_err(py, &err.0))
+        Python::attach(|py| migrate_to_py_err(py, &err.error, &err.migrations, err.reverting))
     }
 }

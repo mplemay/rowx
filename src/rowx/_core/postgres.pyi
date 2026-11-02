@@ -5,9 +5,12 @@ from typing import Any, Literal
 from rowx.postgres._options import ConnectOptions
 from rowx.postgres._vocab import AcceptedParam, CodecName, NullReasonName, PyResultName, TypeKey
 
-type MigrationRow = tuple[
-    int, str, Literal["applied", "pending", "modified", "missing", "dirty"], int | None, int | None
-]
+type MigrationState = Literal["applied", "pending", "modified", "missing", "dirty"]
+# (version, description, state, installed_on in microseconds since the epoch, execution_time in ns, checksum)
+type StatusRow = tuple[int, str, MigrationState, int | None, int | None, bytes | None]
+# (version, elapsed in ns); None for a dry run or a skip
+type ResultRow = tuple[int, int | None]
+type MigrationEntry = tuple[int, str, Literal["simple", "reversible"], Path, Path | None, bytes, bytes | None, bool]
 
 class TypeInfo:
     @property
@@ -188,7 +191,7 @@ class Migrator:
         /,
     ) -> None: ...
     @property
-    def migrations(self) -> list[tuple[int, str, Literal["simple", "up", "down"], bytes, bool, Path]]: ...
+    def migrations(self) -> list[MigrationEntry]: ...
     @property
     def table(self) -> tuple[str] | tuple[str, str]: ...
     async def run(
@@ -196,16 +199,21 @@ class Migrator:
         executor: Connection | Pool,
         target: int | None = None,
         dry_run: bool = False,
-    ) -> list[MigrationRow]: ...
-    async def undo(
+    ) -> list[ResultRow]: ...
+    async def revert(
         self,
         executor: Connection | Pool,
-        target: int | None,
+        target: int | None = None,
         revert_all: bool = False,
         dry_run: bool = False,
-    ) -> list[MigrationRow]: ...
-    async def skip(self, executor: Connection | Pool, target: int | None = None) -> list[MigrationRow]: ...
-    async def info(self, executor: Connection | Pool) -> list[MigrationRow]: ...
+    ) -> list[ResultRow]: ...
+    async def skip(
+        self,
+        executor: Connection | Pool,
+        target: int | None = None,
+        dry_run: bool = False,
+    ) -> list[ResultRow]: ...
+    async def info(self, executor: Connection | Pool) -> list[StatusRow]: ...
 
 def _cancel_requests_sent() -> int: ...
 def _catalog_queries() -> int: ...
