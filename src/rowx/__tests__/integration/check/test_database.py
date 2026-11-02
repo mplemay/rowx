@@ -180,7 +180,7 @@ def test_a_password_is_never_printed(
     secret = "s3cr3t-pw-" + secrets.token_hex(4)
     unreachable = f"postgresql://someone:{secret}@127.0.0.1:1/{name}"
     for argv in (("create",), ("drop", "-y"), ("setup",), ("reset", "-y")):
-        code, out, err = cli(capsys, unreachable, *argv)
+        code, out, err = cli(capsys, unreachable, *argv, "--connect-timeout", "0")
         assert code == 2
         assert secret not in out + err
         assert unreachable not in out + err
@@ -205,3 +205,27 @@ def test_invalid_migrations_fail_before_any_database_change(
     assert err
     with psycopg.connect(dsn, autocommit=True) as conn:
         assert conn.execute("SELECT to_regclass('kept') IS NOT NULL").fetchone() == (True,)
+
+
+def test_database_commands_retry_an_unreachable_server_until_the_connect_timeout(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import socket  # ruff: ignore[import-outside-top-level]
+    from contextlib import closing  # ruff: ignore[import-outside-top-level]
+
+    import rowx.check.database as module  # ruff: ignore[import-outside-top-level]
+
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    attempts: list[int] = []
+    original = module.database_exists
+
+    async def spy(*args: str) -> bool:
+        attempts.append(1)
+        return await original(*args)
+
+    monkeypatch.setattr(module, "database_exists", spy)
+    code, out, _ = cli(capsys, f"postgresql://u:pw@127.0.0.1:{port}/app", "create", "--connect-timeout", "1")
+    assert (code, out) == (2, "")
+    assert len(attempts) > 2

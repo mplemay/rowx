@@ -24,7 +24,15 @@ DEFAULT_EXCLUDE: Final[tuple[str, ...]] = (
     "dist",
 )
 KEYS: Final[tuple[str, ...]] = ("include", "exclude", "database_url_env", "statement_timeout", "migrate")
-MIGRATE_KEYS: Final[tuple[str, ...]] = ("dir", "table", "create_schemas", "versioning", "kind")
+MIGRATE_KEYS: Final[tuple[str, ...]] = (
+    "dir",
+    "table",
+    "create_schemas",
+    "ignore_missing",
+    "allow_out_of_order",
+    "versioning",
+    "kind",
+)
 DEFAULT_MIGRATE_DIR: Final[str] = "migrations"
 DEFAULT_MIGRATE_TABLE: Final[str] = "_rowx_migrations"
 VERSIONINGS: Final[tuple[str, ...]] = ("inferred", "timestamp", "sequential")
@@ -42,6 +50,8 @@ class MigrateConfig:
     dir: str = DEFAULT_MIGRATE_DIR
     table: str = DEFAULT_MIGRATE_TABLE
     create_schemas: tuple[str, ...] = ()
+    ignore_missing: bool = False
+    allow_out_of_order: bool = False
     versioning: str = "inferred"
     kind: str = "inferred"
 
@@ -143,9 +153,19 @@ def _migrate(path: Path, raw: object) -> MigrateConfig:
         dir=_string(path, table, "dir", DEFAULT_MIGRATE_DIR),
         table=_string(path, table, "table", DEFAULT_MIGRATE_TABLE),
         create_schemas=_strings(path, table, "create_schemas", ()),
+        ignore_missing=_bool(path, table, "ignore_missing"),
+        allow_out_of_order=_bool(path, table, "allow_out_of_order"),
         versioning=_choice(path, table, "versioning", VERSIONINGS),
         kind=_choice(path, table, "kind", KINDS),
     )
+
+
+def _bool(path: Path, table: dict[str, object], key: str) -> bool:
+    value = table.get(key, False)
+    if not isinstance(value, bool):
+        msg = f"{path}: {key} must be a boolean"
+        raise ConfigError(msg)
+    return value
 
 
 def _choice(path: Path, table: dict[str, object], key: str, choices: tuple[str, ...]) -> str:

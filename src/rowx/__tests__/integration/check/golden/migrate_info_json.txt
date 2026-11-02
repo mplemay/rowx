@@ -1,0 +1,32 @@
+[
+  {
+    "version": 1,
+    "description": "",
+    "state": "missing",
+    "kind": null,
+    "installed_on": "<time>",
+    "execution_time": "<time>",
+    "local_checksum": null,
+    "applied_checksum": "699853ae801db3fc960c41a1f1c74d5941fde008cff2011033ee44742a7296cb4bf0a421182a5f91eafc2ca734ab5ce4"
+  },
+  {
+    "version": 2,
+    "description": "create cli b",
+    "state": "modified",
+    "kind": "reversible",
+    "installed_on": "<time>",
+    "execution_time": "<time>",
+    "local_checksum": "288373f42738412d9dd218daaedc0ce25a0179eac7be86a70ccb3b23181cc82924ec3f480467eaaecb6e4b544b49f143",
+    "applied_checksum": "ccb52697d97bd5d69a7e2b3735c255335eaf5bf8ff5ac25886fa2642f923675b7b3522f3862b36497de2d604eff32933"
+  },
+  {
+    "version": 3,
+    "description": "create cli c",
+    "state": "pending",
+    "kind": "simple",
+    "installed_on": null,
+    "execution_time": null,
+    "local_checksum": "26e71cc37450b183fb5bb72ec4f644ed27de1b55fad3d4d6cfb0ca0d71f42ca990911d74649814105a190325e15d2092",
+    "applied_checksum": null
+  }
+]

@@ -1,9 +1,12 @@
 import asyncio
+import json
 import sys
-from argparse import Namespace
+from argparse import ArgumentTypeError, BooleanOptionalAction, Namespace
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Final
 
 from rowx.check.config import Config, MigrateConfig, database_url, load_config
@@ -13,9 +16,9 @@ from rowx.postgres import Migrator, connect
 
 if TYPE_CHECKING:
     from argparse import ArgumentParser, _SubParsersAction
-    from collections.abc import Coroutine, Iterable
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable
 
-    from rowx.postgres import Connection, Migration, MigrationResult
+    from rowx.postgres import Connection, Migration, MigrationResult, MigrationStatus
 
 TIMESTAMP_FORMAT: Final[str] = "%Y%m%d%H%M%S"
 SEQUENTIAL_WIDTH: Final[int] = 4
@@ -28,6 +31,15 @@ PLACEHOLDERS: Final[dict[str, str]] = {
     "down": "-- Add down migration script here\n",
 }
 RESERVED_SUFFIXES: Final[tuple[str, ...]] = (".up", ".down")
+DEFAULT_CONNECT_TIMEOUT: Final[float] = 10.0
+STARTING_UP: Final[str] = "57P03"
+RETRY_FIRST: Final[float] = 0.05
+RETRY_MAX: Final[float] = 0.5
+NANOS_PER_MICRO: Final[int] = 1000
+TIP: Final[str] = (
+    "tip: add a [tool.rowx.migrate] table to pyproject.toml to set the migrations directory "
+    "and turn on the drift gate, `rowx check --scratch` and the pytest plugin\n"
+)
 
 
 def utc_now() -> datetime:
@@ -56,21 +68,78 @@ def add_parsers(subparsers: _SubParsersAction[ArgumentParser]) -> None:
     add.add_argument("--source", type=Path, metavar="DIR")
 
     run = commands.add_parser("run")
-    run.add_argument("--target-version", type=int, metavar="V")
-    run.add_argument("--dry-run", action="store_true")
-    run.add_argument("--allow-out-of-order", action="store_true")
-    run.add_argument("--ignore-missing", action="store_true")
+    skip = commands.add_parser("skip")
+    for parser in (run, skip):
+        parser.add_argument("--target-version", type=int, metavar="V")
+        parser.add_argument("--dry-run", action="store_true")
+        parser.add_argument("--allow-out-of-order", action=BooleanOptionalAction)
 
     revert = commands.add_parser("revert")
-    revert.add_argument("--target-version", type=int, metavar="V")
+    revert_target = revert.add_mutually_exclusive_group()
+    revert_target.add_argument("--target-version", type=int, metavar="V")
+    revert_target.add_argument("--all", action="store_true")
     revert.add_argument("--dry-run", action="store_true")
 
     info = commands.add_parser("info")
+    info.add_argument("--output-format", choices=("text", "json"), default="text")
 
-    for parser in (run, revert, info):
+    for parser in (run, revert, skip):
+        # a flag beats the config, in both directions
+        parser.add_argument("--ignore-missing", action=BooleanOptionalAction)
+    for parser in (run, revert, skip, info):
         parser.add_argument("--database-url", metavar="URL")
         parser.add_argument("--config", type=Path, metavar="FILE")
         parser.add_argument("--source", type=Path, metavar="DIR")
+        add_connect_timeout(parser)
+
+
+def connect_timeout_type(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        msg = f"invalid seconds: {value!r}"
+        raise ArgumentTypeError(msg) from None
+    if not 0 <= seconds < float("inf"):
+        msg = "must be zero or more seconds"
+        raise ArgumentTypeError(msg)
+    return seconds
+
+
+def add_connect_timeout(parser: ArgumentParser) -> None:
+    parser.add_argument(
+        "--connect-timeout",
+        type=connect_timeout_type,
+        default=DEFAULT_CONNECT_TIMEOUT,
+        metavar="SECONDS",
+        help="retry connection failures and a starting-up server for this long (default 10; 0 tries once)",
+    )
+
+
+# retries `probe` while the server is unreachable or starting up (57P03), until `seconds` seconds have passed
+async def wait_for_server(probe: Callable[[], Awaitable[object]], seconds: float) -> None:
+    deadline = monotonic() + seconds
+    delay = RETRY_FIRST
+    while True:
+        try:
+            await probe()
+        except InterfaceError:
+            pass
+        except DatabaseError as error:
+            if error.sqlstate != STARTING_UP:
+                raise
+        else:
+            return
+        if (remaining := deadline - monotonic()) <= 0:
+            # one last attempt raises the real error
+            await probe()
+            return
+        await asyncio.sleep(min(delay, remaining))
+        delay = min(delay * 2, RETRY_MAX)
+
+
+async def probe_connection(dsn: str) -> None:
+    async with await connect(dsn):
+        pass
 
 
 def resolve_target(config: Config, source: Path | None) -> Target:
@@ -109,6 +178,8 @@ def handle(args: Namespace) -> None:
     target = resolve_target(config, args.source)
     if args.migrate_command == "add":
         add(target, args)
+        if config.migrate is None:
+            sys.stderr.write(TIP)
         return
     dsn = require_url(config, args.database_url)
     run_guarded(dsn, _database_command(target, args, dsn))
@@ -136,13 +207,19 @@ def _load(target: Target, args: Namespace) -> Migrator:
             target.directory,
             table=migrate.table,
             create_schemas=migrate.create_schemas,
-            allow_out_of_order=getattr(args, "allow_out_of_order", False),
-            ignore_missing=getattr(args, "ignore_missing", False),
+            # a flag beats the config
+            allow_out_of_order=_policy(args, "allow_out_of_order", default=migrate.allow_out_of_order),
+            ignore_missing=_policy(args, "ignore_missing", default=migrate.ignore_missing),
         )
     except MigrateError as error:
         raise CheckError(str(error)) from None
     except ValueError as error:
         raise CheckError(str(error)) from None
+
+
+def _policy(args: Namespace, name: str, *, default: bool) -> bool:
+    value = getattr(args, name, None)
+    return default if value is None else bool(value)
 
 
 def _forward(migrations: Iterable[Migration]) -> list[Migration]:
@@ -245,14 +322,17 @@ def _line(
 
 async def _database_command(target: Target, args: Namespace, dsn: str) -> None:
     migrator = _load(target, args)
+    await wait_for_server(partial(probe_connection, dsn), args.connect_timeout)
     async with await connect(dsn) as conn:
         match args.migrate_command:
             case "run":
                 await _run(migrator, conn, args)
             case "revert":
                 await _revert(migrator, conn, args)
+            case "skip":
+                await _skip(migrator, conn, args)
             case _:
-                await _info(migrator, conn)
+                await _info(migrator, conn, args.output_format)
 
 
 async def _run(migrator: Migrator, conn: Connection, args: Namespace) -> None:
@@ -264,20 +344,45 @@ async def _run(migrator: Migrator, conn: Connection, args: Namespace) -> None:
 
 
 async def _revert(migrator: Migrator, conn: Connection, args: Namespace) -> None:
-    # one revert, so the versions are chosen and reverted under one lock; without a target, only the
-    # latest applied migration is reverted. `--target-version 0` keeps meaning "everything" until
-    # `revert --all` exists, as version 0 is a real version only to the Python API
-    everything = args.target_version == 0
-    target = None if everything else args.target_version
-    for result in await migrator.revert(conn, target=target, all=everything, dry_run=args.dry_run):
+    # one revert, so the versions are chosen and reverted under one lock; without a target or `--all`, only the
+    # latest applied migration is reverted, and `--target-version V` reverts every version above V
+    for result in await migrator.revert(conn, target=args.target_version, all=args.all, dry_run=args.dry_run):
         if args.dry_run:
             sys.stdout.write(_line("Would revert", result, "revert", timed=False))
         else:
             sys.stdout.write(_line("Reverted", result, "revert", result.elapsed))
 
 
-async def _info(migrator: Migrator, conn: Connection) -> None:
-    for status in await migrator.info(conn):
+async def _skip(migrator: Migrator, conn: Connection, args: Namespace) -> None:
+    for result in await migrator.skip(conn, target=args.target_version, dry_run=args.dry_run):
+        verb = "Would skip" if args.dry_run else "Skipped"
+        sys.stdout.write(_line(verb, result, "skip", timed=False))
+
+
+def _status_json(status: MigrationStatus) -> dict[str, object]:
+    return {
+        "version": status.version,
+        "description": status.description,
+        "state": status.state,
+        "kind": status.kind,
+        "installed_on": status.installed_on.isoformat() if status.installed_on is not None else None,
+        # nanoseconds, from the microsecond-resolution timedelta
+        "execution_time": (
+            status.execution_time // timedelta(microseconds=1) * NANOS_PER_MICRO
+            if status.execution_time is not None
+            else None
+        ),
+        "local_checksum": status.local_checksum.hex() if status.local_checksum is not None else None,
+        "applied_checksum": status.applied_checksum.hex() if status.applied_checksum is not None else None,
+    }
+
+
+async def _info(migrator: Migrator, conn: Connection, output_format: str) -> None:
+    statuses = await migrator.info(conn)
+    if output_format == "json":
+        sys.stdout.write(json.dumps([_status_json(status) for status in statuses], indent=2) + "\n")
+        return
+    for status in statuses:
         line = f"{status.version}/{status.state}"
         if status.description:
             line += f" {status.description}"

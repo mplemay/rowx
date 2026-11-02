@@ -49,10 +49,20 @@ def test_add_creates_the_directory_with_sqlx_placeholder_content(
     project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     code, out, err = _add(capsys, "create_users")
-    assert (code, err) == (0, "")
+    assert code == 0
+    # without `[tool.rowx.migrate]`, a one-line tip goes to stderr and stdout is unchanged
+    assert err.startswith("tip: ")
+    assert err.count("\n") == 1
     assert out == "Created migrations/20261029120000_create_users.sql\n"
     created = project / "migrations" / "20261029120000_create_users.sql"
     assert created.read_text(encoding="utf-8") == "-- Add migration script here\n"
+
+
+def test_add_prints_no_tip_when_the_migrate_table_is_configured(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "pyproject.toml").write_text("[tool.rowx.migrate]\n", encoding="utf-8")
+    assert _add(capsys, "create_users") == (0, "Created migrations/20261029120000_create_users.sql\n", "")
 
 
 def test_add_replaces_spaces_in_the_description(project: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -303,7 +313,7 @@ def test_an_unreachable_database_exits_two_without_the_password(
 ) -> None:
     url = "postgresql://nobody:hunter2secret@127.0.0.1:1/nope?connect_timeout=2"
     _seed(project / "migrations", "1_a.sql")
-    code = main(["migrate", command, "--database-url", url])
+    code = main(["migrate", command, "--database-url", url, "--connect-timeout", "0"])
     captured = capsys.readouterr()
     assert code == 2
     assert not captured.out
@@ -314,7 +324,7 @@ def test_an_unreachable_database_exits_two_without_the_password(
 
 def test_a_bad_migration_directory_exits_two(project: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _seed(project / "migrations", "nonsense.sql")
-    code = main(["migrate", "info", "--database-url", "postgresql://u:p@127.0.0.1:1/d"])
+    code = main(["migrate", "info", "--database-url", "postgresql://u:p@127.0.0.1:1/d", "--connect-timeout", "0"])
     assert code == 2
     assert "nonsense.sql" in capsys.readouterr().err
 

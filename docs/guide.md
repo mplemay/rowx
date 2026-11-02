@@ -501,6 +501,7 @@ migrations/
 - **Scaffolding.** `rowx migrate add "add email"` writes the next file. Versions are sequential (`0001`) when the last
   two differ by one and timestamps (`20261029120000`, UTC) otherwise. The kind follows the latest migration. Pass
   `--reversible` or `--simple`, and `--timestamp` or `--sequential`, to override.
+  Without a `[tool.rowx.migrate]` table, it uses `migrations/` and prints a one-line tip on stderr about adding one.
 - **`-- no-transaction`.** A file whose bytes start with `-- no-transaction` runs without the `BEGIN` and `COMMIT` rowx
   puts around other files. It is still sent as **one** simple-protocol query, and Postgres runs a multi-statement query
   as one implicit transaction. So:
@@ -584,7 +585,12 @@ async def start(dsn: str) -> Pool:
 rowx migrate run                      # applies every pending migration
 rowx migrate run --dry-run            # prints the plan and writes nothing
 rowx migrate run --target-version 20261029120000
+rowx migrate revert                   # reverts the latest applied migration
+rowx migrate revert --target-version 20261029120000   # every applied version above it
+rowx migrate revert --all             # everything
+rowx migrate skip                     # records pending migrations as applied, without running them
 rowx migrate info
+rowx migrate info --output-format json
 ```
 
 - `run`, `revert` and `skip` take a `Connection` or a `Pool` and return a `tuple[MigrationResult, ...]`: one
@@ -603,8 +609,9 @@ rowx migrate info
   `reversible`, `path`, `down_path`, `checksum`, `down_checksum` and `no_transaction`); a reversible pair is a single
   entry, and `checksum` is the up file's. `migrator.path` is the directory, resolved against the cwd. The files are
   read when `Migrator` is constructed, so a later edit needs a new `Migrator`.
-- `Migrator.skip` records pending migrations as applied without running them, to baseline a database. It has no CLI
-  command.
+- `Migrator.skip` and `rowx migrate skip [--target-version V] [--dry-run]` record pending migrations as applied without
+  running them, to baseline a database that already has the schema. A skipped row has no execution time. `skip` follows
+  `run`'s rules and takes `--allow-out-of-order` and `--ignore-missing`.
 - Migrate over a direct connection or a session-mode pooler. The lock is a session-level advisory lock, so PgBouncer in
   transaction mode is unsupported.
 
@@ -618,6 +625,27 @@ $ rowx migrate info
 3/pending index accounts email
 ```
 
+`rowx migrate info --output-format json` writes an array with one object per version, for scripts and CI:
+
+```json
+[
+  {
+    "version": 2,
+    "description": "add email",
+    "state": "applied",
+    "kind": "reversible",
+    "installed_on": "2026-10-29T12:00:01.250000+00:00",
+    "execution_time": 2000000,
+    "local_checksum": "ccb5...",
+    "applied_checksum": "ccb5..."
+  }
+]
+```
+
+`installed_on` is an ISO 8601 timestamp, `execution_time` is in nanoseconds, and the checksums are hex (a field is
+`null` when it has no value, such as `applied_checksum` on a pending migration). `info` exits 0 even when it reports
+drift.
+
 `rowx migrate` takes `--database-url` or reads the variable named by `database_url_env`, finds `dir` and the other
 settings in `[tool.rowx.migrate]`, and takes `--source DIR` (relative to the current directory) to override the
 directory. A flag beats the config, which beats the default (`migrations/`, table `_rowx_migrations`).
@@ -627,9 +655,20 @@ directory. A flag beats the config, which beats the default (`migrations/`, tabl
 dir = "migrations"                 # relative to pyproject.toml
 table = "_rowx_migrations"         # "_sqlx_migrations" adopts an sqlx project
 create_schemas = []                # CREATE SCHEMA IF NOT EXISTS, before the table is created
+ignore_missing = false             # default for --ignore-missing; also lets `missing` pass the drift gate
+allow_out_of_order = false         # default for --allow-out-of-order
 versioning = "inferred"            # inferred | timestamp | sequential (for `migrate add`)
 kind = "inferred"                  # inferred | simple | reversible (for `migrate add`)
 ```
+
+`ignore_missing` and `allow_out_of_order` set the policy everywhere migrations are applied or compared: `rowx migrate`,
+the drift gate (`ignore_missing` lets `missing` pass), `rowx check --scratch`, and the test plugin's template build.
+`--ignore-missing` and `--allow-out-of-order` turn a policy on for one command, and `--no-ignore-missing` and
+`--no-allow-out-of-order` turn it off when the config has it on.
+
+`--connect-timeout SECONDS` (default 10) on `rowx migrate` and `rowx database` retries while the server refuses
+connections or is starting up (`57P03`), so a command run right after `docker compose up` waits for the database.
+`--connect-timeout 0` tries once. An authentication error or any other server error is not retried.
 
 `rowx database` manages the database itself, from the same URL:
 
@@ -723,8 +762,10 @@ with TemporaryDirectory() as tmp:
 
 - **Revert.** `revert()` reverts only the latest applied migration. `revert(target=V)` reverts every applied version
   above `V`, newest first, and `revert(all=True)` reverts them all. `target` with `all`, an unknown `target`, and a
-  `target` above the latest applied version are `ValueError`s. `rowx migrate revert` and
-  `rowx migrate revert --target-version V` do the same. If any version in the range is a simple migration (no
+  `target` above the latest applied version are `ValueError`s. `rowx migrate revert`,
+  `rowx migrate revert --target-version V` and `rowx migrate revert --all` do the same, and `--all` with
+  `--target-version` is a usage error (exit 2). `--target-version 0` is an unknown version, not "everything". Use
+  `--all`. If any version in the range is a simple migration (no
   `.down.sql`), nothing is reverted and `IrreversibleMigrationError` names the version. A transactional `.down.sql` runs
   in a transaction with the history row's deletion, and a `-- no-transaction` one leaves a dirty row when it fails.
 - **Failures.** A statement that fails inside a migration raises `MigrationFailedError` with the server's
@@ -849,7 +890,9 @@ run `rowx migrate run`, or `rowx check --scratch`
 ```
 
 - The gate engages only when at least one query is described, and `--no-drift-check` skips it.
-- The check reads the history table and creates nothing. The role needs `SELECT` on it. It takes no migration lock, so
+- `ignore_missing = true` in `[tool.rowx.migrate]` lets `missing` pass.
+- The check reads the history table and creates nothing. The role needs `SELECT` on it, and without it the gate exits 2
+  with "grant SELECT on `<table>` to the checker role". It takes no migration lock, so
   it never waits for a migration that is running.
 - Without `[tool.rowx.migrate]`, `rowx check` behaves as it did before.
 
