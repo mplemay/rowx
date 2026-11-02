@@ -15,6 +15,8 @@ use crate::error::Error;
 const LOCK_MULTIPLIER: i64 = 0x3d32_ad9e;
 // the `execution_time` of a row whose time is not known yet (sqlx #1966)
 const UNKNOWN_EXECUTION_TIME: i64 = -1;
+// how many times a cleanup statement is sent when cancel requests keep landing on it
+const CLEANUP_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum MigrateError {
@@ -400,6 +402,53 @@ async fn revert(
     Ok(())
 }
 
+fn query_canceled(err: &Error) -> bool {
+    matches!(err, Error::Db { sqlstate, .. } if &**sqlstate == "57014")
+}
+
+// A cancelled operation's settle loop resends its cancel request until the task ends, so one can
+// land on the cleanup itself. Repeating a cleanup statement is harmless (a second `ROLLBACK` is a
+// warning, and unlocking a lock no longer held returns false), so a cancelled one is sent again, a
+// bounded number of times, rather than breaking a connection that is fine.
+#[derive(Debug, Clone, Copy)]
+enum Cleanup {
+    Rollback,
+    Unlock(i64),
+}
+
+// whether a cleanup statement that failed with `err` on attempt `attempt` (counting from 1) is sent again
+fn send_again(err: &Error, attempt: u32) -> bool {
+    attempt < CLEANUP_ATTEMPTS && query_canceled(err)
+}
+
+async fn cleanup(conn: &Connection, step: Cleanup) -> Result<(), Error> {
+    let mut attempt = 1;
+    loop {
+        let sent = match step {
+            Cleanup::Rollback => conn.simple("ROLLBACK").await,
+            Cleanup::Unlock(key) => unlock(conn, key).await,
+        };
+        match sent {
+            Err(e) if send_again(&e, attempt) => attempt += 1,
+            other => return other,
+        }
+    }
+}
+
+async fn lock(conn: &Connection, key: i64) -> Result<(), Error> {
+    conn.client()?
+        .query("SELECT pg_catalog.pg_advisory_lock($1)", &[&key])
+        .await?;
+    Ok(())
+}
+
+async fn unlock(conn: &Connection, key: i64) -> Result<(), Error> {
+    conn.client()?
+        .query("SELECT pg_catalog.pg_advisory_unlock($1)", &[&key])
+        .await?;
+    Ok(())
+}
+
 // Takes the lock (unless `locking` is off), runs `body`, and releases the lock whatever happened. On
 // an error the session may sit in an aborted transaction, so it is rolled back first (a warning and a
 // no-op otherwise) whether or not the lock is used. When the rollback or the unlock fails the session
@@ -412,46 +461,36 @@ async fn locked<T>(
     body: impl AsyncFnOnce() -> Result<T, MigrateError>,
 ) -> Result<T, MigrateError> {
     let key = if config.locking {
-        let client = conn.client()?;
-        let database: String = client
+        let database: String = conn
+            .client()?
             .query_one("SELECT pg_catalog.current_database()", &[])
             .await
             .map_err(Error::from)?
             .get(0);
-        let key = lock_key(&database);
-        client
-            .query("SELECT pg_catalog.pg_advisory_lock($1)", &[&key])
-            .await
-            .map_err(Error::from)?;
-        Some(key)
+        Some(lock_key(&database))
     } else {
         None
     };
-    let result = body().await;
-    let clean = if result.is_err() {
-        conn.simple("ROLLBACK").await.is_ok()
-    } else {
-        true
+    let result = match key {
+        // a cancel that lands just after the lock was granted fails the statement but leaves the
+        // session holding the lock, so a failed acquire is unlocked too (false when it wasn't granted)
+        Some(key) => match lock(conn, key).await {
+            Ok(()) => body().await,
+            Err(e) => Err(e.into()),
+        },
+        None => body().await,
     };
-    if let Some(key) = key {
-        let unlocked = match conn.client() {
-            Ok(client) => client
-                .query("SELECT pg_catalog.pg_advisory_unlock($1)", &[&key])
-                .await
-                .map(|_| ())
-                .map_err(Error::from),
-            Err(e) => Err(e),
-        };
-        if let Err(e) = unlocked {
-            return Err(match result {
-                Ok(_) => MigrateError::Unclean(Box::new(e.into())),
-                Err(original) => MigrateError::Unclean(Box::new(original)),
-            });
-        }
-    }
-    match result {
-        Err(original) if !clean => Err(MigrateError::Unclean(Box::new(original))),
-        other => other,
+    let clean = result.is_ok() || cleanup(conn, Cleanup::Rollback).await.is_ok();
+    let unlocked = match key {
+        Some(key) => cleanup(conn, Cleanup::Unlock(key)).await,
+        None => Ok(()),
+    };
+    match (result, unlocked) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(e)) => Err(MigrateError::Unclean(Box::new(e.into()))),
+        (Err(original), Err(_)) => Err(MigrateError::Unclean(Box::new(original))),
+        (Err(original), Ok(())) if !clean => Err(MigrateError::Unclean(Box::new(original))),
+        (Err(original), Ok(())) => Err(original),
     }
 }
 
@@ -635,7 +674,29 @@ pub async fn info(
 
 #[cfg(test)]
 mod tests {
-    use super::lock_key;
+    use super::{CLEANUP_ATTEMPTS, Error, lock_key, send_again};
+
+    fn db_error(sqlstate: &str) -> Error {
+        Error::Db {
+            sqlstate: sqlstate.into(),
+            message: "test".into(),
+            detail: None,
+            hint: None,
+            position: None,
+            routine: None,
+        }
+    }
+
+    #[test]
+    fn a_cancelled_cleanup_statement_is_sent_again_a_bounded_number_of_times() {
+        let canceled = db_error("57014");
+        assert!((1..CLEANUP_ATTEMPTS).all(|attempt| send_again(&canceled, attempt)));
+        // a connection that keeps cancelling is reported, not retried forever
+        assert!(!send_again(&canceled, CLEANUP_ATTEMPTS));
+        // any other failure is final at once
+        assert!(!send_again(&db_error("08006"), 1));
+        assert!(!send_again(&Error::Interface("closed".into()), 1));
+    }
 
     #[test]
     fn lock_key_matches_sqlx() {

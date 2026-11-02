@@ -1,8 +1,12 @@
 import asyncio
+import os
 import secrets
 from typing import TYPE_CHECKING, Final
 
+import psycopg
 import pytest
+from psycopg import sql
+from psycopg.conninfo import make_conninfo
 
 from rowx import query, query_unchecked
 from rowx.errors import (
@@ -19,6 +23,7 @@ from rowx.errors import (
 from rowx.postgres import Connection, Migrator, Pool, connect
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
@@ -760,6 +765,58 @@ def test_a_failed_unlock_discards_the_pooled_connection(schema: str, tmp_path: P
             assert new_pid != pid
             assert await advisory_locks(observer, pid) == 0
             assert pool.size == 1
+
+    asyncio.run(run())
+
+
+# a database of its own, for a file that changes what the whole database allows
+@pytest.fixture
+def database() -> Iterator[str]:
+    if (server := os.environ.get("ROWX_TEST_DSN")) is None:
+        if os.environ.get("ROWX_REQUIRE_DB") == "1":
+            pytest.fail("ROWX_REQUIRE_DB=1 but ROWX_TEST_DSN is not set")
+        pytest.skip("ROWX_TEST_DSN is not set")
+    name = f"rowx_migrate_{secrets.token_hex(6)}"
+    with psycopg.connect(server, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    try:
+        yield make_conninfo(server, dbname=name)
+    finally:
+        with psycopg.connect(server, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+async def ping(conn: Connection) -> None:
+    await conn.ping()
+
+
+@pytest.mark.parametrize("setup", [None, ping], ids=["in_rust", "with_hooks"])
+def test_a_failed_unlock_on_a_live_connection_discards_the_pooled_connection(
+    database: str,
+    tmp_path: Path,
+    setup: Callable[[Connection], Awaitable[None]] | None,
+) -> None:
+    # the file commits a revoke and leaves the session as a role that may neither update the history
+    # table nor unlock, so the session stays alive holding the lock; with `reset_query=None` only the
+    # broken mark keeps the pool from handing it out again
+    write(
+        tmp_path,
+        "1_revoke.sql",
+        "-- no-transaction\nREVOKE EXECUTE ON FUNCTION pg_catalog.pg_advisory_unlock(bigint) FROM PUBLIC;\n"
+        "SET ROLE pg_monitor;\n",
+    )
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with (
+            Pool(database, max_size=1, acquire_timeout=10, reset_query=None, setup=setup) as pool,
+            await connect(database) as observer,
+        ):
+            pid = await backend_pid(pool)
+            with pytest.raises(DatabaseError, match="permission denied"):
+                await migrator.run(pool)
+            assert await backend_pid(pool) != pid
+            await wait_for_no_lock(observer, pid)
 
     asyncio.run(run())
 

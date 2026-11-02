@@ -1660,6 +1660,40 @@ async fn a_failed_rollback_or_unlock_reports_a_broken_connection() -> TestResult
 }
 
 #[tokio::test]
+async fn a_failed_unlock_on_a_live_connection_reports_a_broken_connection() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let mut observer = db.connect().await?;
+    // the file commits a revoke and leaves the session as a role that may neither update the history
+    // table nor unlock: the bookkeeping fails, the rollback succeeds, and the unlock fails while the
+    // session stays alive and keeps the lock
+    let all = [simple(
+        1,
+        "-- no-transaction\nREVOKE EXECUTE ON FUNCTION pg_catalog.pg_advisory_unlock(bigint) FROM PUBLIC; \
+         SET ROLE pg_monitor",
+    )];
+
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(err.connection_broken(), "{err:?}");
+    // the bookkeeping's own error is the one reported
+    assert!(
+        matches!(err.root(), MigrateError::Connection(Error::Db { sqlstate, .. }) if &**sqlstate == "42501"),
+        "{err:?}"
+    );
+    // a live session still holds the lock, which is why the connection must not be reused
+    assert!(conn.client().is_ok());
+    assert_eq!(advisory_locks(&observer).await?, 1);
+    conn.close().await;
+    observer.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
 async fn a_clean_failure_is_not_a_broken_connection() -> TestResult {
     let Some(db) = TestDb::new().await? else {
         return Ok(());

@@ -1,6 +1,9 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -144,6 +147,35 @@ fn may_have_changed(op: Op, result: &Result<Vec<Status>, MigrateError>) -> bool 
     }
 }
 
+// Sets the flag when it is dropped unfinished, before its inner future (whose drop sends the cancel
+// request) goes: a struct's `drop` runs before its fields are dropped. pyo3's own done callback, which
+// drops the Rust future, is registered before `watch_flag`, so the callbacks alone can't order them.
+struct StopFirst<F> {
+    flag: Arc<AtomicBool>,
+    finished: bool,
+    inner: Pin<Box<F>>,
+}
+
+impl<F: Future> Future for StopFirst<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        let out = self.inner.as_mut().poll(cx);
+        if out.is_ready() {
+            self.finished = true;
+        }
+        out
+    }
+}
+
+impl<F> Drop for StopFirst<F> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.flag.store(true, Ordering::Release);
+        }
+    }
+}
+
 async fn run_job(
     cancel: Cancel,
     claim: Option<Claim>,
@@ -155,6 +187,7 @@ async fn run_job(
     let inner = Arc::clone(&cancel.backend.conn);
     let pool = access.pool.clone();
     let state = Arc::clone(&cancel.state);
+    let flag = Arc::clone(&job.cancelled);
     // the invalidation runs in the task, so it also happens when the caller is cancelled
     let pending = cancel::spawn(&cancel, claim, &hook, async move {
         let mut conn = inner.lock().await;
@@ -176,7 +209,13 @@ async fn run_job(
         drop(conn);
         result
     });
-    let result = pending.wait().await.map_err(|e| PgError(e.into()))?;
+    let result = StopFirst {
+        flag,
+        finished: false,
+        inner: Box::pin(pending.wait()),
+    }
+    .await
+    .map_err(|e| PgError(e.into()))?;
     match result {
         Ok(statuses) => Python::attach(|py| to_list(py, statuses)),
         Err(err) => {
@@ -219,7 +258,7 @@ fn on_connection<'py>(py: Python<'py>, conn: &Connection, job: Job) -> PyResult<
     let future = future_into_py(py, async move {
         run_job(cancel, claim, access, hook, job).await
     })?;
-    // the flag first: callbacks run in order, so no step starts once the cancel is being sent
+    // the flag first: done callbacks run in order, so it is set before the hook sends the cancel
     watch_flag(&future, flag)?;
     watch(&future, watched)?;
     Ok(future)

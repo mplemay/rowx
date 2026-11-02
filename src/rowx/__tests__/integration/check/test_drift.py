@@ -32,7 +32,8 @@ def server_dsn() -> str:
     pytest.skip("ROWX_TEST_DSN is not set")
 
 
-# a database of its own, so the migrator lock the test holds can't stall any other test
+# A database of its own rather than the `schema` fixture: the migrator lock's key comes from the database name, so
+# holding it in the shared test database would stall every migration running there, whatever its schema
 @pytest.fixture
 def database(server_dsn: str) -> Iterator[tuple[str, str]]:
     name = f"rowx_drift_{secrets.token_hex(6)}"
@@ -84,10 +85,12 @@ def test_the_drift_gate_does_not_wait_while_another_backend_holds_the_migrator_l
         captured = capsys.readouterr()
         assert (code, captured.out, captured.err) == (0, "", "")
         assert elapsed < WAIT_LIMIT
-        # the lock was held throughout, and the gate neither took nor waited for an advisory lock
+        # the lock was held throughout, and the gate neither took nor waited for an advisory lock. pg_locks is
+        # cluster-wide, so only this test's private database counts: other sessions on the server may hold their own
         row = holder.execute(
             "SELECT count(*) FILTER (WHERE pid = %s AND granted), count(*) FILTER (WHERE pid <> %s)"
-            " FROM pg_locks WHERE locktype = 'advisory'",
+            " FROM pg_locks WHERE locktype = 'advisory'"
+            " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
             (pid, pid),
         ).fetchone()
         assert row == (1, 0)
