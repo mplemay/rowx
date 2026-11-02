@@ -12,7 +12,7 @@ from psycopg import sql
 from rowx.check.scratch import make_tag
 from rowx.postgres import Migrator
 from rowx.postgres._admin import with_database
-from rowx.testing import TEMPLATE_PREFIX, TEST_PREFIX, build_key, project_prefix, template_name
+from rowx.testing import LOCK_DATABASE, TEMPLATE_PREFIX, TEST_PREFIX, build_key, project_prefix, template_name
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -142,6 +142,14 @@ ASYNC_INNER: Final[str] = textwrap.dedent(
         return "session"
 
 
+    # first, so the session's template is also built while the loop runs
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_requested_inside_the_running_loop(request):
+        pool = request.getfixturevalue("rowx_pool")
+        conn = request.getfixturevalue("rowx_connection")
+        assert await work(pool, conn) == 1
+
+
     @pytest.mark.asyncio
     async def test_function_loop(rowx_pool, rowx_connection):
         assert await work(rowx_pool, rowx_connection) == 1
@@ -177,6 +185,13 @@ ANYIO_INNER: Final[str] = textwrap.dedent(
         await query_unchecked[tuple[()]](t"INSERT INTO {TABLE:ident} (id) VALUES (1)").execute(rowx_pool)
         (count,) = await query_unchecked[tuple[int]](t"SELECT count(*)::int4 FROM {TABLE:ident}").one(rowx_connection)
         assert count == 1
+
+
+    @pytest.mark.anyio
+    async def test_anyio_requested_inside_the_running_loop(request):
+        conn = request.getfixturevalue("rowx_connection")
+        (count,) = await query_unchecked[tuple[int]](t"SELECT count(*)::int4 FROM {TABLE:ident}").one(conn)
+        assert count == 0
     """
 )
 
@@ -321,9 +336,11 @@ def project(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> Itera
         pytest.skip("ROWX_TEST_DSN is not set")
     # the plugin reads the server URL from the environment, never from a literal in the ini
     monkeypatch.setenv("DATABASE_URL", DSN)
-    leaked_before = databases(TEST_PREFIX)
-    tmp_before = {name for name in databases(TEMPLATE_PREFIX) if "_tmp_" in name}
     created = Project(pytester, f"t_{os.urandom(6).hex()}")
+    # only the databases of this test's projects, as other sessions may share the server
+    prefixes = tuple(
+        project_prefix(pytester.path / path) for path in ("migrations", "alternative", "sibling/migrations")
+    )
     seen = {created.template()}
     try:
         yield created
@@ -333,8 +350,22 @@ def project(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> Itera
         for name in seen:
             drop(name)
     # no clone or half-built template outlives the session, passing or failing
-    assert databases(TEST_PREFIX) <= leaked_before
-    assert {name for name in databases(TEMPLATE_PREFIX) if "_tmp_" in name} <= tmp_before
+    for prefix in prefixes:
+        assert not databases(f"{TEST_PREFIX}{prefix}_")
+        assert not {name for name in databases(f"{TEMPLATE_PREFIX}{prefix}_") if "_tmp_" in name}
+
+
+# a database for a session's URL to name instead of the test DSN's own
+@pytest.fixture
+def other_url() -> Iterator[str]:
+    assert DSN is not None
+    name = f"rowx_url_{os.urandom(6).hex()}"
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(name)))
+    try:
+        yield with_database(DSN, name)
+    finally:
+        drop(name)
 
 
 def dbname(url: str) -> str:
@@ -477,14 +508,14 @@ def test_fixtures_work_from_pytest_asyncio_tests(project: Project) -> None:
     project.set_config(ini='asyncio_mode = "strict"\nasyncio_default_fixture_loop_scope = "function"\n')
     project.pytester.makepyfile(test_async=f'TABLE = "{project.table}"\n' + ASYNC_INNER)
     result = project.run("--rowx-keep-templates", "test_async.py")
-    result.assert_outcomes(passed=3)
+    result.assert_outcomes(passed=4)
 
 
 @db_test
 def test_fixtures_work_from_an_anyio_test_on_asyncio(project: Project) -> None:
     pytest.importorskip("anyio")
     project.pytester.makepyfile(test_anyio=f'TABLE = "{project.table}"\n' + ANYIO_INNER)
-    project.run("--rowx-keep-templates", "test_anyio.py").assert_outcomes(passed=1)
+    project.run("--rowx-keep-templates", "test_anyio.py").assert_outcomes(passed=2)
 
 
 @db_test
@@ -586,7 +617,9 @@ def test_cleanup_spares_another_projects_template(project: Project) -> None:
 
 @db_test
 @pytest.mark.timing
-def test_cleanup_spares_a_template_another_session_holds(project: Project) -> None:
+def test_cleanup_spares_a_template_another_session_holds(
+    project: Project, monkeypatch: pytest.MonkeyPatch, other_url: str
+) -> None:
     assert DSN is not None
     channel = f"rowx_{os.urandom(6).hex()}"
     gate = int.from_bytes(os.urandom(4))
@@ -596,7 +629,10 @@ def test_cleanup_spares_a_template_another_session_holds(project: Project) -> No
     with psycopg.connect(DSN, autocommit=True) as listener:
         listener.execute(sql.SQL("LISTEN {}").format(sql.Identifier(channel)))
         listener.execute("SELECT pg_advisory_lock(%s)", (gate,))
+        # the sessions' URLs name different databases, and still share the claim
+        monkeypatch.setenv("DATABASE_URL", other_url)
         held = project.start("test_hold.py")
+        monkeypatch.setenv("DATABASE_URL", DSN)
         try:
             # the held session has built its template and is idle between clones
             assert notified(listener, 1) == 1
@@ -615,8 +651,13 @@ def test_cleanup_spares_a_template_another_session_holds(project: Project) -> No
 
 @db_test
 @pytest.mark.timing
-def test_the_build_lock_is_taken_in_the_maintenance_database_before_the_lookup(project: Project) -> None:
+@pytest.mark.parametrize("own", [True, False], ids=["own-database", "other-database"])
+def test_the_build_lock_is_taken_in_the_lock_database_before_the_lookup(
+    project: Project, monkeypatch: pytest.MonkeyPatch, other_url: str, *, own: bool
+) -> None:
     assert DSN is not None
+    if not own:
+        monkeypatch.setenv("DATABASE_URL", other_url)
     template = project.template()
     key = build_key(template)
     classid, objid = (key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF
@@ -624,11 +665,12 @@ def test_the_build_lock_is_taken_in_the_maintenance_database_before_the_lookup(p
         "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = %s AND objid = %s"
         " AND objsubid = 1 AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
     )
-    with psycopg.connect(DSN, autocommit=True) as gate:
+    with psycopg.connect(with_database(DSN, LOCK_DATABASE), autocommit=True) as gate:
         gate.execute("SELECT pg_advisory_lock(%s)", (key,))
         session = project.start("-k", "test_first")
         try:
-            # the session queues on the lock in the URL's own database although the template does not exist yet
+            # whatever database the URL names, the session queues on the lock in the lock database, although the
+            # template does not exist yet
             for _ in range(POLL_LIMIT):
                 row = gate.execute(waiting, (classid, objid)).fetchone()
                 if row is not None and row[0] == 1:

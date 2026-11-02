@@ -1,6 +1,7 @@
 import asyncio
 import os
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from hashlib import sha256
@@ -32,6 +33,12 @@ PROJECT_LENGTH: Final[int] = 8
 HASH_LENGTH: Final[int] = 16
 # the base of every database; `template0` keeps the template free of whatever `template1` holds
 BASE_TEMPLATE: Final[str] = "template0"
+# advisory locks are per database, so every session takes its locks in this one, whatever database its URL names: two
+# sessions of one project whose URLs differ must still build a template once and see each other's claims
+LOCK_DATABASE: Final[str] = "postgres"
+# `postgres` is missing (3D000) or the role may not connect to it (42501): the URL's own database stands in, never
+# `template1`, as a connection held there all session would make every `CREATE DATABASE` from it fail
+LOCK_FALLBACK_STATES: Final[frozenset[str]] = frozenset({"3D000", "42501"})
 # the first key of the shared lock a session holds on its template, so stale cleanup can tell it is in use; the bytes
 # spell "rowx"
 LOCK_KEY: Final[int] = 0x726F7778
@@ -107,12 +114,21 @@ def build_key(name: str) -> int:
     return int.from_bytes(sha256(f"build:{name}".encode()).digest()[:8], signed=True)
 
 
+# a connection to the lock database, and the DSN it was opened with, so the session's other lock connections match it
+async def connect_lock(server_dsn: str) -> tuple[Connection, str]:
+    lock_dsn = with_database(server_dsn, LOCK_DATABASE)
+    try:
+        return await connect(lock_dsn), lock_dsn
+    except DatabaseError as error:
+        if error.sqlstate not in LOCK_FALLBACK_STATES:
+            raise
+    return await connect(server_dsn), server_dsn
+
+
 @asynccontextmanager
-async def locked(server_dsn: str, key: int) -> AsyncGenerator[Connection]:
-    # advisory locks are per database, so every session takes them in the maintenance database: the URL's own, which
-    # is not the target of any admin call here. A session lock on its own connection, released by closing it, so a
-    # crashed process never leaves it behind
-    async with await connect(server_dsn) as conn:
+async def locked(lock_dsn: str, key: int) -> AsyncGenerator[Connection]:
+    # a session lock on its own connection, released by closing it, so a crashed process never leaves it behind
+    async with await connect(lock_dsn) as conn:
         await query_unchecked[tuple[()]](t"SELECT pg_advisory_lock({key}::int8)").execute(conn)
         yield conn
 
@@ -198,26 +214,28 @@ async def drop_stale(server_dsn: str, lock: Connection, project: str, keep: str)
             await query_unchecked[tuple[()]](t"SELECT pg_advisory_unlock({LOCK_KEY}::int4, {key}::int4)").execute(lock)
 
 
-# reuses the template or builds it, under the build lock taken before the lookup; `hold` takes its shared claim on the
-# template before the lock is released, so no other session's cleanup can drop it in between
-async def prepare(server_dsn: str, migrator: Migrator | None, name: str, hold: Connection, *, keep_stale: bool) -> None:
-    async with locked(server_dsn, build_key(name)) as lock:
-        key = template_key(name)
-        await query_unchecked[tuple[()]](t"SELECT pg_advisory_lock_shared({LOCK_KEY}::int4, {key}::int4)").execute(hold)
-        # a database under the final name is complete by construction: it is renamed there only once migrated
-        if await exists(lock, name):
-            return
-        await build(server_dsn, lock, migrator, name)
-        if not keep_stale:
-            await drop_stale(server_dsn, lock, project_of(name), name)
+# reuses the template or builds it, under the build lock (`lock`) taken before the lookup
+async def prepare(server_dsn: str, lock: Connection, migrator: Migrator | None, name: str, *, keep_stale: bool) -> None:
+    # a database under the final name is complete by construction: it is renamed there only once migrated
+    if await exists(lock, name):
+        return
+    await build(server_dsn, lock, migrator, name)
+    if not keep_stale:
+        await drop_stale(server_dsn, lock, project_of(name), name)
 
 
-# returns a connection that holds the session's claim on the template until it is closed
+# returns a connection that holds the session's claim on the template until it is closed. The claim is taken under the
+# build lock, so no other session's cleanup can drop the template between the lookup and the claim
 async def ensure_template(server_dsn: str, migrator: Migrator | None, name: str, *, keep_stale: bool) -> Connection:
     await sweep_orphans(server_dsn, project_of(name))
-    hold = await connect(server_dsn)
+    hold, lock_dsn = await connect_lock(server_dsn)
+    key = template_key(name)
     try:
-        await prepare(server_dsn, migrator, name, hold, keep_stale=keep_stale)
+        async with locked(lock_dsn, build_key(name)) as lock:
+            await query_unchecked[tuple[()]](t"SELECT pg_advisory_lock_shared({LOCK_KEY}::int4, {key}::int4)").execute(
+                hold
+            )
+            await prepare(server_dsn, lock, migrator, name, keep_stale=keep_stale)
     except BaseException:
         await hold.close()
         raise
@@ -257,7 +275,13 @@ def configured(config: pytest.Config) -> tuple[Config, str]:
 
 
 def blocking[T](work: Coroutine[Any, Any, T]) -> T:
-    return asyncio.run(work)
+    # on a thread of its own: a fixture can be set up while this thread runs an event loop (`request.getfixturevalue`
+    # from an async test), where `asyncio.run` raises, and the thread's current loop is left as it was
+    def run() -> T:
+        return asyncio.run(work)
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="rowx-testing") as executor:
+        return executor.submit(run).result()
 
 
 @pytest.fixture(scope="session")
