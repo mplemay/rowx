@@ -30,9 +30,11 @@ pub struct Cube {
 }
 
 fn floats(raw: &[u8], count: usize) -> Vec<f64> {
-    raw.chunks_exact(F64_LEN)
+    raw.as_chunks::<F64_LEN>()
+        .0
+        .iter()
         .take(count)
-        .filter_map(|chunk| <[u8; F64_LEN]>::try_from(chunk).ok())
+        .copied()
         .map(f64::from_be_bytes)
         .collect()
 }
