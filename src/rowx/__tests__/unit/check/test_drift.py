@@ -36,3 +36,13 @@ def test_summary_lists_at_most_five_versions_per_state() -> None:
 def test_no_drift_check_flag() -> None:
     assert _parser().parse_args(["check"]).no_drift_check is False
     assert _parser().parse_args(["check", "--no-drift-check"]).no_drift_check is True
+
+
+def test_ignore_missing_drops_only_the_missing_state() -> None:
+    found = statuses(missing=[4], pending=[7])
+    summary = summarize(found, "migrations", ignore_missing=True)
+    assert summary is not None
+    assert "missing" not in summary
+    assert "  1 pending: 7\n" in summary
+    assert summarize(statuses(missing=[4, 5], applied=[1]), "migrations", ignore_missing=True) is None
+    assert summarize(statuses(missing=[4]), "migrations") is not None

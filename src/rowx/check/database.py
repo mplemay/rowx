@@ -1,15 +1,24 @@
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rowx.check.config import load_config
-from rowx.check.migrate import load_migrator, require_url, resolve_target, run_guarded, run_pending
+from rowx.check.migrate import (
+    add_connect_timeout,
+    connect_options,
+    load_migrator,
+    require_url,
+    resolve_target,
+    run_guarded,
+    run_pending,
+    wait_for_server,
+)
 from rowx.check.runner import CheckError
-from rowx.postgres import ConnectOptions
 from rowx.postgres._admin import create_database, database_exists, drop_database
 
 if TYPE_CHECKING:
     from argparse import ArgumentParser, Namespace, _SubParsersAction
+    from collections.abc import Coroutine
 
     from rowx.postgres import Migrator
 
@@ -29,17 +38,13 @@ def add_parsers(subparsers: _SubParsersAction[ArgumentParser]) -> None:
     for parser in (create, drop, reset, setup):
         parser.add_argument("--database-url", metavar="URL")
         parser.add_argument("--config", type=Path, metavar="FILE")
+        add_connect_timeout(parser)
     for parser in (reset, setup):
         parser.add_argument("--source", type=Path, metavar="DIR")
 
 
 def _name(dsn: str) -> str:
-    try:
-        name = ConnectOptions.from_dsn(dsn).database
-    except Exception as error:
-        # the parser's message can quote the DSN, so it is not repeated
-        msg = "the database URL could not be parsed"
-        raise CheckError(msg) from error
+    name = connect_options(dsn).database
     if name is None or not name.strip():
         msg = "the database URL names no database"
         raise CheckError(msg)
@@ -73,24 +78,37 @@ async def _drop(dsn: str, name: str, *, force: bool) -> None:
     sys.stdout.write(f"Dropped database {name!r}\n")
 
 
+# waits for the server (through the maintenance database), then runs `work`
+async def _ready(dsn: str, name: str, args: Namespace, work: Coroutine[Any, Any, None]) -> None:
+    try:
+        # a probe through the maintenance database: the work opens its own connections, and is never retried
+        await wait_for_server(
+            lambda options: database_exists(options, name), connect_options(dsn), args.connect_timeout
+        )
+    except BaseException:
+        work.close()
+        raise
+    await work
+
+
 def handle(args: Namespace) -> None:
     config = load_config(Path.cwd(), args.config)
     dsn = require_url(config, args.database_url)
     name = _name(dsn)
     match args.database_command:
         case "create":
-            run_guarded(dsn, _create(dsn, name))
+            run_guarded(dsn, _ready(dsn, name, args, _create(dsn, name)))
         case "drop":
             if _confirmed("drop", name, yes=args.yes):
-                run_guarded(dsn, _drop(dsn, name, force=args.force))
+                run_guarded(dsn, _ready(dsn, name, args, _drop(dsn, name, force=args.force)))
         case "reset":
             # the migrations are read first, so a broken directory fails before anything is dropped
             migrator = load_migrator(resolve_target(config, args.source))
             if _confirmed("reset", name, yes=args.yes):
-                run_guarded(dsn, _reset(migrator, dsn, name, force=args.force))
+                run_guarded(dsn, _ready(dsn, name, args, _reset(migrator, dsn, name, force=args.force)))
         case _:
             migrator = load_migrator(resolve_target(config, args.source))
-            run_guarded(dsn, _setup(migrator, dsn, name))
+            run_guarded(dsn, _ready(dsn, name, args, _setup(migrator, dsn, name)))
 
 
 async def _reset(migrator: Migrator, dsn: str, name: str, *, force: bool) -> None:

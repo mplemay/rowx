@@ -143,6 +143,8 @@ def test_empty_migrate_table_is_configured_with_defaults(tmp_path: Path) -> None
         dir="migrations",
         table="_rowx_migrations",
         create_schemas=(),
+        ignore_missing=False,
+        allow_out_of_order=False,
         versioning="inferred",
         kind="inferred",
     )
@@ -152,15 +154,25 @@ def test_migrate_table_parses_every_key(tmp_path: Path) -> None:
     write(
         tmp_path / "pyproject.toml",
         '[tool.rowx.migrate]\ndir = "db/migrations"\ntable = "_sqlx_migrations"\n'
-        'create_schemas = ["app", "audit"]\nversioning = "sequential"\nkind = "reversible"\n',
+        'create_schemas = ["app", "audit"]\nignore_missing = true\nallow_out_of_order = true\n'
+        'versioning = "sequential"\nkind = "reversible"\n',
     )
     assert load_config(tmp_path).migrate == MigrateConfig(
         dir="db/migrations",
         table="_sqlx_migrations",
         create_schemas=("app", "audit"),
+        ignore_missing=True,
+        allow_out_of_order=True,
         versioning="sequential",
         kind="reversible",
     )
+
+
+def test_migrate_policy_keys_are_independent_booleans(tmp_path: Path) -> None:
+    write(tmp_path / "pyproject.toml", "[tool.rowx.migrate]\nallow_out_of_order = true\n")
+    migrate = load_config(tmp_path).migrate
+    assert migrate is not None
+    assert (migrate.ignore_missing, migrate.allow_out_of_order) == (False, True)
 
 
 def test_migrate_unknown_key_suggests(tmp_path: Path) -> None:
@@ -197,6 +209,10 @@ def test_misspelled_migrate_table_suggests(tmp_path: Path) -> None:
         ('table = ""', "table must be a non-empty string"),
         ('create_schemas = "app"', "create_schemas must be a list of strings"),
         ("create_schemas = [1]", "create_schemas must be a list of strings"),
+        ('ignore_missing = "yes"', "ignore_missing must be a boolean"),
+        ("ignore_missing = 1", "ignore_missing must be a boolean"),
+        ('allow_out_of_order = "true"', "allow_out_of_order must be a boolean"),
+        ("allow_out_of_order = 0", "allow_out_of_order must be a boolean"),
     ],
 )
 def test_migrate_bad_values(tmp_path: Path, body: str, message: str) -> None:

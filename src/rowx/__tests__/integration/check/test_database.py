@@ -1,7 +1,10 @@
 import io
 import os
 import secrets
-from typing import TYPE_CHECKING, override
+import socket
+import threading
+from contextlib import closing
+from typing import TYPE_CHECKING, Final, override
 
 import psycopg
 import pytest
@@ -9,12 +12,17 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from rowx.check.cli import main
+from rowx.postgres._admin import database_exists
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from rowx.postgres import ConnectOptions
+
 pytestmark = [pytest.mark.integration, pytest.mark.db]
+
+WAIT_LIMIT: Final[float] = 30.0
 
 
 class FakeStdin(io.StringIO):
@@ -180,7 +188,7 @@ def test_a_password_is_never_printed(
     secret = "s3cr3t-pw-" + secrets.token_hex(4)
     unreachable = f"postgresql://someone:{secret}@127.0.0.1:1/{name}"
     for argv in (("create",), ("drop", "-y"), ("setup",), ("reset", "-y")):
-        code, out, err = cli(capsys, unreachable, *argv)
+        code, out, err = cli(capsys, unreachable, *argv, "--connect-timeout", "0")
         assert code == 2
         assert secret not in out + err
         assert unreachable not in out + err
@@ -205,3 +213,47 @@ def test_invalid_migrations_fail_before_any_database_change(
     assert err
     with psycopg.connect(dsn, autocommit=True) as conn:
         assert conn.execute("SELECT to_regclass('kept') IS NOT NULL").fetchone() == (True,)
+
+
+def test_database_commands_retry_an_unreachable_server_until_the_connect_timeout(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    attempts: list[int] = []
+
+    async def spy(target: str | ConnectOptions, name: str | None = None) -> bool:
+        attempts.append(1)
+        return await database_exists(target, name)
+
+    monkeypatch.setattr("rowx.check.database.database_exists", spy)
+    unreachable = f"postgresql://u:pw@127.0.0.1:{port}/app"
+    code, out, err = cli(capsys, unreachable, "create", "--connect-timeout", "1")
+    assert (code, out) == (2, "")
+    assert err.startswith("error: could not reach the database")
+    assert len(attempts) > 1
+
+    # zero tries once, and reports that attempt's failure without another one
+    attempts.clear()
+    assert cli(capsys, unreachable, "create", "--connect-timeout", "0")[0] == 2
+    assert attempts == [1]
+
+
+def test_the_readiness_probe_is_bounded_by_the_connect_timeout(capsys: pytest.CaptureFixture[str]) -> None:
+
+    results: list[tuple[int, str, str]] = []
+    # completes the TCP handshake but never answers the startup packet
+    with closing(socket.socket()) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        dsn = f"postgresql://u:pw@127.0.0.1:{listener.getsockname()[1]}/app"
+        thread = threading.Thread(
+            target=lambda: results.append(cli(capsys, dsn, "create", "--connect-timeout", "0.5")), daemon=True
+        )
+        thread.start()
+        # a hang fails the test instead of blocking it
+        thread.join(WAIT_LIMIT)
+        assert not thread.is_alive()
+    assert results == [(2, "", "error: could not reach the database: connection timed out\n")]

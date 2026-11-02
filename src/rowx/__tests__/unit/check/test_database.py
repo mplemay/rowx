@@ -83,7 +83,7 @@ def test_unreachable_database_exits_two_without_the_password(
     (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     url = "postgresql://role:hunter2pw@127.0.0.1:1/app"
-    assert main(["database", "create", "--database-url", url]) == 2
+    assert main(["database", "create", "--database-url", url, "--connect-timeout", "0"]) == 2
     captured = capsys.readouterr()
     assert "hunter2pw" not in captured.out + captured.err
     assert url not in captured.out + captured.err
