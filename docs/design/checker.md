@@ -278,6 +278,7 @@ Required fixtures:
 - Quoted strings inside T are `invalid-row-type`. The exception is a class body: a string annotation there, and every
   annotation under `from __future__ import annotations`, is parsed with `ast.parse(mode="eval")` and resolved in the
   class's module.
+- **Class-body names** resolve by module-scope lookup, regardless of definition order (PEP 649).
 - **Leaf names are checked before class resolution**, so `Range`, `Money` and the other `rowx.postgres` value classes
   (which are dataclasses) stay leaves.
 
@@ -295,7 +296,8 @@ Additional rules:
 - A name bound more than once at module level is `unresolved-row-type`.
 - Generic aliases and generic classes are recorded (`type X[T] = …`, class `type_params`, `Generic[T]` bases) and
   substituted when subscripted ([Generics](#generics)).
-- At most 16 hops are followed. A cycle is `unresolved-row-type`.
+- At most 16 hops are followed, one per alias or class substitution along a chain (nesting depth, not breadth),
+  shared with `MAX_ALIAS_DEPTH`. A cycle is `unresolved-row-type`.
 - `TYPE_CHECKING` branches are followed, and the first binding wins.
 
 ### Named row types
@@ -308,15 +310,16 @@ A name that resolves to a class is a named row type ([Named row types](api.md#na
   row type when:
   - it is decorated with `dataclasses.dataclass`, bare, called, or through an alias (`import dataclasses as dc`). The
     decorator's literal `init` and `kw_only` are read, and a non-literal value is `unresolved-row-type`;
-  - a base resolves to `typing.NamedTuple`, or to `typing.TypedDict` or `typing_extensions.TypedDict` (with `total=`
-    read from the class keywords);
+  - a base resolves to `typing.NamedTuple`, or to `typing.TypedDict` or `typing_extensions.TypedDict` (with `total=`,
+    `closed=` and `extra_items=` read from the class keywords; see [TypedDict keywords](api.md#named-row-types));
   - a base resolves to `pydantic.BaseModel` or `pydantic.main.BaseModel`, or it is decorated with
     `pydantic.dataclasses.dataclass`;
   - a base is a project class that is a named row type of the same form.
 - **Fields** are the annotated assignments in the class body, collected through project bases in the order the
   library itself uses. A redeclared field replaces the base's field in place.
-  - **Not fields:** `ClassVar`, `KW_ONLY`, `field(init=False)`, pydantic `_private` names and `computed_field`
-    properties. `InitVar` is rejected.
+  - **Not fields:** `ClassVar`, `KW_ONLY`, `dataclasses.field(init=False)`, `Field(init=False)` on a pydantic
+    dataclass, pydantic `_private` names and `computed_field` properties. `InitVar` is rejected. A project base that is
+    not a row type contributes no fields.
   - **Optional:** a plain `= value`, `= field(default=…)` or `field(default_factory=…)`, a pydantic
     `Field(default=…)`/`Field(default_factory=…)` as the value or in `Annotated` metadata, `NotRequired`, and
     `total=False`. `Field()` and `Field(...)` stay required.
@@ -329,21 +332,25 @@ A name that resolves to a class is a named row type ([Named row types](api.md#na
     `invalid-row-type`, as today.
   - A base or row class from any other module outside the roots is `unresolved-row-type`.
 - **Rejections.** The rejections that hold on both sides, and the checker-only ones (an unknown decorator, `metaclass=`
-  or another unknown class keyword, a hand-written dataclass `__init__`), are in
+  or another unknown class keyword, a hand-written dataclass `__init__`, a pydantic constraint alias such as
+  `PositiveInt`), are in
   [Rejected named forms](api.md#rejected-named-forms) and [Checker-only rejections](api.md#checker-only-rejections).
 - **Annotations.** A name that resolves only through a `TYPE_CHECKING` binding is `invalid-row-type` inside a field,
-  with the help "import `X` at runtime". Field types are `ELEM`s, so pydantic-only types are `invalid-row-type`.
+  with the help "import `X` at runtime". Field types are `ELEM`s, so pydantic-only types are `invalid-row-type`, and so
+  are constraint aliases such as `PositiveInt` (the checker has no pydantic type table). A named row type with no fields
+  is `invalid-row-type`.
 - **Pydantic names and config** are read from the AST, and pydantic is never imported:
   - a field's names are a literal `str` `validation_alias=`, else a literal `alias=`, else its name. These can be in
     `Field(...)`, as the value or in `Annotated` metadata;
   - config is read from `model_config = ConfigDict(...)` with literal keywords, from `class Config:` with literal
     assignments, and from literal class keywords (`class M(BaseModel, populate_by_name=True)`). It is merged through
     project bases, and the child wins. The keys read are `populate_by_name`, `validate_by_name`, `validate_by_alias` and
-    `alias_generator`;
-  - the names are **unknown** ([Pydantic](api.md#named-row-types)) for `AliasChoices(...)`, `AliasPath(...)`, any
-    non-literal alias or class keyword, a `@model_validator(mode="before" | "wrap")` (or a non-literal `mode`) in the
-    class or a project base, any `alias_generator`, and a `model_config` that isn't a literal `ConfigDict(...)`. The
-    runtime is stricter for an `alias_generator`, and the conformance rows record that.
+    `alias_generator`. A pydantic dataclass reads the decorator's literal `config=ConfigDict(...)`;
+  - **that field's** names are **unknown** ([Pydantic](api.md#named-row-types)) for `AliasChoices(...)`,
+    `AliasPath(...)` and a non-literal alias. **Every** field's names are unknown for a
+    `@model_validator(mode="before" | "wrap")` (or a non-literal `mode`) in the class or a project base, any
+    `alias_generator`, a non-literal class keyword or decorator `config=`, and a `model_config` that isn't a literal
+    `ConfigDict(...)`. The runtime is stricter for an `alias_generator`, and the conformance rows record that.
 - A project without pydantic installed resolves identically.
 
 ### Generics
@@ -380,8 +387,8 @@ field add `note: field defined at path:line:col`.
 | `arity-mismatch` | A tuple's arity differs from the column count, or a scalar `T` doesn't face exactly 1 column. For a NamedTuple, the column count is outside the range from its required fields to its total fields. When this fires, no per-element rules run for that call. |
 | `missing-column` | A named row's field has no default and no column matches its names. Help: `select a column named "name", alias one with AS name, or give the field a default`. |
 | `unexpected-column` | A column matches no field of a by-name row, even for a model with `extra="allow"` or a TypedDict with `extra_items`. Help: add a field for the column, or remove it from the SELECT. |
-| `duplicate-column` | Two columns of a by-name row have the same name after the override suffix is stripped, `?column?` included. Help: alias one of the columns with `AS`, or "alias the expression" for `?column?`. |
-| `ambiguous-column` | One column matches the names of two fields (a pydantic `populate_by_name` overlap). Help: give the fields distinct names or aliases. |
+| `duplicate-column` | Two columns of a by-name row map to the same field: the same name after the override suffix is stripped (`?column?` included), or, for pydantic, two of one field's accepted names. Help: alias one of the columns with `AS`, or select only one of the two names. |
+| `ambiguous-column` | One column matches the names of two or more fields (equal aliases, or an alias equal to another field's name, with or without `populate_by_name`). Only pydantic can produce it. Help: give the fields distinct aliases, or remove `populate_by_name` if it causes the overlap. |
 | `column-name-mismatch` | A NamedTuple field and the column at the same position have different names (case-sensitive, after stripping). Help: reorder the SELECT or alias the column to the field's name, or rename the field. |
 | `unsupported-type` | A column or parameter type isn't in the table, or has `typsend = 0`. |
 | `type-mismatch` | The column's Python type ([Type mapping](type-mapping.md#type-mapping-single-source-of-truth)) differs from the element's leaf, ignoring `None`. `bool` and `int` are distinct. Naive versus aware datetimes are not checked. For a named row, the message names the field. |
@@ -396,13 +403,19 @@ runtime. `fields` is a list of `(names | None, required)`, where `None` means th
 builds one: it has no constructor and doesn't import user code. The result is either the mapping or every
 `ShapeError`, as structured values.
 
-- **Every violation is reported**: one diagnostic for each error, in column order.
-- If the mapping has errors, no per-field rules run for that call (as for `arity-mismatch`). Otherwise
-  `type-mismatch` and `nullability-mismatch` run for each mapped field, and `void` columns behave as for tuples.
-- **Unknown names.** For a model with unknown names, the field specs carry `None`. `missing-column`,
-  `unexpected-column`, `duplicate-column` and `ambiguous-column` are skipped, and a column that matches nothing passes
-  through. The type and nullability rules still run on the fields that have known names, and the diagnostic adds
+- **Every violation is reported**: one diagnostic for each error, column-indexed issues by column index, then
+  `missing-column` by field declaration order. The message formats are those of
+  [All errors are collected](api.md#named-row-types).
+- **Per-field rules after errors.** For a positional row, any `arity-mismatch` or `column-name-mismatch` suppresses
+  `type-mismatch` and `nullability-mismatch` for that call. For a by-name row, those rules run on every column that
+  mapped cleanly to exactly one field, and skip only the columns involved in `duplicate-column` or `ambiguous-column`.
+  `void` columns behave as for tuples.
+- **Unknown names.** A field with unknown names carries `None` in the field specs. If any field is unknown, the four
+  by-name rules are skipped for the whole model, and a column that matches nothing passes through. The type and
+  nullability rules still run on columns that map to a field with known names, and the diagnostic adds
   `note: names not checked: <reason>`, for example "field `x` uses AliasChoices" or "`Model` has a before-validator".
+- **Wiring.** `check/compare.py`'s `ColumnDesc` gains `raw_name`, copied from `ColumnInfo.raw_name` in
+  `runner._column_desc`, and compare passes the raw names to `map_columns` (a wiring edit for #187).
 - `unresolved-row-type` and `invalid-row-type` are reported before any describe result is compared.
 
 Exceptions to exact matching:
@@ -469,7 +482,7 @@ error[nullability-mismatch]: column 3 "email" may be NULL but tuple element 3 is
 
   ```text
   error[missing-column]: field "name" of `User` has no column
-    --> app/users.py:14:26
+    --> app/users.py:14:24
      |
   14 |     user = await query[User](t"SELECT id FROM users WHERE id = {uid}").one(conn)
      |                        ^^^^ row type
@@ -482,19 +495,24 @@ error[nullability-mismatch]: column 3 "email" may be NULL but tuple element 3 is
 
   | Rule or case | Help |
   |---|---|
-  | `missing-column` | `select a column named "name", alias one with AS name, or give the field a default` |
-  | `unexpected-column` | ``add a field named "x" to `User`, or remove the column from the SELECT`` |
-  | `duplicate-column` | `alias one of the columns with AS`; for `?column?`, `alias the expression` |
-  | `ambiguous-column` | `give the fields distinct names, or turn off populate_by_name` |
+  | `missing-column` | `select a column named "name", alias one with AS name, or give the field a default`; for a TypedDict, ``mark the key `NotRequired` `` instead of the default |
+  | `unexpected-column` | ``add a field named "x" to `User`, or remove the column from the SELECT``; for `?column?`, `alias the expression` |
+  | `duplicate-column` | `alias one of the columns with AS`; for `?column?`, `alias the expression`; for two names of one field, `select only one of "id" and "user_id"` |
+  | `ambiguous-column` | `give the fields distinct aliases, or remove populate_by_name if it causes the overlap` |
   | `column-name-mismatch` | `reorder the SELECT, alias the column AS id, or rename the field` |
-  | NamedTuple `arity-mismatch` | `select between 2 and 3 columns` (required and total fields) |
+  | NamedTuple `arity-mismatch` | `select exactly N columns` when the required and total counts are equal, else `select between N and M columns` |
   | nullable named row | `use .optional()` |
   | `TYPE_CHECKING`-only name in a field | ``import `datetime` at runtime`` |
   | pydantic-only type | ``annotate the column's Python type (for example `str`) and validate with `Annotated[str, AfterValidator(...)]` `` |
   | unbound generic parameter | ``subscript the class or alias, for example `Page[int]` `` |
-  | unresolved class outside the roots | `define the row type inside the project, or use query_unchecked` |
-  | checker-only rejection | `the checker can't see what this does to the constructor; use a plain dataclass` |
+  | unresolved class outside the roots | `define the row type inside the project` |
+  | checker-only rejection: a decorator | ``remove the decorator, or use `@dataclass` `` |
+  | checker-only rejection: a hand-written `__init__` | ``remove `__init__` and use `__post_init__` `` |
+  | checker-only rejection: a metaclass or unknown class keyword | `remove the metaclass or class keyword` |
+  | checker-only rejection: a constraint alias | the pydantic-only type help |
 
+  In help text, an alias renders as `AS name` when the name is a lowercase identifier, else `AS "Name"`, because
+  matching is case-sensitive and an unquoted alias folds to lower case.
 - Nullability notes are rendered from `NullReason`. Examples: "right side of LEFT JOIN
   (Hash Left Join)" and "computed expression; add AS \"col!\"".
 
@@ -508,8 +526,10 @@ item has these fields:
   "field": str|null }
 ```
 
-`field` is the named row's field name for `missing-column`, `column-name-mismatch`, and the `type-mismatch` and
-`nullability-mismatch` of a field, and `null` otherwise. `unexpected-column`, `duplicate-column` and `ambiguous-column`
-set `column_index` and leave `field` null, and `missing-column` leaves `column_index` null.
+`column_index` is set for every column-related rule: `unexpected-column`, `duplicate-column` (the second occurrence; the
+others are named in the message), `ambiguous-column`, `column-name-mismatch`, `type-mismatch` and
+`nullability-mismatch`. `field` is the field name for field-related rules: `missing-column`, `column-name-mismatch`,
+`type-mismatch`, `nullability-mismatch`, and the pydantic two-names kind of `duplicate-column`. Otherwise it is `null`,
+so `missing-column` leaves `column_index` null. `ambiguous-column` adds one `field defined at` note for each field.
 
 Exit-2 failures go to stderr as text. The DSN or password is never printed.
