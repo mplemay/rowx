@@ -71,6 +71,17 @@ def test_accepts_a_str_path_and_checksums_the_raw_bytes(tmp_path: Path) -> None:
     assert migration.checksum == hashlib.sha384(b"select 1;").digest()
 
 
+def test_the_path_is_resolved_against_the_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "migrations").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    migrator = Migrator("migrations")
+    monkeypatch.chdir(tmp_path / "migrations")
+
+    assert migrator.path == tmp_path / "migrations"
+    assert Migrator(tmp_path / "migrations").path == tmp_path / "migrations"
+
+
 def test_an_empty_directory_has_no_migrations(tmp_path: Path) -> None:
     assert Migrator(tmp_path).migrations == ()
 

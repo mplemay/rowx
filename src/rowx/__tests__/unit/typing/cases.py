@@ -123,6 +123,7 @@ def takes_legacy_kind(kind: Literal["up", "down"]) -> None: ...
 
 async def migrator_runs_on_connection_or_pool(migrator: Migrator, conn: Connection, pool: Pool) -> None:
     reveal_type(migrator.migrations)  # reveal: tuple[Migration, ...]
+    reveal_type(migrator.path)  # reveal: Path
     reveal_type(await migrator.info(conn))  # reveal: tuple[MigrationStatus, ...]
     reveal_type(await migrator.info(pool))  # reveal: tuple[MigrationStatus, ...]
     reveal_type(await migrator.run(pool, target=1))  # reveal: tuple[MigrationResult, ...]

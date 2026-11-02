@@ -601,8 +601,8 @@ rowx migrate info
   `ConnectionBusyError`.
 - `migrator.migrations` lists one `Migration` per version (`version`, `description`, `kind` of `simple` or
   `reversible`, `path`, `down_path`, `checksum`, `down_checksum` and `no_transaction`); a reversible pair is a single
-  entry, and `checksum` is the up file's. The files are read when `Migrator` is constructed, so a later edit needs a
-  new `Migrator`.
+  entry, and `checksum` is the up file's. `migrator.path` is the directory, resolved against the cwd. The files are
+  read when `Migrator` is constructed, so a later edit needs a new `Migrator`.
 - `Migrator.skip` records pending migrations as applied without running them, to baseline a database. It has no CLI
   command.
 - Migrate over a direct connection or a session-mode pooler. The lock is a session-level advisory lock, so PgBouncer in

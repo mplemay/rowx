@@ -128,6 +128,8 @@ class Migrator:
         if isinstance(create_schemas, str):
             msg = "create_schemas must be an iterable of schema names, not a string"
             raise TypeError(msg)
+        # resolved against the cwd now, so a later chdir doesn't change what `path` names
+        self._path = Path(path).absolute()
         # reads and validates the files and the table name; no database IO
         self._impl = MigratorImpl(
             Path(path),
@@ -137,6 +139,10 @@ class Migrator:
             ignore_missing,
             allow_out_of_order,
         )
+
+    @property
+    def path(self) -> Path:
+        return self._path
 
     @property
     def migrations(self) -> tuple[Migration, ...]:
