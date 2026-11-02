@@ -978,23 +978,38 @@ async def test_signup(rowx_pool: Pool) -> None:  # with pytest-asyncio or anyio'
 
 Configuration:
 
-- The server URL comes from the ini option `rowx_database_url`, else from the variable named by `database_url_env` in
-  `[tool.rowx]`. The role needs `CREATEDB`. With no URL the tests skip, or fail when `ROWX_REQUIRE_DB=1`.
+- `rowx_database_url_env` (a `pytest.ini` or `[tool.pytest.ini_options]` option) names the environment variable that
+  holds the server URL, so a password isn't written into the ini file. It defaults to `database_url_env` in
+  `[tool.rowx]` (`DATABASE_URL`). The role needs `CREATEDB`. With no URL the tests skip, or fail when
+  `rowx_require_database = true`.
 - The migrations are `dir` (default `migrations/`) from `[tool.rowx.migrate]` in the `pyproject.toml` at pytest's
-  rootdir or above it. Keep a `[tool.pytest.ini_options]` table next to it so pytest picks that directory as its
-  rootdir. A missing migrations directory fails the session instead of giving tests an empty database.
-- `--rowx-keep-templates` keeps stale templates instead of dropping them.
+  rootdir or above it. `rowx_migrations` (relative to the rootdir) overrides it. Keep a `[tool.pytest.ini_options]`
+  table next to the `pyproject.toml` so pytest picks that directory as its rootdir. A missing migrations directory
+  fails the session. With neither `[tool.rowx.migrate]` nor `rowx_migrations`, tests get an empty database.
+- `--rowx-keep-templates` keeps this project's stale templates instead of dropping them.
+
+```toml
+[tool.pytest.ini_options]
+rowx_database_url_env = "TEST_DATABASE_URL"
+rowx_migrations = "db/migrations"
+rowx_require_database = true
+```
 
 How the template works:
 
-- The plugin migrates **once per session**, into a template database named `rowx_tpl_<hash>`. The hash covers the
-  history table, `create_schemas` and the `(version, checksum)` list of the forward migrations, so editing a migration
-  builds a new template, and an unchanged directory reuses the existing one across sessions and across processes that
-  share the server.
-- A template counts as complete once its migrations ran and it was marked with a database comment, so a build that died
-  part way is replaced. Building a new template drops stale `rowx_tpl_*` databases that no session is using.
-- Each test runs `CREATE DATABASE rowx_test_<hex> TEMPLATE rowx_tpl_<hash>` and drops the clone with `WITH (FORCE)`
-  afterwards, so no test sees another's rows.
+- The plugin migrates **once per session**, into a template database named `rowx_tpl_<p>_<h>`. `<p>` is the first 8 hex
+  characters of the SHA-256 of the migrations path, so it identifies the project. `<h>` hashes the rowx version, the
+  path, the history table, `create_schemas` and the `(version, checksum)` list of the forward migrations, so editing a
+  migration builds a new template, and an unchanged directory reuses the existing one across sessions and across
+  processes (such as `pytest -n 2` workers) that share the server.
+- A build takes an advisory lock for `<h>` before it looks for the template, so concurrent sessions build it once. It
+  migrates a `_tmp_` database and renames it to the final name, so a database under that name is always complete.
+  Building a new template drops this project's stale `rowx_tpl_<p>_*` databases that no session is using, and never
+  another project's.
+- Each test runs `CREATE DATABASE rowx_test_<p>_<hex> TEMPLATE rowx_tpl_<p>_<h>` and drops the clone with `WITH (FORCE)`
+  afterwards, so no test sees another's rows. Clones and `_tmp_` builds carry a `COMMENT` with the process, host and
+  time, and the next session sweeps this project's that are over an hour old and have no connections, such as the
+  leftovers of a killed run.
 - Roles are cluster-wide, so a test that creates one isn't isolated by the clone.
 
 ```python test

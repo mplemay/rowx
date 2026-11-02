@@ -12,6 +12,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from rowx.check.cli import main
+from rowx.testing import TEMPLATE_PREFIX, project_prefix
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -108,7 +109,16 @@ def test_check_scratch_needs_no_prepared_database(
 def test_the_plugin_tests_pass(pytester: pytest.Pytester, server_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
     # the plugin clones from a server URL and creates its own databases there
     monkeypatch.setenv("DATABASE_URL", server_url)
-    monkeypatch.delenv("ROWX_REQUIRE_DB", raising=False)
     shutil.copytree(EXAMPLE, pytester.path, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
-    result = pytester.runpytest_subprocess("-p", "no:cacheprovider")
-    result.assert_outcomes(passed=3)
+    try:
+        # as CI runs it
+        result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "-o", "rowx_require_database=true")
+        result.assert_outcomes(passed=3)
+    finally:
+        # the copy's path is new each run, so is its template's project prefix: only that project's templates go
+        prefix = f"{TEMPLATE_PREFIX}{project_prefix(pytester.path / 'migrations')}_"
+        with psycopg.connect(server_url, autocommit=True) as conn:
+            rows = conn.execute("SELECT datname FROM pg_database WHERE datname::text ^@ %s", (prefix,)).fetchall()
+            for (name,) in rows:
+                conn.execute(sql.SQL("ALTER DATABASE {} WITH IS_TEMPLATE false").format(sql.Identifier(name)))
+                conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
