@@ -57,6 +57,17 @@ class Spans:
 
 
 @dataclass
+class Flaky:
+    id: int
+
+    def __init__(self, *, id: int) -> None:  # ruff: ignore[builtin-argument-shadowing]
+        if id == 3:
+            msg = "three"
+            raise ValueError(msg)
+        self.id = id
+
+
+@dataclass
 class Strict:
     id: int
 
@@ -134,8 +145,9 @@ def test_by_name_forms_ignore_the_column_order(schema: str) -> None:
     assert run_on(schema, "connection", body) == (User(id=1, name="a"), {"name": "a", "id": 1})
 
 
+@pytest.mark.parametrize("kind", EXECUTORS)
 @pytest.mark.parametrize("override", ["!", "?"])
-def test_override_suffixes_map_to_the_plain_field_name(schema: str, override: str) -> None:
+def test_override_suffixes_map_to_the_plain_field_name(schema: str, kind: str, override: str) -> None:
     from string.templatelib import Template  # ruff: ignore[import-outside-top-level]
 
     sql = Template(f'SELECT 1::int4 AS "id{override}", \'a\'::text AS "name{override}"')
@@ -147,7 +159,7 @@ def test_override_suffixes_map_to_the_plain_field_name(schema: str, override: st
             await query[UserRow](sql).one(conn),
         )
 
-    assert run_on(schema, "connection", body) == (User(id=1, name="a"), {"id": 1, "name": "a"}, UserRow(1, "a"))
+    assert run_on(schema, kind, body) == (User(id=1, name="a"), {"id": 1, "name": "a"}, UserRow(1, "a"))
 
 
 def test_a_field_with_a_default_may_have_no_column(schema: str) -> None:
@@ -210,3 +222,49 @@ def test_query_unchecked_builds_named_rows(schema: str) -> None:
     table = "users"
     q = query_unchecked[UserRow](t"SELECT id, name FROM {table:ident} ORDER BY id LIMIT 1")
     assert run_on(schema, "connection", q.one) == UserRow(1, "alice")
+
+
+def test_query_unchecked_builds_a_dataclass_and_a_typeddict(schema: str) -> None:
+    table = "users"
+
+    async def body(conn: Executor) -> tuple[object, object]:
+        return (
+            await query_unchecked[User](t"SELECT id, name FROM {table:ident} ORDER BY id LIMIT 1").one(conn),
+            await query_unchecked[UserDict](t"SELECT id, name FROM {table:ident} ORDER BY id LIMIT 1").one(conn),
+        )
+
+    assert run_on(schema, "connection", body) == (User(id=1, name="alice"), {"id": 1, "name": "alice"})
+
+
+@pytest.mark.parametrize("row_type", [User, UserRow, UserDict])
+def test_a_shape_error_surfaces_from_the_first_anext_of_a_fetch_and_from_one(schema: str, row_type: type) -> None:
+    from string.templatelib import Template  # ruff: ignore[import-outside-top-level]
+
+    q = query[row_type](Template("SELECT 1::int4 AS id, 2 AS age WHERE false"))  # ty: ignore[invalid-type-form]
+
+    async def via_fetch(conn: Executor) -> None:
+        stream = q.fetch(conn)
+        await anext(stream)
+
+    with pytest.raises(RowShapeError):
+        run_on(schema, "connection", via_fetch)
+    with pytest.raises(RowShapeError):
+        run_on(schema, "connection", q.one)
+
+
+@pytest.mark.parametrize("kind", EXECUTORS)
+def test_a_row_construct_error_on_a_later_row_keeps_the_rows_before_it(schema: str, kind: str) -> None:
+    q = query[Flaky](t"SELECT g::int4 AS id FROM generate_series(1, 4) g ORDER BY g")
+    seen: list[int] = []
+
+    async def body(conn: Executor) -> None:
+        stream = q.fetch(conn, batch_size=1)
+        while True:
+            seen.append((await anext(stream)).id)
+
+    with pytest.raises(RowConstructError) as caught:
+        run_on(schema, kind, body)
+    assert seen == [1, 2]
+    assert caught.value.type_name == "Flaky"
+    assert caught.value.row_index == 2
+    assert isinstance(caught.value.__cause__, ValueError)
