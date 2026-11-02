@@ -14,7 +14,8 @@ use rowx_postgres::pool::{Pool as PgPool, is_stale_plan};
 use rowx_postgres::{Row, Type};
 
 use crate::codec::{self, PyParam};
-use crate::errors::{PgError, to_py_err};
+use crate::errors::{PgError, interface_error, named_to_py_err, to_py_err};
+use crate::named::{RowShape, construct};
 
 #[derive(Debug)]
 pub struct FetchArgs {
@@ -24,28 +25,50 @@ pub struct FetchArgs {
     pub scalar: bool,
     pub limit_one: bool,
     pub arity: Option<usize>,
+    // a named row type; `mask`, `scalar` and `arity` are then unused
+    pub shape: Option<Py<RowShape>>,
 }
 
 const NULLABLE: u8 = 1;
 const SPAN: u8 = 2;
 
-/// How a row becomes Python: a bare value or a tuple, and which columns read an `interval` losslessly.
-#[derive(Debug, Clone, Default)]
+/// How a row becomes Python.
+#[derive(Debug, Default)]
+pub enum RowForm {
+    Scalar,
+    #[default]
+    Tuple,
+    Named(Py<RowShape>),
+}
+
+/// How a row becomes Python: a bare value, a tuple or a named row, and which columns read an
+/// `interval` losslessly.
+#[derive(Debug, Default)]
 pub struct Layout {
-    pub scalar: bool,
+    pub form: RowForm,
     pub spans: Vec<bool>,
+    // a named row: the field each column fills (`None` passes through)
+    pub targets: Vec<Option<usize>>,
+    // a named row built by a validator: the key of each column
+    pub keys: Vec<Py<pyo3::types::PyString>>,
 }
 
 impl Layout {
     #[must_use]
     pub fn new(scalar: bool, flags: Option<&[u8]>) -> Self {
         Self {
-            scalar,
+            form: if scalar {
+                RowForm::Scalar
+            } else {
+                RowForm::Tuple
+            },
             spans: flags
                 .unwrap_or_default()
                 .iter()
                 .map(|flag| flag & SPAN != 0)
                 .collect(),
+            targets: Vec::new(),
+            keys: Vec::new(),
         }
     }
 }
@@ -142,16 +165,23 @@ pub async fn run_fetch(
     let inner = Arc::clone(&cancel.backend.conn);
     let layout = Layout::new(args.scalar, args.mask.as_deref());
     let nullable = args.mask.as_deref().map(nullable_mask);
+    let named = args
+        .shape
+        .as_ref()
+        .map(|shape| Python::attach(|py| shape.clone_ref(py)));
+    let io_shape = named
+        .as_ref()
+        .map(|shape| Python::attach(|py| shape.clone_ref(py)));
     // the operation owns the request; dropping this future while it runs cancels it
     let pending = cancel::spawn(&cancel, claim, &hook, async move {
         let mut conn = inner.lock().await;
-        let shape = Shape {
-            mask: nullable.as_deref(),
-            scalar: args.scalar,
-            limit_one: args.limit_one,
-            arity: args.arity,
-            ..Shape::default()
-        };
+        let shape = driver_shape(
+            io_shape.as_ref().map(Py::get),
+            nullable.as_deref(),
+            args.scalar,
+            args.limit_one,
+            args.arity,
+        );
         match conn.parts() {
             Ok((client, cache)) => {
                 exec::fetch(client, cache, &args.sql, &shape, |types: &[Type]| {
@@ -162,13 +192,70 @@ pub async fn run_fetch(
             Err(e) => Err(e),
         }
     });
-    // nothing builds named rows yet, so the mapping is not used
-    let (rows, _mapping) = pending
+    let (rows, mapping) = pending
         .wait()
         .await
         .map_err(|e| PgError(e.into()))?
-        .map_err(|e| access.fail(&cancel.state, e))?;
-    Python::attach(|py| build(py, &rows, &layout))
+        .map_err(|e| fail_named(&access, &cancel.state, e, named.as_ref()))?;
+    Python::attach(|py| {
+        let layout = match (&named, rows.first()) {
+            (Some(shape), Some(first)) => {
+                // a mapping is always published with a named shape; running on without one would
+                // silently decode tuples
+                let Some(mapping) = &mapping else {
+                    return Err(interface_error(
+                        py,
+                        "a named row type was given no column mapping",
+                    ));
+                };
+                Layout::named(py, shape, mapping, first)?
+            }
+            _ => layout,
+        };
+        build(py, &rows, &layout)
+    })
+}
+
+/// The driver's view of what the caller expects: the named shape when there is one (its nullability
+/// is per field), otherwise the tuple or scalar arguments.
+#[must_use]
+pub fn driver_shape<'a>(
+    named: Option<&'a RowShape>,
+    nullable: Option<&'a [bool]>,
+    scalar: bool,
+    limit_one: bool,
+    arity: Option<usize>,
+) -> Shape<'a> {
+    named.map_or_else(
+        || Shape {
+            mask: nullable,
+            scalar,
+            limit_one,
+            arity,
+            ..Shape::default()
+        },
+        |named| Shape {
+            mask: Some(named.nullable()),
+            limit_one,
+            fields: Some(named.specs()),
+            matching: named.matching(),
+            ..Shape::default()
+        },
+    )
+}
+
+/// `fail`, and a named row's mapping or NULL error is rendered with the row type's name and keys.
+pub fn fail_named(
+    access: &Access,
+    state: &State,
+    err: Error,
+    shape: Option<&Py<RowShape>>,
+) -> PyErr {
+    let err = access.fail(state, err);
+    Python::attach(|py| match shape {
+        Some(shape) => named_to_py_err(py, &err.0, shape.get()),
+        None => err.into(),
+    })
 }
 
 /// # Errors
@@ -455,25 +542,38 @@ pub fn fail(state: &State, err: Error) -> PgError {
 
 fn build(py: Python<'_>, rows: &[Row], layout: &Layout) -> PyResult<Py<PyAny>> {
     let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(decode_row(py, row, layout)?);
+    for (index, row) in rows.iter().enumerate() {
+        out.push(decode_row(py, row, layout, index)?);
     }
     Ok(PyList::new(py, out)?.into_any().unbind())
 }
 
+/// `row_index` is the row's position in the returned rows, counted across stream batches.
+///
 /// # Errors
-/// `DecodeError` for a value that cannot be decoded.
-pub fn decode_row<'py>(py: Python<'py>, row: &Row, layout: &Layout) -> PyResult<Bound<'py, PyAny>> {
-    if layout.scalar {
-        return cell(py, row, 0, layout);
+/// `DecodeError` for a value that cannot be decoded, `RowConstructError` for a named row whose
+/// constructor raised.
+pub fn decode_row<'py>(
+    py: Python<'py>,
+    row: &Row,
+    layout: &Layout,
+    row_index: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    match &layout.form {
+        RowForm::Scalar => cell(py, row, 0, layout),
+        RowForm::Tuple => {
+            let cells = (0..row.len())
+                .map(|index| cell(py, row, index, layout))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(PyTuple::new(py, cells)?.into_any())
+        }
+        RowForm::Named(shape) => construct(py, row, layout, shape.get(), row_index),
     }
-    let cells = (0..row.len())
-        .map(|index| cell(py, row, index, layout))
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok(PyTuple::new(py, cells)?.into_any())
 }
 
-fn cell<'py>(
+/// # Errors
+/// `DecodeError` for a value that cannot be decoded.
+pub fn cell<'py>(
     py: Python<'py>,
     row: &Row,
     index: usize,
@@ -482,7 +582,13 @@ fn cell<'py>(
     let raw = row
         .try_get::<_, Raw>(index)
         .map_err(|e| to_py_err(py, &Error::from(e)))?;
-    let ty = row.columns()[index].type_();
+    let Some(column) = row.columns().get(index) else {
+        return Err(interface_error(
+            py,
+            "a row has fewer columns than its layout",
+        ));
+    };
+    let ty = column.type_();
     let as_span = layout.spans.get(index).copied().unwrap_or(false);
     codec::decode_with(py, ty, raw.0, as_span)
 }

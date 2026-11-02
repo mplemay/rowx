@@ -18,12 +18,12 @@ PREPARED_COUNT: Final[str] = "SELECT count(*)::int4 FROM pg_prepared_statements"
 
 async def fetch(conn: ConnectionImpl, sql: str, *, scalar: bool = False) -> list[object]:
     mask = [False] if scalar else None
-    return await conn._fetch(sql, [], mask, scalar, scalar, 1 if scalar else None)
+    return await conn._fetch(sql, [], mask, scalar, scalar, 1 if scalar else None, None)
 
 
 async def fetch_rows(conn: ConnectionImpl, sql: str, mask: list[bool]) -> list[object]:
     scalar = limit_one = False
-    return await conn._fetch(sql, [], mask, scalar, limit_one, len(mask))
+    return await conn._fetch(sql, [], mask, scalar, limit_one, len(mask), None)
 
 
 async def prepared_count(conn: ConnectionImpl) -> int:

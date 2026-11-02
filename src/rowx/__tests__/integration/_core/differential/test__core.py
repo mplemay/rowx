@@ -352,7 +352,7 @@ def _rowx_outcome(dsn: str, sql: str) -> tuple[str, Any]:
     async def run() -> tuple[str, Any]:
         conn = await connect(dsn)
         try:
-            rows = await conn._impl._fetch(sql, [], None, scalar=True, limit_one=True, arity=1)
+            rows = await conn._impl._fetch(sql, [], None, scalar=True, limit_one=True, arity=1, shape=None)
         except DecodeError as exc:
             return "error", exc
         finally:

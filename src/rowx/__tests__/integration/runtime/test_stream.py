@@ -181,7 +181,7 @@ def test_decode_error_yields_prior_rows_then_decode_error_and_idle(schema: str) 
 
 def test_batch_size_one_yields_one_row_per_trip(schema: str) -> None:
     async def body(conn: Connection) -> list[int]:
-        impl = conn._impl._stream("SELECT g FROM generate_series(1, 20) g", [], [False], True, 1, 1)  # ruff: ignore[boolean-positional-value-in-call]
+        impl = conn._impl._stream("SELECT g FROM generate_series(1, 20) g", [], [False], True, 1, 1, None)  # ruff: ignore[boolean-positional-value-in-call]
         sizes: list[int] = []
         while batch := await impl._next():
             sizes.append(len(batch))

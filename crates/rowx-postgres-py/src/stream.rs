@@ -1,23 +1,27 @@
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
+use rowx_core::row_shape::Mapping;
 use rowx_core::state::{Claim, State};
-use rowx_postgres::Type;
 use rowx_postgres::cancel::{self, Cancel, Hook, StreamHandle};
 use rowx_postgres::conn::Connection as PgConnection;
 use rowx_postgres::error::Error;
-use rowx_postgres::exec::{self as pg, Batch, Shape};
+use rowx_postgres::exec::{self as pg, Batch};
 use rowx_postgres::pool::{Pool as PgPool, Pooled};
+use rowx_postgres::{Row, Type};
 use tokio::sync::{Notify, mpsc};
 
 use crate::codec::{self, PyParam};
-use crate::errors::{PgError, to_py_err};
-use crate::exec::{Access, Layout, decode_row, note_sql, nullable_mask, watch};
+use crate::errors::{PgError, interface_error, to_py_err};
+use crate::exec::{
+    Access, Layout, decode_row, driver_shape, fail_named, note_sql, nullable_mask, watch,
+};
+use crate::named::RowShape;
 
 type Msg = Result<Batch, Error>;
 
@@ -29,6 +33,8 @@ pub struct StreamArgs {
     pub scalar: bool,
     pub arity: Option<usize>,
     pub batch_size: usize,
+    // a named row type; `mask`, `scalar` and `arity` are then unused
+    pub shape: Option<Py<RowShape>>,
 }
 
 // how the first `_next` gets its connection
@@ -55,6 +61,13 @@ struct Shared {
     stop: Notify,
     handle: Mutex<Option<StreamHandle>>,
     rows_affected: Mutex<Option<u64>>,
+    // a named row's column-to-field mapping, set by the producer once the statement is prepared and
+    // before it sends anything
+    mapping: OnceLock<Mapping>,
+    // the named layout, built from the first batch and fixed for the stream
+    named: OnceLock<Layout>,
+    // rows already handed to Python, so a constructor error names its position in the whole stream
+    built: AtomicUsize,
     // the error of a batch whose earlier rows were already handed over
     pending: Mutex<Option<PyErr>>,
     // a pool's checkout, held until the stream is over; dropping it releases the connection
@@ -64,6 +77,27 @@ struct Shared {
 }
 
 impl Shared {
+    // the named layout is built from the first batch and fixed for the stream
+    fn named_layout(&self, py: Python<'_>, shape: &Py<RowShape>, first: &Row) -> PyResult<&Layout> {
+        if let Some(named) = self.named.get() {
+            return Ok(named);
+        }
+        // a mapping is always published with a named shape; running on without one would silently
+        // decode tuples
+        let Some(mapping) = self.mapping.get() else {
+            return Err(interface_error(
+                py,
+                "a named row type was given no column mapping",
+            ));
+        };
+        let built = Layout::named(py, shape, mapping, first)?;
+        // only the task awaiting `_next` builds it, so the first `set` wins
+        let _ = self.named.set(built);
+        self.named
+            .get()
+            .ok_or_else(|| interface_error(py, "the named row layout was not kept"))
+    }
+
     // idempotent and synchronous: the claim is released (Busy → Idle) before this returns
     fn finish(&self) {
         self.finished.store(true, Ordering::Release);
@@ -103,7 +137,8 @@ pub struct RowStream {
     target: Arc<OnceLock<(Cancel, Access)>>,
     pool: Option<PgPool>,
     hook: Hook,
-    layout: Layout,
+    layout: Arc<Layout>,
+    shape: Option<Py<RowShape>>,
     start: Mutex<Option<Start>>,
     rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Msg>>>,
     shared: Arc<Shared>,
@@ -150,7 +185,8 @@ impl RowStream {
             target,
             pool,
             hook: Hook::default(),
-            layout: Layout::new(args.scalar, args.mask.as_deref()),
+            layout: Arc::new(Layout::new(args.scalar, args.mask.as_deref())),
+            shape: args.shape.as_ref().map(|shape| shape.clone_ref(py)),
             start: Mutex::new(Some(Start { args, params, tx })),
             rx: Arc::new(tokio::sync::Mutex::new(rx)),
             shared: Arc::new(Shared::default()),
@@ -205,7 +241,8 @@ impl RowStream {
         let hook = self.hook.clone();
         let rx = Arc::clone(&self.rx);
         let shared = Arc::clone(&self.shared);
-        let layout = self.layout.clone();
+        let layout = Arc::clone(&self.layout);
+        let shape = self.shape.as_ref().map(|shape| shape.clone_ref(py));
         let future = future_into_py(py, async move {
             if let Some(starting) = starting {
                 let (start, claim, cancel, access) = match starting {
@@ -256,7 +293,7 @@ impl RowStream {
             let Some((cancel, access)) = target.get().cloned() else {
                 return Err(PgError(Error::Core(CoreError::Closed)).into());
             };
-            receive(&cancel, &access, &rx, &shared, &layout).await
+            receive(&cancel, &access, &rx, &shared, &layout, shape.as_ref()).await
         })?;
         watch(&future, self.hook.clone())?;
         watch_cancelled(&future, Arc::clone(&self.shared))?;
@@ -337,6 +374,7 @@ async fn receive(
     rx: &tokio::sync::Mutex<mpsc::Receiver<Msg>>,
     shared: &Shared,
     layout: &Layout,
+    shape: Option<&Py<RowShape>>,
 ) -> PyResult<Py<PyAny>> {
     if cancel.state.is_closed() {
         shared.finish();
@@ -349,9 +387,20 @@ async fn receive(
     }
     match message {
         Some(Ok(Batch::Rows(rows))) => Python::attach(|py| {
+            let layout = match (shape, rows.first()) {
+                (Some(shape), Some(first)) => match shared.named_layout(py, shape, first) {
+                    Ok(named) => named,
+                    Err(err) => {
+                        shared.finish();
+                        return Err(err);
+                    }
+                },
+                _ => layout,
+            };
+            let first_index = shared.built.load(Ordering::Acquire);
             let mut out = Vec::with_capacity(rows.len());
             for (index, row) in rows.iter().enumerate() {
-                match decode_row(py, row, layout) {
+                match decode_row(py, row, layout, first_index + index) {
                     Ok(value) => out.push(value),
                     Err(err) => {
                         shared.finish();
@@ -366,6 +415,9 @@ async fn receive(
                     }
                 }
             }
+            shared
+                .built
+                .store(first_index + out.len(), Ordering::Release);
             Ok(PyList::new(py, out)?.into_any().unbind())
         }),
         Some(Ok(Batch::End { rows_affected })) => {
@@ -383,7 +435,7 @@ async fn receive(
             } else {
                 err
             };
-            Err(access.fail(&cancel.state, err).into())
+            Err(fail_named(access, &cancel.state, err, shape))
         }
         None => {
             shared.finish();
@@ -419,13 +471,13 @@ async fn run(
     let nullable = args.mask.as_deref().map(nullable_mask);
     let opened = match conn.parts() {
         Ok((client, cache)) => {
-            let shape = Shape {
-                mask: nullable.as_deref(),
-                scalar: args.scalar,
-                limit_one: false,
-                arity: args.arity,
-                ..Shape::default()
-            };
+            let shape = driver_shape(
+                args.shape.as_ref().map(Py::get),
+                nullable.as_deref(),
+                args.scalar,
+                false,
+                args.arity,
+            );
             pg::stream(
                 client,
                 cache,
@@ -439,7 +491,13 @@ async fn run(
         Err(e) => Err(e),
     };
     let mut batches = match opened {
-        Ok(batches) => batches,
+        Ok(batches) => {
+            // the receiver reads it only after the first message, which follows this
+            if let Some(mapping) = batches.mapping() {
+                let _ = shared.mapping.set(mapping.clone());
+            }
+            batches
+        }
         Err(err) => {
             handle.release();
             deliver(&tx, Err(err), shared, state).await;

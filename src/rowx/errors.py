@@ -21,6 +21,7 @@ __all__: Final[list[str]] = [
     "MigrationOrderError",
     "MigrationSourceError",
     "PoolTimeoutError",
+    "RowConstructError",
     "RowNotFound",
     "RowShapeError",
 ]
@@ -83,6 +84,20 @@ class RowShapeError(Error):
 
 class DecodeError(Error):
     pass
+
+
+class RowConstructError(DecodeError):
+    type_name: str
+    row_index: int
+
+    def __init__(self, message: str, type_name: str, row_index: int) -> None:
+        super().__init__(message)
+        self.type_name = type_name
+        self.row_index = row_index
+
+    @override
+    def __reduce__(self) -> tuple[type[Self], tuple[str, str, int]]:
+        return type(self), (str(self), self.type_name, self.row_index)
 
 
 class EncodeError(Error):

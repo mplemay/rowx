@@ -19,7 +19,7 @@ def fetch_scalar(dsn: str, sql: str, params: list[object]) -> object:
     async def run() -> object:
         conn = await connect(dsn)
         try:
-            rows = await conn._impl._fetch(sql, params, None, scalar=True, limit_one=True, arity=1)
+            rows = await conn._impl._fetch(sql, params, None, scalar=True, limit_one=True, arity=1, shape=None)
         finally:
             await conn.close()
         return rows[0]

@@ -104,6 +104,7 @@ class _BaseQuery[T]:
             plan.kind == "scalar",
             limit_one,
             plan.arity,
+            None,
         )
 
     async def one(self, conn: Executor, /) -> T:
@@ -134,6 +135,7 @@ class _BaseQuery[T]:
                 plan.kind == "scalar",
                 plan.arity,
                 batch_size,
+                None,
             )
 
         return RowStream(open_stream, lambda: conn.closed)

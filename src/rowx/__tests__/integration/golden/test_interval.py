@@ -37,7 +37,7 @@ def read(dsn: str, sql: str, params: list[object] | None = None, flags: int | No
     mask = None if flags is None else [flags]
 
     async def run(conn: Connection) -> Any:  # ruff: ignore[any-type]
-        return (await conn._impl._fetch(sql, params or [], mask, scalar=True, limit_one=True, arity=1))[0]
+        return (await conn._impl._fetch(sql, params or [], mask, scalar=True, limit_one=True, arity=1, shape=None))[0]
 
     return run_with_conn(dsn, run)
 
@@ -160,7 +160,7 @@ def test_interval_arrays_round_trip_with_nesting_and_nulls(schema: str) -> None:
 def test_only_annotated_columns_use_the_interval_leaf(schema: str) -> None:
     async def body(conn: Connection) -> list[object]:
         sql = "SELECT '1 mon'::interval, '1 day'::interval, '2 mons'::interval"
-        return await conn._impl._fetch(sql, [], [SPAN, 0, SPAN | 1], scalar=False, limit_one=True, arity=3)
+        return await conn._impl._fetch(sql, [], [SPAN, 0, SPAN | 1], scalar=False, limit_one=True, arity=3, shape=None)
 
     assert run_with_conn(schema, body) == [(Interval(months=1), dt.timedelta(days=1), Interval(months=2))]
 

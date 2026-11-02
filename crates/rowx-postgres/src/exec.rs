@@ -290,7 +290,7 @@ async fn fetch_once(
     let mut rows = Vec::new();
     while let Some(row) = stream.try_next().await? {
         if let Some(mask) = mask {
-            check_nulls(&row, mask, mapping.as_ref())?;
+            check_nulls(&row, rows.len(), mask, mapping.as_ref())?;
         }
         rows.push(row);
         // dropping the stream discards the rest of the result; the connection task drains it
@@ -371,6 +371,8 @@ pub struct RowBatches {
     batch_size: usize,
     pending: Option<Error>,
     rows_affected: Option<u64>,
+    // rows handed out by earlier batches, so a NULL error can name its row
+    delivered: usize,
 }
 
 impl std::fmt::Debug for RowBatches {
@@ -415,10 +417,9 @@ impl RowBatches {
             };
             let err = match next {
                 Ok(Some(row)) => {
-                    let checked = self
-                        .mask
-                        .as_deref()
-                        .map_or(Ok(()), |m| check_nulls(&row, m, self.mapping.as_ref()));
+                    let checked = self.mask.as_deref().map_or(Ok(()), |m| {
+                        check_nulls(&row, self.delivered + rows.len(), m, self.mapping.as_ref())
+                    });
                     match checked {
                         Ok(()) => {
                             rows.push(row);
@@ -450,6 +451,7 @@ impl RowBatches {
             self.pending = Some(err);
             break;
         }
+        self.delivered += rows.len();
         Ok(Batch::Rows(rows))
     }
 }
@@ -482,6 +484,7 @@ pub async fn stream(
         batch_size: batch_size.max(1),
         pending: None,
         rows_affected: None,
+        delivered: 0,
     })
 }
 
@@ -503,7 +506,12 @@ fn check_shape(shape: &Shape<'_>, columns: &[Column]) -> Result<Option<Mapping>,
     if let Some(fields) = shape.fields {
         check_field_mask(fields, shape.mask)?;
         let names: Vec<&str> = columns.iter().map(Column::name).collect();
-        return Ok(Some(map_columns(&names, fields, shape.matching)?));
+        return map_columns(&names, fields, shape.matching)
+            .map(Some)
+            .map_err(|errors| Error::Shape {
+                errors,
+                columns: names.iter().map(|n| (*n).to_owned()).collect(),
+            });
     }
     if let Some(mask) = shape.mask
         && mask.len() != count
@@ -544,7 +552,12 @@ async fn execute_once(
     Ok(client.execute_raw(&stmt, &params).await?)
 }
 
-fn check_nulls(row: &Row, mask: &[bool], mapping: Option<&Mapping>) -> Result<(), Error> {
+fn check_nulls(
+    row: &Row,
+    row_index: usize,
+    mask: &[bool],
+    mapping: Option<&Mapping>,
+) -> Result<(), Error> {
     for (index, nullable) in mask.iter().enumerate() {
         if !nullable && row.try_get::<_, Raw>(index)?.0.is_none() {
             // a named shape reports the field too, so the binding can render its message
@@ -552,6 +565,11 @@ fn check_nulls(row: &Row, mask: &[bool], mapping: Option<&Mapping>) -> Result<()
                 return Err(Error::NullField {
                     column: index,
                     field,
+                    row: row_index,
+                    name: row
+                        .columns()
+                        .get(index)
+                        .map_or_else(Box::default, |c| c.name().into()),
                 });
             }
             return Err(Error::RowShape(format!(

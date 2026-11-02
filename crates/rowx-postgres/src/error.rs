@@ -21,12 +21,22 @@ pub enum Error {
     Core(#[from] CoreError),
     #[error("{0}")]
     RowShape(String),
-    /// A named row's columns do not map onto its fields; the binding renders the text from the indices.
-    #[error("{0}")]
-    Shape(#[from] ShapeErrors),
-    /// NULL in a mapped column whose field is not nullable. Both indices are 0-based.
-    #[error("NULL in non-nullable field {field} (column {column})")]
-    NullField { column: usize, field: usize },
+    /// A named row's columns do not map onto its fields; the binding renders the text from the indices
+    /// and the raw column names.
+    #[error("{errors}")]
+    Shape {
+        errors: ShapeErrors,
+        columns: Vec<String>,
+    },
+    /// NULL in a mapped column whose field is not nullable. The indices are 0-based, `name` is the
+    /// raw column name, and `row` counts the rows delivered so far.
+    #[error("NULL in non-nullable field {field} (column {column} {name:?}, row {row})")]
+    NullField {
+        column: usize,
+        field: usize,
+        row: usize,
+        name: Box<str>,
+    },
     #[error("{0}")]
     Decode(String),
     #[error("{0}")]
@@ -70,10 +80,12 @@ mod tests {
         assert_eq!(
             Error::NullField {
                 column: 3,
-                field: 1
+                field: 1,
+                row: 4,
+                name: "email".into()
             }
             .to_string(),
-            "NULL in non-nullable field 1 (column 3)"
+            "NULL in non-nullable field 1 (column 3 \"email\", row 4)"
         );
     }
 }

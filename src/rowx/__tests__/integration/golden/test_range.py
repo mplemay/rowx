@@ -28,7 +28,7 @@ def run_with_conn[T](dsn: str, body: Callable[[Connection], Awaitable[T]]) -> T:
 
 def read(dsn: str, sql: str, params: list[object] | None = None) -> Any:  # ruff: ignore[any-type]
     async def run(conn: Connection) -> Any:  # ruff: ignore[any-type]
-        return (await conn._impl._fetch(sql, params or [], None, scalar=True, limit_one=True, arity=1))[0]
+        return (await conn._impl._fetch(sql, params or [], None, scalar=True, limit_one=True, arity=1, shape=None))[0]
 
     return run_with_conn(dsn, run)
 
