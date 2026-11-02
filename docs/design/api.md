@@ -4,12 +4,19 @@
 
 ```python
 import asyncio
+from dataclasses import dataclass
 from decimal import Decimal
 
 from rowx import query
 from rowx.postgres import ConnectOptions, Pool, connect
 
 type UserRow = tuple[int, str, str | None]          # id, name, email
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class User:                                         # a named row: matched by column name
+    id: int
+    name: str
+    email: str | None = None                        # a field with a default may have no column
 
 async def main() -> None:
     async with await connect("postgresql://app@localhost/app") as conn:
@@ -21,6 +28,10 @@ async def main() -> None:
         maybe = await query[UserRow](
             t"SELECT id, name, email FROM users WHERE id = {uid}"
         ).optional(conn)                             # -> UserRow | None
+
+        named = await query[User](
+            t"SELECT name, id FROM users WHERE id = {uid}"
+        ).one(conn)                                  # -> User; column order is irrelevant
 
         names = await query[str](
             t"SELECT name FROM users ORDER BY name"
@@ -99,6 +110,7 @@ class Executor(Protocol):                  # structural; see below
     @property
     def closed(self) -> bool: ...
     # private SPI called by the query methods: _fetch, _stream, _execute
+    # _fetch and _stream take a trailing `shape: RowShape | None`, the plan's named-row description (driver.md)
 ```
 
 Requirements:
@@ -254,7 +266,7 @@ class Migrator:
 |---|---|
 | `rowx` | `query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor`, errors |
 | `rowx.postgres` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `RESET_QUERY`, and the value types `Range`, `Interval`, `Money`, `Cube`, `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle` (added by the type-parity features, [Type mapping](type-mapping.md)), plus `Migrator`, `Migration`, `MigrationStatus` and `MigrationResult` ([Migrations](migrations.md)) |
-| `rowx.errors` | adds `PoolTimeoutError(InterfaceError)`, and `MigrateError(Error)` with its subclasses ([Migrations](migrations.md)); all are re-exported from `rowx` |
+| `rowx.errors` | adds `PoolTimeoutError(InterfaceError)`, `RowConstructError(DecodeError)` ([Runtime validation](#runtime-validation)), and `MigrateError(Error)` with its subclasses ([Migrations](migrations.md)); all are re-exported from `rowx` |
 | `rowx.testing` | opt-in pytest plugin: `rowx_database_url`, `rowx_connection`, `rowx_pool` ([Test plugin](testing.md#test-plugin-rowxtesting)) |
 
 - **Hard move, no aliases.** `rowx.connect` and `rowx.Connection` are removed, and `rowx.ping` is removed
@@ -315,9 +327,9 @@ class Migrator:
   `scalar_one_or_none`. The docs say to use a tuple row type (`query[tuple[int | None]]`)
   when the difference matters. The checker does not report it.
 
-The **arity check** happens before execution, against the prepared statement's columns
-([Row-type grammar and runtime row plan](#row-type-grammar-and-runtime-row-plan)). A shape mismatch is reported even
-when the result is empty.
+The **shape check** (arity, and for a named row the column-to-field mapping) happens before execution, against the
+prepared statement's columns ([Row-type grammar and runtime row plan](#row-type-grammar-and-runtime-row-plan)). A shape
+mismatch is reported even when the result is empty.
 
 ## Streaming (`fetch`)
 
@@ -335,8 +347,8 @@ async with q.fetch(conn) as rows:
 ```
 
 - **Claiming.** `fetch` does no IO and doesn't claim the connection. The first `__anext__`
-  claims it synchronously and extracts the parameters. `ConnectionBusyError`, the arity
-  `RowShapeError` and `EncodeError` are therefore raised from the first `__anext__`.
+  claims it synchronously and extracts the parameters. `ConnectionBusyError`, the shape
+  `RowShapeError` (arity or mapping) and `EncodeError` are therefore raised from the first `__anext__`.
 - **Busy while open.** From the first `__anext__` until the stream ends, the connection is
   Busy, and any other operation on it raises `ConnectionBusyError` (asyncpg semantics). The
   docs say this prominently: a loop body can't run queries on the connection it is
@@ -370,7 +382,7 @@ async with q.fetch(conn) as rows:
     the statement is cancelled (psycopg and asyncpg also treat a cancelled cursor as dead).
   - A cancel that lands in the loop body is an ordinary early exit, so the stream drains.
 - **Errors partway through.** A NULL in a non-nullable column (`RowShapeError`), a
-  `DecodeError` or a `DatabaseError` is raised from `__anext__`.
+  `DecodeError`, a `RowConstructError` or a `DatabaseError` is raised from `__anext__`.
   - Rows before the failing row are yielded first, and rows already yielded stay yielded.
   - The stream ends, and the connection drains and returns to Idle, or to Broken on an IO
     error.
@@ -388,17 +400,25 @@ async with q.fetch(conn) as rows:
 ## Row-type grammar and runtime row plan
 
 Both the runtime (`_rowplan.py`) and the checker (`check/resolve.py`) implement this
-grammar. A shared conformance table (`tests/conformance/row_types.py`) runs every entry
+grammar. A shared conformance table (`src/rowx/__tests__/conformance/row_types.py`) runs every entry
 through both implementations, so they can't drift apart.
 
 ```text
 ROW   := NONE                                  # no-rows plan
        | tuple[ELEM, ELEM, ...]                # fixed arity ≥ 1
        | ELEM                                  # scalar plan (exactly one column)
+       | NAMED                                 # named plan; the ROW level only
 NONE  := None                                  # default T, or explicit query[None]: identical
+NAMED := @dataclass class                      # stdlib; matched by column name
+       | typing.NamedTuple class or call       # matched by position, and the names must match
+       | typing.TypedDict / typing_extensions.TypedDict class or call   # matched by key
+       | pydantic.BaseModel subclass           # pydantic >= 2.11; validated by the model
+       | pydantic.dataclasses.dataclass class  # validated by pydantic
+       | a generic class or generic alias of any of these, subscripted (Generics)
+FIELD := ELEM                                  # after unwrapping Annotated, ReadOnly, Required, NotRequired
 ELEM  := LEAF | LEAF | None | Optional[LEAF] | Union[LEAF, None]
        | Any | object                          # nullability-neutral
-       | None                                  # only as a tuple element, matching a `void` column
+       | None                                  # only as a tuple element or a named field, matching a `void` column
 LEAF  := int | float | str | bool | bytes
        | decimal.Decimal | datetime.date | datetime.time | datetime.datetime
        | datetime.timedelta | uuid.UUID
@@ -411,13 +431,14 @@ LEAF  := int | float | str | bool | bytes
 RLEAF := int | decimal.Decimal | datetime.date | datetime.datetime
 ```
 
-- Wrappers are unwrapped first: `Annotated[X, …]` becomes `X`, and a non-generic
-  `TypeAliasType` (`type X = …`) is followed through `__value__` recursively, up to a depth
-  of 16.
+- Wrappers are unwrapped first: `Annotated[X, …]` becomes `X`, and a `TypeAliasType` (`type X = …`) is followed
+  through `__value__` recursively, up to a depth of 16. A generic alias is substituted first ([Generics](#generics)).
+- **Leaves are detected before named types.** The `rowx.postgres` value classes (`Range`, `Money`, `Interval`, the
+  geometric classes and `Cube`) are frozen dataclasses, and they stay leaves. This order holds in both `_rowplan` and
+  `resolve.py`.
 - **Rejected** forms raise `InterfaceError` at the first row-returning call at runtime, and are
   `invalid-row-type` in the checker:
-  - string or `ForwardRef`, and `TypeVar`;
-  - a generic alias (`type Row[X] = …`);
+  - string or `ForwardRef`, and a `TypeVar` that isn't bound by a substitution;
   - bare `tuple`, `tuple[()]` and `tuple[X, ...]`;
   - a union with more than one non-None member, except the two network pairs above, which are written
     `IPv4Interface | IPv6Interface` and `IPv4Network | IPv6Network` and resolve to one leaf each (any other mix, for
@@ -425,26 +446,245 @@ RLEAF := int | decimal.Decimal | datetime.date | datetime.datetime
     these two sets, in either order, as that leaf;
   - `Literal`, any `dict` other than `dict[str, str | None]`, `tuple[X, ...]` in a column position (the row-level
     bare-tuple rule above is unchanged), classes other than the listed `rowx.postgres`
-    leaves, and anything else not derivable from the grammar.
+    leaves and the named forms below, and anything else not derivable from the grammar;
+  - the named-row rejections in [Rejected named forms](#rejected-named-forms).
 - **Each new leaf needs four things**, and a feature PR is not done without them: a grammar line here, a `_rowplan`
-  rule, a `check/resolve.py` rule, and rows in `tests/conformance/row_types.py`. `Range[T]` is checked against the
-  column's subtype (`Range[int]` matches `int4range` and `int8range`, `Range[date]` matches `daterange`). A leaf that
-  does not match the column's leaf is `type-mismatch`, as for any other leaf.
+  rule, a `check/resolve.py` rule, and rows in `src/rowx/__tests__/conformance/row_types.py`. `Range[T]` is checked
+  against the column's subtype (`Range[int]` matches `int4range` and `int8range`, `Range[date]` matches `daterange`). A
+  leaf that does not match the column's leaf is `type-mismatch`, as for any other leaf.
+- **Each new named form needs the same four things:** a `NAMED` line here, a `_rowplan` rule, a `check/resolve.py`
+  rule, and conformance rows. The expected-plan format carries `(form, matching, ((key, names, nullable, required),
+  ...))` for a `named` plan. A construct that only one side can see (see
+  [Checker-only rejections](#checker-only-rejections)) gets a row that records the two verdicts.
 - **Nullable mask.** An element is nullable when it is `None`, a union with `None`, `Any`
   or `object`.
 
-`T` is read **lazily** at the first row-returning call from `self.__orig_class__.__args__[0]`.
-Python sets this after `__init__`, so it is not readable inside `__init__`. If the
-attribute is missing, `T` is `None`. The compiled `RowPlan(kind, arity, nullable_mask)` is
-cached per `T` object.
+`T` is read **lazily** at the first row-returning call from `self.__orig_class__.__args__[0]`. Python sets this after
+`__init__`, so it is not readable inside `__init__`. If the attribute is missing, `T` is `None`. The compiled `RowPlan`
+is cached per `T` object. A tuple or scalar plan is `(kind, arity, nullable_mask)`. A `named` plan adds the field specs
+and a `_core.RowShape` ([Driver](driver.md#named-rows)), built once with the plan.
 
-Runtime validation:
+### Named row types
+
+A `NAMED` row type maps each result column to a field of the class, builds each row through the class's constructor,
+and is checked in the same way as a tuple, field by field.
+
+**Forms.**
+
+| Form | Matching | Construction | Required fields |
+|---|---|---|---|
+| `@dataclass` (stdlib) | by name | keyword arguments (`keyword`) | a field with no `default` or `default_factory` |
+| `typing.NamedTuple` | by position, and names must match | positional arguments (`positional`) | a field not in `_field_defaults` |
+| `TypedDict` (`typing` or `typing_extensions`) | by key | the row is the dict (`dict`) | `__required_keys__` |
+| pydantic `BaseModel` or pydantic dataclass | by name | `__pydantic_validator__.validate_python(row_dict)` for a model, `cls(**row_dict)` for a pydantic dataclass (`validator`) | `FieldInfo.is_required()` |
+
+- **Dataclasses** may use `slots`, `frozen`, `kw_only`, `field(kw_only=…)` and `KW_ONLY`. The fields are the entries of
+  `__dataclass_fields__` that are plain fields with `init=True`.
+- **NamedTuple and TypedDict** are supported in class form and in functional form (`NamedTuple("X", [...])`,
+  `TypedDict("X", {...})`). A `typing_extensions.TypedDict` is detected through `sys.modules`, so rowx doesn't import
+  it.
+- **TypedDict class keywords.** The known keywords are `total`, `closed` and `extra_items`. `closed` and `extra_items`
+  add no fields and don't relax `unexpected-column`. Optionality follows `__required_keys__`: `Required[...]` overrides
+  `total=False`, `NotRequired[...]` overrides `total=True`, and `total` applies to the declaring class only. `typing`
+  supports `closed` and `extra_items` on 3.15 (PEP 728), and `typing_extensions` on 3.14. Any other class keyword on a
+  non-pydantic form is a [checker-only rejection](#checker-only-rejections).
+- **Pydantic** is never imported by rowx. A pydantic class is detected through `sys.modules.get("pydantic")`, as
+  `Range` is. A pydantic dataclass is checked before the stdlib dataclass rule, because `dataclasses.is_dataclass` is
+  true for it.
+- **Inheritance.** Fields come from the bases in the order the library itself uses. A field redeclared in a child
+  replaces the base's field in place. A project base that is not a row type (a plain mixin) contributes no fields. A
+  NamedTuple's fields are only those of the class that directly subclasses `NamedTuple` (`_fields`), and annotations a
+  subclass adds are ignored.
+
+**Which members are fields.** A field is an annotated member that the constructor accepts. These are **not** fields:
+`ClassVar`, `KW_ONLY`, `dataclasses.field(init=False)`, pydantic private attributes (`_x`, `PrivateAttr`),
+`computed_field`, and `Field(init=False)` on a pydantic dataclass. A field's annotation is exactly an `ELEM`, after
+`Annotated`, `ReadOnly`, `Required` and `NotRequired` are unwrapped. A field typed `None` matches a `void` column, as a
+tuple element does. A field is **optional** (the constructor fills it, or a TypedDict lacks the key) when it has a
+dataclass `default` or `default_factory`, a pydantic default, `NotRequired`, or `total=False`.
+
+**Column names.** The name a column is matched under is the server's name after the override suffix is stripped
+([Nullability overrides](#nullability-overrides-sqlx-convention)).
+
+- One function in `rowx-core` (`row_shape::column_name`) strips a single trailing `!` or `?`, and exempts `?column?`.
+  `describe.rs` and the mapping both call it. `id!!` becomes `id!`.
+- Matching is case-sensitive.
+- The checker passes the **raw** names to the same function through `_core.postgres.map_columns`, so nothing is
+  stripped twice, and there is no Python port.
+
+**Matching by name** (dataclass, TypedDict, pydantic). Column order is irrelevant. The mapping is a bijection, where
+defaults relax one side:
+
+- every column needs a field, or it is `unexpected-column`. This holds for a pydantic model with `extra="allow"` and a
+  TypedDict with `extra_items` (`typing_extensions` only on 3.14);
+- every field without a default needs a column, or it is `missing-column`;
+- two columns of a by-name row with the same stripped name (`?column?` included), or, for pydantic, two accepted names
+  of one field, are `duplicate-column`. An example of the latter is `id` and `user_id` for
+  `id: int = Field(alias="user_id")` under `populate_by_name`, where pydantic would silently keep one. A name that
+  appears on two or more columns is `duplicate-column` whether or not a field has that name (`field` is `None` when
+  none does, as for `?column?`). Columns reported in a `duplicate-column` are not also reported as
+  `unexpected-column`;
+- one column that matches the names of two or more fields is `ambiguous-column`: equal aliases, or an alias equal to
+  another field's name, with or without `populate_by_name`. Only pydantic can produce it. For example,
+  `x: int = Field(alias="y")` next to `y: int` makes pydantic fill both from one `y`.
+
+**Matching by position** (NamedTuple). Field *i* faces column *i*.
+
+- The column count must be between the number of required fields and the total, or it is `arity-mismatch`. Trailing
+  fields with defaults may have no column.
+- A column whose stripped name differs from its field's name is `column-name-mismatch`, reported for each position.
+  Names are errors, not hints, so `SELECT name, id` against `(id, name)` fails twice.
+- When the arity is wrong, no name rules run, as for a tuple.
+- Positional matching has no `missing-column` or `unexpected-column`.
+
+**All errors are collected.** The mapping reports every violation, not the first. The runtime `RowShapeError` message
+names the row type and lists them. The checker emits one diagnostic for each.
+
+- **Order.** Column-indexed issues come first, by column index, then `missing-column` by field declaration order. A
+  `duplicate-column` sorts by its second (reported) column index, which is also its JSON `column_index`; an
+  `ambiguous-column` sorts by its column. The runtime message uses the same order.
+- **Message formats.** The checker's diagnostic messages and the runtime issue messages are the same text, in the
+  `column N "name"` style (columns are 1-based). `type_name` is `cls.__name__`, not the qualname, and for a substituted
+  generic it renders the arguments (`Page[int]`).
+
+  | Issue | Message |
+  |---|---|
+  | `unexpected-column` | ``column 3 "age" matches no field of `User` `` |
+  | `missing-column` | ``field "name" of `User` has no column`` |
+  | `duplicate-column` | ``columns 1 and 3 are both named "id"``; for `?column?`, ``columns 1 and 3 are both unnamed (`?column?`)``; pydantic two names, ``columns 1 "id" and 2 "user_id" both map to field "id" of `M` `` |
+  | `ambiguous-column` | ``column 2 "y" matches fields "x" and "y" of `M` `` |
+  | `column-name-mismatch` | ``column 2 "login" faces field "email" of `UserRow` (position 2)`` |
+  | NamedTuple `arity-mismatch` | ``the query returns 4 columns but `UserRow` takes between 2 and 3`` (``takes exactly N`` when min equals max) |
+  | `type-mismatch` | ``column 2 "age" is `int` but field "age" of `User` is `str` `` |
+  | `nullability-mismatch` | ``column 3 "email" may be NULL but field "email" of `User` is `str` `` |
+
+  `RowShapeError` reads ``{type_name}: {msg}; {msg}``, one message per issue. A tuple or scalar arity mismatch keeps its
+  existing wording.
+
+**Pydantic.** Rows are validated. For a `BaseModel`, Rust calls `__pydantic_validator__.validate_python(row_dict)`; for
+a pydantic dataclass it calls the class, `cls(**row_dict)`, which runs the same validator through `__init__`. The dict
+is keyed by column name and includes pass-through columns, so validators, constraints, aliases and a custom `__init__`
+behave as in `Model.model_validate`.
+
+- **Why a dataclass is called.** `validate_python(dict)` on a pydantic dataclass's validator raises
+  `dataclass_exact_type` under `ConfigDict(strict=True)` (checked on pydantic 2.14.2), while `cls(**row_dict)` works
+  under `strict=True` with aliases, `AliasChoices` and strict types intact. A failure of either call is a
+  `ValidationError`, wrapped in `RowConstructError` the same way.
+- An incomplete model (`__pydantic_complete__` is false) gets `model_rebuild(raise_errors=False)` (for a pydantic
+  dataclass, `pydantic.dataclasses.rebuild_dataclass(cls, raise_errors=False)`) while the plan is built, and
+  `__pydantic_complete__` is tested afterwards. If it is still incomplete, that is an `InterfaceError` naming the class
+  (and the missing name where pydantic reports it). The plan caches `__pydantic_validator__`, so a later
+  `model_rebuild(force=True)` isn't seen by a plan that is already built.
+- **Column names** of a field: its `str` `validation_alias`, else its `str` `alias`, else its name. `validate_by_name`
+  (or `populate_by_name`) adds the field name, and `validate_by_alias=False` keeps only the name. Config is read with
+  `.get`, so 2.11's keys and the older `populate_by_name` both work.
+- **Class keywords are config.** `class M(BaseModel, populate_by_name=True)` is pydantic config, not an unknown class
+  keyword: literal class keywords on a model merge into its config, and the child wins. A non-literal one makes the
+  names unknown, in the checker.
+- **Pydantic dataclass config** is the decorator's literal `config=ConfigDict(...)` in the checker (a non-literal value
+  makes the names unknown), and `__pydantic_config__` at runtime. The decorator's `init=False`, or an `InitVar` field,
+  on a pydantic dataclass is rejected on both sides (the runtime checks `__dataclass_fields__` for `InitVar`);
+  `Field(init=False)` on a field just makes it a non-field.
+- **Unknown names.** This is a deliberate exception to "uncheckable is an error", for parity with sqlty. It has two
+  scopes:
+  - An `AliasChoices`, an `AliasPath` or a non-literal alias makes **that field's** names unknown.
+  - A `model_validator(mode="before" | "wrap")` anywhere in the MRO makes **every** field's names unknown. So does an
+    `alias_generator`, or a `model_config` the checker can't read, **in the checker only**: at runtime the generated
+    aliases are plain strings, and are checked.
+  - If any field is unknown, the four by-name rules (`missing-column`, `unexpected-column`, `duplicate-column`,
+    `ambiguous-column`) are skipped for the whole model, and the checker adds `note: names not checked: <reason>`.
+    Type and nullability checks still run for columns that map to a field with known names.
+  - At runtime, every column goes into the dict, and the NULL check applies only to columns that match a known name.
+    A pass-through column decodes with the default decoder (no `Interval` flag), and two columns with one name collapse
+    to the last one in the dict ([known limits](../known-limits.md)).
+- **The checker stays exact** ([decision 17](decision-log.md)). Lax-mode coercions, such as a `numeric` column into an
+  `int` field, are reported as `type-mismatch`. There is no pydantic type table.
+- **Pydantic-only types** (`EmailStr`, `AnyUrl`, `SecretStr`) are real classes and not `ELEM`s, so they are
+  `invalid-row-type` on both sides. Annotate the column's Python type and validate with
+  `Annotated[str, AfterValidator(...)]`. The constraint aliases that are `Annotated[<leaf>, ...]` (`PositiveInt`,
+  `constr()`) are different: the runtime strips the `Annotated` metadata and accepts them, and the checker rejects them
+  ([Checker-only rejections](#checker-only-rejections)).
+- The `rowx.postgres` value classes work as pydantic field types without `arbitrary_types_allowed`, and the decoded
+  instance passes through validation unchanged, even under `strict=True`.
+
+**Annotations.**
+
+- **At runtime**, annotations come from `typing.get_type_hints(cls, include_extras=True)` (or pydantic's resolved field
+  info). An annotation that doesn't resolve raises `InterfaceError` naming the field and the missing name.
+- **In the checker**, annotations come from the class body's AST. A string annotation in a class body, and every
+  annotation under `from __future__ import annotations`, is parsed as an expression. A string as `T` itself stays
+  `invalid-row-type`.
+- A name that resolves only through a `TYPE_CHECKING` import is `invalid-row-type` inside a named-type field, with the
+  help "import `datetime` at runtime", because `get_type_hints` would fail on it (ruff's TC003 produces exactly this).
+  Aliases used as `T` keep today's rule.
+
+#### Generics
+
+Generic classes (`class Page[T]`, `Generic[T]`) and generic aliases (`type Rows[T] = tuple[int, T]`) are
+supported on both sides, once subscripted.
+
+- Substitution is recursive, through a mapping from each `__type_params__` (or `__parameters__`) entry to its argument.
+  It is never `__value__[args]`, because `type Swap[A, B] = tuple[B, A]` reports its parameters in order of use.
+- The argument count is checked explicitly, because Python doesn't check it. Inherited parameters are rebound by
+  walking `__orig_bases__`, so `class Child[U](Base[U])` binds `Base`'s own `T`.
+- Every parameter must be bound, by an argument or a PEP 696 default. An unbound one, a `TypeVarTuple`, a `ParamSpec`,
+  a wrong argument count, or a substitution deeper than the alias depth limit is `invalid-row-type`.
+- **Depth limit.** One hop is one alias or class substitution along a chain (nesting depth, not breadth). The limit is
+  16, shared with `MAX_ALIAS_DEPTH`, and the conformance rows sit at 16 (accepted) and 17 (rejected).
+- `TypeVar` bounds and constraints are not enforced; the leaf check does the work. A generic alias of a generic class
+  (`type B[T] = Box[T]`) and a bare generic class whose parameters all have PEP 696 defaults are supported.
+- `type_name` renders the arguments (`Box[int]`).
+- The constructor is the origin class, not the subscripted alias, so `__orig_class__` isn't set on every row. A pydantic
+  `Page[int]` is already a concrete subclass with resolved fields, and is used as it is.
+
+#### Rejected named forms
+
+Rejected on **both sides** (`invalid-row-type` in the checker, `InterfaceError` at the first row-returning call):
+
+- `Protocol`, `collections.namedtuple` (untyped), attrs, msgspec, `RootModel` and pydantic v1 (`pydantic.v1`);
+- a dataclass with `init=False`, and a dataclass `InitVar` field (also on a pydantic dataclass);
+- a named row type with no fields (`invalid-row-type`, "has no fields");
+- a nullable named row (`User | None`), with the help "use .optional()";
+- a named type anywhere below the row level: in a tuple, a list, a union, or as a field type;
+- an unbound or unsupported generic parameter ([Generics](#generics)).
+
+#### Checker-only rejections
+
+The checker rejects these as `invalid-row-type` because it can't see what they do to the constructor. The runtime
+accepts them, and any failure surfaces as `RowConstructError`:
+
+- a class decorator other than the dataclass decorators and `typing.final`;
+- a `metaclass=`, or another class keyword the resolver doesn't know (pydantic config keywords are known);
+- a hand-written `__init__` on a stdlib dataclass;
+- a pydantic constraint alias that is `Annotated[<leaf>, ...]` (`PositiveInt`, `constr()` and the like). The runtime
+  strips the `Annotated` metadata, and the checker sees only a pydantic name it can't look through (there is no pydantic
+  type table).
+
+The runtime can't see a decorator or a class keyword once the class exists. It can see a hand-written `__init__`, but it
+doesn't reject one, because a failing constructor already has a runtime error. A pydantic model **may** define
+`__init__`, because the validator calls it. Conformance rows record these as runtime-ok and checker-invalid.
+
+### Runtime validation
 
 - **Arity.** Before executing, compare `len(stmt.columns())` with the plan's arity. A
   scalar plan needs exactly 1 column. A mismatch raises `RowShapeError`. Columns of type
   `void` count towards arity.
+- **Name mapping (named rows).** In the same step, the prepared statement's columns are mapped to the fields. A
+  mismatch raises `RowShapeError` before execution, even for an empty result, and names the row type and each error. A
+  cached statement whose mapping fails is re-prepared once, as for an arity mismatch, before the error is raised.
 - **NULL check.** A NULL in a position the mask marks non-nullable raises `RowShapeError`
-  naming the column index and name. The Rust decoder performs this check.
+  naming the column index and name. The Rust decoder performs this check. For a named row the mask is per mapped
+  field; a column that maps to no known field (unknown names) counts as nullable. The named message names the field and
+  the column: ``NULL in column 2 "email" for non-nullable field "email" of `User` (row {k})``. The tuple message is
+  unchanged. In `all` and `one` the NULL checks run while the rows are collected, before any constructor runs. In a
+  stream, earlier rows are constructed and yielded first.
+- **Construction errors.** An exception from the constructor or validator (a pydantic `ValidationError`, a raising
+  `__post_init__`, a `TypeError` from a hand-written `__init__`) raises `RowConstructError(DecodeError)`. It carries
+  `type_name` and `row_index`, the 0-based position in the returned rows (counted across stream batches, and always 0
+  for `one` and `optional`). The message is ``{type_name} row {row_index}: {cause!r}``. The original exception is its
+  `__cause__`. Stream semantics are those of `DecodeError`: rows before the failing one are yielded first. It wraps
+  `Exception` only: `CancelledError`, `KeyboardInterrupt` and `SystemExit` pass through.
+- **Types are not checked at runtime**, except by pydantic. `query_unchecked[T]` gets the same runtime checks.
 - **No-rows plan.** `one`, `optional`, `all` and `fetch` raise
   `InterfaceError("query without a row type; use .execute() or add query[T]")`.
 - Element types and nullability inside `list[...]` are **not** checked at runtime. A NULL
@@ -509,8 +749,11 @@ A result column whose name ends in `!` is forced NOT NULL, and one ending in `?`
 nullable. You write it with a quoted alias: `count(*) AS "n!"`.
 
 - The checker strips the suffix ([Overrides](nullability.md#overrides)).
-- The runtime ignores names, because plans are positional. A NULL in a `!` column still
+- For tuple and scalar rows the runtime ignores names, because plans are positional. A NULL in a `!` column still
   raises `RowShapeError`.
+- For a named row the runtime strips one trailing `!` or `?` through `row_shape::column_name` before it matches a name
+  (`"id!"` maps to the field `id`), and `?column?` is exempt. The suffix still doesn't change the NULL check: a NULL in
+  a `!` column raises `RowShapeError`.
 - Postgres truncates identifiers at 63 bytes, which would silently drop the suffix. The
   checker reports a described column name of exactly 63 bytes whose quoted alias in the
   source SQL ends in `!`/`?` as `invalid-override`.
@@ -528,8 +771,9 @@ rowx.Error(Exception)
 ├── DatabaseError           # server ErrorResponse: .sqlstate .message .detail .hint .position
 │                           # (incl. auth failures 28P01, unknown database 3D000, query canceled 57014)
 ├── RowNotFound             # one with zero rows
-├── RowShapeError           # arity mismatch / NULL in non-nullable position
+├── RowShapeError           # arity or column-to-field mismatch / NULL in non-nullable position
 ├── DecodeError             # value can't be represented as the Python type (infinity, interval months, …)
+│   └── RowConstructError   # .type_name .row_index: a named row's constructor or validator raised; __cause__ is the original
 ├── EncodeError             # Python value not accepted for the param's type (Type mapping); names "$n" and both types
 └── MigrateError            # Migrator failures; typed attributes per subclass
     ├── MigrationSourceError    # .path .version: bad filename, duplicate version, unpaired up/down, non-UTF-8 file,
@@ -545,6 +789,8 @@ rowx.Error(Exception)
 - **Construction-time misuse** raises a plain `TypeError` from `__init__`. Examples: a
   non-Template argument, or a dynamic interpolation in `query`.
 - **Fetch-time row-type problems** raise `InterfaceError`.
+- **`RowConstructError`** keeps keyword constructors and pickles as `DatabaseError` does; pickling keeps `type_name`
+  and `row_index`, and `__cause__` isn't pickled. It is re-exported from `rowx`.
 - `DatabaseError.sqlstate` is a 5-character `str`, and `.position` is an `int | None`
   holding the 1-based character position.
 - **Migration errors** ([Migrations](migrations.md)) are all `MigrateError`s, defined in `rowx.errors` and re-exported

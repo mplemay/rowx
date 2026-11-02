@@ -38,14 +38,23 @@ The binding signatures (in `_core/postgres.pyi`) are:
 
 ```text
 Connection._fetch(sql: str, params: list[object], mask: list[bool] | None,
-                  scalar: bool, limit_one: bool, arity: int | None) -> list[object]
+                  scalar: bool, limit_one: bool, arity: int | None,
+                  shape: RowShape | None) -> list[object]
 Connection._execute(sql: str, params: list[object]) -> int     # Python wraps it in QueryResult
 Connection._stream(sql: str, params: list[object], mask: list[bool] | None,
-                   scalar: bool, arity: int | None, batch_size: int) -> RowStream   # sync
+                   scalar: bool, arity: int | None, batch_size: int,
+                   shape: RowShape | None) -> RowStream   # sync
 RowStream._next() -> list[object]      # awaitable; [] means exhausted
 RowStream.close() -> None              # sync, idempotent
 RowStream.rows_affected -> int | None  # set once exhausted
+map_columns(columns: list[str], fields: list[tuple[tuple[str, ...] | None, bool]],
+            positional: bool) -> tuple[list[int | None], list[ShapeIssue]]
+                                       # module function, for the checker (Named rows)
 ```
+
+`shape` is the trailing argument and the existing arguments keep their meaning. It is `None` for a tuple or scalar plan.
+For a named plan, Python passes `mask=None`, `scalar=False`, `arity=None` and the `RowShape`; the binding derives the
+rest ([Named rows](#named-rows)). `Pool` and `Transaction` take the same arguments.
 
 `_stream` returns a handle whose first `_next()` claims a connection. On a `Connection` or `Transaction` that is a
 synchronous claim, so `ConnectionBusyError` is raised from the first `__anext__`. On a `Pool` it is an async acquire
@@ -61,13 +70,15 @@ Rust future ([Fast path](#fast-path)). The shared Python never imports these cla
    - Look up the statement cache; on a miss, `prepare(sql)` with no parameter types, so
      the server infers them.
    - Check that `params.len()` equals `stmt.params().len()`, else raise `InterfaceError`.
-   - Check that `arity` equals `stmt.columns().len()`, else raise `RowShapeError`.
+   - Check that `arity` equals `stmt.columns().len()`, else raise `RowShapeError`. For a named plan, map the columns to
+     the fields instead ([Named rows](#named-rows)).
    - Encode each parameter against its `Type` ([Codec](#codec-rowx-postgres-pysrccodec-rowx-postgressrcwire)).
 3. Run `query_raw`. Per-parameter formats come from each value's
    `ToSql::encode_format(&Type)`, and tokio-postgres always requests binary results.
 4. Collect the raw rows, `Vec<Option<Bytes>>` with types. Apply the `mask` NULL check while
    collecting. With `limit_one`, drop the stream after the first row.
-5. **With the GIL**, in one pass, build Python tuples (or bare values when `scalar`).
+5. **With the GIL**, in one pass, build Python tuples (or bare values when `scalar`, or named rows,
+   [Named rows](#named-rows)).
 6. Move the state Busy → Idle **before** the result is delivered to Python, so
    `await a(); await b()` never sees Busy.
 
@@ -86,6 +97,106 @@ Rust future ([Fast path](#fast-path)). The shared Python never imports these cla
   `DatabaseError`, with the hint "schema changed inside a transaction; ROLLBACK and retry".
 - On `26000` ("prepared statement does not exist", e.g. after `DISCARD ALL`), clear the
   whole cache and retry once.
+
+## Named rows
+
+This implements [Named row types](api.md#named-row-types). The mapping is pure and lives in `rowx-core`, the check runs
+in `rowx-postgres`, and the construction runs in `rowx-postgres-py`.
+
+**`rowx-core/src/row_shape.rs`** has no pyo3 dependency and has `cargo` tests.
+
+- `column_name(raw: &str) -> (&str, Option<Override>)` strips a single trailing `!` or `?`, and exempts `?column?`.
+  `describe.rs` (`apply_overrides`) calls it, so the stripping has one implementation.
+- The specs are `FieldSpec { names: Names, required: bool }`, where `Names` is `Known(Vec<String>)` or `Unknown`, and
+  `Matching::{ByName, Positional}`.
+- `map_columns(raw_columns, fields, matching) -> Result<Mapping, ShapeErrors>` strips each name through `column_name`
+  and **collects every violation**. `ShapeErrors` is a non-empty list of `ShapeError`s, a `thiserror` enum. Errors carry
+  **field indices** into the `fields` slice and 0-based column indices, not names: the message text is rendered by the
+  caller, because the binding has the `RowShape` keys and `type_name` and the checker has its own field records.
+
+  | `ShapeError` | When | Checker rule |
+  |---|---|---|
+  | `UnexpectedColumn { index, name }` | `ByName`: a column no field's names contain | `unexpected-column` |
+  | `MissingColumn { field }` | `ByName`: a required field with no column | `missing-column` |
+  | `DuplicateColumn { field: Option<usize>, indices }` | `ByName`: a name on two or more columns, or two accepted names of one field. `field` is `None` when no field has the name (`?column?`) | `duplicate-column` |
+  | `AmbiguousColumn { index, name, fields }` | `ByName`: one column in the names of two or more fields | `ambiguous-column` |
+  | `Arity { min, max, actual }` | `Positional`: the count is outside the required-to-total range | `arity-mismatch` |
+  | `NameMismatch { position, field, column }` | `Positional`: position *i*'s name differs, reported for each position | `column-name-mismatch` |
+
+  If any field's names are `Unknown`, a column that matches nothing passes through and the four `ByName` errors are not
+  raised, for the whole model. `Positional` runs the name rules only when the arity is right. Issues are ordered by
+  column index, then `MissingColumn` by field index. A `duplicate-column` sorts by its second (reported) column index,
+  which is also its JSON `column_index`; an `ambiguous-column` sorts by its column. A name on two or more columns is a
+  `DuplicateColumn` whether or not a field has that name, and its columns are not also `UnexpectedColumn`.
+- `Mapping` holds, for each column, the field it maps to or a pass-through, and the optional fields that no column
+  fills (the absent fields: the field indices that are not in the mapping).
+
+**`rowx-postgres/src/exec.rs`.** `Shape` gains `fields: Option<&[FieldSpec]>` and `matching`. For a named shape, `mask`
+is per field.
+
+- **One source of truth.** `RowShape` (its per-field flags, bit 0) is the only place the nullable mask lives. The
+  binding derives `Shape.mask` (per field), `fields` and `matching` from it, and `check_shape` skips the mask-length
+  check when `fields` is set. The per-column NULL mask and the `Interval` flag (bit 1) come from the `Mapping`.
+- `check_shape` calls `map_columns` when `fields` is set, in both the cached-statement re-prepare condition and the
+  final check in `open()`, next to the arity check. It returns the `Mapping`. A mismatch is reported before execution,
+  even for an empty result, and a stale cached statement is re-prepared before the error is raised, exactly as for an
+  arity mismatch.
+- `fetch` returns the `Mapping` with the rows, and `RowBatches` carries it. `check_nulls` uses a per-column mask derived
+  from it: a mapped column takes its field's flag, and a pass-through column counts as nullable.
+- `ShapeError` is a source of `Error::RowShape`, which maps to `RowShapeError` in `rowx-postgres-py/src/errors.rs`. The
+  message names the row type and every error.
+
+**`rowx-postgres-py/src/exec.rs`.**
+
+- **`RowShape`** is a pyclass exported from `_core.postgres`. It is immutable, and Python builds it once per plan. It
+  holds:
+  - `ctor`: the class, or for a pydantic model its `__pydantic_validator__` (a pydantic dataclass uses the class);
+  - `form`: `positional`, `keyword`, `dict` or `validator`; the `validator` form records which call it makes;
+  - `matching`, and `type_name`;
+  - for each field: an interned key `PyString`, the accepted names (or unknown), `required`, and flags (bit 0
+    nullable, bit 1 `Interval`).
+- **`Layout`** gains `form: RowForm`. The name avoids a clash with `rowx_postgres::exec::Shape`. `RowForm` is
+  `Scalar`, `Tuple` (both unchanged) or `Named(Py<RowShape>)`. The `Interval` flag of a column comes from the field it
+  maps to.
+- **Construction** runs in the single GIL pass, from the `Mapping`. Cells go directly into the argument tuple, the
+  kwargs dict or the row dict, and there is no intermediate tuple except for the positional form.
+
+  | Form | Row |
+  |---|---|
+  | `positional` | one `PyTuple` in field order, then `ctor(*args)` |
+  | `keyword` | a kwargs dict, without the absent optional fields, then `ctor(**kwargs)` |
+  | `dict` | the row is the dict itself, without the absent `NotRequired` keys |
+  | `validator` | `ctor.validate_python(dict)` for a model, `cls(**dict)` for a pydantic dataclass; the dict is keyed by column name and includes pass-through columns |
+
+  The `keyword` form may call a dataclass positionally when it has no keyword-only fields and nothing is absent, if the
+  benchmark shows a gain.
+- **Stream layout.** `exec::stream` returns the `Mapping` with the `RowBatches`. The layout is fixed for the stream, and
+  a mapping error is raised from the first `__anext__`.
+- **Errors.** An exception from the constructor or validator becomes `RowConstructError`, with `type_name`, a 0-based
+  `row_index` (the position in the returned rows, counted across stream batches, and always 0 for `one` and `optional`),
+  and the original as `__cause__`. It wraps `Exception` only. In `all` and `one` the NULL checks run while the rows are
+  collected, before any constructor runs. In a stream it is handled like a
+  `DecodeError`: `_next()` returns the rows before the failing one, then raises. `RowConstructError(DecodeError)` is
+  registered in `rowx-py-core/src/errors.rs` and mapped in `rowx-postgres-py/src/errors.rs`.
+- **`stream.rs`** builds the stream's layout from the mapping of the first batch, because the handle exists before
+  anything is prepared.
+- **`map_columns(columns, fields, positional)`** is a `_core.postgres` function for the checker. `fields` is a list of
+  `(names | None, required)`, so the checker needn't build a `RowShape`. It returns
+  `tuple[list[int | None], list[ShapeIssue]]`: for each column, the field index or `None` for a pass-through (the absent
+  optional fields are the field indices not in the mapping), and the issues.
+  - `ShapeIssue` is a frozen pyclass with `kind` (the rule name: `"missing-column"`, `"unexpected-column"`,
+    `"duplicate-column"`, `"ambiguous-column"`, `"column-name-mismatch"`, `"arity-mismatch"`), `columns: list[int]`
+    (0-based), `fields: list[int]` (empty when no field), `name: str | None` (the stripped column name), and, for arity,
+    `min`, `max` and `actual` (`None` otherwise).
+
+**Acceptance.** The mapping cases are `cargo` tests in `row_shape.rs` and the same cases through `map_columns`. DB tests
+cover a mapping error on an empty result, the re-prepare after a table gains a column, a NULL in a mapped non-nullable
+field in `fetch` and in `RowBatches`, and a constructor that raises in `all`, `one` and `fetch` (earlier rows are
+yielded, `row_index` is correct across a `batch_size=2` boundary, and the connection stays usable).
+
+**Performance.** `bench/fetch_100k.py` gains a variant for each form (dataclass with `slots=True`, NamedTuple,
+TypedDict, pydantic `BaseModel`, pydantic dataclass) next to the tuple baseline. Their numbers are recorded, with no
+hard threshold. The only hard gate is no regression in the tuple and scalar paths.
 
 ## Streaming (`exec.rs`)
 
