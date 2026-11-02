@@ -1,12 +1,15 @@
 import asyncio
+import sys
+import types
 from dataclasses import dataclass, field
 from string.templatelib import Template
 from typing import Final
 
 import pytest
 
+import rowx._core.postgres as core_postgres
 from rowx import query
-from rowx.__tests__.conformance.row_types import PRELUDE, ROWS, NamedPlan, Plan
+from rowx.__tests__.conformance.row_types import NAMED_ROWS, PRELUDE, ROWS, NamedPlan, Plan
 from rowx._core.postgres import RowShape
 from rowx._rowplan import row_plan
 from rowx.errors import InterfaceError
@@ -32,9 +35,11 @@ class FakeImpl:
 
 
 def evaluate(source: str) -> object:
-    ns: dict[str, object] = {}
-    exec(PRELUDE + source, ns)  # ruff: ignore[exec-builtin]
-    return ns["T"]
+    # a class resolves its annotations in its module, so the source runs in a registered one
+    module = types.ModuleType("conformance_row")
+    sys.modules["conformance_row"] = module
+    exec(PRELUDE + source, module.__dict__)  # ruff: ignore[exec-builtin]
+    return module.T
 
 
 def fetch_plan(t: object) -> Plan | NamedPlan:
@@ -80,6 +85,54 @@ def test_interval_leaf_reaches_the_driver_as_flag_bit_one() -> None:
     asyncio.run(query[row](t"SELECT 1").all(conn))  # ty: ignore[invalid-type-form]
     ((mask, _, _, _),) = impl.fetches
     assert mask == [0b10, 0b00, 0b11]
+
+
+type ShapeField = tuple[str, tuple[str, ...] | None, bool, int]
+
+
+def build_shape_arguments(monkeypatch: pytest.MonkeyPatch, t: object) -> tuple[str, str, list[ShapeField]]:
+    captured: list[tuple[str, str, list[ShapeField]]] = []
+    original = core_postgres.RowShape
+
+    def spy(
+        ctor: object,
+        form: str,
+        matching: str,
+        type_name: str,
+        fields: list[ShapeField],
+        /,
+    ) -> RowShape:
+        captured.append((form, matching, fields))
+        return original(ctor, form, matching, type_name, fields)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(core_postgres, "RowShape", spy)
+    row_plan(t)
+    (args,) = captured
+    return args
+
+
+NAMED_PLAN_ROWS: Final[list[tuple[str, NamedPlan]]] = [
+    (source, expected) for source, expected, _ in NAMED_ROWS if not isinstance(expected, str) and len(expected) == 4
+]
+
+
+@pytest.mark.parametrize(("source", "expected"), NAMED_PLAN_ROWS)
+def test_the_shape_built_for_a_named_row_carries_the_required_and_nullable_flags(
+    monkeypatch: pytest.MonkeyPatch, source: str, expected: NamedPlan
+) -> None:
+    _, form, matching, fields = expected
+    shape_form, shape_matching, shape_fields = build_shape_arguments(monkeypatch, evaluate(source))
+    assert (shape_form, shape_matching) == (form, matching)
+    # flag bit 0 is nullable; bit 1 (the interval leaf) has its own test
+    assert [(key, names, required, flag & 1) for key, names, required, flag in shape_fields] == [
+        (key, names, required, int(nullable)) for key, names, nullable, required in fields
+    ]
+
+
+def test_the_shape_built_for_interval_fields_carries_flag_bit_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = "@dataclass\nclass T:\n    i: Interval\n    j: Interval | None\n    d: datetime.timedelta\n    k: list[Interval]"
+    *_, shape_fields = build_shape_arguments(monkeypatch, evaluate(source))
+    assert [flag for *_, flag in shape_fields] == [0b10, 0b11, 0b00, 0b10]
 
 
 DB_ROWS: Final[list[tuple[str, str]]] = [

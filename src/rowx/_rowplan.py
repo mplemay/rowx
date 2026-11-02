@@ -1,16 +1,18 @@
 import datetime as dt
 import decimal
 import ipaddress
+import re
 import sys
 import types
 import uuid
 from annotationlib import Format, get_annotations
-from dataclasses import MISSING, dataclass, field, is_dataclass
+from dataclasses import MISSING, InitVar, dataclass, field, fields, is_dataclass
 from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
     Final,
+    ForwardRef,
     Literal,
     NotRequired,
     ReadOnly,
@@ -65,11 +67,22 @@ type RowForm = Literal["positional", "keyword", "dict"]
 type Matching = Literal["by_name", "positional"]
 
 # the wrappers a named type's field annotation may carry around its element
-FIELD_QUALIFIERS: Final[tuple[object, ...]] = (Required, NotRequired, ReadOnly)
+FIELD_QUALIFIERS: Final[dict[str, object]] = {"Required": Required, "NotRequired": NotRequired, "ReadOnly": ReadOnly}
 
-# `dataclasses.Field._field_type` names; the sentinels are private to `dataclasses`
-DATACLASS_FIELD: Final[str] = "_FIELD"
-DATACLASS_INITVAR: Final[str] = "_FIELD_INITVAR"
+# the text of an `InitVar` annotation that stayed a string (`from __future__ import annotations`)
+INITVAR_TEXT: Final[re.Pattern[str]] = re.compile(r"^\s*(?:\w+\.)*InitVar\b")
+
+# the names `rowx.postgres` value classes are looked up by, as `(module, class)`
+VALUE_CLASSES: Final[tuple[tuple[str, str], ...]] = (
+    ("rowx.postgres._range", "Range"),
+    ("rowx.postgres._interval", "Interval"),
+    ("rowx.postgres._money", "Money"),
+    ("rowx.postgres._cube", "Cube"),
+    *(
+        ("rowx.postgres._geometric", name)
+        for name in ("Point", "Line", "LineSegment", "Box", "Path", "Polygon", "Circle")
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -273,18 +286,39 @@ NAMED_FORMS: Final[tuple[tuple[str, Callable[[type], bool]], ...]] = (
 )
 
 
+def _value_base(t: type) -> str | None:
+    for module_name, name in VALUE_CLASSES:
+        module = sys.modules.get(module_name)
+        if module is not None and issubclass(t, base := getattr(module, name)) and t is not base:
+            return name
+    return None
+
+
 # which named form a class is, or `None` for any other class; the value leaves are frozen dataclasses and
 # are never named, so this is only asked of a class that is not a leaf
 def _named_form(t: type) -> str | None:
     if _is_value_leaf(t) or _is_range(t):
         return None
+    if (base := _value_base(t)) is not None:
+        raise _reject(t, f"a subclass of rowx.postgres.{base} is not a row type")
     return next((name for name, matches in NAMED_FORMS if matches(t)), None)
+
+
+def _qualifier(origin: object) -> str | None:
+    # `typing` and `typing_extensions` each own their qualifiers on some versions
+    if origin is None:
+        return None
+    extensions = sys.modules.get("typing_extensions")
+    for name, qualifier in FIELD_QUALIFIERS.items():
+        if origin is qualifier or (extensions is not None and origin is getattr(extensions, name, None)):
+            return name
+    return None
 
 
 def _unwrap_field(t: object) -> object:
     for _ in range(MAX_ALIAS_DEPTH + 1):
         origin = get_origin(t)
-        if origin is Annotated or origin in FIELD_QUALIFIERS:
+        if origin is Annotated or _qualifier(origin) is not None:
             t = get_args(t)[0]
         elif isinstance(t, TypeAliasType) and not t.__type_params__:
             t = t.__value__
@@ -293,23 +327,59 @@ def _unwrap_field(t: object) -> object:
     return t
 
 
-def _missing_name_field(t: type, name: str | None) -> str | None:
-    # the annotations unresolved names stay as `ForwardRef`s, which says which field mentions the name
-    for klass in reversed(t.__mro__):
+# the declaring class and raw (possibly unresolved) annotation of each field, most derived class first
+def _declared(t: type) -> dict[str, tuple[type, object]]:
+    if _is_typeddict(t):
+        return _declared_typeddict(t)
+    out: dict[str, tuple[type, object]] = {}
+    for klass in t.__mro__:
         for key, annotation in get_annotations(klass, format=Format.FORWARDREF).items():
-            if name is not None and name in repr(annotation) and "ForwardRef" in repr(annotation):
-                return key
-    return None
+            out.setdefault(key, (klass, annotation))
+    return out
 
 
-def _hints(t: type) -> dict[str, object]:
-    try:
-        return dict(get_type_hints(t, include_extras=True))
-    except NameError as err:
-        key = _missing_name_field(t, err.name)
-        where = f"field {key!r}" if key is not None else "an annotation"
-        msg = f"{t.__name__}: {where} names {err.name!r}, which is not available at runtime; import it outside `TYPE_CHECKING`"
-        raise InterfaceError(msg) from err
+# a TypedDict is not a subclass of its bases and merges their annotations, so a key's declaring class is the base
+# whose annotation it still has, or else the class itself
+def _declared_typeddict(t: type) -> dict[str, tuple[type, object]]:
+    inherited: dict[str, tuple[type, object]] = {}
+    for base in getattr(t, "__orig_bases__", ()):
+        if isinstance(base, type) and _is_typeddict(base):
+            for key, owned in _declared_typeddict(base).items():
+                inherited.setdefault(key, owned)
+    out: dict[str, tuple[type, object]] = {}
+    for key, annotation in get_annotations(t, format=Format.FORWARDREF).items():
+        owned = inherited.get(key)
+        out[key] = owned if owned is not None and owned[1] == annotation else (t, annotation)
+    return out
+
+
+# one annotation resolved in the namespace of the class that declares it; a name that is not available raises `NameError`
+def _resolve(klass: type, annotation: object, key: str) -> object:
+    holder = type("Holder", (), {"__annotations__": {key: annotation}})
+    module = sys.modules.get(klass.__module__)
+    return get_type_hints(
+        holder, globalns=vars(module) if module is not None else {}, localns=dict(vars(klass)), include_extras=True
+    )[key]
+
+
+# only the selected fields are resolved, so an unresolvable annotation on a `ClassVar`, an `init=False` field or an
+# extra annotation on a subclass does not fail the row
+def _hints(t: type, keys: list[str]) -> dict[str, object]:
+    declared = _declared(t)
+    out: dict[str, object] = {}
+    for key in keys:
+        if key not in declared:
+            continue
+        klass, annotation = declared[key]
+        try:
+            out[key] = _resolve(klass, annotation, key)
+        except NameError as err:
+            msg = (
+                f"{t.__name__}: field {key!r} names {err.name!r}, which is not available at runtime; "
+                "import it outside `TYPE_CHECKING`"
+            )
+            raise InterfaceError(msg) from err
+    return out
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -318,17 +388,29 @@ class Spec:
     required: bool
 
 
+def _is_initvar(t: type, key: str, declared: dict[str, tuple[type, object]]) -> bool:
+    klass, annotation = declared.get(key, (t, None))
+    try:
+        resolved = _resolve(klass, annotation, key)
+    except NameError:
+        # an unresolvable annotation is only an `InitVar` when its text says so
+        text = annotation.__forward_arg__ if isinstance(annotation, ForwardRef) else annotation
+        return isinstance(text, str) and INITVAR_TEXT.match(text) is not None
+    return resolved is InitVar or isinstance(resolved, InitVar)
+
+
 def _dataclass_specs(t: type) -> list[Spec]:
     if not t.__dataclass_params__.init:  # ty: ignore[unresolved-attribute]
         raise _reject(t, "a dataclass with init=False is not supported")
-    specs: list[Spec] = []
-    for key, f in t.__dataclass_fields__.items():  # ty: ignore[unresolved-attribute]
-        kind = f._field_type.name  # ruff: ignore[private-member-access]
-        if kind == DATACLASS_INITVAR:
+    init_fields = fields(t)  # ty: ignore[invalid-argument-type]
+    # `fields()` drops the `ClassVar` and `InitVar` pseudo-fields, which `__dataclass_fields__` still lists
+    declared = _declared(t)
+    for key in t.__dataclass_fields__.keys() - {f.name for f in init_fields}:  # ty: ignore[unresolved-attribute]
+        if _is_initvar(t, key, declared):
             raise _reject(t, f"InitVar field {key!r} is not supported")
-        if kind == DATACLASS_FIELD and f.init:
-            specs.append(Spec(key=key, required=f.default is MISSING and f.default_factory is MISSING))
-    return specs
+    return [
+        Spec(key=f.name, required=f.default is MISSING and f.default_factory is MISSING) for f in init_fields if f.init
+    ]
 
 
 def _namedtuple_specs(t: type) -> list[Spec]:
@@ -336,9 +418,25 @@ def _namedtuple_specs(t: type) -> list[Spec]:
     return [Spec(key=key, required=key not in defaults) for key in t._fields]  # ty: ignore[unresolved-attribute]
 
 
+def _typeddict_required(t: type, key: str, hint: object) -> bool:
+    # `__required_keys__` is fixed at class creation from unresolved annotations, so it misses a qualifier written in a
+    # quoted annotation or under `from __future__ import annotations`; the resolved qualifiers settle it
+    required = key in t.__required_keys__  # ty: ignore[unresolved-attribute]
+    for _ in range(MAX_ALIAS_DEPTH + 1):
+        origin = get_origin(hint)
+        qualifier = _qualifier(origin)
+        if origin is not Annotated and qualifier is None:
+            break
+        if qualifier == "Required":
+            required = True
+        elif qualifier == "NotRequired":
+            required = False
+        hint = get_args(hint)[0]
+    return required
+
+
 def _typeddict_specs(t: type, hints: dict[str, object]) -> list[Spec]:
-    required = t.__required_keys__  # ty: ignore[unresolved-attribute]
-    return [Spec(key=key, required=key in required) for key in hints]
+    return [Spec(key=key, required=_typeddict_required(t, key, hint)) for key, hint in hints.items()]
 
 
 def _build_shape(t: type, form: RowForm, matching: Matching, fields: tuple[FieldPlan, ...]) -> RowShape:
@@ -355,22 +453,28 @@ def _build_shape(t: type, form: RowForm, matching: Matching, fields: tuple[Field
     )
 
 
+def _specs(t: type, kind: str) -> tuple[list[Spec], RowForm, Matching, dict[str, object]]:
+    # a TypedDict's keys come from its annotations, so its hints are resolved before its requiredness is known
+    if kind == "typeddict":
+        hints = _hints(t, list(get_annotations(t, format=Format.FORWARDREF)))
+        return _typeddict_specs(t, hints), "dict", "by_name", hints
+    if kind == "namedtuple":
+        specs, form, matching = _namedtuple_specs(t), "positional", "positional"
+    else:
+        specs, form, matching = _dataclass_specs(t), "keyword", "by_name"
+    return specs, form, matching, _hints(t, [spec.key for spec in specs])
+
+
 def _named(t: type, kind: str) -> RowPlan:
     match kind:
         case "protocol":
             raise _reject(t, "a Protocol is not a row type")
         case "pydantic":
             raise _reject(t, "pydantic models are not supported yet")
-    hints = _hints(t)
-    form: RowForm
-    matching: Matching
-    match kind:
-        case "dataclass":
-            specs, form, matching = _dataclass_specs(t), "keyword", "by_name"
-        case "namedtuple":
-            specs, form, matching = _namedtuple_specs(t), "positional", "positional"
-        case _:
-            specs, form, matching = _typeddict_specs(t, hints), "dict", "by_name"
+    # #189 lifts this: a generic row type will be substituted through its type parameters
+    if getattr(t, "__type_params__", ()) or getattr(t, "__parameters__", ()):
+        raise _reject(t, "generic row types are not supported yet")
+    specs, form, matching, hints = _specs(t, kind)
     if not specs:
         raise _reject(t, "has no fields")
     plans: list[FieldPlan] = []
@@ -410,6 +514,15 @@ def _nullable_named(t: object) -> bool:
     return has_none and len(members) == 1 and isinstance(members[0], type) and _named_form(members[0]) is not None
 
 
+def _scalar(t: object) -> RowPlan:
+    return RowPlan(
+        kind="scalar",
+        arity=1,
+        nullable_mask=(_elem(t),),
+        interval_mask=(_is_interval_elem(t),),
+    )
+
+
 def _build(t: object) -> RowPlan:
     t = _unwrap(t)
     if _is_none(t):
@@ -421,16 +534,17 @@ def _build(t: object) -> RowPlan:
         mask = tuple(_elem(a) for a in args)
         spans = tuple(_is_interval_elem(a) for a in args)
         return RowPlan(kind="tuple", arity=len(mask), nullable_mask=mask, interval_mask=spans)
+    # the leaves come before the named forms, so a value class that is a dataclass stays a scalar
+    if (isinstance(t, type) and (_is_value_leaf(t) or _is_range(t))) or _is_range(get_origin(t)):
+        return _scalar(t)
     if isinstance(t, type) and (kind := _named_form(t)) is not None:
         return _named(t, kind)
+    # `G[int]` of a generic named class; #189 lifts this
+    if isinstance(origin := get_origin(t), type) and _named_form(origin) is not None:
+        raise _reject(t, "generic row types are not supported yet")
     if _nullable_named(t):
         raise _reject(t, "a named row cannot be nullable; use .optional()")
-    return RowPlan(
-        kind="scalar",
-        arity=1,
-        nullable_mask=(_elem(t),),
-        interval_mask=(_is_interval_elem(t),),
-    )
+    return _scalar(t)
 
 
 def row_plan(t: object) -> RowPlan:

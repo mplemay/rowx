@@ -1,5 +1,7 @@
+import importlib
 import sys
 import types
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -7,11 +9,16 @@ from rowx.__tests__.conformance.row_types import PRELUDE, ROWS, NamedPlan, Plan
 from rowx._rowplan import NO_ROWS, RowPlan, row_plan
 from rowx.errors import InterfaceError
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 def evaluate(source: str) -> object:
-    ns: dict[str, object] = {}
-    exec(PRELUDE + source, ns)  # ruff: ignore[exec-builtin]
-    return ns["T"]
+    # a class resolves its annotations in its module, so the source runs in a registered one
+    module = types.ModuleType("conformance_row")
+    sys.modules["conformance_row"] = module
+    exec(PRELUDE + source, module.__dict__)  # ruff: ignore[exec-builtin]
+    return module.T
 
 
 @pytest.mark.parametrize(("source", "expected", "_verdict"), ROWS)
@@ -367,3 +374,222 @@ def test_a_pydantic_class_is_rejected_for_now(monkeypatch: pytest.MonkeyPatch) -
     exec("from dataclasses import dataclass\n@dataclass\nclass T:\n    id: int\n    __pydantic_validator__ = 1", ns)  # ruff: ignore[exec-builtin]
     with pytest.raises(InterfaceError, match="pydantic"):
         row_plan(ns["T"])
+
+
+FUTURE: Final[list[str]] = ["", "from __future__ import annotations\n"]
+
+
+def load_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, source: str) -> types.ModuleType:
+    (tmp_path / f"{name}.py").write_text(source)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    module = importlib.import_module(name)
+    monkeypatch.setitem(sys.modules, name, module)
+    return module
+
+
+MISSING_NAME_HEADER: Final[str] = (
+    "from dataclasses import dataclass, field\n"
+    "from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypedDict, Optional\n"
+    "import typing_extensions\n"
+    "if TYPE_CHECKING:\n    from fractions import Fraction as Bar\n"
+)
+
+
+@pytest.mark.parametrize("future", FUTURE)
+def test_unselected_members_naming_a_type_checking_only_name_do_not_fail_a_dataclass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, future: str
+) -> None:
+    source = (
+        future
+        + MISSING_NAME_HEADER
+        + "@dataclass\nclass T:\n    a: int\n    cv: ClassVar[Bar] = None\n    b: Bar = field(init=False, default=None)\n"
+    )
+    module = load_module(tmp_path, monkeypatch, "unselected_dc", source)
+    assert [f.key for f in row_plan(module.T).fields] == ["a"]
+
+
+@pytest.mark.parametrize("future", FUTURE)
+def test_an_extra_annotation_on_a_namedtuple_subclass_naming_a_missing_name_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, future: str
+) -> None:
+    source = future + MISSING_NAME_HEADER + "class Base(NamedTuple):\n    a: int\nclass T(Base):\n    extra: Bar\n"
+    module = load_module(tmp_path, monkeypatch, "unselected_nt", source)
+    assert [f.key for f in row_plan(module.T).fields] == ["a"]
+
+
+SELECTED_FORMS: Final[list[str]] = [
+    "@dataclass\nclass T:\n    a: {ann}",
+    "class T(NamedTuple):\n    a: {ann}",
+    "class T(TypedDict):\n    a: {ann}",
+    "class T(typing_extensions.TypedDict):\n    a: {ann}",
+]
+SELECTED_ANNOTATIONS: Final[list[str]] = ["Bar", "'Bar'", "list['Bar']", "list[Bar]", "Optional['Bar']"]
+
+
+@pytest.mark.parametrize("future", FUTURE)
+@pytest.mark.parametrize("form", SELECTED_FORMS)
+@pytest.mark.parametrize("annotation", SELECTED_ANNOTATIONS)
+def test_a_selected_field_naming_a_type_checking_only_name_is_named_in_the_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, future: str, form: str, annotation: str
+) -> None:
+    source = future + MISSING_NAME_HEADER + form.format(ann=annotation) + "\n"
+    module = load_module(tmp_path, monkeypatch, "selected_missing", source)
+    with pytest.raises(InterfaceError, match=r"T: field 'a' names 'Bar'"):
+        row_plan(module.T)
+
+
+@pytest.mark.parametrize("future", FUTURE)
+def test_a_missing_name_that_is_a_substring_of_another_annotation_blames_the_right_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, future: str
+) -> None:
+    source = future + MISSING_NAME_HEADER + "@dataclass\nclass T:\n    a: list[int]\n    b: Bar\n    c: int\n"
+    module = load_module(tmp_path, monkeypatch, "substring_dc", source)
+    with pytest.raises(InterfaceError, match=r"field 'b' names 'Bar'"):
+        row_plan(module.T)
+    source = future + MISSING_NAME_HEADER + "@dataclass\nclass T:\n    a: Bar\n    b: list[Barn]\n"
+    source += "class Barn: ...\n"
+    module = load_module(tmp_path, monkeypatch, "substring_dc2", source)
+    with pytest.raises(InterfaceError, match=r"field 'a' names 'Bar'"):
+        row_plan(module.T)
+
+
+@pytest.mark.parametrize("future", FUTURE)
+def test_a_typeddict_key_inherited_from_a_base_in_another_module_resolves_in_the_base_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, future: str
+) -> None:
+    base = (
+        future
+        + "from decimal import Decimal as Dec\nfrom typing import TypedDict\n"
+        + "class Base(TypedDict):\n    a: Dec\n    b: list['Dec']\n"
+    )
+    load_module(tmp_path, monkeypatch, "td_base_mod", base)
+    child = future + "from typing import TypedDict\nfrom td_base_mod import Base\nclass T(Base):\n    c: int\n"
+    module = load_module(tmp_path, monkeypatch, "td_child_mod", child)
+    assert [(f.key, f.required) for f in row_plan(module.T).fields] == [("a", True), ("b", True), ("c", True)]
+
+
+@pytest.mark.parametrize("future", FUTURE)
+def test_a_dataclass_field_inherited_from_a_base_in_another_module_resolves_in_the_base_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, future: str
+) -> None:
+    base = (
+        future
+        + "from dataclasses import dataclass\nfrom decimal import Decimal as Dec\n@dataclass\nclass Base:\n    a: Dec\n"
+    )
+    load_module(tmp_path, monkeypatch, "dc_base_mod", base)
+    child = (
+        future
+        + "from dataclasses import dataclass\nfrom dc_base_mod import Base\n@dataclass\nclass T(Base):\n    c: int\n"
+    )
+    module = load_module(tmp_path, monkeypatch, "dc_child_mod", child)
+    assert [f.key for f in row_plan(module.T).fields] == ["a", "c"]
+
+
+TD_MODULES: Final[list[str]] = ["typing", "typing_extensions"]
+
+# (class header, body, the expected `(key, required)` pairs)
+TD_REQUIREDNESS: Final[list[tuple[str, str, list[tuple[str, bool]]]]] = [
+    (
+        "",
+        "a: int\n    b: NotRequired[str]\n    c: NotRequired['str']\n    d: 'NotRequired[str]'",
+        [("a", True), ("b", False), ("c", False), ("d", False)],
+    ),
+    (
+        "total=False",
+        "a: int\n    b: Required[str]\n    c: 'Required[str]'\n    d: Required['str']",
+        [("a", False), ("b", True), ("c", True), ("d", True)],
+    ),
+    (
+        "",
+        "a: Required[ReadOnly[int]]\n    b: ReadOnly[Required[int]]\n    c: NotRequired[ReadOnly[int]]\n    d: ReadOnly[NotRequired[int]]",
+        [("a", True), ("b", True), ("c", False), ("d", False)],
+    ),
+    (
+        "total=False",
+        "a: Required[ReadOnly[int]]\n    b: ReadOnly[Required[int]]\n    c: ReadOnly[int]",
+        [("a", True), ("b", True), ("c", False)],
+    ),
+    (
+        "",
+        "a: Annotated[NotRequired[int], 'm']\n    b: NotRequired[Annotated[int, 'm']]\n    c: Annotated[int, 'm']",
+        [("a", False), ("b", False), ("c", True)],
+    ),
+]
+
+
+@pytest.mark.parametrize("future", FUTURE)
+@pytest.mark.parametrize("module_name", TD_MODULES)
+@pytest.mark.parametrize("case", TD_REQUIREDNESS)
+def test_typeddict_requiredness_follows_the_resolved_qualifiers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    future: str,
+    module_name: str,
+    case: tuple[str, str, list[tuple[str, bool]]],
+) -> None:
+    header, body, expected = case
+    source = (
+        future
+        + f"from {module_name} import Annotated, NotRequired, ReadOnly, Required, TypedDict\n"
+        + f"class T(TypedDict{', ' + header if header else ''}):\n    {body}\n"
+    )
+    module = load_module(tmp_path, monkeypatch, "td_required", source)
+    assert [(f.key, f.required) for f in row_plan(module.T).fields] == expected
+
+
+@pytest.mark.parametrize("future", FUTURE)
+@pytest.mark.parametrize("module_name", TD_MODULES)
+def test_typeddict_requiredness_uses_each_declaring_class_total_across_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, future: str, module_name: str
+) -> None:
+    imports = f"from {module_name} import NotRequired, Required, TypedDict\n"
+    base = future + imports + "class Base(TypedDict):\n    a: int\n    b: NotRequired[int]\n"
+    load_module(tmp_path, monkeypatch, "td_total_base", base)
+    child = (
+        future
+        + imports
+        + "from td_total_base import Base\n"
+        + "class T(Base, total=False):\n    c: int\n    d: Required[int]\n"
+    )
+    module = load_module(tmp_path, monkeypatch, "td_total_child", child)
+    assert [(f.key, f.required) for f in row_plan(module.T).fields] == [
+        ("a", True),
+        ("b", False),
+        ("c", False),
+        ("d", True),
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "class P2(Point): ...\nT = P2",
+        "@dataclass(frozen=True)\nclass P2(Point):\n    z: int\nT = P2",
+        "class S(Range[int]): ...\nT = S",
+        "class I2(Interval): ...\nT = I2",
+        "class M2(Money): ...\nT = M2",
+        "class C2(Cube): ...\nT = C2",
+        "class P2(Polygon): ...\nT = tuple[P2, int]",
+        "class P2(Point): ...\nT = P2 | None",
+    ],
+)
+def test_a_subclass_of_a_value_class_is_not_a_row_type(source: str) -> None:
+    with pytest.raises(InterfaceError, match=r"a subclass of rowx\.postgres\.\w+ is not a row type"):
+        row_plan(evaluate(source))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "@dataclass\nclass T[X]:\n    a: int",
+        "G = TypeVar('G')\n@dataclass\nclass Box(typing.Generic[G]):\n    a: int\nT = Box",
+        "class T[X](NamedTuple):\n    a: int",
+        "class T[X](TypedDict):\n    a: int",
+        "@dataclass\nclass Box[X]:\n    a: int\nT = Box[int]",
+        "S = TypeVar('S')\nclass T(NamedTuple, typing.Generic[S]):\n    a: S",
+    ],
+)
+def test_generic_row_types_are_rejected_until_189(source: str) -> None:
+    with pytest.raises(InterfaceError, match="generic row types are not supported yet"):
+        row_plan(evaluate(source))
