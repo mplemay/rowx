@@ -9,7 +9,7 @@ from time import perf_counter, time
 from typing import TYPE_CHECKING, Final
 
 from rowx.check.runner import CheckError, ScratchBuild, redact
-from rowx.errors import DatabaseError, InterfaceError, MigrateError
+from rowx.errors import DatabaseError, Error, InterfaceError, MigrateError
 from rowx.postgres import connect
 from rowx.postgres._admin import create_database, drop_database, list_databases, with_database
 
@@ -85,14 +85,14 @@ class Scratch:
     # best effort: a run that was SIGKILLed or cancelled by CI leaves its database behind; only an old tag with no
     # sessions is dropped, and any error (a listing that is refused, a database another role owns) is ignored
     async def sweep_orphans(self) -> None:
-        with suppress(DatabaseError, InterfaceError, OSError):
+        with suppress(Error, OSError):
             found = await list_databases(self.server_dsn, PREFIX)
             now = time()
             for info in found:
                 age = tag_age(info.comment, now)
                 if info.name == self.name or age is None or age <= ORPHAN_AGE_SECONDS or info.sessions > 0:
                     continue
-                with suppress(DatabaseError, InterfaceError, OSError):
+                with suppress(Error, OSError):
                     await drop_database(self.server_dsn, info.name)
 
     async def _create(self) -> None:

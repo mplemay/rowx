@@ -10,6 +10,9 @@ use rowx_postgres::dsn::ConnectOptions;
 use rowx_postgres::error::Error;
 use tokio::runtime::Handle;
 
+// serialises the tests that revoke CONNECT on `postgres` from PUBLIC
+const REVOKE_LOCK_KEY: i64 = 0x726f_7778_636f_6e6e;
+
 fn unique(prefix: &str) -> String {
     format!(
         "{prefix}_{:016x}",
@@ -263,7 +266,15 @@ async fn postgres_falls_back_to_template1_when_connect_is_denied() -> TestResult
     let target = unique("rowx_fallback");
     let password = "rowx-nocon";
 
+    // CONNECT can only be denied to one role by revoking it from PUBLIC, which is server-wide until restored. It only
+    // affects non-superusers entering `postgres`, which no other test does (the test DSN's role is a superuser and
+    // the restricted roles of other tests use the DSN's own database), and CI runs the Rust and Python suites one
+    // after the other. The session lock serialises concurrent runs of this test against one server, and is released
+    // with the session even if the test process dies.
     let mut setup = open(&admin, "postgres").await?;
+    setup
+        .simple(&format!("SELECT pg_advisory_lock({REVOKE_LOCK_KEY})"))
+        .await?;
     let outcome = async {
         setup
             .simple(&format!(

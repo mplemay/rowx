@@ -134,6 +134,8 @@ def test_sigint_drops_the_scratch_database_and_exits_two(server_dsn: str, tmp_pa
         assert name is not None, "the scratch database never appeared in pg_database"
         proc.send_signal(signal.SIGINT)
         out, err = proc.communicate(timeout=POLL_LIMIT)
+        # read before the cleanup below, which would otherwise hide a database the run failed to drop
+        left = scratch_names(server_dsn)
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -143,4 +145,4 @@ def test_sigint_drops_the_scratch_database_and_exits_two(server_dsn: str, tmp_pa
     assert proc.returncode == 2
     assert not out
     assert "interrupted" in err
-    assert name not in scratch_names(server_dsn)
+    assert name not in left

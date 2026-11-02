@@ -8,9 +8,9 @@ const MAINTENANCE_DATABASE: &str = "postgres";
 // `createdb` connects here instead when the target is itself named `postgres`
 const FALLBACK_MAINTENANCE_DATABASE: &str = "template1";
 // NAMEDATALEN - 1: the server silently truncates longer names, so a lookup by the full name would miss
+const MAX_NAME_BYTES: usize = 63;
 const FORCE_HELP: &str =
     "dropping with FORCE needs the pg_signal_backend role or ownership of the database";
-const MAX_NAME_BYTES: usize = 63;
 
 /// A database as `list_databases` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,24 +122,38 @@ fn can_fall_back(options: &ConnectOptions, err: &Error) -> bool {
         && matches!(err, Error::Db { sqlstate, .. } if &**sqlstate == "3D000" || &**sqlstate == "42501")
 }
 
-// connects to the maintenance database for `target`
-async fn maintenance(
-    options: &ConnectOptions,
-    target: &str,
-    handle: &Handle,
-) -> Result<Connection, Error> {
-    let primary = maintenance_options(options, target);
-    match connect_bounded(&primary, handle).await {
+// connects with `primary`, and with `template1` instead when `postgres` is refused as `can_fall_back` allows;
+// generic over the connection so the decision can be tested without a server
+async fn connect_or_fall_back<T, F>(
+    primary: ConnectOptions,
+    connect: impl Fn(ConnectOptions) -> F,
+) -> Result<T, Error>
+where
+    F: Future<Output = Result<T, Error>>,
+{
+    match connect(primary.clone()).await {
         Err(err) if can_fall_back(&primary, &err) => {
             let fallback = ConnectOptions {
                 database: Some(FALLBACK_MAINTENANCE_DATABASE.to_owned()),
                 ..primary
             };
             // the original failure is the more useful one if template1 is refused too
-            connect_bounded(&fallback, handle).await.map_err(|_| err)
+            connect(fallback).await.map_err(|_| err)
         }
         other => other,
     }
+}
+
+// connects to the maintenance database for `target`
+async fn maintenance(
+    options: &ConnectOptions,
+    target: &str,
+    handle: &Handle,
+) -> Result<Connection, Error> {
+    connect_or_fall_back(maintenance_options(options, target), |chosen| async move {
+        connect_bounded(&chosen, handle).await
+    })
+    .await
 }
 
 async fn with_maintenance<T>(
@@ -275,10 +289,93 @@ fn with_force_help(err: Error) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, PoisonError};
+
     use super::{
-        comment_sql, create_sql, drop_sql, maintenance_options, quote_ident, quote_literal,
+        comment_sql, connect_or_fall_back, create_sql, drop_sql, maintenance_options, quote_ident,
+        quote_literal,
     };
     use crate::dsn::ConnectOptions;
+    use crate::error::Error;
+
+    fn refused(sqlstate: &str) -> Error {
+        Error::Db {
+            sqlstate: sqlstate.into(),
+            message: format!("refused with {sqlstate}").into(),
+            detail: None,
+            hint: None,
+            position: None,
+            routine: None,
+        }
+    }
+
+    // the databases tried, in order, and the outcome; `refusals` maps a database to the SQLSTATE it fails with
+    async fn fall_back_from(
+        database: &str,
+        refusals: &[(&str, &str)],
+    ) -> (Vec<String>, Result<String, Error>) {
+        let tried = Mutex::new(Vec::new());
+        let primary = ConnectOptions {
+            database: Some(database.to_owned()),
+            ..ConnectOptions::default()
+        };
+        let outcome = connect_or_fall_back(primary, |chosen| {
+            let name = chosen.database.unwrap_or_default();
+            tried
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(name.clone());
+            let result = refusals
+                .iter()
+                .find(|(db, _)| *db == name)
+                .map_or(Ok(name), |(_, sqlstate)| Err(refused(sqlstate)));
+            async move { result }
+        })
+        .await;
+        (
+            tried.into_inner().unwrap_or_else(PoisonError::into_inner),
+            outcome,
+        )
+    }
+
+    fn state(outcome: &Result<String, Error>) -> Option<&str> {
+        match outcome {
+            Err(Error::Db { sqlstate, .. }) => Some(sqlstate),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_falls_back_to_template1_when_missing_or_refused() {
+        for sqlstate in ["3D000", "42501"] {
+            let (tried, outcome) = fall_back_from("postgres", &[("postgres", sqlstate)]).await;
+            assert_eq!(tried, ["postgres", "template1"]);
+            assert_eq!(outcome.ok().as_deref(), Some("template1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn other_failures_and_other_databases_do_not_fall_back() {
+        let (tried, outcome) = fall_back_from("postgres", &[("postgres", "28P01")]).await;
+        assert_eq!(tried, ["postgres"]);
+        assert_eq!(state(&outcome), Some("28P01"));
+
+        let (tried, outcome) = fall_back_from("app", &[("app", "3D000")]).await;
+        assert_eq!(tried, ["app"]);
+        assert_eq!(state(&outcome), Some("3D000"));
+
+        let (tried, outcome) = fall_back_from("postgres", &[]).await;
+        assert_eq!(tried, ["postgres"]);
+        assert_eq!(outcome.ok().as_deref(), Some("postgres"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_fallback_reports_the_original_failure() {
+        let (tried, outcome) =
+            fall_back_from("postgres", &[("postgres", "3D000"), ("template1", "42501")]).await;
+        assert_eq!(tried, ["postgres", "template1"]);
+        assert_eq!(state(&outcome), Some("3D000"));
+    }
 
     fn picked(database: Option<&str>, user: Option<&str>, target: &str) -> Option<String> {
         let opts = ConnectOptions {
@@ -352,6 +449,7 @@ mod tests {
             "COMMENT ON DATABASE \"a\" IS 'c'"
         );
     }
+
     #[test]
     fn quotes_identifiers() {
         assert_eq!(quote_ident("app").as_deref(), Ok("\"app\""));
