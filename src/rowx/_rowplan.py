@@ -4,10 +4,32 @@ import ipaddress
 import sys
 import types
 import uuid
-from dataclasses import dataclass, field
-from typing import Annotated, Any, Final, Literal, TypeAliasType, Union, get_args, get_origin
+from annotationlib import Format, get_annotations
+from dataclasses import MISSING, dataclass, field, is_dataclass
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Final,
+    Literal,
+    NotRequired,
+    ReadOnly,
+    Required,
+    TypeAliasType,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+    is_protocol,
+    is_typeddict,
+)
 
 from rowx.errors import InterfaceError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from rowx._core.postgres import RowShape
 
 MAX_ALIAS_DEPTH: Final[int] = 16
 
@@ -38,7 +60,26 @@ NETWORK_PAIRS: Final[frozenset[frozenset[type]]] = frozenset(
 # the subtype leaves a range column can have
 RANGE_SUBTYPES: Final[frozenset[type]] = frozenset({int, decimal.Decimal, dt.date, dt.datetime})
 
-type PlanKind = Literal["none", "scalar", "tuple"]
+type PlanKind = Literal["none", "scalar", "tuple", "named"]
+type RowForm = Literal["positional", "keyword", "dict"]
+type Matching = Literal["by_name", "positional"]
+
+# the wrappers a named type's field annotation may carry around its element
+FIELD_QUALIFIERS: Final[tuple[object, ...]] = (Required, NotRequired, ReadOnly)
+
+# `dataclasses.Field._field_type` names; the sentinels are private to `dataclasses`
+DATACLASS_FIELD: Final[str] = "_FIELD"
+DATACLASS_INITVAR: Final[str] = "_FIELD_INITVAR"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FieldPlan:
+    key: str
+    # the column names the field accepts; `None` is unknown (not used until a form can have aliases)
+    names: tuple[str, ...] | None
+    nullable: bool
+    interval: bool
+    required: bool
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -49,6 +90,13 @@ class RowPlan:
     # per element, whether it is `rowx.postgres.Interval`, which reads an `interval` losslessly
     # (left out of equality so a plan compares by its shape and nullability)
     interval_mask: tuple[bool, ...] = field(default=(), compare=False)
+    # a named plan only
+    fields: tuple[FieldPlan, ...] = ()
+    form: RowForm | None = None
+    matching: Matching | None = None
+    type_name: str | None = None
+    # the `_core.postgres.RowShape` the driver maps columns and builds rows with, built once with the plan
+    shape: RowShape | None = field(default=None, compare=False)
 
     @property
     def flags(self) -> list[int]:
@@ -176,6 +224,8 @@ def _elem(t: object) -> bool:
         return False
     if origin is None and isinstance(t, type) and _is_value_leaf(t):
         return False
+    if isinstance(t, type) and _named_form(t) is not None:
+        raise _reject(t, "a named row type is only allowed as the row, not inside a tuple, list, union or field")
     raise _reject(t, "not derivable from the row type grammar")
 
 
@@ -191,6 +241,175 @@ def _is_interval_elem(t: object) -> bool:
     return _is_interval(member)
 
 
+# `typing_extensions.TypedDict` is only looked up when it was imported, as `typing.is_typeddict` misses it
+def _is_typeddict(t: object) -> bool:
+    if is_typeddict(t):
+        return True
+    module = sys.modules.get("typing_extensions")
+    return module is not None and bool(module.is_typeddict(t))
+
+
+def _is_pydantic(t: type) -> bool:
+    return sys.modules.get("pydantic") is not None and (
+        hasattr(t, "__pydantic_validator__") or hasattr(t, "__pydantic_fields__")
+    )
+
+
+def _is_namedtuple(t: type) -> bool:
+    return issubclass(t, tuple) and isinstance(getattr(t, "_fields", None), tuple)
+
+
+def _is_protocol(t: type) -> bool:
+    return is_protocol(t)
+
+
+# the checks for each named form, in order; a Protocol and a pydantic class are named only to be rejected
+NAMED_FORMS: Final[tuple[tuple[str, Callable[[type], bool]], ...]] = (
+    ("protocol", _is_protocol),
+    ("pydantic", _is_pydantic),
+    ("typeddict", _is_typeddict),
+    ("namedtuple", _is_namedtuple),
+    ("dataclass", is_dataclass),
+)
+
+
+# which named form a class is, or `None` for any other class; the value leaves are frozen dataclasses and
+# are never named, so this is only asked of a class that is not a leaf
+def _named_form(t: type) -> str | None:
+    if _is_value_leaf(t) or _is_range(t):
+        return None
+    return next((name for name, matches in NAMED_FORMS if matches(t)), None)
+
+
+def _unwrap_field(t: object) -> object:
+    for _ in range(MAX_ALIAS_DEPTH + 1):
+        origin = get_origin(t)
+        if origin is Annotated or origin in FIELD_QUALIFIERS:
+            t = get_args(t)[0]
+        elif isinstance(t, TypeAliasType) and not t.__type_params__:
+            t = t.__value__
+        else:
+            return t
+    return t
+
+
+def _missing_name_field(t: type, name: str | None) -> str | None:
+    # the annotations unresolved names stay as `ForwardRef`s, which says which field mentions the name
+    for klass in reversed(t.__mro__):
+        for key, annotation in get_annotations(klass, format=Format.FORWARDREF).items():
+            if name is not None and name in repr(annotation) and "ForwardRef" in repr(annotation):
+                return key
+    return None
+
+
+def _hints(t: type) -> dict[str, object]:
+    try:
+        return dict(get_type_hints(t, include_extras=True))
+    except NameError as err:
+        key = _missing_name_field(t, err.name)
+        where = f"field {key!r}" if key is not None else "an annotation"
+        msg = f"{t.__name__}: {where} names {err.name!r}, which is not available at runtime; import it outside `TYPE_CHECKING`"
+        raise InterfaceError(msg) from err
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Spec:
+    key: str
+    required: bool
+
+
+def _dataclass_specs(t: type) -> list[Spec]:
+    if not t.__dataclass_params__.init:  # ty: ignore[unresolved-attribute]
+        raise _reject(t, "a dataclass with init=False is not supported")
+    specs: list[Spec] = []
+    for key, f in t.__dataclass_fields__.items():  # ty: ignore[unresolved-attribute]
+        kind = f._field_type.name  # ruff: ignore[private-member-access]
+        if kind == DATACLASS_INITVAR:
+            raise _reject(t, f"InitVar field {key!r} is not supported")
+        if kind == DATACLASS_FIELD and f.init:
+            specs.append(Spec(key=key, required=f.default is MISSING and f.default_factory is MISSING))
+    return specs
+
+
+def _namedtuple_specs(t: type) -> list[Spec]:
+    defaults = getattr(t, "_field_defaults", {})
+    return [Spec(key=key, required=key not in defaults) for key in t._fields]  # ty: ignore[unresolved-attribute]
+
+
+def _typeddict_specs(t: type, hints: dict[str, object]) -> list[Spec]:
+    required = t.__required_keys__  # ty: ignore[unresolved-attribute]
+    return [Spec(key=key, required=key in required) for key in hints]
+
+
+def _build_shape(t: type, form: RowForm, matching: Matching, fields: tuple[FieldPlan, ...]) -> RowShape:
+    # `rowx._core` is the backend, which `import rowx` must not load, so it is imported when a plan needs it
+    from rowx._core.postgres import RowShape as RowShapeImpl  # ruff: ignore[import-outside-top-level]
+
+    flags = [(int(f.nullable) | (int(f.interval) << 1)) for f in fields]
+    return RowShapeImpl(
+        t,
+        form,
+        matching,
+        t.__name__,
+        [(f.key, f.names, f.required, flag) for f, flag in zip(fields, flags, strict=True)],
+    )
+
+
+def _named(t: type, kind: str) -> RowPlan:
+    match kind:
+        case "protocol":
+            raise _reject(t, "a Protocol is not a row type")
+        case "pydantic":
+            raise _reject(t, "pydantic models are not supported yet")
+    hints = _hints(t)
+    form: RowForm
+    matching: Matching
+    match kind:
+        case "dataclass":
+            specs, form, matching = _dataclass_specs(t), "keyword", "by_name"
+        case "namedtuple":
+            specs, form, matching = _namedtuple_specs(t), "positional", "positional"
+        case _:
+            specs, form, matching = _typeddict_specs(t, hints), "dict", "by_name"
+    if not specs:
+        raise _reject(t, "has no fields")
+    plans: list[FieldPlan] = []
+    for spec in specs:
+        if spec.key not in hints:
+            raise _reject(
+                t, f"field {spec.key!r} has no type annotation; use typing.NamedTuple, not collections.namedtuple"
+            )
+        annotation = _unwrap_field(hints[spec.key])
+        try:
+            nullable = _elem(annotation)
+            interval = _is_interval_elem(annotation)
+        except InterfaceError as err:
+            msg = f"{err} (field {spec.key!r} of {t.__name__})"
+            raise InterfaceError(msg) from err
+        plans.append(
+            FieldPlan(key=spec.key, names=(spec.key,), nullable=nullable, interval=interval, required=spec.required),
+        )
+    fields = tuple(plans)
+    return RowPlan(
+        kind="named",
+        arity=len(fields),
+        nullable_mask=tuple(f.nullable for f in fields),
+        interval_mask=tuple(f.interval for f in fields),
+        fields=fields,
+        form=form,
+        matching=matching,
+        type_name=t.__name__,
+        shape=_build_shape(t, form, matching, fields),
+    )
+
+
+def _nullable_named(t: object) -> bool:
+    if get_origin(t) not in {Union, types.UnionType}:
+        return False
+    members, has_none = _flatten(t)
+    return has_none and len(members) == 1 and isinstance(members[0], type) and _named_form(members[0]) is not None
+
+
 def _build(t: object) -> RowPlan:
     t = _unwrap(t)
     if _is_none(t):
@@ -202,6 +421,10 @@ def _build(t: object) -> RowPlan:
         mask = tuple(_elem(a) for a in args)
         spans = tuple(_is_interval_elem(a) for a in args)
         return RowPlan(kind="tuple", arity=len(mask), nullable_mask=mask, interval_mask=spans)
+    if isinstance(t, type) and (kind := _named_form(t)) is not None:
+        return _named(t, kind)
+    if _nullable_named(t):
+        raise _reject(t, "a named row cannot be nullable; use .optional()")
     return RowPlan(
         kind="scalar",
         arity=1,

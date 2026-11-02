@@ -100,11 +100,11 @@ class _BaseQuery[T]:
         return await conn._fetch(  # ruff: ignore[private-member-access]
             self._compiled.sql,
             self._params,
-            plan.flags,
+            None if plan.kind == "named" else plan.flags,
             plan.kind == "scalar",
             limit_one,
-            plan.arity,
-            None,
+            None if plan.kind == "named" else plan.arity,
+            plan.shape,
         )
 
     async def one(self, conn: Executor, /) -> T:
@@ -131,11 +131,11 @@ class _BaseQuery[T]:
             return conn._stream(  # ruff: ignore[private-member-access]
                 self._compiled.sql,
                 self._params,
-                plan.flags,
+                None if plan.kind == "named" else plan.flags,
                 plan.kind == "scalar",
-                plan.arity,
+                None if plan.kind == "named" else plan.arity,
                 batch_size,
-                None,
+                plan.shape,
             )
 
         return RowStream(open_stream, lambda: conn.closed)

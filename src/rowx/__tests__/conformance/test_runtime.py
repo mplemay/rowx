@@ -6,26 +6,28 @@ from typing import Final
 import pytest
 
 from rowx import query
-from rowx.__tests__.conformance.row_types import PRELUDE, ROWS
+from rowx.__tests__.conformance.row_types import PRELUDE, ROWS, NamedPlan, Plan
+from rowx._core.postgres import RowShape
+from rowx._rowplan import row_plan
 from rowx.errors import InterfaceError
 from rowx.postgres import Connection, connect
 
 
 @dataclass(slots=True)
 class FakeImpl:
-    fetches: list[tuple[list[int], bool, int]] = field(default_factory=list)
+    fetches: list[tuple[list[int] | None, bool, int | None, object]] = field(default_factory=list)
 
     async def _fetch(
         self,
         _sql: str,
         _params: list[object],
-        mask: list[int],
+        mask: list[int] | None,
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         _limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
-        arity: int,
-        _shape: object,
+        arity: int | None,
+        shape: object,
     ) -> list[object]:
-        self.fetches.append((mask, scalar, arity))
+        self.fetches.append((mask, scalar, arity, shape))
         return []
 
 
@@ -35,11 +37,21 @@ def evaluate(source: str) -> object:
     return ns["T"]
 
 
-def fetch_plan(t: object) -> tuple[str, int, tuple[bool, ...]]:
+def fetch_plan(t: object) -> Plan | NamedPlan:
     impl = FakeImpl()
     conn = Connection(impl)  # ty: ignore[invalid-argument-type]
     asyncio.run(query[t](t"SELECT 1").all(conn))  # ty: ignore[invalid-type-form]
-    ((mask, scalar, arity),) = impl.fetches
+    ((mask, scalar, arity, shape),) = impl.fetches
+    if shape is not None:
+        # a named plan reaches the driver as its shape, with no mask or arity
+        assert mask is None
+        assert arity is None
+        assert not scalar
+        assert isinstance(shape, RowShape)
+        fields = tuple((f.key, f.names, f.nullable, f.required) for f in row_plan(t).fields)
+        return ("named", shape.form, shape.matching, fields)
+    assert mask is not None
+    assert arity is not None
     # bit 0 of each flag is the nullability the table lists
     return ("scalar" if scalar else "tuple", arity, tuple(bool(flag & 1) for flag in mask))
 
@@ -47,7 +59,7 @@ def fetch_plan(t: object) -> tuple[str, int, tuple[bool, ...]]:
 @pytest.mark.parametrize(("source", "expected", "_verdict"), ROWS)
 def test_conformance_row_at_first_fetch(
     source: str,
-    expected: tuple[str, int, tuple[bool, ...]] | str,
+    expected: Plan | NamedPlan | str,
     _verdict: str,
 ) -> None:
     t = evaluate(source)
@@ -66,7 +78,7 @@ def test_interval_leaf_reaches_the_driver_as_flag_bit_one() -> None:
     conn = Connection(impl)  # ty: ignore[invalid-argument-type]
     row = evaluate("T = tuple[Interval, datetime.timedelta, Interval | None]")
     asyncio.run(query[row](t"SELECT 1").all(conn))  # ty: ignore[invalid-type-form]
-    ((mask, _, _),) = impl.fetches
+    ((mask, _, _, _),) = impl.fetches
     assert mask == [0b10, 0b00, 0b11]
 
 
