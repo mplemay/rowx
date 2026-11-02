@@ -477,10 +477,12 @@ def _build_shape(
 
 
 def _pydantic_rebuild(t: type, *, dataclass: bool, raise_errors: bool) -> None:
+    # an explicit empty namespace stops pydantic using this frame's locals (`t`, `dataclass`) as the parent namespace;
+    # the class still resolves names from its own module
     if dataclass:
-        sys.modules["pydantic.dataclasses"].rebuild_dataclass(t, raise_errors=raise_errors)
+        sys.modules["pydantic.dataclasses"].rebuild_dataclass(t, raise_errors=raise_errors, _types_namespace={})
     else:
-        t.model_rebuild(raise_errors=raise_errors)  # ty: ignore[unresolved-attribute]
+        t.model_rebuild(raise_errors=raise_errors, _types_namespace={})  # ty: ignore[unresolved-attribute]
 
 
 # a model whose forward references resolved after it was defined is rebuilt once here; the plan then holds the rebuilt
@@ -488,16 +490,18 @@ def _pydantic_rebuild(t: type, *, dataclass: bool, raise_errors: bool) -> None:
 def _pydantic_complete(t: type, *, dataclass: bool) -> None:
     if t.__pydantic_complete__:  # ty: ignore[unresolved-attribute]
         return
-    _pydantic_rebuild(t, dataclass=dataclass, raise_errors=False)
-    if t.__pydantic_complete__:  # ty: ignore[unresolved-attribute]
-        return
-    missing = ""
     try:
+        _pydantic_rebuild(t, dataclass=dataclass, raise_errors=False)
+        if t.__pydantic_complete__:  # ty: ignore[unresolved-attribute]
+            return
         _pydantic_rebuild(t, dataclass=dataclass, raise_errors=True)
-    except (NameError, TypeError) as err:
-        name = getattr(err, "name", None)
-        missing = f" (it needs {name!r})" if name else f" ({err})"
-    msg = f"{t.__name__} is not fully defined{missing}; define what its annotations name before the first query"
+    except Exception as err:
+        name = getattr(err, "name", None) if isinstance(err, NameError) else None
+        detail = f"it needs {name!r}" if name else str(err)
+        hint = "; call model_rebuild() where the name is in scope" if name else ""
+        msg = f"{t.__name__} is not fully defined ({detail}){hint}; define what its annotations name before the first query"
+        raise InterfaceError(msg) from err
+    msg = f"{t.__name__} is not fully defined; define what its annotations name before the first query"
     raise InterfaceError(msg)
 
 
@@ -514,13 +518,25 @@ def _pydantic_rewrites_input(t: type) -> bool:
     return any(getattr(d.info, "mode", None) in {"before", "wrap"} for d in validators.values())
 
 
+def _pydantic_name_flags(config: dict[str, object]) -> tuple[bool, bool]:
+    # mirrors pydantic._internal._config._build_effective_config
+    by_alias = config.get("validate_by_alias", True) is not False
+    by_name = config.get("validate_by_name")
+    if by_name is None:
+        if (pbn := config.get("populate_by_name")) is not None:
+            by_alias, by_name = True, bool(pbn)
+        elif not by_alias:
+            by_name = True
+    return by_alias, bool(by_name)
+
+
 def _pydantic_names(key: str, info: object, config: dict[str, object]) -> tuple[str, ...] | None:
     validation_alias = getattr(info, "validation_alias", None)
     alias = validation_alias if validation_alias is not None else getattr(info, "alias", None)
     if alias is not None and not isinstance(alias, str):
         return None
-    by_name = bool(config.get("validate_by_name") or config.get("populate_by_name"))
-    if config.get("validate_by_alias", True) is False or alias is None:
+    by_alias, by_name = _pydantic_name_flags(config)
+    if alias is None or not by_alias:
         return (key,)
     return (alias, key) if by_name and alias != key else (alias,)
 
@@ -540,7 +556,8 @@ def _pydantic_specs(t: type, *, dataclass: bool) -> tuple[list[Spec], dict[str, 
     specs: list[Spec] = []
     hints: dict[str, object] = {}
     for key, info in infos.items():
-        if info.init is False:
+        # only a pydantic dataclass's validator ignores an `init=False` field's input; a model still requires it
+        if dataclass and info.init is False:
             continue
         names = None if unknown else _pydantic_names(key, info, config)
         specs.append(Spec(key=key, required=info.is_required(), names=names))

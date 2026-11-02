@@ -473,6 +473,100 @@ def test_a_child_model_class_keyword_overrides_the_base_config(names: Names) -> 
 
 
 @pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ("populate_by_name=True, validate_by_name=False", ("a",)),
+        ("validate_by_alias=False, populate_by_name=True", ("a", "id")),
+        ("validate_by_alias=False, populate_by_name=False", ("a",)),
+        ("validate_by_alias=False, validate_by_name=True", ("id",)),
+        ("validate_by_alias=False", ("id",)),
+    ],
+)
+@pytest.mark.parametrize("spelling", ["keyword", "model_config"])
+def test_pydantic_name_config_follows_the_effective_config_precedence(
+    config: str, expected: tuple[str, ...], spelling: str, names: Names
+) -> None:
+    if spelling == "keyword":
+        source = f"class T(BaseModel, {config}):\n    id: int = Field(alias='a')"
+    else:
+        source = f"class T(BaseModel):\n    model_config = ConfigDict({config})\n    id: int = Field(alias='a')"
+    assert names(source) == {"id": expected}
+
+
+def test_a_child_populate_by_name_does_not_override_an_inherited_validate_by_name(names: Names) -> None:
+    source = (
+        "class Base(BaseModel, validate_by_name=True):\n    id: int = Field(alias='a')\n"
+        "class T(Base, populate_by_name=False):\n    pass"
+    )
+    assert names(source) == {"id": ("a", "id")}
+
+
+def test_a_pydantic_dataclass_follows_the_effective_config_precedence(names: Names) -> None:
+    source = (
+        "@pydantic.dataclasses.dataclass(config=ConfigDict(populate_by_name=True, validate_by_name=False))\n"
+        "class T:\n    id: int = Field(alias='a')"
+    )
+    assert names(source) == {"id": ("a",)}
+
+
+def test_a_serialization_alias_does_not_change_the_names(names: Names) -> None:
+    assert names("class T(BaseModel):\n    id: int = Field(serialization_alias='s')") == {"id": ("id",)}
+
+
+def test_an_alias_generator_object_with_a_validation_alias_gives_the_generated_names(names: Names) -> None:
+    source = (
+        "class T(BaseModel):\n    model_config = ConfigDict(alias_generator=pydantic.AliasGenerator("
+        "validation_alias=lambda name: 'v_' + name))\n    id: int"
+    )
+    assert names(source) == {"id": ("v_id",)}
+
+
+def test_an_excluded_field_is_still_a_field(names: Names) -> None:
+    assert names("class T(BaseModel):\n    id: int\n    n: int = Field(0, exclude=True)") == {
+        "id": ("id",),
+        "n": ("n",),
+    }
+
+
+def test_init_false_on_a_model_field_leaves_it_required(evaluate: Evaluate) -> None:
+    plan = row_plan(evaluate("class T(BaseModel):\n    id: int\n    count: int = Field(init=False)"))
+    assert [(f.key, f.required) for f in plan.fields] == [("id", True), ("count", True)]
+
+
+def test_init_false_with_a_default_on_a_model_field_is_optional(evaluate: Evaluate) -> None:
+    plan = row_plan(evaluate("class T(BaseModel):\n    id: int\n    count: int = Field(0, init=False)"))
+    assert [(f.key, f.required) for f in plan.fields] == [("id", True), ("count", False)]
+
+
+def test_init_var_on_a_model_field_is_a_normal_field(names: Names) -> None:
+    assert names("class T(BaseModel):\n    id: int\n    n: int = Field(0, init_var=True)") == {
+        "id": ("id",),
+        "n": ("n",),
+    }
+
+
+def test_a_forward_reference_is_not_resolved_against_the_planners_locals(evaluate: Evaluate) -> None:
+    t = evaluate("class T(BaseModel):\n    id: 't'\nt = int")
+    plan = row_plan(t)
+    assert plan.kind == "named"
+    assert t.model_fields["id"].annotation is int  # ty: ignore[unresolved-attribute]
+
+
+def test_a_model_incomplete_for_a_reason_other_than_a_name_is_an_interface_error_with_its_cause(
+    evaluate: Evaluate,
+) -> None:
+    source = "class T(BaseModel):\n    id: 'Plain'\nclass Plain:\n    pass"
+    with pytest.raises(InterfaceError, match="T is not fully defined") as caught:
+        row_plan(evaluate(source))
+    assert caught.value.__cause__ is not None
+
+
+def test_a_missing_name_hints_at_model_rebuild(evaluate: Evaluate) -> None:
+    with pytest.raises(InterfaceError, match=r"call model_rebuild\(\) where the name is in scope"):
+        row_plan(evaluate("class T(BaseModel):\n    id: 'Never'"))
+
+
+@pytest.mark.parametrize(
     "source",
     [
         "class T(BaseModel):\n    id: int = Field(validation_alias=AliasChoices('a', 'b'))",
@@ -480,7 +574,7 @@ def test_a_child_model_class_keyword_overrides_the_base_config(names: Names) -> 
     ],
 )
 def test_alias_choices_and_alias_path_make_only_that_field_unknown(source: str, names: Names) -> None:
-    source = source.replace("\n    id", "\n    other: str\n    id", 1).replace("BaseModel):", "BaseModel):", 1)
+    source = source.replace("\n    id", "\n    other: str\n    id", 1)
     source = "from pydantic import AliasPath\n" + source
     assert names(source) == {"other": ("other",), "id": None}
 
@@ -623,7 +717,6 @@ def test_a_stdlib_dataclass_is_not_taken_for_a_pydantic_one(evaluate: Evaluate) 
 
 NEVER_IMPORTS_PYDANTIC: Final[str] = """
 import sys
-sys.modules.pop("pydantic", None)
 from dataclasses import dataclass
 from typing import NamedTuple, TypedDict
 from rowx._rowplan import row_plan
@@ -646,7 +739,7 @@ for t in (D, N, Z):
     row_plan(t)
 # a named plan loads the backend, but nothing else
 assert not [m for m in set(sys.modules) - before if not m.startswith("rowx.")], "something was imported"
-assert not [m for m in sys.modules if m.split(".")[0] == "pydantic"], "pydantic was imported"
+assert "pydantic" not in sys.modules, "pydantic was imported"
 """
 
 

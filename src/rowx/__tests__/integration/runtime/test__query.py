@@ -5,7 +5,16 @@ from string.templatelib import Template
 from typing import TYPE_CHECKING, Final, NamedTuple, NotRequired, TypedDict
 
 import pytest
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 from rowx import RowStream, query, query_unchecked
@@ -461,9 +470,31 @@ def test_an_alias_and_the_name_of_one_field_are_a_duplicate_column(schema: str) 
         run_on(schema, "connection", query[DuplicateModel](t"SELECT 1::int4 AS id, 2::int4 AS user_id").one)
 
 
-def value_models(*, strict: bool) -> tuple[type[BaseModel], type]:
-    config = ConfigDict(strict=strict)
+class InitFalseModel(BaseModel):
+    id: int
+    count: int = Field(init=False)
 
+
+class ByAliasOnlyModel(BaseModel, populate_by_name=True, validate_by_name=False):
+    id: int = Field(alias="user_id")
+    name: str = "default"
+
+
+def test_a_model_field_with_init_false_is_fetched(schema: str) -> None:
+    row = run_on(schema, "connection", query[InitFalseModel](t"SELECT 1::int4 AS id, 5::int4 AS count").one)
+    assert (row.id, row.count) == (1, 5)
+
+
+def test_a_name_column_is_rejected_when_validate_by_name_is_false(schema: str) -> None:
+    with pytest.raises(RowShapeError):
+        run_on(schema, "connection", query[ByAliasOnlyModel](t"SELECT 1::int4 AS id").one)
+
+
+def value_models(*, strict: bool) -> tuple[dict[str, object], type[BaseModel], type]:
+    config = ConfigDict(strict=strict)
+    seen: dict[str, object] = {}
+
+    # a before validator records each input, so the test can tell the validator's result from a copy
     class Values(BaseModel):
         model_config = config
         ints: Range[int]
@@ -472,6 +503,12 @@ def value_models(*, strict: bool) -> tuple[type[BaseModel], type]:
         span: Interval
         point: Point
         cube: Cube
+
+        @field_validator("*", mode="before")
+        @classmethod
+        def record(cls, value: object, info: ValidationInfo) -> object:
+            seen[str(info.field_name)] = value
+            return value
 
     @pydantic_dataclass(config=config)
     class ValuesDataclass:
@@ -482,7 +519,13 @@ def value_models(*, strict: bool) -> tuple[type[BaseModel], type]:
         point: Point
         cube: Cube
 
-    return Values, ValuesDataclass
+        @field_validator("*", mode="before")
+        @classmethod
+        def record(cls, value: object, info: ValidationInfo) -> object:
+            seen[str(info.field_name)] = value
+            return value
+
+    return seen, Values, ValuesDataclass
 
 
 VALUES_SQL: Final[str] = (
@@ -501,8 +544,12 @@ def test_value_classes_pass_through_a_model_and_a_pydantic_dataclass_unchanged(
         "connection",
         query_unchecked[tuple[Range[int], Range[dt.datetime], Money, Interval, Point, Cube]](Template(VALUES_SQL)).one,
     )
-    for row_type in value_models(strict=strict):
+    seen, *row_types = value_models(strict=strict)
+    keys = ("ints", "stamps", "money", "span", "point", "cube")
+    for row_type in row_types:
+        seen.clear()
         row = run_on(schema, "connection", query[row_type](Template(VALUES_SQL)).one)  # ty: ignore[invalid-type-form]
-        fields = (row.ints, row.stamps, row.money, row.span, row.point, row.cube)
+        fields = tuple(getattr(row, k) for k in keys)
         assert fields == plain
         assert [type(v) for v in fields] == [Range, Range, Money, Interval, Point, Cube]
+        assert all(getattr(row, k) is seen[k] for k in keys)

@@ -314,7 +314,18 @@ NAMED_ROWS: Final[list[Row]] = [
         validator(f("id"), f("name", nullable=True)),
         PENDING_188,  # #188 flips to "ok"
     ),
+    (
+        "class T(BaseModel):\n    id: int\n    count: int = Field(init=False)",
+        validator(f("id"), f("count")),
+        PENDING_188,  # #188 flips to "ok"; `init=False` excludes a field only on a pydantic dataclass
+    ),
+    (
+        "class T(BaseModel, populate_by_name=True, validate_by_name=False):\n    id: int = Field(alias='user_id')",
+        validator(("id", ("user_id",), False, True)),
+        PENDING_188,  # #188 flips to "ok"
+    ),
     ("class T(BaseModel):\n    id: PositiveInt", validator(f("id")), CHECKER_ONLY),
+    ("class T(BaseModel):\n    j: pydantic.Json[list[int]]", validator(f("j")), CHECKER_ONLY),
     ("class T(BaseModel):\n    id: pydantic.constr(min_length=1)", validator(f("id")), CHECKER_ONLY),
     ("class T(RootModel[int]): ...", "InterfaceError", REJECTED),
     # `EmailStr` needs the optional email-validator package to even define the class; `AnyUrl` and `SecretStr` are
