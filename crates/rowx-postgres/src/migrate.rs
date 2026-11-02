@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use rowx_core::migrate::{
@@ -14,6 +15,8 @@ use crate::error::Error;
 const LOCK_MULTIPLIER: i64 = 0x3d32_ad9e;
 // the `execution_time` of a row whose time is not known yet (sqlx #1966)
 const UNKNOWN_EXECUTION_TIME: i64 = -1;
+// how many times a cleanup statement is sent when cancel requests keep landing on it
+const CLEANUP_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum MigrateError {
@@ -21,15 +24,57 @@ pub enum MigrateError {
     Source(#[from] SourceError),
     #[error(transparent)]
     Plan(#[from] PlanError),
-    // the file (or its commit) failed; `source` keeps the server error with its sqlstate and position
-    #[error("migration {version} failed: {source}")]
+    // the file (or its commit, or the probe after it) failed; `source` keeps the server error with its
+    // sqlstate and position
+    #[error("{}", failed_message(*version, *ended_transaction, source))]
     Failed {
         version: i64,
         #[source]
         source: Error,
+        // the history row was left with `success = false`
+        dirty: bool,
+        // the file ended rowx's transaction, so whatever it committed stays committed, unrecorded
+        ended_transaction: bool,
+        // the status of each migration applied before this one failed
+        applied: Box<[MigrationDetail]>,
     },
     #[error(transparent)]
     Connection(#[from] Error),
+    // the caller went away, so no further step was started
+    #[error("the migration was cancelled")]
+    Cancelled,
+    // the cleanup after the error (the rollback or the unlock) failed too, so the session may still
+    // hold the lock or a transaction and the connection must not be reused
+    #[error(transparent)]
+    Unclean(Box<Self>),
+}
+
+impl MigrateError {
+    /// The error without the cleanup marker.
+    #[must_use]
+    pub fn root(&self) -> &Self {
+        match self {
+            Self::Unclean(inner) => inner.root(),
+            other => other,
+        }
+    }
+
+    /// `true` when the rollback or the unlock failed, so the connection is broken.
+    #[must_use]
+    pub const fn connection_broken(&self) -> bool {
+        matches!(self, Self::Unclean(_))
+    }
+}
+
+fn failed_message(version: i64, ended_transaction: bool, source: &Error) -> String {
+    if ended_transaction {
+        format!(
+            "migration {version} failed: the file ended rowx's transaction (mark it \
+             `-- no-transaction`); whatever it committed stays committed but is not recorded"
+        )
+    } else {
+        format!("migration {version} failed: {source}")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,8 +263,80 @@ async fn execute(conn: &Connection, sql: &str, version: i64) -> Result<(), Error
     Ok(())
 }
 
+fn failure(version: i64, dirty: bool, ended_transaction: bool, source: Error) -> MigrateError {
+    MigrateError::Failed {
+        version,
+        source,
+        dirty,
+        ended_transaction,
+        applied: Box::default(),
+    }
+}
+
 fn failed(version: i64) -> impl Fn(Error) -> MigrateError {
-    move |source| MigrateError::Failed { version, source }
+    move |source| failure(version, false, false, source)
+}
+
+// a failure after the row was written with `success = false`
+fn failed_dirty(version: i64) -> impl Fn(Error) -> MigrateError {
+    move |source| failure(version, true, false, source)
+}
+
+// A file that ended rowx's transaction (COMMIT or ROLLBACK) and left none open makes the savepoint
+// fail with 25P01; then nothing is recorded. Otherwise the savepoint is released.
+async fn probe(conn: &Connection, version: i64) -> Result<(), MigrateError> {
+    match conn.simple("SAVEPOINT rowx_probe").await {
+        Ok(()) => conn
+            .simple("RELEASE SAVEPOINT rowx_probe")
+            .await
+            .map_err(failed(version)),
+        Err(source) if matches!(&source, Error::Db { sqlstate, .. } if &**sqlstate == "25P01") => {
+            // a no-op warning here; `locked` repeats it and treats a failure as a broken connection
+            let _ = conn.simple("ROLLBACK").await;
+            Err(failure(version, false, true, source))
+        }
+        Err(source) => Err(failed(version)(source)),
+    }
+}
+
+fn stop(cancelled: &AtomicBool) -> Result<(), MigrateError> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(MigrateError::Cancelled);
+    }
+    Ok(())
+}
+
+// Adds what the earlier steps did to a step's failure. The step's transaction is rolled back first,
+// so the read sees the committed state.
+async fn with_applied(
+    conn: &Connection,
+    quoted: &str,
+    local: &[Migration],
+    done: &[i64],
+    err: MigrateError,
+) -> MigrateError {
+    let MigrateError::Failed {
+        version,
+        source,
+        dirty,
+        ended_transaction,
+        ..
+    } = err
+    else {
+        return err;
+    };
+    let _ = conn.simple("ROLLBACK").await;
+    let applied = touched(conn, quoted, local, done)
+        .await
+        .unwrap_or_default()
+        .into_boxed_slice();
+    MigrateError::Failed {
+        version,
+        source,
+        dirty,
+        ended_transaction,
+        applied,
+    }
 }
 
 async fn apply(conn: &Connection, quoted: &str, migration: &Migration) -> Result<(), MigrateError> {
@@ -235,7 +352,9 @@ async fn apply(conn: &Connection, quoted: &str, migration: &Migration) -> Result
     };
     if migration.no_transaction {
         insert_row(conn, quoted, migration, false).await?;
-        conn.simple(&migration.sql).await.map_err(failed(version))?;
+        conn.simple(&migration.sql)
+            .await
+            .map_err(failed_dirty(version))?;
         conn.client()?
             .execute(&finish(true), &[&nanos(started), &version])
             .await
@@ -244,6 +363,7 @@ async fn apply(conn: &Connection, quoted: &str, migration: &Migration) -> Result
     }
     conn.simple("BEGIN").await?;
     conn.simple(&migration.sql).await.map_err(failed(version))?;
+    probe(conn, version).await?;
     insert_row(conn, quoted, migration, true).await?;
     conn.simple("COMMIT").await.map_err(failed(version))?;
     // outside the transaction, because the elapsed time includes the commit (sqlx #1966)
@@ -268,61 +388,109 @@ async fn revert(
             version,
         )
         .await?;
-        conn.simple(&migration.sql).await.map_err(failed(version))?;
+        conn.simple(&migration.sql)
+            .await
+            .map_err(failed_dirty(version))?;
         execute(conn, &delete, version).await?;
         return Ok(());
     }
     conn.simple("BEGIN").await?;
     conn.simple(&migration.sql).await.map_err(failed(version))?;
+    probe(conn, version).await?;
     execute(conn, &delete, version).await?;
     conn.simple("COMMIT").await.map_err(failed(version))?;
     Ok(())
 }
 
+fn query_canceled(err: &Error) -> bool {
+    matches!(err, Error::Db { sqlstate, .. } if &**sqlstate == "57014")
+}
+
+// A cancelled operation's settle loop resends its cancel request until the task ends, so one can
+// land on the cleanup itself. Repeating a cleanup statement is harmless (a second `ROLLBACK` is a
+// warning, and unlocking a lock no longer held returns false), so a cancelled one is sent again, a
+// bounded number of times, rather than breaking a connection that is fine.
+#[derive(Debug, Clone, Copy)]
+enum Cleanup {
+    Rollback,
+    Unlock(i64),
+}
+
+// whether a cleanup statement that failed with `err` on attempt `attempt` (counting from 1) is sent again
+fn send_again(err: &Error, attempt: u32) -> bool {
+    attempt < CLEANUP_ATTEMPTS && query_canceled(err)
+}
+
+async fn cleanup(conn: &Connection, step: Cleanup) -> Result<(), Error> {
+    let mut attempt = 1;
+    loop {
+        let sent = match step {
+            Cleanup::Rollback => conn.simple("ROLLBACK").await,
+            Cleanup::Unlock(key) => unlock(conn, key).await,
+        };
+        match sent {
+            Err(e) if send_again(&e, attempt) => attempt += 1,
+            other => return other,
+        }
+    }
+}
+
+async fn lock(conn: &Connection, key: i64) -> Result<(), Error> {
+    conn.client()?
+        .query("SELECT pg_catalog.pg_advisory_lock($1)", &[&key])
+        .await?;
+    Ok(())
+}
+
+async fn unlock(conn: &Connection, key: i64) -> Result<(), Error> {
+    conn.client()?
+        .query("SELECT pg_catalog.pg_advisory_unlock($1)", &[&key])
+        .await?;
+    Ok(())
+}
+
 // Takes the lock (unless `locking` is off), runs `body`, and releases the lock whatever happened. On
 // an error the session may sit in an aborted transaction, so it is rolled back first (a warning and a
-// no-op otherwise) whether or not the lock is used; the rollback and the unlock are best effort then,
-// and a pool's reset is the backstop.
+// no-op otherwise) whether or not the lock is used. When the rollback or the unlock fails the session
+// may still hold the lock (advisory locks are re-entrant, so a missed unlock could stack), which is
+// reported as `Unclean` so the caller breaks the connection; `reset_query` is no backstop, as it may
+// be `None` or custom.
 async fn locked<T>(
     conn: &Connection,
     config: &MigrateConfig,
     body: impl AsyncFnOnce() -> Result<T, MigrateError>,
 ) -> Result<T, MigrateError> {
     let key = if config.locking {
-        let client = conn.client()?;
-        let database: String = client
+        let database: String = conn
+            .client()?
             .query_one("SELECT pg_catalog.current_database()", &[])
             .await
             .map_err(Error::from)?
             .get(0);
-        let key = lock_key(&database);
-        client
-            .query("SELECT pg_catalog.pg_advisory_lock($1)", &[&key])
-            .await
-            .map_err(Error::from)?;
-        Some(key)
+        Some(lock_key(&database))
     } else {
         None
     };
-    let result = body().await;
-    if result.is_err() {
-        let _ = conn.simple("ROLLBACK").await;
-    }
-    let Some(key) = key else {
-        return result;
+    let result = match key {
+        // a cancel that lands just after the lock was granted fails the statement but leaves the
+        // session holding the lock, so a failed acquire is unlocked too (false when it wasn't granted)
+        Some(key) => match lock(conn, key).await {
+            Ok(()) => body().await,
+            Err(e) => Err(e.into()),
+        },
+        None => body().await,
     };
-    let unlocked = match conn.client() {
-        Ok(client) => client
-            .query("SELECT pg_catalog.pg_advisory_unlock($1)", &[&key])
-            .await
-            .map(|_| ())
-            .map_err(Error::from),
-        Err(e) => Err(e),
+    let clean = result.is_ok() || cleanup(conn, Cleanup::Rollback).await.is_ok();
+    let unlocked = match key {
+        Some(key) => cleanup(conn, Cleanup::Unlock(key)).await,
+        None => Ok(()),
     };
     match (result, unlocked) {
         (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(e)) => Err(e.into()),
-        (Err(e), _) => Err(e),
+        (Ok(_), Err(e)) => Err(MigrateError::Unclean(Box::new(e.into()))),
+        (Err(original), Err(_)) => Err(MigrateError::Unclean(Box::new(original))),
+        (Err(original), Ok(())) if !clean => Err(MigrateError::Unclean(Box::new(original))),
+        (Err(original), Ok(())) => Err(original),
     }
 }
 
@@ -354,6 +522,7 @@ pub async fn run(
     config: &MigrateConfig,
     local: &[Migration],
     options: PlanOptions,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
@@ -362,7 +531,10 @@ pub async fn run(
         let plan = plan_run(local, &plain(&applied), options)?;
         let mut done = Vec::with_capacity(plan.steps.len());
         for step in &plan.steps {
-            apply(conn, &quoted, step).await?;
+            stop(cancelled)?;
+            if let Err(err) = apply(conn, &quoted, step).await {
+                return Err(with_applied(conn, &quoted, local, &done, err).await);
+            }
             done.push(step.version);
         }
         touched(conn, &quoted, local, &done).await
@@ -382,6 +554,7 @@ pub async fn undo(
     local: &[Migration],
     target: RevertTarget,
     ignore_missing: bool,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
@@ -393,8 +566,11 @@ pub async fn undo(
         let mut done = Vec::with_capacity(plan.steps.len());
         let mut elapsed = Vec::with_capacity(plan.steps.len());
         for step in &plan.steps {
+            stop(cancelled)?;
             let started = Instant::now();
-            revert(conn, &quoted, step).await?;
+            if let Err(err) = revert(conn, &quoted, step).await {
+                return Err(with_applied(conn, &quoted, local, &done, err).await);
+            }
             done.push(step.version);
             elapsed.push(nanos(started));
         }
@@ -424,8 +600,8 @@ fn planned(steps: &[Migration], status: MigrationStatus) -> Vec<MigrationDetail>
         .collect()
 }
 
-/// The statuses [`run`] would return, from the same plan under the same lock, without running
-/// anything. Creates nothing: a missing history table makes everything pending.
+/// The statuses [`run`] would return, from the same plan, without running anything or taking the
+/// lock. Creates nothing: a missing history table makes everything pending.
 ///
 /// # Errors
 /// The `Plan` errors [`run`] raises and `Connection`.
@@ -435,16 +611,13 @@ pub async fn run_dry(
     local: &[Migration],
     options: PlanOptions,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
-    locked(conn, config, async || {
-        let applied = list_applied(conn, &config.table).await?;
-        let plan = plan_run(local, &plain(&applied), options)?;
-        Ok(planned(&plan.steps, MigrationStatus::Applied))
-    })
-    .await
+    let applied = list_applied(conn, &config.table).await?;
+    let plan = plan_run(local, &plain(&applied), options)?;
+    Ok(planned(&plan.steps, MigrationStatus::Applied))
 }
 
-/// The statuses [`undo`] would return (with no `execution_time`), without reverting anything.
-/// Creates nothing.
+/// The statuses [`undo`] would return (with no `execution_time`), without reverting anything or
+/// taking the lock. Creates nothing.
 ///
 /// # Errors
 /// The `Plan` errors [`undo`] raises and `Connection`.
@@ -455,14 +628,9 @@ pub async fn undo_dry(
     target: RevertTarget,
     ignore_missing: bool,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
-    locked(conn, config, async || {
-        let applied = list_applied(conn, &config.table).await?;
-        let applied = plain(&applied);
-        // `Latest` is resolved by the plan, under the same lock as the revert
-        let plan = plan_undo(local, &applied, target, ignore_missing)?;
-        Ok(planned(&plan.steps, MigrationStatus::Pending))
-    })
-    .await
+    let applied = list_applied(conn, &config.table).await?;
+    let plan = plan_undo(local, &plain(&applied), target, ignore_missing)?;
+    Ok(planned(&plan.steps, MigrationStatus::Pending))
 }
 
 /// Records the pending migrations as applied without running them, and returns the status of each.
@@ -474,6 +642,7 @@ pub async fn skip(
     config: &MigrateConfig,
     local: &[Migration],
     options: PlanOptions,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     locked(conn, config, async || {
         ensure_table(conn, &config.table, &config.create_schemas).await?;
@@ -482,6 +651,7 @@ pub async fn skip(
         let plan = plan_skip(local, &plain(&applied), options)?;
         let mut done = Vec::with_capacity(plan.steps.len());
         for step in &plan.steps {
+            stop(cancelled)?;
             insert_row(conn, &quoted, step, true).await?;
             done.push(step.version);
         }
@@ -490,7 +660,7 @@ pub async fn skip(
     .await
 }
 
-/// The status of every version. Creates nothing: a missing table makes everything pending.
+/// The status of every version. Takes no lock and creates nothing: a missing table makes everything pending.
 ///
 /// # Errors
 /// `Connection` for a server error.
@@ -499,15 +669,34 @@ pub async fn info(
     config: &MigrateConfig,
     local: &[Migration],
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
-    locked(conn, config, async || {
-        Ok(details(local, &list_applied(conn, &config.table).await?))
-    })
-    .await
+    Ok(details(local, &list_applied(conn, &config.table).await?))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::lock_key;
+    use super::{CLEANUP_ATTEMPTS, Error, lock_key, send_again};
+
+    fn db_error(sqlstate: &str) -> Error {
+        Error::Db {
+            sqlstate: sqlstate.into(),
+            message: "test".into(),
+            detail: None,
+            hint: None,
+            position: None,
+            routine: None,
+        }
+    }
+
+    #[test]
+    fn a_cancelled_cleanup_statement_is_sent_again_a_bounded_number_of_times() {
+        let canceled = db_error("57014");
+        assert!((1..CLEANUP_ATTEMPTS).all(|attempt| send_again(&canceled, attempt)));
+        // a connection that keeps cancelling is reported, not retried forever
+        assert!(!send_again(&canceled, CLEANUP_ATTEMPTS));
+        // any other failure is final at once
+        assert!(!send_again(&db_error("08006"), 1));
+        assert!(!send_again(&Error::Interface("closed".into()), 1));
+    }
 
     #[test]
     fn lock_key_matches_sqlx() {

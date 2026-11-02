@@ -539,7 +539,7 @@ async def main(directory: Path) -> None:
     assert migrator.migrations[-1].no_transaction
 
     async with Pool(DSN, max_size=2) as pool:
-        # the plan, read under the migration lock: nothing runs and nothing is written
+        # the plan, read without the migration lock: nothing runs and nothing is written
         planned = await migrator.run(pool, dry_run=True)
         assert [s.version for s in planned] == [1, 2, 3]
         assert [s.state for s in await migrator.info(pool)] == ["pending"] * 3
@@ -590,6 +590,8 @@ rowx migrate info
   per migration applied, reverted or skipped, or per version for `info`. `status.state` is `applied`, `pending`,
   `modified`, `missing` or `dirty`, and `installed_on` and `execution_time` are set for applied rows. `execution_time`
   is a `timedelta`, or `None` for a dry run or a skipped row. For `undo` it is how long the revert took.
+- `info` and `dry_run=True` take no advisory lock and create nothing, so they return even while a migration is running.
+  If the call is cancelled, no further migration starts and the lock is released.
 - A `Transaction`, or a `Connection` inside one, raises `InterfaceError`, because each migration manages its own
   transaction. The operation holds its connection for the whole run, so a concurrent query on that `Connection` raises
   `ConnectionBusyError`.
@@ -643,6 +645,9 @@ rowx database setup                # create if missing, then run every migration
 - **Missing.** An applied version with no local file raises `MigrationMissingError`, unless `ignore_missing=True` or
   `--ignore-missing`. Even then, reverting such a version fails with `MigrationSourceError`, since there is no
   `.down.sql` to run.
+- **A file that ends the transaction.** A transactional file that runs `COMMIT` or `ROLLBACK` itself, and doesn't open
+  another transaction, raises `MigrationFailedError` and records nothing. What the file committed stays committed but
+  unrecorded, so mark such a file `-- no-transaction`.
 - **Dirty.** A `-- no-transaction` file records its row with `success = false` before it runs. If the file fails, the
   row stays, `info` reports `dirty`, and the next run raises `DirtyMigrationError` rather than guess what half-applied.
   A transactional file rolls back whole and leaves nothing. To recover from a dirty row, inspect the database, undo or
@@ -836,8 +841,8 @@ run `rowx migrate run`, or `rowx check --scratch`
 ```
 
 - The gate engages only when at least one query is described, and `--no-drift-check` skips it.
-- The check reads the history table and creates nothing. The role needs `SELECT` on it. It takes the migration lock,
-  so it waits for a migration that is running to finish.
+- The check reads the history table and creates nothing. The role needs `SELECT` on it. It takes no migration lock, so
+  it never waits for a migration that is running.
 - Without `[tool.rowx.migrate]`, `rowx check` behaves as it did before.
 
 `rowx check --scratch` needs no database to prepare. It treats the URL as a **server** URL, creates `rowx_check_<hex>`,

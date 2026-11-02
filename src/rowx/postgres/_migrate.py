@@ -1,3 +1,4 @@
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -71,8 +72,13 @@ async def call(
             conn = await executor._checkout(None)  # ruff: ignore[private-member-access]
             try:
                 rows = await start(conn._impl)  # ruff: ignore[private-member-access]
-            finally:
-                await executor._finish(conn)  # ruff: ignore[private-member-access]
+            except BaseException:
+                # a failed cleanup marks the connection broken, so its reset raises; the release still
+                # discards it, and the migration's own error is the one the caller sees
+                with suppress(Exception):
+                    await executor._finish(conn)  # ruff: ignore[private-member-access]
+                raise
+            await executor._finish(conn)  # ruff: ignore[private-member-access]
         else:
             rows = await start(executor._impl)  # ruff: ignore[private-member-access]
     elif isinstance(executor, Connection):
