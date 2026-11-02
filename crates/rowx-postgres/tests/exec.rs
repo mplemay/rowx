@@ -523,3 +523,77 @@ async fn named_stream_rejects_null_after_the_rows_before_it() -> TestResult {
 
     schema.drop().await
 }
+
+#[tokio::test]
+async fn named_shape_without_a_full_field_mask_is_an_interface_error() -> TestResult {
+    let Some(schema) = common::fresh_schema().await? else {
+        return Ok(());
+    };
+    let client = schema.connect().await?;
+    let mut cache = cache();
+    let fields = [field("a", true), field("b", true)];
+    let sql = "SELECT 1::int4 AS a, NULL::int4 AS b";
+
+    for mask in [Some(&[false][..]), None] {
+        let shape = Shape {
+            mask,
+            fields: Some(&fields),
+            ..Shape::default()
+        };
+        let fetched = exec::fetch(&client, &mut cache, sql, &shape, no_params()).await;
+        assert!(matches!(fetched.err(), Some(Error::Interface(_))));
+        let opened = exec::stream(&client, &mut cache, sql, &shape, no_params(), 10).await;
+        assert!(matches!(opened.err(), Some(Error::Interface(_))));
+    }
+
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn unnamed_shapes_have_no_mapping() -> TestResult {
+    let Some(schema) = common::fresh_schema().await? else {
+        return Ok(());
+    };
+    let client = schema.connect().await?;
+    let mut cache = cache();
+    let sql = "SELECT 1::int4 AS a";
+    let shape = Shape {
+        arity: Some(1),
+        scalar: true,
+        ..Shape::default()
+    };
+
+    let (rows, mapping) = exec::fetch(&client, &mut cache, sql, &shape, no_params()).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(mapping, None);
+    let batches = exec::stream(&client, &mut cache, sql, &shape, no_params(), 10).await?;
+    assert_eq!(batches.mapping(), None);
+
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn named_stream_accepts_null_in_a_pass_through_column() -> TestResult {
+    let Some(schema) = common::fresh_schema().await? else {
+        return Ok(());
+    };
+    let client = schema.connect().await?;
+    let mut cache = cache();
+    let fields = [field("v", true), open_names()];
+    let sql = "SELECT g::int4 AS v, NULL::int4 AS extra FROM generate_series(1, 3) g";
+
+    let mut batches = exec::stream(
+        &client,
+        &mut cache,
+        sql,
+        &named(&fields, &[false, false]),
+        no_params(),
+        100,
+    )
+    .await?;
+    let (_, rows, end) = drain(&mut batches).await;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(end?, Some(3));
+
+    schema.drop().await
+}

@@ -278,7 +278,10 @@ async fn fetch_once(
 ) -> Result<Fetched, Error> {
     let (stream, mapping) = open(client, cache, sql, shape, encode).await?;
     pin_mut!(stream);
-    let owned = mapping.as_ref().and_then(|m| column_mask(shape, m));
+    let owned = mapping
+        .as_ref()
+        .map(|m| column_mask(shape, m))
+        .transpose()?;
     let mask = if mapping.is_some() {
         owned.as_deref()
     } else {
@@ -299,16 +302,35 @@ async fn fetch_once(
 }
 
 // the per-column mask of a named shape: a mapped column takes its field's flag, a pass-through
-// column is nullable
-fn column_mask(shape: &Shape<'_>, mapping: &Mapping) -> Option<Vec<bool>> {
-    let fields = shape.mask?;
-    Some(
-        mapping
-            .columns
-            .iter()
-            .map(|field| field.is_none_or(|f| fields.get(f).copied().unwrap_or(true)))
-            .collect(),
-    )
+// column is nullable. `check_shape` guarantees one flag per field, so a miss is a caller bug.
+fn column_mask(shape: &Shape<'_>, mapping: &Mapping) -> Result<Vec<bool>, Error> {
+    let fields = shape.mask.ok_or_else(missing_field_mask)?;
+    mapping
+        .columns
+        .iter()
+        .map(|field| {
+            field.map_or(Ok(true), |f| {
+                fields.get(f).copied().ok_or_else(missing_field_mask)
+            })
+        })
+        .collect()
+}
+
+fn missing_field_mask() -> Error {
+    Error::Interface("a named shape needs one nullability flag per field".to_owned())
+}
+
+// a named shape must carry a flag for every field, or NULL checks would silently switch off
+fn check_field_mask(fields: &[FieldSpec], mask: Option<&[bool]>) -> Result<(), Error> {
+    match mask {
+        Some(mask) if mask.len() == fields.len() => Ok(()),
+        Some(mask) => Err(Error::Interface(format!(
+            "the nullability mask covers {} fields, the named shape has {}",
+            mask.len(),
+            fields.len()
+        ))),
+        None => Err(missing_field_mask()),
+    }
 }
 
 // prepare, shape check, encode and send; errors here all precede the first row, so the retrier wraps it
@@ -449,12 +471,13 @@ pub async fn stream(
             Err(err) => retrier.on_error(err, cache, sql)?,
         }
     };
+    let mask = mapping.as_ref().map_or_else(
+        || Ok(shape.mask.map(<[bool]>::to_vec)),
+        |m| column_mask(shape, m).map(Some),
+    )?;
     Ok(RowBatches {
         stream: Some(Box::pin(stream)),
-        mask: mapping.as_ref().map_or_else(
-            || shape.mask.map(<[bool]>::to_vec),
-            |m| column_mask(shape, m),
-        ),
+        mask,
         mapping,
         batch_size: batch_size.max(1),
         pending: None,
@@ -476,8 +499,9 @@ fn check_shape(shape: &Shape<'_>, columns: &[Column]) -> Result<Option<Mapping>,
             "a scalar result needs exactly 1 column, the query returns {count}"
         )));
     }
-    // a named shape's mask is per field, so the mapping replaces the length check
+    // a named shape's mask is per field, so the mapping replaces the column length check
     if let Some(fields) = shape.fields {
+        check_field_mask(fields, shape.mask)?;
         let names: Vec<&str> = columns.iter().map(Column::name).collect();
         return Ok(Some(map_columns(&names, fields, shape.matching)?));
     }
@@ -536,4 +560,37 @@ fn check_nulls(row: &Row, mask: &[bool], mapping: Option<&Mapping>) -> Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rowx_core::row_shape::{FieldSpec, Names};
+
+    use super::{Error, check_field_mask};
+
+    fn fields(count: usize) -> Vec<FieldSpec> {
+        (0..count)
+            .map(|_| FieldSpec {
+                names: Names::Unknown,
+                required: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn field_mask_must_cover_every_field() {
+        assert_eq!(check_field_mask(&fields(2), Some(&[true, false])), Ok(()));
+        assert!(matches!(
+            check_field_mask(&fields(2), Some(&[true])),
+            Err(Error::Interface(_))
+        ));
+        assert!(matches!(
+            check_field_mask(&fields(2), Some(&[true, false, true])),
+            Err(Error::Interface(_))
+        ));
+        assert!(matches!(
+            check_field_mask(&fields(2), None),
+            Err(Error::Interface(_))
+        ));
+    }
 }

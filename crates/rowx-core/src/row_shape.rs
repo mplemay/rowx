@@ -122,6 +122,9 @@ impl std::error::Error for ShapeErrors {}
 
 /// Where each column goes. `columns[i]` is the field column `i` fills, or `None` for a column
 /// that passes through; `absent` lists the fields no column fills.
+///
+/// When any field's names are unknown the by-name checks are off, so two columns can map to one
+/// field; the binding keeps the last.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mapping {
     pub columns: Vec<Option<usize>>,
@@ -185,10 +188,29 @@ fn by_name(names: &[&str], fields: &[FieldSpec]) -> Vec<ShapeError> {
     for (i, name) in names.iter().enumerate() {
         by_text.entry(name).or_default().push(i);
     }
+    // two differently named columns that one field accepts
+    let mut field_groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for field in 0..fields.len() {
+        let columns: Vec<usize> = (0..names.len())
+            .filter(|&i| hits[i].contains(&field))
+            .collect();
+        let distinct = columns.iter().any(|&i| names[i] != names[columns[0]]);
+        if distinct {
+            field_groups.push((field, columns));
+        }
+    }
+
     let mut duplicated = vec![false; names.len()];
     for indices in by_text.values().filter(|v| v.len() > 1) {
         for &i in indices {
             duplicated[i] = true;
+        }
+        // a repeated name inside a reported field group is part of that report
+        if field_groups
+            .iter()
+            .any(|(_, columns)| indices.iter().all(|i| columns.contains(i)))
+        {
+            continue;
         }
         found.push((
             indices[1],
@@ -199,23 +221,15 @@ fn by_name(names: &[&str], fields: &[FieldSpec]) -> Vec<ShapeError> {
             },
         ));
     }
-
-    // two differently named columns that one field accepts
-    for field in 0..fields.len() {
-        let columns: Vec<usize> = (0..names.len())
-            .filter(|&i| hits[i].contains(&field))
-            .collect();
-        let distinct = columns.iter().any(|&i| names[i] != names[columns[0]]);
-        if distinct {
-            found.push((
-                columns[1],
-                DUPLICATE,
-                ShapeError::DuplicateColumn {
-                    field: Some(field),
-                    indices: columns,
-                },
-            ));
-        }
+    for (field, columns) in field_groups {
+        found.push((
+            columns[1],
+            DUPLICATE,
+            ShapeError::DuplicateColumn {
+                field: Some(field),
+                indices: columns,
+            },
+        ));
     }
 
     for (i, name) in names.iter().enumerate() {
@@ -430,6 +444,68 @@ mod tests {
                 name: "y".into(),
                 fields: vec![0, 1]
             }])
+        );
+    }
+
+    #[test]
+    fn repeated_name_inside_a_field_group_is_one_duplicate() {
+        let fields = [field(&["id", "user_id"], true)];
+        assert_eq!(
+            map_columns(&["id", "user_id", "id"], &fields, Matching::ByName),
+            err(vec![ShapeError::DuplicateColumn {
+                field: Some(0),
+                indices: vec![0, 1, 2]
+            }])
+        );
+        let fields = [field(&["a", "b"], true)];
+        assert_eq!(
+            map_columns(&["a", "b", "a"], &fields, Matching::ByName),
+            err(vec![ShapeError::DuplicateColumn {
+                field: Some(0),
+                indices: vec![0, 1, 2]
+            }])
+        );
+    }
+
+    #[test]
+    fn duplicate_and_ambiguous_are_both_reported() {
+        let fields = [req("y"), req("y")];
+        assert_eq!(
+            map_columns(&["y", "y"], &fields, Matching::ByName),
+            err(vec![
+                ShapeError::AmbiguousColumn {
+                    index: 0,
+                    name: "y".into(),
+                    fields: vec![0, 1]
+                },
+                ShapeError::DuplicateColumn {
+                    field: Some(0),
+                    indices: vec![0, 1]
+                },
+                ShapeError::AmbiguousColumn {
+                    index: 1,
+                    name: "y".into(),
+                    fields: vec![0, 1]
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn unknown_names_let_duplicate_columns_map_to_one_field() {
+        let fields = [
+            req("id"),
+            FieldSpec {
+                names: Names::Unknown,
+                required: false,
+            },
+        ];
+        assert_eq!(
+            map_columns(&["id", "id", "zz"], &fields, Matching::ByName),
+            Ok(Mapping {
+                columns: vec![Some(0), Some(0), None],
+                absent: vec![1]
+            })
         );
     }
 

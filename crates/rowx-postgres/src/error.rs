@@ -60,3 +60,20 @@ impl From<TaskStopped> for Error {
         Self::Interface(err.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn null_field_display_names_the_field_and_column() {
+        assert_eq!(
+            Error::NullField {
+                column: 3,
+                field: 1
+            }
+            .to_string(),
+            "NULL in non-nullable field 1 (column 3)"
+        );
+    }
+}
