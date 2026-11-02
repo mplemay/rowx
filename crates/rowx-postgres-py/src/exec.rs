@@ -150,6 +150,7 @@ pub async fn run_fetch(
             scalar: args.scalar,
             limit_one: args.limit_one,
             arity: args.arity,
+            ..Shape::default()
         };
         match conn.parts() {
             Ok((client, cache)) => {
@@ -161,7 +162,8 @@ pub async fn run_fetch(
             Err(e) => Err(e),
         }
     });
-    let rows = pending
+    // nothing builds named rows yet, so the mapping is not used
+    let (rows, _mapping) = pending
         .wait()
         .await
         .map_err(|e| PgError(e.into()))?

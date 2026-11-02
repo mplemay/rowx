@@ -1,4 +1,5 @@
 use rowx_core::error::{CoreError, TaskStopped};
+use rowx_core::row_shape::ShapeErrors;
 use thiserror::Error;
 use tokio_postgres::error::ErrorPosition;
 
@@ -20,6 +21,12 @@ pub enum Error {
     Core(#[from] CoreError),
     #[error("{0}")]
     RowShape(String),
+    /// A named row's columns do not map onto its fields; the binding renders the text from the indices.
+    #[error("{0}")]
+    Shape(#[from] ShapeErrors),
+    /// NULL in a mapped column whose field is not nullable. Both indices are 0-based.
+    #[error("NULL in non-nullable field {field} (column {column})")]
+    NullField { column: usize, field: usize },
     #[error("{0}")]
     Decode(String),
     #[error("{0}")]

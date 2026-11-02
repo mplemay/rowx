@@ -30,7 +30,9 @@ pub fn to_py_err(py: Python<'_>, err: &Error) -> PyErr {
         ),
         Error::Interface(_) => shared::interface_error(py, &err.to_string()),
         Error::Core(core) => shared::core_to_py_err(py, *core),
-        Error::RowShape(_) => shared::row_shape_error(py, &err.to_string()),
+        Error::RowShape(_) | Error::Shape(_) | Error::NullField { .. } => {
+            shared::row_shape_error(py, &err.to_string())
+        }
         Error::Decode(_) => shared::decode_error(py, &err.to_string()),
         Error::Encode(_) => shared::encode_error(py, &err.to_string()),
     }

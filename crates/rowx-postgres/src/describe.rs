@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rowx_core::row_shape::{Override, column_name};
 use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::{Client, SimpleQueryMessage};
 
@@ -626,16 +627,10 @@ async fn analyse_definition(
 }
 
 fn apply_overrides(col: &mut ColumnInfo) {
-    // the server names an unnamed expression `?column?`, which is not an override
-    if col.raw_name == "?column?" {
-        return;
-    }
-    let (stripped, reason, nullable) = if let Some(rest) = col.raw_name.strip_suffix('!') {
-        (rest, NullReason::OverrideBang, false)
-    } else if let Some(rest) = col.raw_name.strip_suffix('?') {
-        (rest, NullReason::OverrideQuestion, true)
-    } else {
-        return;
+    let (stripped, nullable, reason) = match column_name(&col.raw_name) {
+        (name, Some(Override::Bang)) => (name, false, NullReason::OverrideBang),
+        (name, Some(Override::Question)) => (name, true, NullReason::OverrideQuestion),
+        (_, None) => return,
     };
     col.name = stripped.to_owned();
     col.nullable = nullable;
