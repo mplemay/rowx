@@ -31,7 +31,8 @@
 │                            types.rs, wire/, and its pool connector            │
 │  crates/rowx-core          PURE RUST (no pyo3): claim/settle state machine,   │
 │                            cancel-guard plumbing, shared thiserror variants,  │
-│                            the pool, migrate/ (source, checksums, plan)       │
+│                            the pool, migrate/ (source, checksums, plan),      │
+│                            row_shape.rs (column-to-field mapping)             │
 └──────────────────────────────────┬────────────────────────────────────────────┘
                                    │ tokio-postgres 0.7.x on a multi-thread tokio runtime
                                    ▼
@@ -42,7 +43,7 @@ Decisions:
 
 - **`rowx-core` and `rowx-postgres` are pure Rust** (no pyo3), so `cargo test` is real.
   - `rowx-core` holds what any backend shares: the claim/settle state machine, the
-    cancel-guard plumbing, the shared `thiserror` variants and the pool.
+    cancel-guard plumbing, the shared `thiserror` variants, the pool and the row-shape mapping.
   - `rowx-postgres` holds what is Postgres-specific: connections, DSN and TLS, the statement
     cache, describe, the EXPLAIN walker, the type-table metadata, the byte-level wire codecs
     (which return plain Rust values, such as numeric digits and microseconds) and the pool's
@@ -55,6 +56,15 @@ Decisions:
   - `rowx-postgres-py/src/migrate.rs` holds the bindings, and the migrate error mapping is in
     `rowx-postgres-py/src/errors.rs`.
   - `rowx.postgres.Migrator` lives in `rowx.postgres`, and `rowx` never imports it.
+- **Named rows** ([Named rows](driver.md#named-rows)) follow the same split.
+  - `rowx-core/src/row_shape.rs` is pure. It holds the field specs, the column-to-field mapping with its `ShapeError`s,
+    and `column_name`, the one function that strips the `!`/`?` override suffix. `rowx-postgres/src/describe.rs` calls
+    it, so describe and the mapping can't disagree.
+  - `rowx-postgres/src/exec.rs` runs the mapping in `open()` and returns it with the rows.
+  - `rowx-postgres-py/src/exec.rs` holds the `RowShape` pyclass and builds each row through the plan's constructor,
+    under the GIL. This is the constructor path.
+  - `rowx._rowplan` builds the `RowShape` once per plan. The checker calls the same mapping through
+    `_core.postgres.map_columns`, with no Python port. `rowx` never imports pydantic.
 - **The backend trait.** `Cancel` held Postgres types. `rowx-core` now defines a small trait
   (send a cancel request, an is-alive check, with `Send` futures). `rowx-postgres`
   implements it, and the pool's `Manage` trait reuses it.

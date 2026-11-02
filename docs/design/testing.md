@@ -34,9 +34,17 @@
 - **Goldens.** There is one file per type family in `tests/golden/`, holding round-trip
   values, edge cases and expected errors. A meta-test asserts that every `type_table()` row
   has decode and encode goldens, or an explicit exemption.
-- **Conformance.** `tests/conformance/row_types.py` runs the shared
+- **Conformance.** `src/rowx/__tests__/conformance/row_types.py` runs the shared
   [Row-type grammar and runtime row plan](api.md#row-type-grammar-and-runtime-row-plan) table through `_rowplan` and the
   checker's resolver.
+  - The expected-plan format carries `(form, matching, ((key, names, nullable, required), ...))` for a `named` plan.
+  - Named rows cover every form, in class and functional form, plus generics, aliases, leaf-typed fields, and each
+    rejection.
+  - Rows for constructs that only one side can see are recorded as runtime-ok and checker-invalid: an unknown
+    decorator, a `metaclass=`, a hand-written dataclass `__init__`. An `alias_generator` row records the runtime names
+    and the checker's unknown-names verdict.
+  - A row that lands before its checker support records the checker verdict `invalid-row-type`, and the checker
+    feature flips it.
 - **Oracles.** Each compares rowx with something independent, and each is generated from `type_table()`, so a new
   table row joins all of them. A meta-test fails when a row is missing from one.
   - **Agreement matrix** (#94): types × row-type leaves, nullability and parameters. A query the checker accepts must
@@ -58,11 +66,41 @@
     (`attnum` gap), a view with an extra `INSTEAD` rule, an unreadable `security_invoker` view, a `search_path` trap (a
     same-named table in another schema), a depth-limit chain, and a crafted definition that must not reach `EXPLAIN` as
     a second statement.
+- **Named rows.**
+  - *Unit (`rowx-core`):* `row_shape.rs` covers each `ShapeError`; `column_name` on `id!`, `id?`, `id!!` (one stripped)
+    and `?column?` (kept); case sensitivity; an absent default; `Unknown` pass-through; positional trailing defaults;
+    and `NameMismatch` on a swapped pair. Describe's override tests pass unchanged.
+  - *Unit (Python):* `unit/test_rowplan.py` covers each form and its variants, inheritance, fields that aren't fields,
+    TypedDict qualifiers, leaf-typed fields (`Interval`, `Range[int]`; `Money`, `Point` and `Range` stay leaves), a
+    `TYPE_CHECKING`-only annotation, each rejection with its message, and that `_rowplan` never imports pydantic.
+    `unit/check/test_resolve.py` covers the same forms from the AST, cross-module classes and inheritance, string
+    annotations, aliased decorators, and that user code is never imported.
+  - *DB tests* (`db`, `schema` fixture) cover, for each form, `one`, `optional`, `all` and `fetch` on a connection, a
+    pool and a transaction; a reordered `SELECT`; `"col!"` and `"col?"` mapping to `col`; a missing column, an extra
+    column and a NamedTuple name mismatch as `RowShapeError` before execution (also on an empty result, and after a
+    table gains a column); a NULL in a non-nullable field in `fetch` and in a stream; and a constructor that raises as
+    `RowConstructError` with `__cause__` and `row_index` across a `batch_size=2` boundary. `query_unchecked[User]` is
+    included.
+  - *The pydantic matrix:* a model, an inherited model and a pydantic dataclass; `Field(alias=...)`,
+    `validation_alias` and `Annotated` aliases; `populate_by_name`, `validate_by_name` and `validate_by_alias=False`;
+    `alias_generator`; `AliasChoices`, `AliasPath` and a before-validator (unknown names, and a model that receives
+    every column); defaults and `default_factory`; an incomplete model; a custom `__init__`; a failing `Field(gt=0)` and
+    after-validator as `RowConstructError` whose `__cause__` is a `ValidationError`; `extra="allow"` against an extra
+    column; the `populate_by_name` overlap; `RootModel`, pydantic v1 and `EmailStr` rejected; and the `rowx.postgres`
+    value classes passing through unchanged with and without `strict=True`. Pydantic is a dev-group dependency only.
+  - *Typing:* a `ty` case shows `query[User](...).one(conn)` typed `User`, and a TypedDict row typed as the TypedDict.
+  - *Benchmark:* the per-form variants of `bench/fetch_100k.py`; the only gate is no tuple or scalar regression.
 - **Checker cases.**
   - `tests/check/cases/<rule>.py` files carry inline markers: `# error: [rule]` or
     `# error: [rule1, rule2]` on the line where the diagnostic starts.
   - Caret goldens are `tests/check/expected/*.txt` (text) and `*.json`, compared byte for
     byte.
+  - Named-row goldens (text and JSON, in `src/rowx/__tests__/integration/check/`) cover each new rule with its field
+    note and help text; `type-mismatch` and `nullability-mismatch` on a field; passing cases (a reordered `SELECT`, an
+    absent optional field, `"col!"` mapping to `col`, a NamedTuple with trailing defaults); a duplicate `?column?`;
+    an aliased pydantic field; `populate_by_name` with either name and its `ambiguous-column` overlap; an
+    unknown-names model with its note; a `numeric` column against an `int` field of a model (reported, no lax
+    coercion); and `type-mismatch` inside a substituted generic field.
   - A meta-test asserts that every rule in [Rules](checker.md#rules-all-errors) has at least one case.
 - **Fidelity.** This runs **only against the test suite's own seeded database**, and is
   the one place rowx tests execute checked queries. Every checked query in the fixtures is

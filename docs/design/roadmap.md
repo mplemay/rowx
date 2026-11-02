@@ -1,7 +1,12 @@
 # Deferred work (by expected value)
 
-1. **Named row types** (dataclass, NamedTuple, TypedDict, Pydantic, Protocol), matched by
-   column name.
+1. **The rest of named row types.** Dataclass, `NamedTuple`, `TypedDict` and pydantic rows are supported
+   ([Named row types](api.md#named-row-types)). Still deferred:
+   - attrs, msgspec and `Protocol`;
+   - nested and JSON-shaped fields, and composite and record columns (type parity T1 stays deferred), with sqlx's
+     `flatten`;
+   - a pydantic type table and lax-aware checking (`EmailStr` and friends);
+   - named types as query **parameters**, and row classes from installed packages.
 2. Opt-in **pipelining**.
 3. **Offline cache** (`rowx prepare`, `.rowx/query-<sha256>.json`, `--check` drift).
 4. **Multi-statement execution** over the simple protocol (sqlx's `fetch_many` results),

@@ -174,6 +174,7 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Wire codecs (pure) | `crates/rowx-postgres/src/wire/<family>.rs` |
 | PyObject codecs | `crates/rowx-postgres-py/src/codec/<family>.rs`; `codec/mod.rs` is dispatch only |
 | Shared core (pure) | `crates/rowx-core/src/` (`state.rs` claim/settle state machine, `cancel.rs` plumbing, shared errors, pool) |
+| Row shape (pure) | `crates/rowx-core/src/row_shape.rs` (column-to-field mapping, `ShapeError`, `column_name` override stripping) |
 | Driver | `crates/rowx-postgres/src/{dsn,tls,conn,cancel,stmt_cache,exec}.rs` and its pool connector |
 | Describe | `crates/rowx-postgres/src/{describe,explain}.rs`, `crates/rowx-postgres-py/src/describe.rs` |
 | Bindings | `crates/rowx-postgres-py/src/{conn,exec,stream,pool,transaction,errors,types}.rs`, `crates/rowx-py-core/src/{runtime,errors}.rs`, `crates/rowx-py/src/lib.rs` |

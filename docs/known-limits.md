@@ -27,6 +27,28 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
   mismatch with the real value's dimensions (such as `list[int]` for a two-dimensional `int[]`) surfaces at runtime.
   Pinned by `test_array_depth_is_not_checked`.
 
+## Named row limits
+
+- **No nesting.** A named type is allowed only as the row. A named type inside a tuple, a list or a union, or as a
+  field type, is `invalid-row-type`, so there are no JSON-shaped fields, composite or record columns, or `flatten`.
+- **Pydantic-only types are rejected.** `EmailStr`, `AnyUrl`, `SecretStr`, `constr()` and `PositiveInt` aren't row
+  types, because the checker compares exact Python types and has no pydantic type table. Annotate the column's Python
+  type and validate with `Annotated[str, AfterValidator(...)]`. Lax-mode coercions, such as a `numeric` column into an
+  `int` field, are reported too.
+- **Models with unknown names are partly checked.** For `AliasChoices`, `AliasPath`, a non-literal alias, a
+  `model_validator(mode="before" | "wrap")`, an `alias_generator` or an unreadable `model_config`, the checker skips
+  `missing-column`, `unexpected-column`, `duplicate-column` and `ambiguous-column`, and adds a `names not checked`
+  note. Type and nullability checks still run on the fields whose names are known.
+- **Some rejections are checker-only.** A class decorator other than the dataclass decorators and `typing.final`, a
+  `metaclass=` or another unknown class keyword, and a hand-written `__init__` on a stdlib dataclass are rejected by
+  `rowx check`, because it can't see what they do. The runtime accepts them, and a constructor failure surfaces as
+  `RowConstructError`.
+- **Not supported:** attrs, msgspec, `Protocol`, `collections.namedtuple`, `RootModel`, pydantic v1, a dataclass with
+  `init=False` or an `InitVar`, a nullable named row (`User | None`, use `.optional()`), named parameters, and row
+  classes from installed packages (the checker resolves classes in the project only). Pydantic needs 2.11 or later.
+- **Types are not checked at runtime**, except by pydantic. A class whose annotations don't match its columns fails
+  only in `rowx check`.
+
 ## Execution limits
 
 - **No multi-statement execution.** A query is one statement. Postgres prepares one statement at a time, so a string

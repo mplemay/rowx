@@ -5,14 +5,15 @@
 ### Goals (v1)
 
 1. **Runtime API.** An async Python API runs t-string SQL against Postgres and decodes rows
-   into the declared tuple or scalar type `T`.
+   into the declared tuple, scalar or named row type `T` (a dataclass, `NamedTuple`, `TypedDict`, or pydantic model).
 2. **Owned driver.** A Rust core (PyO3, abi3-py314) owns the connection. It is built on
    `tokio-postgres`.
 3. **Static checker.** `rowx check` finds every `query[T](t"...")` call. For each call it:
    - prepares the SQL on a live Postgres 18 database. A query the server rejects is an
      error.
    - compares the described result columns with `T`: count, Python type and nullability
-     must match **exactly**.
+     must match **exactly**. For a named row type, columns are matched to fields by name (a `NamedTuple` by position
+     and name), and each field is checked the same way.
    - compares interpolated values whose Python type is statically evident with the
      parameter types the server inferred (as sqlty does).
 4. **Nullability** follows SQLx's model: catalog NOT NULL, plus a plan walk for outer joins.
@@ -35,8 +36,8 @@ order.
 - An offline cache. The checker always needs a live database.
 - `--fix` and rewriting, warnings, severities and ignore comments. Every diagnostic is an
   error.
-- Named row types (dataclass, TypedDict, NamedTuple, Pydantic, Protocol). Only tuples and
-  scalars are supported.
+- Row types beyond dataclass, `NamedTuple`, `TypedDict` and pydantic: attrs, msgspec and `Protocol`. Named types nested
+  in a row (JSON-shaped fields, composite and record columns) are also deferred.
 - Multi-statement execution (sqlx's `fetch_many`).
 - A client-side SQL parser ([Dependency evaluation](dependencies.md#dependency-evaluation)).
 - Type-checker plugins.
