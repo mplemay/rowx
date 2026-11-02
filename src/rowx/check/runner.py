@@ -267,9 +267,11 @@ def _report(  # ruff: ignore[too-many-arguments]
     help: str | None = None,  # ruff: ignore[builtin-argument-shadowing]
     label: str | None = None,
     column_index: int | None = None,
+    field: str | None = None,
+    order: int = 0,
 ) -> Report:
     diagnostic = Diagnostic(rule=rule, message=message, path=site.call.path, span=span, notes=notes)
-    return Report(diagnostic=diagnostic, help=help, label=label, column_index=column_index)
+    return Report(diagnostic=diagnostic, help=help, label=label, column_index=column_index, field=field, order=order)
 
 
 def _param_reports(site: _Site, described: Describe) -> list[Report]:
@@ -319,6 +321,7 @@ def _column_desc(column: ColumnInfo) -> ColumnDesc:
         reason=column.reason,
         reason_detail=column.reason_detail,
         element_key=column.element_key,
+        raw_name=column.raw_name,
     )
 
 
@@ -399,10 +402,9 @@ def _row_reports(site: _Site, described: Describe) -> list[Report]:
         message = "the query returns no columns but the row type is not `None`"
         return [_report(site, "unexpected-row-type", message, span, notes=notes, help="use .execute()")]
     descs = tuple(_column_desc(column) for column in columns)
-    elements = _element_spans(site)
     return [
-        _finding_report(site, finding, descs, elements, span)
-        for finding in compare(DescribeDesc(columns=descs), row_type)
+        _finding_report(site, finding, descs, order)
+        for order, finding in enumerate(compare(DescribeDesc(columns=descs), row_type))
     ]
 
 
@@ -410,20 +412,32 @@ def _finding_report(
     site: _Site,
     finding: Finding,
     columns: tuple[ColumnDesc, ...],
-    elements: tuple[Span, ...] | None,
-    row_span: Span,
+    order: int,
 ) -> Report:
     notes: list[str] = []
     label = None
-    span = row_span
+    span = _row_span(site)
+    elements = _element_spans(site)
+    row_type = site.row_type
+    named = row_type is not None and row_type.kind == "named"
     if finding.element is not None and elements is not None:
         span = elements[finding.element]
         label = f"element {finding.element + 1}"
     else:
-        notes.extend(_alias_note(site.row_type))
+        notes.extend(_alias_note(row_type))
+    if named:
+        label = "row type"
+    if row_type is not None:
+        for index in finding.fields:
+            defined = row_type.fields[index]
+            notes.append(f"field defined at {defined.path}:{defined.span.line}:{defined.span.col}")
     name = columns[finding.column].name if finding.column is not None else None
     if reason := finding.reason:
         notes.append(null_reason_note(reason, finding.reason_detail, column=name))
+    # `field` is set only for the rules that concern one field
+    field_key = None
+    if row_type is not None and len(finding.fields) == 1 and finding.rule != "ambiguous-column":
+        field_key = row_type.fields[finding.fields[0]].key
     return _report(
         site,
         finding.rule,
@@ -433,6 +447,8 @@ def _finding_report(
         help=finding.help,
         label=label,
         column_index=finding.column,
+        field=field_key,
+        order=order if named else 0,
     )
 
 
@@ -469,7 +485,7 @@ def _collect(
             stats.checked += 1
             resolution = resolve_row_type(graph, call, roots)
             if resolution.diagnostic is not None:
-                reports.append(Report(diagnostic=resolution.diagnostic))
+                reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
             sites.append(
                 _Site(
                     call=call,

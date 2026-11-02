@@ -11,7 +11,8 @@
     "help": "try again",
     "sqlstate": "42P01",
     "sql": "select 1",
-    "column_index": null
+    "column_index": null,
+    "field": null
   },
   {
     "rule": "nullability-mismatch",
@@ -27,6 +28,7 @@
     "help": "annotate `str | None`, or alias the column as \"email!\" if it can't be NULL",
     "sqlstate": null,
     "sql": null,
-    "column_index": 2
+    "column_index": 2,
+    "field": null
   }
 ]

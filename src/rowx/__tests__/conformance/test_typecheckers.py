@@ -113,6 +113,9 @@ def _render(row: RowType) -> str:
             return _render_elem(row.elements[0])
         case "tuple":
             return f"tuple[{', '.join(_render_elem(elem) for elem in row.elements)}]"
+        case "named":
+            assert row.type_name is not None
+            return row.type_name
 
 
 def _normalize(type_: str) -> str:
@@ -256,7 +259,14 @@ def test_conformance_row_matches_type_checker(
     elif row[2] == "ok":
         assert isinstance(resolved, RowType)
         assert key not in outcome.errors
-        assert outcome.reveals[key] == _render(resolved)
+        revealed = outcome.reveals[key]
+        # mypy reveals a TypedDict by its keys and a NamedTuple by its elements, and not by their names
+        if resolved.form == "dict" and checker == "mypy":
+            assert revealed.startswith(f"TypedDict({_render(resolved)},")
+        elif resolved.form == "positional" and checker == "mypy":
+            assert revealed.endswith(f"fallback={_render(resolved)}]")
+        else:
+            assert revealed == _render(resolved)
     else:
         assert resolved == row[2]
         # the checker must have seen the row, either as a type or as an error

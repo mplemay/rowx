@@ -23,13 +23,19 @@ def test_conformance_row_checker_verdict(
     resolution = resolve_row_type(ModuleGraph(), call, (tmp_path,))
     if verdict == "ok":
         assert resolution.diagnostic is None
-        assert (row := resolution.row_type) is not None
+        row = resolution.row_type
+        assert row is not None
         assert not isinstance(expected, str)
-        assert (row.kind, len(row.elements), tuple(elem.nullable for elem in row.elements)) == (
-            expected[0],
-            expected[1],
-            expected[2],
-        )
+        if expected[0] == "named":
+            assert row.kind == "named"
+            fields = tuple((f.key, f.names, f.elem.nullable, f.required) for f in row.fields)
+            assert ("named", row.form, row.matching, fields) == expected
+        else:
+            assert (row.kind, len(row.elements), tuple(elem.nullable for elem in row.elements)) == (
+                expected[0],
+                expected[1],
+                expected[2],
+            )
     else:
         assert resolution.diagnostic is not None
         assert resolution.diagnostic.rule == verdict

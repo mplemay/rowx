@@ -128,10 +128,7 @@ ROWS: Final[list[Row]] = [
     ("class C: ...\nT = C", "InterfaceError", "invalid-row-type"),
 ]
 
-# The checker resolves a class binding to `invalid-row-type` until #187 adds the named forms. A row whose verdict is
-# `PENDING_187` flips to `ok` there; the other `invalid-row-type` rows are rejected on both sides for good.
-PENDING_187: Final[str] = "invalid-row-type"
-# `PENDING_188` is the same for the pydantic rows the checker accepts from #188 on
+# a pydantic row is `invalid-row-type` in the checker until #188 accepts it, and then flips to `ok`
 PENDING_188: Final[str] = "invalid-row-type"
 # the runtime accepts these and the checker rejects them for good (a checker-only rejection)
 CHECKER_ONLY: Final[str] = "invalid-row-type"
@@ -163,17 +160,17 @@ NAMED_ROWS: Final[list[Row]] = [
     (
         "@dataclass\nclass T:\n    id: int\n    name: str | None\n    tags: list[str] = field(default_factory=list)",
         keyword(f("id"), f("name", nullable=True), f("tags", required=False)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "@dataclass(slots=True, frozen=True, kw_only=True)\nclass T:\n    a: int\n    b: int = 0",
         keyword(f("a"), f("b", required=False)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "@dataclass\nclass T:\n    a: int\n    _: KW_ONLY\n    b: str\n    c: str = field(kw_only=True, default='')",
         keyword(f("a"), f("b"), f("c", required=False)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         (
@@ -181,66 +178,85 @@ NAMED_ROWS: Final[list[Row]] = [
             "@dataclass\nclass T(Mid):\n    b: str | None\n    d: bool = False"
         ),
         keyword(f("a"), f("b", nullable=True), f("c"), f("d", required=False)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "@dataclass\nclass T:\n    a: int\n    c: ClassVar[int] = 0\n    d: int = field(init=False, default=1)",
         keyword(f("a")),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "@dataclass\nclass T:\n    a: Annotated[int, 'm']\n    b: Any\n    c: None\n    d: Interval | None\n    e: Range[int]",
         keyword(f("a"), f("b", nullable=True), f("c", nullable=True), f("d", nullable=True), f("e")),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "@dataclass\nclass T:\n    m: Money\n    p: Point\n    r: Range[datetime.date] | None\n    h: dict[str, str | None]",
         keyword(f("m"), f("p"), f("r", nullable=True), f("h")),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
-    ("@dataclass\nclass U:\n    id: int\ntype A = U\nT = A", keyword(f("id")), PENDING_187),  # #187 flips to "ok"
+    ("@dataclass\nclass U:\n    id: int\ntype A = U\nT = A", keyword(f("id")), "ok"),
     # a hand-written `__init__` is a checker-only rejection: the runtime accepts it
     (
         "@dataclass\nclass T:\n    id: int\n    def __init__(self, id: int) -> None:\n        self.id = id",
         keyword(f("id")),
-        REJECTED,
+        CHECKER_ONLY,
+    ),
+    # an unknown decorator, a metaclass and an unknown class keyword are checker-only rejections too
+    (
+        "def deco(cls):\n    return cls\n@deco\n@dataclass\nclass T:\n    id: int",
+        keyword(f("id")),
+        CHECKER_ONLY,
+    ),
+    (
+        "class Meta(type): ...\n@dataclass\nclass T(metaclass=Meta):\n    id: int",
+        keyword(f("id")),
+        CHECKER_ONLY,
+    ),
+    (
+        (
+            "class Base:\n    def __init_subclass__(cls, flag=False, **kwargs):\n        super().__init_subclass__(**kwargs)\n"
+            "@dataclass\nclass T(Base, flag=True):\n    id: int"
+        ),
+        keyword(f("id")),
+        CHECKER_ONLY,
     ),
     # typing.NamedTuple
     (
         "class T(NamedTuple):\n    id: int\n    name: str | None\n    note: str = ''",
         positional(f("id"), f("name", nullable=True), f("note", required=False)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "T = NamedTuple('T', [('id', int), ('name', str | None)])",
         positional(f("id"), f("name", nullable=True)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "class Base(NamedTuple):\n    id: int\nclass T(Base):\n    extra: str",
         positional(f("id")),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     # TypedDict
     (
         "class T(TypedDict):\n    id: int\n    name: str | None\n    note: NotRequired[str]",
         dict_form(f("id"), f("name", nullable=True), f("note", required=False)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "class T(TypedDict, total=False):\n    a: int\n    b: Required[str]\n    c: ReadOnly[int]",
         dict_form(f("a", required=False), f("b"), f("c", required=False)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "T = TypedDict('T', {'id': int, 'name': str | None})",
         dict_form(f("id"), f("name", nullable=True)),
-        PENDING_187,
-    ),  # #187 flips to "ok"
+        "ok",
+    ),
     (
         "class T(typing_extensions.TypedDict):\n    id: int\n    n: typing_extensions.NotRequired[str]",
         dict_form(f("id"), f("n", required=False)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         (
@@ -248,23 +264,23 @@ NAMED_ROWS: Final[list[Row]] = [
             "class T(Mid):\n    b: str | None\n    d: int"
         ),
         dict_form(f("a"), f("b", nullable=True), f("c", required=False), f("d")),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     # quoted qualifiers are missed by `__required_keys__`; requiredness follows the resolved annotation
     (
         "class T(TypedDict):\n    id: int\n    n: 'NotRequired[str]'\n    m: NotRequired['str']",
         dict_form(f("id"), f("n", required=False), f("m", required=False)),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "class T(TypedDict, total=False):\n    id: int\n    n: 'Required[str]'\n    m: 'Required[ReadOnly[int]]'",
         dict_form(f("id", required=False), f("n"), f("m")),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     (
         "class T(typing_extensions.TypedDict):\n    n: 'typing_extensions.NotRequired[str]'\n    m: int",
         dict_form(f("n", required=False), f("m")),
-        PENDING_187,  # #187 flips to "ok"
+        "ok",
     ),
     # pydantic models and dataclasses
     (

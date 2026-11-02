@@ -3,6 +3,7 @@ import builtins
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
+from re import compile as re_compile
 from sys import stdlib_module_names
 from tokenize import detect_encoding
 from typing import TYPE_CHECKING, Final, Literal, get_args
@@ -82,7 +83,23 @@ assert (  # ruff: ignore[assert]
     | {HSTORE_LEAF, "list", "any", "none"}
     == set(get_args(LeafName.__value__))
 )
+FUNCTIONAL: Final[frozenset[str]] = frozenset({"typing.NamedTuple", "typing.TypedDict"})
 NEUTRAL: Final[frozenset[str]] = frozenset({"typing.Any", "builtins.object"})
+# names from these roots that aren't a supported row type or base are `invalid-row-type`; any other root is outside
+# the project and can't be looked at, so it is `unresolved-row-type`
+KNOWN_ROOTS: Final[frozenset[str]] = stdlib_module_names | {"typing_extensions", "rowx", "pydantic"}
+VALUE_CLASSES: Final[dict[str, str]] = {
+    qualname: qualname.rsplit(".", 1)[-1]
+    for qualname in (*LEAVES, *RANGE_CLASSES)
+    if qualname.startswith("rowx.postgres.")
+}
+FIELD_QUALIFIERS: Final[frozenset[str]] = frozenset({"typing.Required", "typing.NotRequired", "typing.ReadOnly"})
+TYPED_DICT_KEYWORDS: Final[frozenset[str]] = frozenset({"total", "closed", "extra_items"})
+LOWERCASE_IDENTIFIER: Final = re_compile(r"[a-z_][a-z0-9_]*")
+DECORATOR_HELP: Final[str] = "remove the decorator, or use `@dataclass`"
+INIT_HELP: Final[str] = "remove `__init__` and use `__post_init__`"
+KEYWORD_HELP: Final[str] = "remove the metaclass or class keyword"
+OUTSIDE_HELP: Final[str] = "define the row type inside the project"
 
 SCOPE_TYPES: Final = (
     ast.FunctionDef,
@@ -95,8 +112,19 @@ SCOPE_TYPES: Final = (
     ast.GeneratorExp,
 )
 
-type RowKind = Literal["none", "scalar", "tuple"]
-type BindingKind = Literal["import", "from", "alias", "invalid", "other"]
+type RowKind = Literal["none", "scalar", "tuple", "named"]
+type BindingKind = Literal["import", "from", "alias", "class", "call", "invalid", "other"]
+type RowForm = Literal["positional", "keyword", "dict", "validator"]
+type Matching = Literal["by_name", "positional"]
+type Form = Literal["dataclass", "namedtuple", "typeddict"]
+
+FORMS: Final[dict[Form, tuple[RowForm, Matching]]] = {
+    "dataclass": ("keyword", "by_name"),
+    "namedtuple": ("positional", "positional"),
+    "typeddict": ("dict", "by_name"),
+}
+FUNCTIONAL_ARGS: Final[int] = 2
+MIN_ANNOTATED: Final[int] = 2
 
 
 # `leaf` is a LEAVES value, "list" (with `item`), "any" (`Any` and `object`) or "none" (a tuple element `None`)
@@ -113,10 +141,26 @@ class AliasSite:
     span: Span
 
 
+# `names` is None when the column names a field accepts can't be known statically; `span` is where the field is defined
+@dataclass(slots=True, kw_only=True, frozen=True)
+class NamedField:
+    key: str
+    names: tuple[str, ...] | None
+    elem: Elem
+    required: bool
+    path: Path
+    span: Span
+
+
 @dataclass(slots=True, kw_only=True, frozen=True)
 class RowType:
     kind: RowKind
     elements: tuple[Elem, ...] = ()
+    # a named row only
+    form: RowForm | None = None
+    matching: Matching | None = None
+    type_name: str | None = None
+    fields: tuple[NamedField, ...] = ()
     # the first alias followed while resolving, for the "alias defined at" note
     alias: AliasSite | None = None
 
@@ -125,6 +169,7 @@ class RowType:
 class Resolution:
     row_type: RowType | None = None
     diagnostic: Diagnostic | None = None
+    help: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -136,6 +181,7 @@ class _Binding:
     expr: ast.expr | None = None
     generic: bool = False
     type_stmt: bool = False
+    node: ast.stmt | ast.expr | None = None
     site: Span | None = None
     tc: bool = field(default=False, compare=False)
 
@@ -151,7 +197,7 @@ class _Module:
     stars: list[tuple[int, str | None]] = field(default_factory=list)
     all_names: frozenset[str] | None = None
 
-    def span(self, node: ast.stmt) -> Span:
+    def span(self, node: ast.stmt | ast.expr) -> Span:
         end_line = node.end_lineno or node.lineno
         end_col = node.end_col_offset if node.end_col_offset is not None else node.col_offset
         return Span(
@@ -190,7 +236,15 @@ class _Alias:
     type_stmt: bool = False
 
 
-type _Value = _External | _ModuleRef | _Alias
+# a `class` statement, or a functional `NamedTuple(...)` / `TypedDict(...)` call; `name` is its `__name__`
+@dataclass(slots=True, frozen=True, eq=False)
+class _Class:
+    module: _Module
+    node: ast.ClassDef | ast.Call
+    name: str
+
+
+type _Value = _External | _ModuleRef | _Alias | _Class
 
 
 @dataclass(slots=True, frozen=True)
@@ -199,24 +253,64 @@ class _Tuple:
 
 
 @dataclass(slots=True, frozen=True)
+class _NamedRef:
+    klass: _Class
+
+
+@dataclass(slots=True, frozen=True)
 class _Node:
-    members: tuple[Elem | _Tuple, ...]
+    members: tuple[Elem | _Tuple | _NamedRef, ...]
     none: bool
 
 
+# a field before its annotation is evaluated; `total` is the `total` of the TypedDict class that declares it
+@dataclass(slots=True, kw_only=True)
+class _Source:
+    key: str
+    annotation: ast.expr
+    module: _Module
+    node: ast.stmt | ast.expr
+    default: bool = False
+    total: bool = True
+
+
+# `fields` maps a name to its source, or to None for a name that is declared but is not a field (a dataclass
+# `ClassVar` or `init=False`), which still shadows the base's field of that name
+@dataclass(slots=True, kw_only=True)
+class _Info:
+    form: Form | None
+    fields: dict[str, _Source | None] = field(default_factory=dict)
+    init: bool = True
+
+
 class _Reject(Exception):  # ruff: ignore[error-suffix-on-exception-name]
-    def __init__(self, rule: Rule, message: str) -> None:
+    def __init__(
+        self,
+        rule: Rule,
+        message: str,
+        *,
+        help: str | None = None,  # ruff: ignore[builtin-argument-shadowing]
+        notes: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(message)
         self.rule: Rule = rule
         self.message = message
+        self.help = help
+        self.notes = notes
 
 
-def _invalid(message: str) -> _Reject:
-    return _Reject("invalid-row-type", message)
+def _invalid(message: str, *, help: str | None = None) -> _Reject:  # ruff: ignore[builtin-argument-shadowing]
+    return _Reject("invalid-row-type", message, help=help)
 
 
-def _unresolved(message: str) -> _Reject:
-    return _Reject("unresolved-row-type", message)
+def _unresolved(message: str, *, help: str | None = None) -> _Reject:  # ruff: ignore[builtin-argument-shadowing]
+    return _Reject("unresolved-row-type", message, help=help)
+
+
+def _external_reject(qualname: str) -> _Reject:
+    if qualname.split(".", maxsplit=1)[0] in KNOWN_ROOTS:
+        return _invalid(f"`{qualname}` isn't a supported row type")
+    return _unresolved(f"`{qualname}` is defined outside the project", help=OUTSIDE_HELP)
 
 
 def _is_type_checking(test: ast.expr) -> bool:
@@ -265,6 +359,14 @@ def _collect_import(module: _Module, stmt: ast.Import | ast.ImportFrom, *, tc: b
             module.bind(alias.asname or alias.name, binding)
 
 
+# a call may be a functional `NamedTuple(...)` or `TypedDict(...)`, which only the resolver can tell
+def _assignment(name: str, value: ast.expr, site: Span, *, tc: bool) -> _Binding:
+    if isinstance(value, ast.Call):
+        return _Binding("call", name=name, node=value, site=site, tc=tc)
+    impure = any(isinstance(child, ast.Call | ast.Lambda | ast.NamedExpr) for child in ast.walk(value))
+    return _Binding("invalid" if impure else "alias", name=name, expr=value, site=site, tc=tc)
+
+
 def _collect_definition(module: _Module, stmt: ast.stmt, *, tc: bool) -> None:
     site = module.span(stmt)
     match stmt:
@@ -281,9 +383,10 @@ def _collect_definition(module: _Module, stmt: ast.stmt, *, tc: bool) -> None:
             module.all_names = _literal_names(value)
             module.bind("__all__", _Binding("other", tc=tc))
         case ast.Assign(targets=[ast.Name(id=name)], value=value):
-            impure = any(isinstance(child, ast.Call | ast.Lambda | ast.NamedExpr) for child in ast.walk(value))
-            module.bind(name, _Binding("invalid" if impure else "alias", name=name, expr=value, site=site, tc=tc))
-        case ast.ClassDef() | ast.FunctionDef() | ast.AsyncFunctionDef():
+            module.bind(name, _assignment(name, value, site, tc=tc))
+        case ast.ClassDef():
+            module.bind(stmt.name, _Binding("class", name=stmt.name, node=stmt, site=site, tc=tc))
+        case ast.FunctionDef() | ast.AsyncFunctionDef():
             module.bind(stmt.name, _Binding("invalid", name=stmt.name, site=site, tc=tc))
         case ast.Assign() | ast.AnnAssign() | ast.AugAssign():
             targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
@@ -476,6 +579,9 @@ def _to_elem(node: _Node, *, allow_none: bool) -> Elem:
     if isinstance(member, _Tuple):
         msg = "a tuple is only valid as the whole row type"
         raise _invalid(msg)
+    if isinstance(member, _NamedRef):
+        msg = "a named row type is only valid as the whole row type, not inside a tuple, list, union or field"
+        raise _invalid(msg)
     if member.leaf == "any":
         return Elem("any", nullable=True)
     if member.leaf in NETWORK_MEMBERS:
@@ -489,6 +595,9 @@ class _Resolver:
         self._graph = graph
         self._roots = roots
         self.alias: AliasSite | None = None
+        # set while a named type's field annotation is evaluated: a string is parsed, and a name imported only under
+        # `TYPE_CHECKING` is rejected, because `get_type_hints` would fail on it
+        self._in_field = False
 
     def _find(self, module: _Module, level: int, dotted: str | None) -> _Module | None:
         if level == 0:
@@ -553,11 +662,22 @@ class _Resolver:
         unique = list(dict.fromkeys(bindings))
         # a `TYPE_CHECKING` binding is the one a type checker sees, so the first one wins
         if tc := [binding for binding in unique if binding.tc]:
+            if self._in_field and len(tc) == len(unique):
+                msg = f"`{name}` is imported only under `TYPE_CHECKING`"
+                raise _invalid(msg, help=f"import `{name}` at runtime")
             unique = tc[:1]
         if len(unique) > 1:
             msg = f"`{name}` is bound more than once at module level"
             raise _unresolved(msg)
-        binding = unique[0]
+        return self._binding_value(module, name, unique[0], chain)
+
+    def _binding_value(
+        self,
+        module: _Module,
+        name: str,
+        binding: _Binding,
+        chain: tuple[tuple[Path, str], ...],
+    ) -> _Value:
         match binding.kind:
             case "import":
                 return self._module_value(binding.module, module)
@@ -571,12 +691,34 @@ class _Resolver:
                     msg = f"`{name}` has no value"
                     raise _unresolved(msg)
                 return _Alias(module, binding.expr, binding.site, chain, type_stmt=binding.type_stmt)
-            case "invalid":
-                msg = f"`{name}` is not a type expression"
-                raise _invalid(msg)
+            case "class" if isinstance(binding.node, ast.ClassDef):
+                return _Class(module, binding.node, binding.node.name)
+            case "call":
+                return self._functional(module, name, binding)
             case "other":
                 msg = f"`{name}` is not bound by an import or a type alias"
                 raise _unresolved(msg)
+        msg = f"`{name}` is not a type expression"
+        raise _invalid(msg)
+
+    # `X = NamedTuple("X", ...)` and `X = TypedDict("X", ...)` are classes; any other call isn't a type expression
+    def _functional(self, module: _Module, name: str, binding: _Binding) -> _Value:
+        call = binding.node
+        if not isinstance(call, ast.Call):
+            msg = f"`{name}` is not a type expression"
+            raise _invalid(msg)
+        try:
+            func = self._resolve_ref(call.func, module, ())
+        except _Reject:
+            func = None
+        if not isinstance(func, _External) or self._normalize(func.qualname) not in FUNCTIONAL:
+            msg = f"`{name}` is not a type expression"
+            raise _invalid(msg)
+        match call.args:
+            case [ast.Constant(value=str() as class_name), *_]:
+                return _Class(module, call, class_name)
+        msg = f"`{func.qualname}(...)` needs a literal class name"
+        raise _unresolved(msg)
 
     def _module_value(self, dotted: str, module: _Module) -> _Value:
         found = self._find(module, 0, dotted)
@@ -621,9 +763,11 @@ class _Resolver:
         match expr:
             case ast.Constant(value=None):
                 return _Node((), none=True)
-            case ast.Constant(value=str()):
-                msg = "a quoted type isn't supported"
-                raise _invalid(msg)
+            case ast.Constant(value=str() as text):
+                if not self._in_field:
+                    msg = "a quoted type isn't supported"
+                    raise _invalid(msg)
+                return self._eval(self._parse_quoted(text), module, chain)
             case ast.Name() | ast.Attribute():
                 return self._eval_value(self._resolve_ref(expr, module, chain))
             case ast.Subscript():
@@ -633,20 +777,34 @@ class _Resolver:
         msg = "the row type isn't derivable from the row-type grammar"
         raise _invalid(msg)
 
+    @staticmethod
+    def _parse_quoted(text: str) -> ast.expr:
+        try:
+            return ast.parse(text.strip(), mode="eval").body
+        except SyntaxError:
+            msg = f"the annotation {text!r} can't be parsed"
+            raise _invalid(msg) from None
+
     def _eval_value(self, value: _Value) -> _Node:
         match value:
             case _Alias():
                 if self.alias is None:
                     self.alias = AliasSite(path=value.module.path, span=value.site)
-                return self._eval(value.expr, value.module, value.chain)
+                # an alias is evaluated as a row type is, so a string in it stays unsupported
+                in_field, self._in_field = self._in_field, False
+                try:
+                    return self._eval(value.expr, value.module, value.chain)
+                finally:
+                    self._in_field = in_field
             case _External(qualname):
                 normalized = self._normalize(qualname)
                 if (leaf := LEAVES.get(normalized)) is not None:
                     return _Node((Elem(leaf, nullable=False),), none=False)
                 if normalized in NEUTRAL:
                     return _Node((Elem("any", nullable=False),), none=False)
-                msg = f"`{qualname}` isn't a supported row type"
-                raise _invalid(msg)
+                raise _external_reject(qualname)
+            case _Class():
+                return _Node((_NamedRef(value),), none=False)
             case _ModuleRef():
                 msg = "a module isn't a row type"
                 raise _invalid(msg)
@@ -668,6 +826,9 @@ class _Resolver:
 
     def _eval_subscript(self, expr: ast.Subscript, module: _Module, chain: tuple[tuple[Path, str], ...]) -> _Node:
         base = self._constructor(self._resolve_ref(expr.value, module, chain))
+        if isinstance(base, _Class):
+            msg = f"`{base.name}` is subscripted, and generic row types are not supported yet"
+            raise _invalid(msg)
         if not isinstance(base, _External):
             msg = "only `tuple`, `list`, `Optional`, `Union` and `Annotated` can be subscripted"
             raise _invalid(msg)
@@ -722,6 +883,383 @@ class _Resolver:
             raise _invalid(msg)
         return _Node((Elem(RANGE_LEAVES[inner.leaf], nullable=False),), none=False)
 
+    # ---- named row types ----
+
+    def _ref(self, expr: ast.expr, module: _Module) -> _Value:
+        return self._constructor(self._resolve_ref(expr, module, ()))
+
+    def _external_name(self, expr: ast.expr, module: _Module) -> str | None:
+        # the normalized qualified name of `expr`, or None when it is not an import-resolved name
+        try:
+            value = self._resolve_ref(expr, module, ())
+        except _Reject:
+            return None
+        return self._normalize(value.qualname) if isinstance(value, _External) else None
+
+    def _base(self, expr: ast.expr, klass: _Class, stack: tuple[_Class, ...]) -> _Info | str:
+        subscripted = isinstance(expr, ast.Subscript)
+        target = expr.value if isinstance(expr, ast.Subscript) else expr
+        if not isinstance(target, ast.Name | ast.Attribute):
+            msg = f"a base of `{klass.name}` isn't a class name"
+            raise _invalid(msg)
+        match self._ref(target, klass.module):
+            case _External(qualname):
+                return self._external_base(self._normalize(qualname), qualname, subscripted=subscripted)
+            case _Class() as base:
+                if subscripted:
+                    msg = f"`{base.name}` is subscripted, and generic row types are not supported yet"
+                    raise _invalid(msg)
+                return self._info(base, (*stack, klass))
+        msg = f"a base of `{klass.name}` isn't a class"
+        raise _invalid(msg)
+
+    @staticmethod
+    def _external_base(normalized: str, qualname: str, *, subscripted: bool) -> str:
+        if normalized == "typing.Protocol" and not subscripted:
+            msg = "a Protocol is not a row type"
+            raise _invalid(msg)
+        if normalized in {"typing.Generic", "typing.Protocol"}:
+            msg = "generic row types are not supported yet"
+            raise _invalid(msg)
+        if (value := VALUE_CLASSES.get(qualname)) is not None:
+            msg = f"a subclass of rowx.postgres.{value} is not a row type"
+            raise _invalid(msg)
+        if qualname.split(".", maxsplit=1)[0] == "pydantic":
+            msg = "a pydantic row type isn't supported yet"
+            raise _invalid(msg)
+        if subscripted:
+            msg = f"`{qualname}` can't be subscripted as a base of a row type"
+            raise _invalid(msg)
+        if normalized in {"typing.NamedTuple", "typing.TypedDict", "builtins.object"}:
+            return normalized.rsplit(".", maxsplit=1)[-1]
+        raise _external_reject(qualname)
+
+    @staticmethod
+    def _literal_bool(keyword: ast.keyword, what: str) -> bool:
+        if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, bool):
+            return keyword.value.value
+        msg = f"{what} isn't a literal"
+        raise _unresolved(msg)
+
+    # None for a decorator that is ignored (`final`), else the `init` of a dataclass decorator
+    def _decorator_init(self, decorator: ast.expr, klass: _Class) -> bool | None:
+        call = decorator if isinstance(decorator, ast.Call) else None
+        func = call.func if call is not None else decorator
+        try:
+            value = self._resolve_ref(func, klass.module, ())
+        except _Reject as reject:
+            if reject.rule != "invalid-row-type":
+                raise
+            value = None
+        name = self._normalize(value.qualname) if isinstance(value, _External) else None
+        if name == "typing.final":
+            return None
+        if isinstance(value, _External) and value.qualname.split(".", maxsplit=1)[0] == "pydantic":
+            msg = "a pydantic row type isn't supported yet"
+            raise _invalid(msg)
+        if name != "dataclasses.dataclass":
+            msg = f"the decorator `{ast.unparse(func)}` on `{klass.name}` is unknown, so its effect on the constructor is not checked"
+            raise _invalid(msg, help=DECORATOR_HELP)
+        init = True
+        for keyword in call.keywords if call is not None else ():
+            if keyword.arg is None:
+                msg = f"the dataclass decorator on `{klass.name}` takes `**` arguments"
+                raise _unresolved(msg)
+            if keyword.arg in {"init", "kw_only"}:
+                literal = self._literal_bool(
+                    keyword, f"the `{keyword.arg}` of the dataclass decorator on `{klass.name}`"
+                )
+                init = literal if keyword.arg == "init" else init
+        return init
+
+    # whether the class is decorated with `dataclasses.dataclass`, and that decorator's `init`
+    def _decorators(self, node: ast.ClassDef, klass: _Class) -> tuple[bool, bool]:
+        decorated, init = False, True
+        for decorator in node.decorator_list:
+            if (found := self._decorator_init(decorator, klass)) is not None:
+                decorated, init = True, found
+        return decorated, init
+
+    def _total(self, node: ast.ClassDef) -> bool:
+        total = True
+        for keyword in node.keywords:
+            if keyword.arg == "total":
+                total = self._literal_bool(keyword, f"the `total` of `{node.name}`")
+        return total
+
+    @staticmethod
+    def _check_keywords(node: ast.ClassDef, *, known: frozenset[str]) -> None:
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                msg = f"`{node.name}` takes `**` class keywords"
+                raise _unresolved(msg)
+            if keyword.arg not in known:
+                what = "the metaclass" if keyword.arg == "metaclass" else f"the class keyword `{keyword.arg}`"
+                msg = f"{what} of `{node.name}` is unknown, so its effect on the constructor is not checked"
+                raise _invalid(msg, help=KEYWORD_HELP)
+
+    def _bases(self, node: ast.ClassDef, klass: _Class, stack: tuple[_Class, ...]) -> tuple[list[_Info], set[str]]:
+        bases = [self._base(base, klass, stack) for base in node.bases]
+        direct = {base for base in bases if isinstance(base, str)} - {"object"}
+        if len(direct) > 1:
+            msg = f"`{klass.name}` can't combine NamedTuple and TypedDict"
+            raise _invalid(msg)
+        return [base for base in bases if isinstance(base, _Info)], direct
+
+    @staticmethod
+    def _form(klass: _Class, infos: list[_Info], direct: set[str], *, decorated: bool) -> Form | None:
+        forms: set[Form] = {info.form for info in infos if info.form is not None}
+        forms |= {"namedtuple" if name == "NamedTuple" else "typeddict" for name in direct}
+        if decorated:
+            forms.add("dataclass")
+        if len(forms) > 1:
+            msg = f"`{klass.name}` mixes row type forms"
+            raise _invalid(msg)
+        return next(iter(forms), None)
+
+    def _info(self, klass: _Class, stack: tuple[_Class, ...]) -> _Info:
+        if klass in stack or len(stack) >= MAX_HOPS:
+            msg = f"`{klass.name}` inherits from itself or is more than {MAX_HOPS} bases deep"
+            raise _unresolved(msg)
+        node = klass.node
+        if isinstance(node, ast.Call):
+            return self._functional_info(klass, node)
+        if node.type_params:
+            msg = f"`{klass.name}` is generic, and generic row types are not supported yet"
+            raise _invalid(msg)
+        infos, direct = self._bases(node, klass, stack)
+        decorated, init = self._decorators(node, klass)
+        form = self._form(klass, infos, direct, decorated=decorated)
+        self._check_keywords(node, known=TYPED_DICT_KEYWORDS if form == "typeddict" else frozenset())
+        info = _Info(form=form)
+        match form:
+            case "dataclass":
+                bases = [base for base in infos if base.form == "dataclass"]
+                self._dataclass_fields(info, node, klass, bases, decorated=decorated)
+                info.init = init if decorated else next((base.init for base in bases), True)
+            case "namedtuple":
+                self._namedtuple_fields(info, node, klass, infos, direct=bool(direct))
+            case "typeddict":
+                self._typeddict_fields(info, node, klass, infos)
+        return info
+
+    def _namedtuple_fields(
+        self, info: _Info, node: ast.ClassDef, klass: _Class, infos: list[_Info], *, direct: bool
+    ) -> None:
+        if not direct:
+            info.fields = dict(next(base.fields for base in infos if base.form == "namedtuple"))
+            return
+        for stmt, key in self._annotated(node):
+            info.fields[key] = self._source(stmt, key, klass, default=stmt.value is not None)
+
+    def _typeddict_fields(self, info: _Info, node: ast.ClassDef, klass: _Class, infos: list[_Info]) -> None:
+        for base in infos:
+            if base.form == "typeddict":
+                info.fields.update(base.fields)
+        total = self._total(node)
+        for stmt, key in self._annotated(node):
+            info.fields[key] = self._source(stmt, key, klass, total=total)
+
+    @staticmethod
+    def _annotated(node: ast.ClassDef) -> list[tuple[ast.AnnAssign, str]]:
+        return [
+            (stmt, stmt.target.id)
+            for stmt in node.body
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+        ]
+
+    @staticmethod
+    def _source(stmt: ast.AnnAssign, key: str, klass: _Class, *, default: bool = False, total: bool = True) -> _Source:
+        return _Source(
+            key=key,
+            annotation=stmt.annotation,
+            module=klass.module,
+            node=stmt,
+            default=default,
+            total=total,
+        )
+
+    # `ClassVar`, `InitVar` or `KW_ONLY`, which the dataclass module tells apart by the head of the annotation
+    def _special(self, annotation: ast.expr, module: _Module) -> str | None:
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            try:
+                annotation = ast.parse(annotation.value.strip(), mode="eval").body
+            except SyntaxError:
+                return None
+        head = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+        if not isinstance(head, ast.Name | ast.Attribute):
+            return None
+        specials = {"typing.ClassVar": "ClassVar", "dataclasses.InitVar": "InitVar", "dataclasses.KW_ONLY": "KW_ONLY"}
+        return specials.get(self._external_name(head, module) or "")
+
+    def _dataclass_fields(
+        self,
+        info: _Info,
+        node: ast.ClassDef,
+        klass: _Class,
+        bases: list[_Info],
+        *,
+        decorated: bool,
+    ) -> None:
+        # the library collects the bases from the last to the first, and a redeclared field keeps its place
+        for base in reversed(bases):
+            info.fields.update(base.fields)
+        if not decorated:
+            return
+        if any(isinstance(stmt, ast.FunctionDef) and stmt.name == "__init__" for stmt in node.body):
+            msg = f"`{klass.name}` defines `__init__`, so its effect on the constructor is not checked"
+            raise _invalid(msg, help=INIT_HELP)
+        for stmt, key in self._annotated(node):
+            match self._special(stmt.annotation, klass.module):
+                case "ClassVar":
+                    info.fields[key] = None
+                case "KW_ONLY":
+                    pass
+                case "InitVar":
+                    msg = f"`{klass.name}` has the InitVar field `{key}`, which is not supported"
+                    raise _invalid(msg)
+                case _:
+                    info.fields[key] = self._dataclass_field(stmt, key, klass)
+
+    def _dataclass_field(self, stmt: ast.AnnAssign, key: str, klass: _Class) -> _Source | None:
+        value = stmt.value
+        if not (isinstance(value, ast.Call) and self._external_name(value.func, klass.module) == "dataclasses.field"):
+            return self._source(stmt, key, klass, default=value is not None)
+        default = False
+        for keyword in value.keywords:
+            if keyword.arg is None:
+                msg = f"a `field(...)` in `{klass.name}` takes `**` arguments"
+                raise _unresolved(msg)
+            if keyword.arg == "init" and not self._literal_bool(
+                keyword, f"the `init` of a `field(...)` in `{klass.name}`"
+            ):
+                return None
+            default = default or keyword.arg in {"default", "default_factory"}
+        return self._source(stmt, key, klass, default=default)
+
+    @staticmethod
+    def _namedtuple_entries(klass: _Class, spec: ast.expr) -> list[tuple[str, ast.expr, ast.expr]]:
+        if not isinstance(spec, ast.List | ast.Tuple):
+            msg = f"`NamedTuple(...)` for `{klass.name}` needs a literal list of fields"
+            raise _unresolved(msg)
+        entries: list[tuple[str, ast.expr, ast.expr]] = []
+        for item in spec.elts:
+            match item:
+                case (
+                    ast.Tuple(elts=[ast.Constant(value=str() as key), annotation])
+                    | ast.List(
+                        elts=[ast.Constant(value=str() as key), annotation],
+                    )
+                ):
+                    entries.append((key, annotation, item))
+                case _:
+                    msg = f"`NamedTuple(...)` for `{klass.name}` needs literal `(name, type)` pairs"
+                    raise _unresolved(msg)
+        return entries
+
+    @staticmethod
+    def _typeddict_entries(klass: _Class, spec: ast.expr) -> list[tuple[str, ast.expr, ast.expr]]:
+        if not isinstance(spec, ast.Dict):
+            msg = f"`TypedDict(...)` for `{klass.name}` needs a literal dict of fields"
+            raise _unresolved(msg)
+        entries: list[tuple[str, ast.expr, ast.expr]] = []
+        for key, annotation in zip(spec.keys, spec.values, strict=True):
+            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                msg = f"`TypedDict(...)` for `{klass.name}` needs literal string keys"
+                raise _unresolved(msg)
+            entries.append((key.value, annotation, key))
+        return entries
+
+    def _functional_info(self, klass: _Class, call: ast.Call) -> _Info:
+        namedtuple = self._external_name(call.func, klass.module) == "typing.NamedTuple"
+        label = "NamedTuple" if namedtuple else "TypedDict"
+        total = True
+        for keyword in call.keywords:
+            if namedtuple or keyword.arg != "total":
+                msg = f"`{label}(...)` for `{klass.name}` needs literal arguments"
+                raise _unresolved(msg)
+            total = self._literal_bool(keyword, f"the `total` of `{klass.name}`")
+        if len(call.args) != FUNCTIONAL_ARGS:
+            msg = f"`{label}(...)` for `{klass.name}` needs a name and a literal list of fields"
+            raise _unresolved(msg)
+        spec = call.args[1]
+        entries = self._namedtuple_entries(klass, spec) if namedtuple else self._typeddict_entries(klass, spec)
+        info = _Info(form="namedtuple" if namedtuple else "typeddict")
+        for key, annotation, at in entries:
+            info.fields[key] = _Source(key=key, annotation=annotation, module=klass.module, node=at, total=total)
+        return info
+
+    def _named_row(self, klass: _Class) -> RowType:
+        info = self._info(klass, ())
+        if info.form is None:
+            msg = f"`{klass.name}` isn't a dataclass, NamedTuple or TypedDict"
+            raise _invalid(msg)
+        if info.form == "dataclass" and not info.init:
+            msg = f"`{klass.name}` is a dataclass with init=False, which is not supported"
+            raise _invalid(msg)
+        sources = [source for source in info.fields.values() if source is not None]
+        if not sources:
+            msg = f"`{klass.name}` has no fields"
+            raise _invalid(msg)
+        fields = tuple(self._field(source, klass.name, typeddict=info.form == "typeddict") for source in sources)
+        form, matching = FORMS[info.form]
+        return RowType(
+            kind="named",
+            form=form,
+            matching=matching,
+            type_name=klass.name,
+            fields=fields,
+            alias=self.alias,
+        )
+
+    def _field(self, source: _Source, type_name: str, *, typeddict: bool) -> NamedField:
+        span = source.module.span(source.node)
+        self._in_field = True
+        try:
+            expr, override = self._strip_field(source.annotation, source.module)
+            elem = _to_elem(self._eval(expr, source.module, ()), allow_none=True)
+        except _Reject as reject:
+            note = f"field defined at {source.module.path}:{span.line}:{span.col}"
+            message = f'{reject.message} (field "{source.key}" of `{type_name}`)'
+            raise _Reject(reject.rule, message, help=reject.help, notes=(*reject.notes, note)) from None
+        finally:
+            self._in_field = False
+        # only a TypedDict is optional by its qualifier or `total`; the others are by their default
+        required = (source.total if override is None else override) if typeddict else not source.default
+        return NamedField(
+            key=source.key,
+            names=(source.key,),
+            elem=elem,
+            required=required,
+            path=source.module.path,
+            span=span,
+        )
+
+    # the layers a field annotation may carry around its element: quotes, `Annotated` and the TypedDict qualifiers,
+    # found in any nesting of them (a quoted `'NotRequired[str]'` included)
+    def _strip_field(self, annotation: ast.expr, module: _Module) -> tuple[ast.expr, bool | None]:
+        required: bool | None = None
+        expr = annotation
+        for _ in range(MAX_HOPS + 1):
+            if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+                expr = self._parse_quoted(expr.value)
+            if not isinstance(expr, ast.Subscript):
+                break
+            base = self._constructor(self._resolve_ref(expr.value, module, ()))
+            if not isinstance(base, _External):
+                break
+            name = self._normalize(base.qualname)
+            slice_ = expr.slice
+            if name == "typing.Annotated" and isinstance(slice_, ast.Tuple) and len(slice_.elts) >= MIN_ANNOTATED:
+                expr = slice_.elts[0]
+            elif name in FIELD_QUALIFIERS and not isinstance(slice_, ast.Tuple):
+                if name != "typing.ReadOnly":
+                    required = name == "typing.Required"
+                expr = slice_
+            else:
+                break
+        return expr, required
+
     def resolve(self, call: QueryCall) -> RowType:
         if call.row_type is None:
             return RowType(kind="none")
@@ -740,12 +1278,20 @@ class _Resolver:
             msg = "a union may have only one non-`None` member"
             raise _invalid(msg)
         (member,) = node.members
-        if isinstance(member, _Tuple):
+        if isinstance(member, _NamedRef):
             if node.none:
-                msg = "a tuple can't be combined with `None`"
-                raise _invalid(msg)
-            return RowType(kind="tuple", elements=member.elems, alias=self.alias)
+                msg = f"`{member.klass.name}` is a named row type, which can't be nullable"
+                raise _invalid(msg, help="use .optional()")
+            return self._named_row(member.klass)
+        if isinstance(member, _Tuple):
+            return self._tuple_row(node, member)
         return RowType(kind="scalar", elements=(_to_elem(node, allow_none=False),), alias=self.alias)
+
+    def _tuple_row(self, node: _Node, member: _Tuple) -> RowType:
+        if node.none:
+            msg = "a tuple can't be combined with `None`"
+            raise _invalid(msg)
+        return RowType(kind="tuple", elements=member.elems, alias=self.alias)
 
 
 def resolve_row_type(graph: ModuleGraph, call: QueryCall, roots: tuple[Path, ...]) -> Resolution:
@@ -761,6 +1307,6 @@ def resolve_row_type(graph: ModuleGraph, call: QueryCall, roots: tuple[Path, ...
             message=reject.message,
             path=call.path,
             span=call.row_type_span or call.span,
-            notes=notes,
+            notes=(*notes, *reject.notes),
         )
-        return Resolution(diagnostic=diagnostic)
+        return Resolution(diagnostic=diagnostic, help=reject.help)

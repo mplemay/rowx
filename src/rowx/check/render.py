@@ -24,6 +24,10 @@ class Report:
     sqlstate: str | None = None
     sql: str | None = None
     column_index: int | None = None
+    # the field key of a field-related rule on a named row
+    field: str | None = None
+    # the position of the report among those at one span, which a named row uses to keep the order the design gives
+    order: int = 0
 
 
 type _TemplateReason = Literal[
@@ -89,11 +93,11 @@ def null_reason_note(reason: NullReasonName, detail: str | None = None, *, colum
             assert_never(unreachable)
 
 
-def _sort_key(report: Report) -> tuple[str, int, int, int, int, str, str]:
+def _sort_key(report: Report) -> tuple[str, int, int, int, int, int, str, str]:
     diagnostic = report.diagnostic
     span = diagnostic.span
     path = diagnostic.path.as_posix()
-    return (path, span.line, span.col, span.end_line, span.end_col, diagnostic.rule, diagnostic.message)
+    return (path, span.line, span.col, span.end_line, span.end_col, report.order, diagnostic.rule, diagnostic.message)
 
 
 def sort_reports(reports: Iterable[Report]) -> list[Report]:
@@ -202,6 +206,7 @@ def render_json(reports: Iterable[Report], root: Path | None = None) -> str:
                 "sqlstate": report.sqlstate,
                 "sql": report.sql,
                 "column_index": report.column_index,
+                "field": report.field,
             },
         )
     return dumps(items, indent=2, ensure_ascii=False) + "\n"

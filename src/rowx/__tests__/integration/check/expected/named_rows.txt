@@ -1,0 +1,101 @@
+error[missing-column]: field "name" of `User` has no column
+ --> queries.py:4:7
+  |
+4 | query[User](t"SELECT id FROM users")
+  |       ^^^^ row type
+  |
+  = note: field defined at <root>/app/models.py:8:5
+  = help: select a column named "name", alias one with AS name, or give the field a default
+
+error[missing-column]: field "email" of `User` has no column
+ --> queries.py:4:7
+  |
+4 | query[User](t"SELECT id FROM users")
+  |       ^^^^ row type
+  |
+  = note: field defined at <root>/app/models.py:9:5
+  = help: select a column named "email", alias one with AS email, or give the field a default
+
+error[unexpected-column]: column 3 "email" matches no field of `Small`
+ --> queries.py:5:7
+  |
+5 | query[Small](t"SELECT id, name, email FROM users")
+  |       ^^^^^ row type
+  |
+  = help: add a field named "email" to `Small`, or remove the column from the SELECT
+
+error[duplicate-column]: columns 1 and 2 are both named "id"
+ --> queries.py:6:7
+  |
+6 | query[Small](t"SELECT id, id, name FROM users")
+  |       ^^^^^ row type
+  |
+  = help: alias one of the columns with AS
+
+error[duplicate-column]: columns 1 and 2 are both unnamed (`?column?`)
+ --> queries.py:7:7
+  |
+7 | query[Loose](t"SELECT 1, 2")
+  |       ^^^^^ row type
+  |
+  = help: alias the expression
+
+error[column-name-mismatch]: column 1 "name" faces field "id" of `Pair` (position 1)
+ --> queries.py:8:7
+  |
+8 | query[Pair](t"SELECT name, id FROM users")
+  |       ^^^^ row type
+  |
+  = note: field defined at <root>/app/models.py:38:5
+  = help: reorder the SELECT, alias the column AS id, or rename the field
+
+error[column-name-mismatch]: column 2 "id" faces field "name" of `Pair` (position 2)
+ --> queries.py:8:7
+  |
+8 | query[Pair](t"SELECT name, id FROM users")
+  |       ^^^^ row type
+  |
+  = note: field defined at <root>/app/models.py:39:5
+  = help: reorder the SELECT, alias the column AS name, or rename the field
+
+error[arity-mismatch]: the query returns 1 columns but `Pair` takes exactly 2
+ --> queries.py:9:7
+  |
+9 | query[Pair](t"SELECT id FROM users")
+  |       ^^^^ row type
+  |
+  = help: select exactly 2 columns
+
+error[arity-mismatch]: the query returns 4 columns but `Trailing` takes between 1 and 3
+  --> queries.py:10:7
+   |
+10 | query[Trailing](t"SELECT id, name, email, 1 FROM users")
+   |       ^^^^^^^^ row type
+   |
+   = help: select between 1 and 3 columns
+
+error[type-mismatch]: column 1 "id" is `int` but field "id" of `Typed` is `str`
+  --> queries.py:11:7
+   |
+11 | query[Typed](t"SELECT id, name, email FROM users")
+   |       ^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:25:5
+
+error[nullability-mismatch]: column 3 "email" may be NULL but field "email" of `Strict` is `str`
+  --> queries.py:12:7
+   |
+12 | query[Strict](t"SELECT id, name, email FROM users")
+   |       ^^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:34:5
+   = note: nullable because the column has no NOT NULL constraint
+   = help: annotate `str | None`, or alias the column as "email!" if it can't be NULL
+
+error[unexpected-column]: column 3 "other" matches no field of `Movie`
+  --> queries.py:13:7
+   |
+13 | query[Movie](t"SELECT id, name, id AS other FROM users")
+   |       ^^^^^ row type
+   |
+   = help: add a field named "other" to `Movie`, or remove the column from the SELECT

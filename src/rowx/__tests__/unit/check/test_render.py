@@ -218,3 +218,18 @@ def test_unicode_line_separator_is_not_a_line_break() -> None:
     diagnostic = Diagnostic(rule="sql-error", message="m", path=PATH, span=Span(line=2, col=1, end_line=2, end_col=5))
     text = render_text([Report(diagnostic=diagnostic)], {PATH: source})
     assert "2 | rows = 1\n  | ^^^^\n" in text
+
+
+def test_json_carries_the_field_and_order_keeps_a_named_rows_findings_in_sequence() -> None:
+    span = Span(line=4, col=7, end_line=4, end_col=11)
+    first = Diagnostic(rule="unexpected-column", message="b", path=PATH, span=span)
+    second = Diagnostic(rule="duplicate-column", message="a", path=PATH, span=span)
+    reports = [
+        Report(diagnostic=second, order=1, column_index=1),
+        Report(diagnostic=first, order=0, column_index=0, field="id"),
+    ]
+    items = json.loads(render_json(reports))
+    assert [(item["rule"], item["field"], item["column_index"]) for item in items] == [
+        ("unexpected-column", "id", 0),
+        ("duplicate-column", None, 1),
+    ]

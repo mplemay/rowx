@@ -1,18 +1,23 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from re import compile as re_compile
 from typing import TYPE_CHECKING, Final, Literal
 
+from rowx._core.postgres import map_columns
 from rowx.postgres._types import accepts, by_key, result_type, result_types
 from rowx.postgres._vocab import NullReasonName, TypeKey
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from rowx._core.postgres import ShapeIssue
     from rowx.check.model import Rule
     from rowx.check.params import ParamType
-    from rowx.check.resolve import Elem, RowType
+    from rowx.check.resolve import Elem, NamedField, RowType
 
 JSON_KEYS: Final[frozenset[TypeKey]] = frozenset({"json", "jsonb"})
 USE_EXECUTE: Final[str] = "use .execute()"
+UNNAMED: Final[str] = "?column?"
+LOWERCASE_IDENTIFIER: Final = re_compile(r"[a-z_][a-z0-9_]*")
 type _Reason = NullReasonName | Literal[""]
 
 
@@ -27,6 +32,8 @@ class ColumnDesc:
     reason: _Reason = ""
     reason_detail: str | None = None
     element_key: TypeKey | None = None
+    # the name as the server sent it, with the `!`/`?` suffix; it is what `map_columns` strips, once
+    raw_name: str | None = None
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -44,6 +51,8 @@ class Finding:
     help: str | None = None
     reason: _Reason = ""
     reason_detail: str | None = None
+    # the indices into a named row's fields that the finding concerns, for the field notes and the JSON `field`
+    fields: tuple[int, ...] = ()
 
 
 def _label(column: ColumnDesc, index: int) -> str:
@@ -135,14 +144,16 @@ def _void_finding(column: ColumnDesc, index: int, elem: Elem, element: int | Non
     return [Finding(rule="type-mismatch", message=message, column=index, element=element, help=USE_EXECUTE)]
 
 
-def _nullability_finding(column: ColumnDesc, index: int, elem: Elem, element: int | None) -> list[Finding]:
+def _nullability_finding(
+    column: ColumnDesc, index: int, elem: Elem, element: int | None, subject: str | None
+) -> list[Finding]:
     if column.nullable == elem.nullable:
         return []
     if column.nullable:
-        message = f"{_label(column, index)} may be NULL but the element is `{_shown(elem)}`"
+        message = f"{_label(column, index)} may be NULL but {subject or 'the element'} is `{_shown(elem)}`"
         help_ = f'annotate `{_shown(elem)} | None`, or alias the column as "{column.name}!" if it can\'t be NULL'
     else:
-        message = f"{_label(column, index)} is NOT NULL but the element is `{_shown(elem)} | None`"
+        message = f"{_label(column, index)} is NOT NULL but {subject or 'the element'} is `{_shown(elem)} | None`"
         help_ = f'annotate `{_shown(elem)}`, or alias the column as "{column.name}?" if it may be NULL'
     return [
         Finding(
@@ -157,7 +168,14 @@ def _nullability_finding(column: ColumnDesc, index: int, elem: Elem, element: in
     ]
 
 
-def _compare_element(column: ColumnDesc, index: int, elem: Elem, element: int | None) -> list[Finding]:
+# `subject` is the field of a named row, such as `field "age" of `User``; a tuple element has none
+def _compare_element(
+    column: ColumnDesc,
+    index: int,
+    elem: Elem,
+    element: int | None,
+    subject: str | None = None,
+) -> list[Finding]:
     if not _supported(column):
         return [_unsupported(column, index, element)]
     if column.type_key == "void":
@@ -166,11 +184,136 @@ def _compare_element(column: ColumnDesc, index: int, elem: Elem, element: int | 
     if elem.leaf == "any":
         return []
     if not _leaf_matches(column, elem):
-        message = (
-            f"{_label(column, index)}: column type is `{_expected(column)}` but the annotation is `{_shown(elem)}`"
-        )
+        if subject is not None:
+            message = f"{_label(column, index)} is `{_expected(column)}` but {subject} is `{_shown(elem)}`"
+        else:
+            message = (
+                f"{_label(column, index)}: column type is `{_expected(column)}` but the annotation is `{_shown(elem)}`"
+            )
         return [Finding(rule="type-mismatch", message=message, column=index, element=element, help=_range_help(column))]
-    return _nullability_finding(column, index, elem, element)
+    return _nullability_finding(column, index, elem, element, subject)
+
+
+def _alias_for(name: str) -> str:
+    return f"AS {name}" if LOWERCASE_IDENTIFIER.fullmatch(name) else f'AS "{name}"'
+
+
+def _join(items: list[str]) -> str:
+    if len(items) == 1:
+        return items[0]
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _issue_finding(issue: ShapeIssue, columns: Sequence[ColumnDesc], row_type: RowType) -> Finding:
+    type_name = row_type.type_name
+    fields = row_type.fields
+    positions = issue.columns
+    first = positions[0] if positions else None
+    name = columns[first].name if first is not None else ""
+    match issue.kind:
+        case "unexpected-column":
+            help_ = (
+                "alias the expression"
+                if name == UNNAMED
+                else f'add a field named "{name}" to `{type_name}`, or remove the column from the SELECT'
+            )
+            message = f'column {(first or 0) + 1} "{name}" matches no field of `{type_name}`'
+            return Finding(rule="unexpected-column", message=message, column=first, help=help_)
+        case "missing-column":
+            field_ = fields[issue.fields[0]]
+            how = "mark the key `NotRequired`" if row_type.form == "dict" else "give the field a default"
+            help_ = f'select a column named "{field_.key}", alias one with {_alias_for(field_.key)}, or {how}'
+            message = f'field "{field_.key}" of `{type_name}` has no column'
+            return Finding(rule="missing-column", message=message, help=help_, fields=(issue.fields[0],))
+        case "duplicate-column":
+            return _duplicate_finding(issue, columns, row_type)
+        case "ambiguous-column":
+            keys = _join([f'"{fields[index].key}"' for index in issue.fields])
+            message = f'column {(first or 0) + 1} "{name}" matches fields {keys} of `{type_name}`'
+            help_ = "give the fields distinct aliases, or remove populate_by_name if it causes the overlap"
+            return Finding(
+                rule="ambiguous-column",
+                message=message,
+                column=first,
+                help=help_,
+                fields=tuple(issue.fields),
+            )
+        case "column-name-mismatch":
+            field_ = fields[issue.fields[0]]
+            message = (
+                f'column {(first or 0) + 1} "{name}" faces field "{field_.key}" of `{type_name}` '
+                f"(position {(first or 0) + 1})"
+            )
+            help_ = f"reorder the SELECT, alias the column {_alias_for(field_.key)}, or rename the field"
+            return Finding(
+                rule="column-name-mismatch",
+                message=message,
+                column=first,
+                help=help_,
+                fields=(issue.fields[0],),
+            )
+    low, high, actual = issue.min or 0, issue.max or 0, issue.actual or 0
+    takes = f"exactly {low}" if low == high else f"between {low} and {high}"
+    message = f"the query returns {actual} columns but `{type_name}` takes {takes}"
+    help_ = f"select exactly {low} columns" if low == high else f"select between {low} and {high} columns"
+    return Finding(rule="arity-mismatch", message=message, help=help_)
+
+
+def _duplicate_finding(issue: ShapeIssue, columns: Sequence[ColumnDesc], row_type: RowType) -> Finding:
+    type_name = row_type.type_name
+    positions = issue.columns
+    names = [columns[index].name for index in positions]
+    verb = "both" if len(positions) == len(("a", "b")) else "all"
+    # the second occurrence is the one that is reported
+    reported = positions[1]
+    if issue.name is not None:
+        numbers = _join([str(index + 1) for index in positions])
+        if issue.name == UNNAMED:
+            message = f"columns {numbers} are {verb} unnamed (`{UNNAMED}`)"
+            return Finding(rule="duplicate-column", message=message, column=reported, help="alias the expression")
+        message = f'columns {numbers} are {verb} named "{issue.name}"'
+        return Finding(
+            rule="duplicate-column", message=message, column=reported, help="alias one of the columns with AS"
+        )
+    # two accepted names of one field
+    field_ = row_type.fields[issue.fields[0]]
+    listed = _join([f'{index + 1} "{name}"' for index, name in zip(positions, names, strict=True)])
+    message = f'columns {listed} {verb} map to field "{field_.key}" of `{type_name}`'
+    help_ = f"select only one of {_join([f'"{name}"' for name in names])}"
+    return Finding(rule="duplicate-column", message=message, column=reported, help=help_, fields=(issue.fields[0],))
+
+
+def _order(finding: Finding) -> tuple[int, int, int]:
+    # a finding about the whole row first, then the column-indexed ones by column, then `missing-column` by field
+    if finding.column is not None:
+        return (1, finding.column, 0 if finding.rule not in {"type-mismatch", "nullability-mismatch"} else 1)
+    if finding.rule == "missing-column":
+        return (2, finding.fields[0], 0)
+    return (0, 0, 0)
+
+
+def _compare_named(columns: Sequence[ColumnDesc], row_type: RowType) -> list[Finding]:
+    fields: list[NamedField] = list(row_type.fields)
+    positional = row_type.matching == "positional"
+    raw = [column.name if column.raw_name is None else column.raw_name for column in columns]
+    mapping, issues = map_columns(raw, [(field_.names, field_.required) for field_ in fields], positional)
+    findings = [_issue_finding(issue, columns, row_type) for issue in issues]
+    # a positional row stops at its first error; a by-name row still checks every column that mapped to one field
+    skipped = {
+        index for issue in issues if issue.kind in {"duplicate-column", "ambiguous-column"} for index in issue.columns
+    }
+    if not (positional and issues):
+        for index, (column, target) in enumerate(zip(columns, mapping, strict=True)):
+            if target is None or index in skipped:
+                continue
+            field_ = fields[target]
+            subject = f'field "{field_.key}" of `{row_type.type_name}`'
+            for finding in _compare_element(column, index, field_.elem, None, subject):
+                if finding.rule == "unsupported-type":
+                    findings.append(finding)
+                else:
+                    findings.append(replace(finding, fields=(target,)))
+    return sorted(findings, key=_order)
 
 
 def compare(describe: DescribeDesc, row_type: RowType) -> list[Finding]:
@@ -183,6 +326,8 @@ def compare(describe: DescribeDesc, row_type: RowType) -> list[Finding]:
                 message = f"a scalar row type needs exactly 1 column but the query returns {len(columns)}"
                 return [Finding(rule="arity-mismatch", message=message)]
             return _compare_element(columns[0], 0, row_type.elements[0], None)
+        case "named":
+            return _compare_named(columns, row_type)
         case "tuple":
             if len(columns) != len(row_type.elements):
                 message = (
