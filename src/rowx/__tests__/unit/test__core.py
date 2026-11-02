@@ -100,6 +100,20 @@ def test_map_columns_duplicate_column_for_two_names_of_one_field() -> None:
     assert verdict(["user_id"], fields) == ([0], [])
 
 
+def test_map_columns_duplicate_column_keeps_a_partial_mapping() -> None:
+    assert verdict(["id", "id"], [req("id")]) == (
+        [0, 0],
+        [issue("duplicate-column", columns=[0, 1], fields=[0], name="id")],
+    )
+
+
+def test_map_columns_ambiguous_column_keeps_the_other_columns_mapped() -> None:
+    assert verdict(["y", "a"], [req("y"), req("y"), req("a")]) == (
+        [None, 2],
+        [issue("ambiguous-column", columns=[0], fields=[0, 1], name="y")],
+    )
+
+
 def test_map_columns_ambiguous_column() -> None:
     assert verdict(["y"], [req("y"), req("y")]) == (
         [None],

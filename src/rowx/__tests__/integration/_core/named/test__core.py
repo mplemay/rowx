@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Final, cast
 import pytest
 
 from rowx._core.postgres import Connection as ConnectionImpl, RowShape
-from rowx.errors import DecodeError, RowConstructError, RowShapeError
+from rowx.errors import DecodeError, InterfaceError, RowConstructError, RowShapeError
 from rowx.postgres import Connection, Interval, Pool, connect
 
 if TYPE_CHECKING:
@@ -199,7 +199,7 @@ def test_null_in_a_non_nullable_field_names_the_field_and_column(schema: str) ->
 
     with pytest.raises(RowShapeError) as caught:
         run_with_conn(schema, body)
-    assert str(caught.value) == 'NULL in column 2 "b" for non-nullable field "b" of `Row` (row 0)'
+    assert str(caught.value) == 'Row: NULL in column 2 "b" for non-nullable field "b" of `Row` (row 0)'
 
 
 def test_null_in_a_stream_names_its_row_after_the_rows_before_it(schema: str) -> None:
@@ -212,7 +212,7 @@ def test_null_in_a_stream_names_its_row_after_the_rows_before_it(schema: str) ->
     rows, err = run_with_conn(schema, body)
     assert rows == [{"n": 1}, {"n": 2}, {"n": 3}]
     assert isinstance(err, RowShapeError)
-    assert str(err) == 'NULL in column 1 "n" for non-nullable field "n" of `User` (row 3)'
+    assert str(err) == 'User: NULL in column 1 "n" for non-nullable field "n" of `User` (row 3)'
 
 
 def test_mapping_error_on_an_empty_result_is_exact(schema: str) -> None:
@@ -365,3 +365,59 @@ def test_the_mapping_is_rechecked_when_a_table_gains_a_column(schema: str) -> No
             await fetch(conn, "SELECT * FROM named_t", row_shape)
 
     run_with_conn(schema, body)
+
+
+def test_named_fetch_and_stream_through_a_transaction(schema: str) -> None:
+    row_shape = shape(kwargs_of, "keyword", [spec("n")])
+    sql = "SELECT g::int4 AS n FROM generate_series(1, 5) g"
+
+    async def body(conn: Connection) -> tuple[list[object], list[object]]:
+        async with conn.transaction() as tx:
+            fetched = await tx._fetch(sql, [], None, False, False, None, row_shape)  # ruff: ignore[boolean-positional-value-in-call]
+            streamed, err = await drain(tx._stream(sql, [], None, False, None, 2, row_shape))  # ruff: ignore[boolean-positional-value-in-call]
+            assert err is None
+        return fetched, streamed
+
+    fetched, streamed = run_with_conn(schema, body)
+    assert fetched == streamed == [{"n": n} for n in range(1, 6)]
+
+
+def test_pool_recovers_after_a_named_fetch_fails(schema: str) -> None:
+    good = shape(kwargs_of, "keyword", [spec("n")])
+    mapping = shape(kwargs_of, "keyword", [spec("n"), spec("m")], name="Two")
+    null = shape(kwargs_of, "keyword", [spec("n")], name="Num")
+    ctor = shape(raising_on({2}), "keyword", [spec("n")], name="Num")
+
+    async def fetch_on(pool: Pool, sql: str, row_shape: RowShape) -> list[object]:
+        return await pool._fetch(sql, [], None, False, False, None, row_shape)  # ruff: ignore[boolean-positional-value-in-call]
+
+    async def run() -> list[object]:
+        async with Pool(schema, max_size=1) as pool:
+            with pytest.raises(RowShapeError, match="matches no field"):
+                await fetch_on(pool, "SELECT 1::int4 AS n, 2::int4 AS z", mapping)
+            assert await fetch_on(pool, "SELECT 1::int4 AS n", good) == [{"n": 1}]
+            with pytest.raises(RowShapeError, match="NULL in column 1"):
+                await fetch_on(pool, "SELECT NULL::int4 AS n", null)
+            assert await fetch_on(pool, "SELECT 2::int4 AS n", good) == [{"n": 2}]
+            with pytest.raises(RowConstructError):
+                await fetch_on(pool, "SELECT g::int4 AS n FROM generate_series(1, 3) g", ctor)
+            return await fetch_on(pool, "SELECT 3::int4 AS n", good)
+
+    assert asyncio.run(run()) == [{"n": 3}]
+
+
+def test_positional_form_that_skips_a_field_is_an_interface_error(schema: str) -> None:
+    # by-name mapping with a positional constructor is not a shape the checker produces
+    row_shape = shape(
+        args_of,
+        "positional",
+        [spec("a"), spec("b", required=False), spec("c")],
+        matching="by_name",
+    )
+
+    async def body(conn: Connection) -> list[object]:
+        with pytest.raises(InterfaceError, match="cannot skip a field"):
+            await fetch(conn, "SELECT 1::int4 AS a, 3::int4 AS c", row_shape)
+        return await fetch(conn, "SELECT 1::int4 AS a, 2::int4 AS b, 3::int4 AS c", row_shape)
+
+    assert run_with_conn(schema, body) == [(1, 2, 3)]
