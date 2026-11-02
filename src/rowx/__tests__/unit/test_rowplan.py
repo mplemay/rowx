@@ -10,19 +10,28 @@ from rowx._rowplan import NO_ROWS, RowPlan, row_plan
 from rowx.errors import InterfaceError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
-def evaluate(source: str) -> object:
-    # a class resolves its annotations in its module, so the source runs in a registered one
-    module = types.ModuleType("conformance_row")
-    sys.modules["conformance_row"] = module
-    exec(PRELUDE + source, module.__dict__)  # ruff: ignore[exec-builtin]
-    return module.T
+type Evaluate = Callable[[str], object]
+type Keys = Callable[[str], list[tuple[str, bool, bool]]]
+
+
+@pytest.fixture
+def evaluate(monkeypatch: pytest.MonkeyPatch) -> Evaluate:
+    def run(source: str) -> object:
+        # a class resolves its annotations in its module, so the source runs in a registered one that goes with the test
+        module = types.ModuleType("conformance_row")
+        monkeypatch.setitem(sys.modules, "conformance_row", module)
+        exec(PRELUDE + source, module.__dict__)  # ruff: ignore[exec-builtin]
+        return module.T
+
+    return run
 
 
 @pytest.mark.parametrize(("source", "expected", "_verdict"), ROWS)
-def test_conformance_row(source: str, expected: Plan | NamedPlan | str, _verdict: str) -> None:
+def test_conformance_row(source: str, expected: Plan | NamedPlan | str, _verdict: str, evaluate: Evaluate) -> None:
     t = evaluate(source)
     if isinstance(expected, str):
         with pytest.raises(InterfaceError):
@@ -46,12 +55,12 @@ def test_none_is_shared_no_rows_plan() -> None:
     assert row_plan(None) is NO_ROWS
 
 
-def test_plan_is_cached_per_type() -> None:
+def test_plan_is_cached_per_type(evaluate: Evaluate) -> None:
     t = evaluate("T = tuple[int, str | None]")
     assert row_plan(t) is row_plan(t)
 
 
-def test_unhashable_annotation_is_not_cached() -> None:
+def test_unhashable_annotation_is_not_cached(evaluate: Evaluate) -> None:
     t = evaluate("T = Annotated[int, []]")
     assert row_plan(t) == RowPlan(kind="scalar", arity=1, nullable_mask=(False,))
 
@@ -65,7 +74,7 @@ def test_alias_depth_limit() -> None:
     assert row_plan(ns["A10"]).kind == "scalar"
 
 
-def test_network_pair_in_either_order_is_one_leaf() -> None:
+def test_network_pair_in_either_order_is_one_leaf(evaluate: Evaluate) -> None:
     forward = evaluate("T = ipaddress.IPv4Network | ipaddress.IPv6Network | None")
     backward = evaluate("T = ipaddress.IPv6Network | ipaddress.IPv4Network")
     assert row_plan(forward) == RowPlan(kind="scalar", arity=1, nullable_mask=(True,))
@@ -79,27 +88,27 @@ def test_network_pair_in_either_order_is_one_leaf() -> None:
         "type V4 = Annotated[ipaddress.IPv4Interface | None, 1]\nT = Annotated[V4 | ipaddress.IPv6Interface, 2]",
     ],
 )
-def test_network_pair_split_across_nested_unions_is_one_nullable_leaf(source: str) -> None:
+def test_network_pair_split_across_nested_unions_is_one_nullable_leaf(source: str, evaluate: Evaluate) -> None:
     assert row_plan(evaluate(source)) == RowPlan(kind="scalar", arity=1, nullable_mask=(True,))
 
 
-def test_cyclic_union_alias_is_rejected() -> None:
+def test_cyclic_union_alias_is_rejected(evaluate: Evaluate) -> None:
     with pytest.raises(InterfaceError):
         row_plan(evaluate("type A = A | int\nT = A"))
 
 
 @pytest.mark.parametrize("subtype", ["int", "decimal.Decimal", "datetime.date", "datetime.datetime"])
-def test_range_is_a_non_nullable_leaf_for_each_subtype(subtype: str) -> None:
+def test_range_is_a_non_nullable_leaf_for_each_subtype(subtype: str, evaluate: Evaluate) -> None:
     assert row_plan(evaluate(f"T = Range[{subtype}]")) == RowPlan(kind="scalar", arity=1, nullable_mask=(False,))
     assert row_plan(evaluate(f"T = Range[{subtype}] | None")) == RowPlan(kind="scalar", arity=1, nullable_mask=(True,))
 
 
-def test_range_subtype_is_looked_through_aliases() -> None:
+def test_range_subtype_is_looked_through_aliases(evaluate: Evaluate) -> None:
     plan = row_plan(evaluate("type N = Annotated[int, 1]\nT = Range[N]"))
     assert plan == RowPlan(kind="scalar", arity=1, nullable_mask=(False,))
 
 
-def test_money_and_interval_are_non_nullable_leaves() -> None:
+def test_money_and_interval_are_non_nullable_leaves(evaluate: Evaluate) -> None:
     assert row_plan(evaluate("T = Money")).nullable_mask == (False,)
     assert row_plan(evaluate("T = Interval | None")).nullable_mask == (True,)
     assert row_plan(evaluate("T = list[list[Money]]")).nullable_mask == (False,)
@@ -122,22 +131,22 @@ def test_money_and_interval_are_non_nullable_leaves() -> None:
         ("type I = Interval\nT = tuple[I | None, str]", (True, False)),
     ],
 )
-def test_interval_leaf_is_marked_per_column(source: str, spans: tuple[bool, ...]) -> None:
+def test_interval_leaf_is_marked_per_column(source: str, spans: tuple[bool, ...], evaluate: Evaluate) -> None:
     assert row_plan(evaluate(source)).interval_mask == spans
 
 
-def test_flags_pack_nullability_and_the_interval_leaf() -> None:
+def test_flags_pack_nullability_and_the_interval_leaf(evaluate: Evaluate) -> None:
     plan = row_plan(evaluate("T = tuple[Interval, datetime.timedelta | None, Interval | None, int]"))
     assert plan.flags == [0b10, 0b01, 0b11, 0b00]
 
 
-def test_interval_and_money_are_rejected_in_unions() -> None:
+def test_interval_and_money_are_rejected_in_unions(evaluate: Evaluate) -> None:
     for source in ("T = Interval | Money", "T = Interval | datetime.timedelta"):
         with pytest.raises(InterfaceError):
             row_plan(evaluate(source))
 
 
-def test_geometric_classes_are_non_nullable_leaves() -> None:
+def test_geometric_classes_are_non_nullable_leaves(evaluate: Evaluate) -> None:
     for name in ("Point", "Line", "LineSegment", "Box", "Path", "Polygon", "Circle"):
         assert row_plan(evaluate(f"T = {name}")).nullable_mask == (False,), name
         assert row_plan(evaluate(f"T = {name} | None")).nullable_mask == (True,), name
@@ -147,20 +156,20 @@ def test_geometric_classes_are_non_nullable_leaves() -> None:
     assert plan.interval_mask == (False, False, False)
 
 
-def test_geometric_classes_are_rejected_in_unions_and_subscripts() -> None:
+def test_geometric_classes_are_rejected_in_unions_and_subscripts(evaluate: Evaluate) -> None:
     for source in ("T = Point | Circle", "T = Point | int", "T = Path | Polygon"):
         with pytest.raises(InterfaceError):
             row_plan(evaluate(source))
 
 
-def test_cube_and_the_hstore_dict_are_non_nullable_leaves() -> None:
+def test_cube_and_the_hstore_dict_are_non_nullable_leaves(evaluate: Evaluate) -> None:
     for leaf in ("Cube", "dict[str, str | None]"):
         assert row_plan(evaluate(f"T = {leaf}")).nullable_mask == (False,), leaf
         assert row_plan(evaluate(f"T = {leaf} | None")).nullable_mask == (True,), leaf
         assert row_plan(evaluate(f"T = list[list[{leaf} | None]]")).nullable_mask == (False,), leaf
 
 
-def test_other_dicts_and_cube_unions_are_rejected() -> None:
+def test_other_dicts_and_cube_unions_are_rejected(evaluate: Evaluate) -> None:
     for source in (
         "T = dict",
         "T = dict[str, str]",
@@ -173,11 +182,15 @@ def test_other_dicts_and_cube_unions_are_rejected() -> None:
             row_plan(evaluate(source))
 
 
-def keys(source: str) -> list[tuple[str, bool, bool]]:
-    return [(f.key, f.nullable, f.required) for f in row_plan(evaluate(source)).fields]
+@pytest.fixture
+def keys(evaluate: Evaluate) -> Keys:
+    def run(source: str) -> list[tuple[str, bool, bool]]:
+        return [(f.key, f.nullable, f.required) for f in row_plan(evaluate(source)).fields]
+
+    return run
 
 
-def test_named_plan_carries_the_form_the_type_name_and_a_shape() -> None:
+def test_named_plan_carries_the_form_the_type_name_and_a_shape(evaluate: Evaluate) -> None:
     t = evaluate("@dataclass\nclass T:\n    id: int\n    name: str | None")
     plan = row_plan(t)
     assert (plan.kind, plan.form, plan.matching, plan.type_name, plan.arity) == ("named", "keyword", "by_name", "T", 2)
@@ -187,7 +200,7 @@ def test_named_plan_carries_the_form_the_type_name_and_a_shape() -> None:
     assert plan.shape.ctor is t  # ty: ignore[unresolved-attribute]
 
 
-def test_named_plan_and_its_shape_are_cached_per_type() -> None:
+def test_named_plan_and_its_shape_are_cached_per_type(evaluate: Evaluate) -> None:
     t = evaluate("@dataclass\nclass T:\n    id: int")
     assert row_plan(t) is row_plan(t)
     assert row_plan(t).shape is row_plan(t).shape
@@ -204,7 +217,7 @@ def test_named_plan_and_its_shape_are_cached_per_type() -> None:
         ("class T(typing_extensions.TypedDict):\n    a: int", "dict", "by_name"),
     ],
 )
-def test_each_form_has_its_form_and_matching(source: str, form: str, matching: str) -> None:
+def test_each_form_has_its_form_and_matching(source: str, form: str, matching: str, evaluate: Evaluate) -> None:
     plan = row_plan(evaluate(source))
     assert (plan.form, plan.matching) == (form, matching)
     assert plan.shape.form == form  # ty: ignore[unresolved-attribute]
@@ -219,23 +232,23 @@ def test_each_form_has_its_form_and_matching(source: str, form: str, matching: s
         "@dataclass(slots=True, frozen=True, kw_only=True)",
     ],
 )
-def test_dataclass_options_do_not_change_the_fields(decorator: str) -> None:
+def test_dataclass_options_do_not_change_the_fields(decorator: str, keys: Keys) -> None:
     assert keys(f"{decorator}\nclass T:\n    a: int\n    b: str | None = None") == [
         ("a", False, True),
         ("b", True, False),
     ]
 
 
-def test_dataclass_kw_only_markers_are_ordinary_fields() -> None:
+def test_dataclass_kw_only_markers_are_ordinary_fields(keys: Keys) -> None:
     source = "@dataclass\nclass T:\n    a: int\n    _: KW_ONLY\n    b: int\n    c: int = field(kw_only=True, default=0)"
     assert keys(source) == [("a", False, True), ("b", False, True), ("c", False, False)]
 
 
-def test_dataclass_default_factory_is_not_required() -> None:
+def test_dataclass_default_factory_is_not_required(keys: Keys) -> None:
     assert keys("@dataclass\nclass T:\n    a: list[int] = field(default_factory=list)") == [("a", False, False)]
 
 
-def test_dataclass_fields_are_inherited_across_two_levels_and_a_redeclared_one_keeps_its_place() -> None:
+def test_dataclass_fields_are_inherited_across_two_levels_and_a_redeclared_one_keeps_its_place(keys: Keys) -> None:
     source = (
         "@dataclass\nclass A:\n    a: int\n    b: str\n"
         "@dataclass\nclass B(A):\n    c: int\n"
@@ -244,24 +257,24 @@ def test_dataclass_fields_are_inherited_across_two_levels_and_a_redeclared_one_k
     assert keys(source) == [("a", False, True), ("b", True, True), ("c", False, True), ("d", False, False)]
 
 
-def test_dataclass_members_that_are_not_fields_are_excluded() -> None:
+def test_dataclass_members_that_are_not_fields_are_excluded(keys: Keys) -> None:
     source = "@dataclass\nclass T:\n    a: int\n    c: ClassVar[int] = 0\n    d: int = field(init=False, default=1)"
     assert keys(source) == [("a", False, True)]
 
 
-def test_a_dataclass_with_a_hand_written_init_is_accepted_at_runtime() -> None:
+def test_a_dataclass_with_a_hand_written_init_is_accepted_at_runtime(keys: Keys) -> None:
     source = "@dataclass\nclass T:\n    a: int\n    def __init__(self, a: int) -> None:\n        self.a = a"
     assert keys(source) == [("a", False, True)]
 
 
-def test_namedtuple_defaults_are_not_required_and_a_subclass_adds_no_fields() -> None:
+def test_namedtuple_defaults_are_not_required_and_a_subclass_adds_no_fields(evaluate: Evaluate, keys: Keys) -> None:
     assert keys("class T(NamedTuple):\n    a: int\n    b: str = ''") == [("a", False, True), ("b", False, False)]
     source = "class Base(NamedTuple):\n    a: int\n    b: str | None\nclass T(Base):\n    extra: int"
     assert keys(source) == [("a", False, True), ("b", True, True)]
     assert row_plan(evaluate(source)).type_name == "T"
 
 
-def test_functional_namedtuple_and_typeddict() -> None:
+def test_functional_namedtuple_and_typeddict(keys: Keys) -> None:
     assert keys("T = NamedTuple('T', [('a', int), ('b', str | None)])") == [("a", False, True), ("b", True, True)]
     assert keys("T = TypedDict('T', {'a': int, 'b': str | None}, total=False)") == [
         ("a", False, False),
@@ -269,14 +282,14 @@ def test_functional_namedtuple_and_typeddict() -> None:
     ]
 
 
-def test_typeddict_qualifiers_decide_which_keys_are_required() -> None:
+def test_typeddict_qualifiers_decide_which_keys_are_required(keys: Keys) -> None:
     source = "class T(TypedDict):\n    a: int\n    b: NotRequired[int]\n    c: ReadOnly[int]\n    d: ReadOnly[NotRequired[int | None]]"
     assert keys(source) == [("a", False, True), ("b", False, False), ("c", False, True), ("d", True, False)]
     source = "class T(TypedDict, total=False):\n    a: int\n    b: Required[int]\n    c: ReadOnly[Required[str]]"
     assert keys(source) == [("a", False, False), ("b", False, True), ("c", False, True)]
 
 
-def test_typeddict_total_applies_to_the_declaring_class_only() -> None:
+def test_typeddict_total_applies_to_the_declaring_class_only(keys: Keys) -> None:
     source = (
         "class A(TypedDict):\n    a: int\n    b: str\n"
         "class B(A, total=False):\n    c: int\n"
@@ -285,12 +298,12 @@ def test_typeddict_total_applies_to_the_declaring_class_only() -> None:
     assert keys(source) == [("a", False, True), ("b", True, True), ("c", False, False), ("d", False, True)]
 
 
-def test_typing_extensions_typeddict_qualifiers() -> None:
+def test_typing_extensions_typeddict_qualifiers(keys: Keys) -> None:
     source = "class T(typing_extensions.TypedDict):\n    a: typing_extensions.ReadOnly[int]\n    b: typing_extensions.NotRequired[str]"
     assert keys(source) == [("a", False, True), ("b", False, False)]
 
 
-def test_annotated_fields_and_a_type_alias_naming_the_class() -> None:
+def test_annotated_fields_and_a_type_alias_naming_the_class(evaluate: Evaluate, keys: Keys) -> None:
     source = (
         "@dataclass\nclass U:\n    a: Annotated[int, 'x']\n    b: Annotated[str | None, 1]\ntype Alias = U\nT = Alias"
     )
@@ -298,7 +311,7 @@ def test_annotated_fields_and_a_type_alias_naming_the_class() -> None:
     assert row_plan(evaluate(source)).type_name == "U"
 
 
-def test_leaf_typed_fields_mark_intervals_and_ranges() -> None:
+def test_leaf_typed_fields_mark_intervals_and_ranges(evaluate: Evaluate) -> None:
     plan = row_plan(
         evaluate(
             "@dataclass\nclass T:\n    i: Interval\n    j: Interval | None\n    t: datetime.timedelta\n    r: Range[int]"
@@ -308,7 +321,7 @@ def test_leaf_typed_fields_mark_intervals_and_ranges() -> None:
     assert plan.flags == [0b10, 0b11, 0b00, 0b00]
 
 
-def test_a_field_typed_none_is_nullable() -> None:
+def test_a_field_typed_none_is_nullable(keys: Keys) -> None:
     assert keys("class T(TypedDict):\n    v: None") == [("v", True, True)]
 
 
@@ -321,16 +334,16 @@ def test_a_field_typed_none_is_nullable() -> None:
         ("T = tuple[Money, Point]", "tuple"),
     ],
 )
-def test_value_classes_stay_leaves_though_they_are_dataclasses(source: str, kind: str) -> None:
+def test_value_classes_stay_leaves_though_they_are_dataclasses(source: str, kind: str, evaluate: Evaluate) -> None:
     assert row_plan(evaluate(source)).kind == kind
 
 
-def test_the_bare_range_class_is_not_a_named_row() -> None:
+def test_the_bare_range_class_is_not_a_named_row(evaluate: Evaluate) -> None:
     with pytest.raises(InterfaceError):
         row_plan(evaluate("T = Range"))
 
 
-def test_an_annotation_imported_only_under_type_checking_names_the_field_and_the_name() -> None:
+def test_an_annotation_imported_only_under_type_checking_names_the_field_and_the_name(evaluate: Evaluate) -> None:
     source = (
         "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from fractions import Fraction\n"
         "@dataclass\nclass T:\n    id: int\n    ratio: list[Fraction]"
@@ -362,7 +375,7 @@ def test_an_annotation_imported_only_under_type_checking_names_the_field_and_the
         ("class T(TypedDict):\n    a: int | str", "field 'a' of T"),
     ],
 )
-def test_named_rejections_have_their_messages(source: str, message: str) -> None:
+def test_named_rejections_have_their_messages(source: str, message: str, evaluate: Evaluate) -> None:
     with pytest.raises(InterfaceError, match=message):
         row_plan(evaluate(source))
 
@@ -574,7 +587,7 @@ def test_typeddict_requiredness_uses_each_declaring_class_total_across_modules(
         "class P2(Point): ...\nT = P2 | None",
     ],
 )
-def test_a_subclass_of_a_value_class_is_not_a_row_type(source: str) -> None:
+def test_a_subclass_of_a_value_class_is_not_a_row_type(source: str, evaluate: Evaluate) -> None:
     with pytest.raises(InterfaceError, match=r"a subclass of rowx\.postgres\.\w+ is not a row type"):
         row_plan(evaluate(source))
 
@@ -590,6 +603,31 @@ def test_a_subclass_of_a_value_class_is_not_a_row_type(source: str) -> None:
         "S = TypeVar('S')\nclass T(NamedTuple, typing.Generic[S]):\n    a: S",
     ],
 )
-def test_generic_row_types_are_rejected_until_189(source: str) -> None:
+def test_generic_row_types_are_rejected_until_189(source: str, evaluate: Evaluate) -> None:
     with pytest.raises(InterfaceError, match="generic row types are not supported yet"):
         row_plan(evaluate(source))
+
+
+def test_a_quoted_initvar_alias_naming_a_missing_name_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = (
+        "from dataclasses import dataclass, InitVar as IVA\n"
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n    from decimal import Decimal\n"
+        "@dataclass\nclass T:\n    a: int\n    b: 'IVA[Decimal]'\n"
+    )
+    module = load_module(tmp_path, monkeypatch, "initvar_alias", source)
+    with pytest.raises(InterfaceError, match="InitVar field 'b' is not supported"):
+        row_plan(module.T)
+
+
+def test_a_quoted_classvar_naming_a_missing_name_still_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = (
+        "from dataclasses import dataclass\n"
+        "from typing import TYPE_CHECKING, ClassVar\n"
+        "if TYPE_CHECKING:\n    from decimal import Decimal\n"
+        "@dataclass\nclass T:\n    a: int\n    b: 'ClassVar[Decimal]' = None\n"
+    )
+    module = load_module(tmp_path, monkeypatch, "classvar_quoted", source)
+    assert [f.key for f in row_plan(module.T).fields] == ["a"]

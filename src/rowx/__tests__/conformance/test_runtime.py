@@ -3,7 +3,7 @@ import sys
 import types
 from dataclasses import dataclass, field
 from string.templatelib import Template
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -14,6 +14,11 @@ from rowx._core.postgres import RowShape
 from rowx._rowplan import row_plan
 from rowx.errors import InterfaceError
 from rowx.postgres import Connection, connect
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+type Evaluate = Callable[[str], object]
 
 
 @dataclass(slots=True)
@@ -34,12 +39,16 @@ class FakeImpl:
         return []
 
 
-def evaluate(source: str) -> object:
-    # a class resolves its annotations in its module, so the source runs in a registered one
-    module = types.ModuleType("conformance_row")
-    sys.modules["conformance_row"] = module
-    exec(PRELUDE + source, module.__dict__)  # ruff: ignore[exec-builtin]
-    return module.T
+@pytest.fixture
+def evaluate(monkeypatch: pytest.MonkeyPatch) -> Evaluate:
+    def run(source: str) -> object:
+        # a class resolves its annotations in its module, so the source runs in a registered one that goes with the test
+        module = types.ModuleType("conformance_row")
+        monkeypatch.setitem(sys.modules, "conformance_row", module)
+        exec(PRELUDE + source, module.__dict__)  # ruff: ignore[exec-builtin]
+        return module.T
+
+    return run
 
 
 def fetch_plan(t: object) -> Plan | NamedPlan:
@@ -66,6 +75,7 @@ def test_conformance_row_at_first_fetch(
     source: str,
     expected: Plan | NamedPlan | str,
     _verdict: str,
+    evaluate: Evaluate,
 ) -> None:
     t = evaluate(source)
     if isinstance(expected, str):
@@ -78,7 +88,7 @@ def test_conformance_row_at_first_fetch(
         assert fetch_plan(t) == expected
 
 
-def test_interval_leaf_reaches_the_driver_as_flag_bit_one() -> None:
+def test_interval_leaf_reaches_the_driver_as_flag_bit_one(evaluate: Evaluate) -> None:
     impl = FakeImpl()
     conn = Connection(impl)  # ty: ignore[invalid-argument-type]
     row = evaluate("T = tuple[Interval, datetime.timedelta, Interval | None]")
@@ -118,7 +128,7 @@ NAMED_PLAN_ROWS: Final[list[tuple[str, NamedPlan]]] = [
 
 @pytest.mark.parametrize(("source", "expected"), NAMED_PLAN_ROWS)
 def test_the_shape_built_for_a_named_row_carries_the_required_and_nullable_flags(
-    monkeypatch: pytest.MonkeyPatch, source: str, expected: NamedPlan
+    monkeypatch: pytest.MonkeyPatch, source: str, expected: NamedPlan, evaluate: Evaluate
 ) -> None:
     _, form, matching, fields = expected
     shape_form, shape_matching, shape_fields = build_shape_arguments(monkeypatch, evaluate(source))
@@ -129,7 +139,9 @@ def test_the_shape_built_for_a_named_row_carries_the_required_and_nullable_flags
     ]
 
 
-def test_the_shape_built_for_interval_fields_carries_flag_bit_one(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_shape_built_for_interval_fields_carries_flag_bit_one(
+    monkeypatch: pytest.MonkeyPatch, evaluate: Evaluate
+) -> None:
     source = "@dataclass\nclass T:\n    i: Interval\n    j: Interval | None\n    d: datetime.timedelta\n    k: list[Interval]"
     *_, shape_fields = build_shape_arguments(monkeypatch, evaluate(source))
     assert [flag for *_, flag in shape_fields] == [0b10, 0b11, 0b00, 0b10]
@@ -146,7 +158,7 @@ DB_EXPECTED: Final[list[object]] = [1, (1, None), [1, None]]
 @pytest.mark.integration
 @pytest.mark.db
 @pytest.mark.parametrize(("row", "expected"), list(zip(DB_ROWS, DB_EXPECTED, strict=True)), ids=[r[0] for r in DB_ROWS])
-def test_conformance_ok_row_against_db(schema: str, row: tuple[str, str], expected: object) -> None:
+def test_conformance_ok_row_against_db(schema: str, row: tuple[str, str], expected: object, evaluate: Evaluate) -> None:
     source, sql = row
     t = evaluate(source)
 

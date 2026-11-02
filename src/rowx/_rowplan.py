@@ -11,6 +11,7 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
+    ClassVar,
     Final,
     ForwardRef,
     Literal,
@@ -69,8 +70,8 @@ type Matching = Literal["by_name", "positional"]
 # the wrappers a named type's field annotation may carry around its element
 FIELD_QUALIFIERS: Final[dict[str, object]] = {"Required": Required, "NotRequired": NotRequired, "ReadOnly": ReadOnly}
 
-# the text of an `InitVar` annotation that stayed a string (`from __future__ import annotations`)
-INITVAR_TEXT: Final[re.Pattern[str]] = re.compile(r"^\s*(?:\w+\.)*InitVar\b")
+# the text of a `ClassVar` annotation that stayed a string (`from __future__ import annotations`)
+CLASSVAR_TEXT: Final[re.Pattern[str]] = re.compile(r"^\s*(?:\w+\.)*ClassVar\b")
 
 # the names `rowx.postgres` value classes are looked up by, as `(module, class)`
 VALUE_CLASSES: Final[tuple[tuple[str, str], ...]] = (
@@ -349,6 +350,8 @@ def _declared_typeddict(t: type) -> dict[str, tuple[type, object]]:
     out: dict[str, tuple[type, object]] = {}
     for key, annotation in get_annotations(t, format=Format.FORWARDREF).items():
         owned = inherited.get(key)
+        # attributing an equal redeclared key to the base is safe: TypedDict `ForwardRef`s carry their module, so a
+        # same-text redeclaration from another module compares unequal
         out[key] = owned if owned is not None and owned[1] == annotation else (t, annotation)
     return out
 
@@ -393,9 +396,12 @@ def _is_initvar(t: type, key: str, declared: dict[str, tuple[type, object]]) -> 
     try:
         resolved = _resolve(klass, annotation, key)
     except NameError:
-        # an unresolvable annotation is only an `InitVar` when its text says so
+        # `fields()` only drops a `ClassVar` or an `InitVar`, so an unresolvable one that is no `ClassVar` is an
+        # `InitVar`, whatever alias it is spelled with
         text = annotation.__forward_arg__ if isinstance(annotation, ForwardRef) else annotation
-        return isinstance(text, str) and INITVAR_TEXT.match(text) is not None
+        if isinstance(text, str):
+            return CLASSVAR_TEXT.match(text) is None
+        return annotation is not ClassVar and get_origin(annotation) is not ClassVar
     return resolved is InitVar or isinstance(resolved, InitVar)
 
 
