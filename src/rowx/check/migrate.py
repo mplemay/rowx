@@ -2,9 +2,8 @@ import asyncio
 import json
 import sys
 from argparse import ArgumentTypeError, BooleanOptionalAction, Namespace
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Final
@@ -12,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Final
 from rowx.check.config import Config, MigrateConfig, database_url, load_config
 from rowx.check.runner import CheckError, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
-from rowx.postgres import Migrator, connect
+from rowx.postgres import ConnectOptions, Migrator, connect
 
 if TYPE_CHECKING:
     from argparse import ArgumentParser, _SubParsersAction
@@ -35,6 +34,8 @@ DEFAULT_CONNECT_TIMEOUT: Final[float] = 10.0
 STARTING_UP: Final[str] = "57P03"
 RETRY_FIRST: Final[float] = 0.05
 RETRY_MAX: Final[float] = 0.5
+# the driver reads a zero timeout as none, so an attempt always gets at least this long
+MIN_ATTEMPT: Final[float] = 0.001
 NANOS_PER_MICRO: Final[int] = 1000
 TIP: Final[str] = (
     "tip: add a [tool.rowx.migrate] table to pyproject.toml to set the migrations directory "
@@ -115,31 +116,44 @@ def add_connect_timeout(parser: ArgumentParser) -> None:
     )
 
 
-# retries `probe` while the server is unreachable or starting up (57P03), until `seconds` seconds have passed
-async def wait_for_server(probe: Callable[[], Awaitable[object]], seconds: float) -> None:
+def connect_options(dsn: str) -> ConnectOptions:
+    try:
+        return ConnectOptions.from_dsn(dsn)
+    except Exception as error:
+        # the parser's message can quote the DSN, so it is not repeated
+        msg = "the database URL could not be parsed"
+        raise CheckError(msg) from error
+
+
+# `options` with its connect timeout cut to the `remaining` seconds, keeping a shorter one from the URL
+def bounded(options: ConnectOptions, remaining: float) -> ConnectOptions:
+    limit = max(remaining, MIN_ATTEMPT)
+    # zero is no timeout, as in libpq
+    if options.connect_timeout is not None and options.connect_timeout > 0:
+        limit = min(limit, options.connect_timeout)
+    return replace(options, connect_timeout=limit)
+
+
+# calls `attempt` until it succeeds, retrying connection failures and a starting-up server (57P03) until `seconds`
+# have passed. Each attempt is bounded by the time left, none starts after the deadline, and the last failure is the
+# error; `0` makes one attempt with the URL's own timeout
+async def wait_for_server[T](
+    attempt: Callable[[ConnectOptions], Awaitable[T]], options: ConnectOptions, seconds: float
+) -> T:
     deadline = monotonic() + seconds
     delay = RETRY_FIRST
     while True:
         try:
-            await probe()
-        except InterfaceError:
-            pass
-        except DatabaseError as error:
-            if error.sqlstate != STARTING_UP:
+            return await attempt(bounded(options, deadline - monotonic()) if seconds > 0 else options)
+        except (InterfaceError, DatabaseError) as error:
+            if isinstance(error, DatabaseError) and error.sqlstate != STARTING_UP:
                 raise
-        else:
-            return
-        if (remaining := deadline - monotonic()) <= 0:
-            # one last attempt raises the real error
-            await probe()
-            return
-        await asyncio.sleep(min(delay, remaining))
+            if (remaining := deadline - monotonic()) <= 0:
+                raise
+            await asyncio.sleep(min(delay, remaining))
+            if deadline - monotonic() <= 0:
+                raise
         delay = min(delay * 2, RETRY_MAX)
-
-
-async def probe_connection(dsn: str) -> None:
-    async with await connect(dsn):
-        pass
 
 
 def resolve_target(config: Config, source: Path | None) -> Target:
@@ -322,8 +336,8 @@ def _line(
 
 async def _database_command(target: Target, args: Namespace, dsn: str) -> None:
     migrator = _load(target, args)
-    await wait_for_server(partial(probe_connection, dsn), args.connect_timeout)
-    async with await connect(dsn) as conn:
+    # only the connection is retried, never the command, and it is the one the command uses
+    async with await wait_for_server(connect, connect_options(dsn), args.connect_timeout) as conn:
         match args.migrate_command:
             case "run":
                 await _run(migrator, conn, args)

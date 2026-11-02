@@ -17,7 +17,7 @@ from rowx.check.cli import main
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
 
-    from rowx.postgres import Connection
+    from rowx.postgres import Connection, ConnectOptions
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -554,9 +554,8 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
+# nothing listens on its port until `start` is called; then it forwards to a real server
 class Proxy:
-    """Nothing listens on its port until `start` is called; then it forwards to a real server."""
-
     def __init__(self, upstream: tuple[str, int]) -> None:
         self.upstream = upstream
         self.listener = socket.socket()
@@ -610,9 +609,9 @@ def watched_connects(monkeypatch: pytest.MonkeyPatch, on_failure: Callable[[], N
     attempts: list[bool] = []
     original = module.connect
 
-    async def spy(dsn: str) -> Connection:
+    async def spy(options: ConnectOptions) -> Connection:
         try:
-            conn = await original(dsn)
+            conn = await original(options)
         except Exception:
             attempts.append(True)
             on_failure()
@@ -648,6 +647,8 @@ def test_connect_timeout_retries_until_the_server_accepts(
         proxy.close()
     assert result == (0, golden("migrate_run.txt"), "")
     assert attempts[0] is True
+    # the connection that succeeded is the one the command used: no probe, no second connection
+    assert attempts.count(False) == 1
     assert attempts[-1] is False
     assert applied_versions(schema) == [1, 2]
 
@@ -662,8 +663,8 @@ def test_connect_timeout_gives_up_after_the_timeout(
     assert (code, out) == (2, "")
     assert err.startswith("error: could not reach the database")
     assert secret not in err
-    # it retried: more than one attempt, plus the final one that reports the error
-    assert len(attempts) > 2
+    # it retried, and the last failure is the error: no extra attempt to report it
+    assert len(attempts) > 1
     assert all(attempts)
 
 
@@ -672,9 +673,38 @@ def test_a_zero_connect_timeout_tries_once(
 ) -> None:
     dsn = f"postgresql://u:p@127.0.0.1:{free_port()}/nope"
     with watched_connects(monkeypatch, lambda: None) as attempts:
-        code, _, _ = cli(capsys, dsn, migrations, "info", "--connect-timeout", "0")
+        code, _, err = cli(capsys, dsn, migrations, "info", "--connect-timeout", "0")
     assert code == 2
-    assert len(attempts) == 2
+    assert err.startswith("error: could not reach the database")
+    assert attempts == [True]
+
+
+# a listener that completes the TCP handshake but never answers, like a host that drops the startup packet
+@contextmanager
+def silent_listener() -> Generator[int]:
+    with closing(socket.socket()) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        yield int(listener.getsockname()[1])
+
+
+# runs `call` on a thread so a hang fails the test instead of blocking it
+def finishes(call: Callable[[], object]) -> bool:
+    thread = threading.Thread(target=call, daemon=True)
+    thread.start()
+    thread.join(WAIT_LIMIT)
+    return not thread.is_alive()
+
+
+def test_connect_timeout_bounds_an_attempt_to_a_server_that_never_answers(
+    migrations: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results: list[tuple[int, str, str]] = []
+    with silent_listener() as port, watched_connects(monkeypatch, lambda: None) as attempts:
+        dsn = f"postgresql://u:pw@127.0.0.1:{port}/nope"
+        assert finishes(lambda: results.append(cli(capsys, dsn, migrations, "info", "--connect-timeout", "0.5")))
+    assert results == [(2, "", "error: could not reach the database: connection timed out\n")]
+    assert attempts == [True]
 
 
 def test_a_wrong_password_is_not_retried(

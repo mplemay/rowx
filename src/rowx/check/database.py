@@ -1,11 +1,11 @@
 import sys
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rowx.check.config import load_config
 from rowx.check.migrate import (
     add_connect_timeout,
+    connect_options,
     load_migrator,
     require_url,
     resolve_target,
@@ -14,7 +14,6 @@ from rowx.check.migrate import (
     wait_for_server,
 )
 from rowx.check.runner import CheckError
-from rowx.postgres import ConnectOptions
 from rowx.postgres._admin import create_database, database_exists, drop_database
 
 if TYPE_CHECKING:
@@ -45,12 +44,7 @@ def add_parsers(subparsers: _SubParsersAction[ArgumentParser]) -> None:
 
 
 def _name(dsn: str) -> str:
-    try:
-        name = ConnectOptions.from_dsn(dsn).database
-    except Exception as error:
-        # the parser's message can quote the DSN, so it is not repeated
-        msg = "the database URL could not be parsed"
-        raise CheckError(msg) from error
+    name = connect_options(dsn).database
     if name is None or not name.strip():
         msg = "the database URL names no database"
         raise CheckError(msg)
@@ -87,7 +81,10 @@ async def _drop(dsn: str, name: str, *, force: bool) -> None:
 # waits for the server (through the maintenance database), then runs `work`
 async def _ready(dsn: str, name: str, args: Namespace, work: Coroutine[Any, Any, None]) -> None:
     try:
-        await wait_for_server(partial(database_exists, dsn, name), args.connect_timeout)
+        # a probe through the maintenance database: the work opens its own connections, and is never retried
+        await wait_for_server(
+            lambda options: database_exists(options, name), connect_options(dsn), args.connect_timeout
+        )
     except BaseException:
         work.close()
         raise

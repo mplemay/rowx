@@ -666,9 +666,11 @@ the drift gate (`ignore_missing` lets `missing` pass), `rowx check --scratch`, a
 `--ignore-missing` and `--allow-out-of-order` turn a policy on for one command, and `--no-ignore-missing` and
 `--no-allow-out-of-order` turn it off when the config has it on.
 
-`--connect-timeout SECONDS` (default 10) on `rowx migrate` and `rowx database` retries while the server refuses
-connections or is starting up (`57P03`), so a command run right after `docker compose up` waits for the database.
-`--connect-timeout 0` tries once. An authentication error or any other server error is not retried.
+`--connect-timeout SECONDS` (default 10) on `rowx migrate` and `rowx database` retries while the server can't be
+reached or is starting up (`57P03`), so a command run right after `docker compose up` waits for the database. Each
+attempt is cut off when the time runs out, so a host that never answers fails after the timeout instead of hanging.
+`--connect-timeout 0` tries once, limited only by the URL's own `connect_timeout`. An authentication error or any other
+server error is not retried, and only connecting is retried, never the command itself.
 
 `rowx database` manages the database itself, from the same URL:
 
