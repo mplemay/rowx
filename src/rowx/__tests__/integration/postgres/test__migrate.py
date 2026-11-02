@@ -646,3 +646,149 @@ def test_two_migrators_on_one_database_both_finish(schema: str, tmp_path: Path) 
 
     # one applied it, the other waited on the lock and found nothing to do
     assert asyncio.run(run()) == [0, 1]
+
+
+async def wait_for_statement(observer: Connection, pids: list[int], needle: str) -> None:
+    for _ in range(POLL_LIMIT):
+        if await query[bool](
+            t"SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = ANY({pids}) AND state = 'active' AND query LIKE {needle})",
+        ).one(observer):
+            return
+    pytest.fail("the migration never started")
+
+
+async def wait_for_no_lock(observer: Connection, pid: int) -> None:
+    for _ in range(POLL_LIMIT):
+        if await advisory_locks(observer, pid) == 0:
+            return
+    pytest.fail("the advisory lock was never released")
+
+
+@pytest.mark.timing
+def test_a_cancelled_transactional_run_on_a_connection_leaves_no_row_and_no_lock(
+    schema: str,
+    tmp_path: Path,
+) -> None:
+    write(tmp_path, "1_slow.sql", "CREATE TABLE cancelled_conn (id int4); SELECT pg_sleep(31);")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn, await connect(schema) as observer:
+            pid = await backend_pid(conn)
+            task = asyncio.ensure_future(migrator.run(conn))
+            await wait_for_statement(observer, [pid], "%pg_sleep(31)%")
+            assert await advisory_locks(observer, pid) == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            # the next query waits for the cancelled run to settle, and then succeeds
+            assert await query[int](t"SELECT 1").one(conn) == 1
+            assert await advisory_locks(observer, pid) == 0
+            assert await history(conn) == []
+            assert not await table_exists(conn, "cancelled_conn")
+
+    asyncio.run(run())
+
+
+@pytest.mark.timing
+def test_a_cancel_during_the_first_migration_stops_the_second_from_running(schema: str, tmp_path: Path) -> None:
+    # the first file swallows the cancel, so only the executor's check keeps the second from starting
+    write(
+        tmp_path,
+        "1_stubborn.sql",
+        "DO $$ BEGIN PERFORM pg_sleep(32); EXCEPTION WHEN query_canceled THEN NULL; END $$;",
+    )
+    write(tmp_path, "2_second.sql", "CREATE TABLE second_never (id int4);")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn, await connect(schema) as observer:
+            pid = await backend_pid(conn)
+            task = asyncio.ensure_future(migrator.run(conn))
+            await wait_for_statement(observer, [pid], "%pg_sleep(32)%")
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await query[int](t"SELECT 1").one(conn) == 1
+            assert await advisory_locks(observer, pid) == 0
+            assert 2 not in [version for version, _ in await history(conn)]
+            assert not await table_exists(conn, "second_never")
+
+    asyncio.run(run())
+
+
+@pytest.mark.timing
+def test_a_cancelled_run_on_a_pool_without_a_reset_query_leaves_no_lock(schema: str, tmp_path: Path) -> None:
+    write(tmp_path, "1_slow.sql", "SELECT pg_sleep(33);")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with (
+            Pool(schema, max_size=1, acquire_timeout=10, reset_query=None) as pool,
+            await connect(schema) as observer,
+        ):
+            pid = await backend_pid(pool)
+            task = asyncio.ensure_future(migrator.run(pool))
+            await wait_for_statement(observer, [pid], "%pg_sleep(33)%")
+            assert await advisory_locks(observer, pid) == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await wait_for_no_lock(observer, pid)
+            # whatever the pool kept or discarded, a connection from it holds no migrator lock
+            new_pid = await backend_pid(pool)
+            assert await advisory_locks(observer, new_pid) == 0
+            assert await history(pool) == []
+
+    asyncio.run(run())
+
+
+def test_a_failed_unlock_discards_the_pooled_connection(schema: str, tmp_path: Path) -> None:
+    # the file terminates its own backend, so neither the rollback nor the unlock can run
+    write(tmp_path, "1_kill.sql", "SELECT pg_terminate_backend(pg_backend_pid()); SELECT pg_sleep(34);")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with (
+            Pool(schema, max_size=1, acquire_timeout=10, reset_query=None) as pool,
+            await connect(schema) as observer,
+        ):
+            pid = await backend_pid(pool)
+            with pytest.raises((MigrationFailedError, DatabaseError, InterfaceError)):
+                await migrator.run(pool)
+            new_pid = await backend_pid(pool)
+            assert new_pid != pid
+            assert await advisory_locks(observer, pid) == 0
+            assert pool.size == 1
+
+    asyncio.run(run())
+
+
+def test_a_file_ending_in_rollback_fails_and_records_nothing(schema: str, tmp_path: Path) -> None:
+    write(tmp_path, "1_rollback.sql", "CREATE TABLE ended_rollback (id int4); ROLLBACK;")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            with pytest.raises(MigrationFailedError, match="ended rowx's transaction"):
+                await migrator.run(conn)
+            assert await history(conn) == []
+            assert not await table_exists(conn, "ended_rollback")
+            assert await query[int](t"SELECT 1").one(conn) == 1
+
+    asyncio.run(run())
+
+
+def test_a_file_ending_in_commit_fails_but_its_changes_stay_committed(schema: str, tmp_path: Path) -> None:
+    write(tmp_path, "1_commit.sql", "CREATE TABLE ended_commit (id int4); COMMIT;")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            with pytest.raises(MigrationFailedError, match="stays committed"):
+                await migrator.run(conn)
+            # the file committed its own DDL before the probe, so it stays, unrecorded
+            assert await history(conn) == []
+            assert await table_exists(conn, "ended_commit")
+
+    asyncio.run(run())

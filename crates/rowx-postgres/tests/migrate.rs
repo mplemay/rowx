@@ -5,6 +5,7 @@ use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use common::TestResult;
@@ -25,6 +26,8 @@ use rowx_postgres::pool::{PgManager, Pool, PoolOptions, RESET_QUERY};
 use tokio::runtime::Handle;
 
 const TABLE: &str = "_rowx_migrations";
+// a flag nobody sets, for runs that are never cancelled
+static LIVE: AtomicBool = AtomicBool::new(false);
 
 fn versions(details: Vec<MigrationDetail>) -> Vec<i64> {
     details.into_iter().map(|d| d.info.version).collect()
@@ -185,13 +188,13 @@ async fn applies_reapplies_and_stops_at_a_target() -> TestResult {
         simple(3, "CREATE TABLE c (i int)"),
     ];
 
-    let first = versions(run(&conn, &config(), &all, target(2)).await?);
+    let first = versions(run(&conn, &config(), &all, target(2), &LIVE).await?);
     assert_eq!(first, [1, 2]);
     assert_eq!(history(&conn, TABLE).await?, [(1, true), (2, true)]);
 
-    let rest = versions(run(&conn, &config(), &all, PlanOptions::default()).await?);
+    let rest = versions(run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?);
     assert_eq!(rest, [3]);
-    let again = versions(run(&conn, &config(), &all, PlanOptions::default()).await?);
+    let again = versions(run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?);
     assert_eq!(again.len(), 0);
     assert_eq!(history(&conn, TABLE).await?.len(), 3);
 
@@ -222,13 +225,29 @@ async fn a_failing_transactional_migration_leaves_nothing() -> TestResult {
         simple(2, "CREATE TABLE partial (i int); SELECT 1/0"),
     ];
 
-    let err = run(&conn, &config(), &all, PlanOptions::default()).await;
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await;
     let err = err.err().ok_or("expected a failure")?;
     assert!(
         matches!(err, MigrateError::Failed { version: 2, .. }),
         "{err:?}"
     );
     assert_eq!(sqlstate(&err), Some("22012"));
+    // the results of the migrations applied before the failure travel with it, and the row isn't dirty
+    match &err {
+        MigrateError::Failed {
+            dirty,
+            ended_transaction,
+            applied,
+            ..
+        } => {
+            assert!(!dirty && !ended_transaction);
+            assert_eq!(
+                applied.iter().map(|d| d.info.version).collect::<Vec<_>>(),
+                [1]
+            );
+        }
+        other => return Err(format!("unexpected {other:?}").into()),
+    }
 
     assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
     assert_eq!(
@@ -256,7 +275,7 @@ async fn a_failure_without_locking_still_leaves_no_open_transaction() -> TestRes
         ..config()
     };
     let up = [simple(1, "CREATE TABLE partial (i int); SELECT 1/0")];
-    let err = run(&conn, &unlocked, &up, PlanOptions::default()).await;
+    let err = run(&conn, &unlocked, &up, PlanOptions::default(), &LIVE).await;
     assert!(
         matches!(err, Err(MigrateError::Failed { version: 1, .. })),
         "{err:?}"
@@ -277,13 +296,22 @@ async fn a_failure_without_locking_still_leaves_no_open_transaction() -> TestRes
                 &conn,
                 &unlocked,
                 &[up.clone(), down.clone()],
-                PlanOptions::default()
+                PlanOptions::default(),
+                &LIVE
             )
             .await?
         ),
         [1]
     );
-    let err = undo(&conn, &unlocked, &[up, down], RevertTarget::All, false).await;
+    let err = undo(
+        &conn,
+        &unlocked,
+        &[up, down],
+        RevertTarget::All,
+        false,
+        &LIVE,
+    )
+    .await;
     assert!(
         matches!(err, Err(MigrateError::Failed { version: 1, .. })),
         "{err:?}"
@@ -324,7 +352,7 @@ async fn a_file_that_changes_search_path_keeps_the_history_table() -> TestResult
     .into_iter()
     .flatten()
     .collect();
-    let applied = run(&conn, &config(), &all, PlanOptions::default()).await?;
+    let applied = run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
     // the statuses come from the table resolved before the files moved `search_path`
     assert_eq!(
         applied
@@ -367,7 +395,7 @@ async fn a_file_that_changes_search_path_keeps_the_history_table() -> TestResult
 
     // a fresh session, so the unqualified name resolves to `public` again
     let mut other = db.connect().await?;
-    let reverted = undo(&other, &config(), &all, RevertTarget::All, false).await?;
+    let reverted = undo(&other, &config(), &all, RevertTarget::All, false, &LIVE).await?;
     assert_eq!(
         reverted
             .iter()
@@ -396,6 +424,7 @@ async fn the_server_error_keeps_its_position() -> TestResult {
         &config(),
         &[simple(1, "SELECT 1;\nSELEC 2")],
         PlanOptions::default(),
+        &LIVE,
     )
     .await
     .err()
@@ -406,6 +435,7 @@ async fn the_server_error_keeps_its_position() -> TestResult {
             source: Error::Db {
                 sqlstate, position, ..
             },
+            ..
         } => {
             assert_eq!(&*sqlstate, "42601");
             assert!(position.is_some());
@@ -427,11 +457,15 @@ async fn a_failing_no_transaction_migration_is_dirty_and_blocks_the_next_run() -
         simple(2, "CREATE TABLE after (i int)"),
     ];
 
-    let err = run(&conn, &config(), &all, PlanOptions::default())
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
         .await
         .err()
         .ok_or("expected a failure")?;
     assert_eq!(sqlstate(&err), Some("22012"));
+    assert!(
+        matches!(err, MigrateError::Failed { dirty: true, ref applied, .. } if applied.is_empty()),
+        "{err:?}"
+    );
     assert_eq!(history(&conn, TABLE).await?, [(1, false)]);
     // the file ran as one implicit transaction, so Postgres rolled it back, but the row is dirty anyway
     assert_eq!(
@@ -443,7 +477,7 @@ async fn a_failing_no_transaction_migration_is_dirty_and_blocks_the_next_run() -
         0
     );
 
-    let next = run(&conn, &config(), &all, PlanOptions::default())
+    let next = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
         .await
         .err()
         .ok_or("expected the dirty row to block")?;
@@ -466,7 +500,7 @@ async fn create_index_concurrently_works_only_as_the_sole_statement() -> TestRes
     };
     let mut conn = db.connect().await?;
     let setup = [simple(1, "CREATE TABLE users (email text)")];
-    run(&conn, &config(), &setup, PlanOptions::default()).await?;
+    run(&conn, &config(), &setup, PlanOptions::default(), &LIVE).await?;
 
     let good = [
         setup[0].clone(),
@@ -476,7 +510,7 @@ async fn create_index_concurrently_works_only_as_the_sole_statement() -> TestRes
         ),
     ];
     assert_eq!(
-        versions(run(&conn, &config(), &good, PlanOptions::default()).await?),
+        versions(run(&conn, &config(), &good, PlanOptions::default(), &LIVE).await?),
         [2]
     );
     assert_eq!(
@@ -498,7 +532,7 @@ async fn create_index_concurrently_works_only_as_the_sole_statement() -> TestRes
             "-- no-transaction\nSELECT 1; CREATE INDEX CONCURRENTLY users_email2 ON users (email);",
         ),
     ];
-    let err = run(&conn, &config(), &bad, PlanOptions::default())
+    let err = run(&conn, &config(), &bad, PlanOptions::default(), &LIVE)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -523,7 +557,7 @@ async fn a_no_transaction_file_can_commit_between_enum_steps() -> TestResult {
         ),
     ];
     assert_eq!(
-        versions(run(&conn, &config(), &all, PlanOptions::default()).await?),
+        versions(run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?),
         [1, 2]
     );
     assert_eq!(history(&conn, TABLE).await?, [(1, true), (2, true)]);
@@ -545,10 +579,10 @@ async fn undo_reverts_newest_first_to_a_target_and_to_zero() -> TestResult {
             &format!("DROP TABLE {t}"),
         ));
     }
-    run(&conn, &config(), &all, PlanOptions::default()).await?;
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
 
     assert_eq!(
-        versions(undo(&conn, &config(), &all, RevertTarget::Above(1), false).await?),
+        versions(undo(&conn, &config(), &all, RevertTarget::Above(1), false, &LIVE).await?),
         [3, 2]
     );
     assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
@@ -562,12 +596,12 @@ async fn undo_reverts_newest_first_to_a_target_and_to_zero() -> TestResult {
     );
 
     assert_eq!(
-        versions(undo(&conn, &config(), &all, RevertTarget::All, false).await?),
+        versions(undo(&conn, &config(), &all, RevertTarget::All, false, &LIVE).await?),
         [1]
     );
     assert_eq!(history(&conn, TABLE).await?.len(), 0);
     assert_eq!(
-        versions(undo(&conn, &config(), &all, RevertTarget::All, false).await?).len(),
+        versions(undo(&conn, &config(), &all, RevertTarget::All, false, &LIVE).await?).len(),
         0
     );
     conn.close().await;
@@ -588,19 +622,19 @@ async fn undo_without_a_target_reverts_only_the_latest_and_times_each_revert() -
             &format!("DROP TABLE {t}"),
         ));
     }
-    run(&conn, &config(), &all, PlanOptions::default()).await?;
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
 
-    let reverted = undo(&conn, &config(), &all, RevertTarget::Latest, false).await?;
+    let reverted = undo(&conn, &config(), &all, RevertTarget::Latest, false, &LIVE).await?;
     assert_eq!(versions(reverted.clone()), [5]);
     assert_eq!(reverted[0].info.status, MigrationStatus::Pending);
     assert!(reverted[0].execution_time.is_some_and(|t| t > 0));
     assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
     assert_eq!(
-        versions(undo(&conn, &config(), &all, RevertTarget::Latest, false).await?),
+        versions(undo(&conn, &config(), &all, RevertTarget::Latest, false, &LIVE).await?),
         [1]
     );
     assert_eq!(
-        versions(undo(&conn, &config(), &all, RevertTarget::Latest, false).await?).len(),
+        versions(undo(&conn, &config(), &all, RevertTarget::Latest, false, &LIVE).await?).len(),
         0
     );
     conn.close().await;
@@ -642,7 +676,7 @@ async fn a_dry_run_plans_like_the_real_one_and_changes_nothing() -> TestResult {
     assert_eq!(count(&conn, &tables).await?, 0);
     assert_eq!(advisory_locks(&conn).await?, 0);
 
-    run(&conn, &config(), &all, target(2)).await?;
+    run(&conn, &config(), &all, target(2), &LIVE).await?;
     assert_eq!(
         versions(run_dry(&conn, &config(), &all, PlanOptions::default()).await?),
         [3]
@@ -704,9 +738,9 @@ async fn undo_without_a_down_file_reverts_nothing() -> TestResult {
     let mut conn = db.connect().await?;
     let mut all = reversible(1, "CREATE TABLE a (i int)", "DROP TABLE a").to_vec();
     all.push(simple(2, "CREATE TABLE b (i int)"));
-    run(&conn, &config(), &all, PlanOptions::default()).await?;
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
 
-    let err = undo(&conn, &config(), &all, RevertTarget::All, false)
+    let err = undo(&conn, &config(), &all, RevertTarget::All, false, &LIVE)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -730,9 +764,9 @@ async fn a_failing_transactional_revert_keeps_the_row_and_the_schema() -> TestRe
     };
     let mut conn = db.connect().await?;
     let all = reversible(1, "CREATE TABLE a (i int)", "DROP TABLE a; SELECT 1/0");
-    run(&conn, &config(), &all, PlanOptions::default()).await?;
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
 
-    let err = undo(&conn, &config(), &all, RevertTarget::All, false)
+    let err = undo(&conn, &config(), &all, RevertTarget::All, false, &LIVE)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -761,8 +795,8 @@ async fn a_failing_no_transaction_revert_leaves_a_dirty_row() -> TestResult {
         "CREATE TABLE a (i int)",
         "-- no-transaction\nDROP TABLE nope",
     );
-    run(&conn, &config(), &all, PlanOptions::default()).await?;
-    let err = undo(&conn, &config(), &all, RevertTarget::All, false)
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    let err = undo(&conn, &config(), &all, RevertTarget::All, false, &LIVE)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -775,7 +809,7 @@ async fn a_failing_no_transaction_revert_leaves_a_dirty_row() -> TestResult {
         "CREATE TABLE b (i int)",
         "-- no-transaction\nDROP TABLE b",
     );
-    run(&conn, &config(), &ok, PlanOptions::default())
+    run(&conn, &config(), &ok, PlanOptions::default(), &LIVE)
         .await
         .err()
         .ok_or("the dirty row must block run")?;
@@ -794,9 +828,9 @@ async fn a_no_transaction_revert_deletes_the_row() -> TestResult {
         "CREATE TABLE a (i int)",
         "-- no-transaction\nDROP TABLE a",
     );
-    run(&conn, &config(), &all, PlanOptions::default()).await?;
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
     assert_eq!(
-        versions(undo(&conn, &config(), &all, RevertTarget::All, false).await?),
+        versions(undo(&conn, &config(), &all, RevertTarget::All, false, &LIVE).await?),
         [1]
     );
     assert_eq!(history(&conn, TABLE).await?.len(), 0);
@@ -815,7 +849,7 @@ async fn skip_records_without_running() -> TestResult {
         simple(2, "CREATE TABLE b (i int)"),
     ];
     assert_eq!(
-        versions(skip(&conn, &config(), &all, target(1)).await?),
+        versions(skip(&conn, &config(), &all, target(1), &LIVE).await?),
         [1]
     );
     assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
@@ -829,7 +863,7 @@ async fn skip_records_without_running() -> TestResult {
     );
     // the skipped one counts as applied
     assert_eq!(
-        versions(run(&conn, &config(), &all, PlanOptions::default()).await?),
+        versions(run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?),
         [2]
     );
     let unknown = count(
@@ -858,6 +892,7 @@ async fn a_schema_qualified_table_and_create_schemas() -> TestResult {
         &cfg,
         &[simple(1, "SELECT 1")],
         PlanOptions::default(),
+        &LIVE,
     )
     .await?;
     assert_eq!(history(&conn, "\"my app\".\"history\"").await?, [(1, true)]);
@@ -873,7 +908,7 @@ async fn a_schema_qualified_table_and_create_schemas() -> TestResult {
 
     // a missing schema without create_schemas is the server's error, not a silent creation
     let bare = MigrateConfig::new(table("absent.history"));
-    let err = run(&conn, &bare, &[], PlanOptions::default())
+    let err = run(&conn, &bare, &[], PlanOptions::default(), &LIVE)
         .await
         .err()
         .ok_or("expected a failure")?;
@@ -915,7 +950,7 @@ async fn info_creates_nothing_and_reports_every_state() -> TestResult {
     );
     assert_eq!(list_applied(&conn, &table(TABLE)).await?.len(), 0);
 
-    run(&conn, &cfg, &all[..1], PlanOptions::default()).await?;
+    run(&conn, &cfg, &all[..1], PlanOptions::default(), &LIVE).await?;
     let after = info(&conn, &cfg, &all).await?;
     assert_eq!(after[0].info.status, MigrationStatus::Applied);
     assert!(after[0].installed_on_micros.is_some_and(|t| t > 0));
@@ -925,7 +960,7 @@ async fn info_creates_nothing_and_reports_every_state() -> TestResult {
     let modified = [simple(1, "SELECT 'changed'")];
     let changed = info(&conn, &cfg, &modified).await?;
     assert_eq!(changed[0].info.status, MigrationStatus::Modified);
-    let err = run(&conn, &cfg, &modified, PlanOptions::default()).await;
+    let err = run(&conn, &cfg, &modified, PlanOptions::default(), &LIVE).await;
     assert!(matches!(
         err,
         Err(MigrateError::Plan(PlanError::Checksum { version: 1 }))
@@ -971,7 +1006,7 @@ async fn reads_a_table_and_checksums_written_by_sqlx() -> TestResult {
     assert_eq!(details[0].info.status, MigrationStatus::Applied);
     assert_eq!(details[0].execution_time, Some(12345));
     assert_eq!(
-        versions(run(&conn, &cfg, &all, PlanOptions::default()).await?),
+        versions(run(&conn, &cfg, &all, PlanOptions::default(), &LIVE).await?),
         [20_240_102_000_000]
     );
 
@@ -986,6 +1021,7 @@ async fn reads_a_table_and_checksums_written_by_sqlx() -> TestResult {
         &cfg,
         &[edited, all[1].clone()],
         PlanOptions::default(),
+        &LIVE,
     )
     .await;
     assert!(matches!(
@@ -1032,7 +1068,7 @@ async fn a_mixed_case_table_resolves_to_the_unquoted_table_sqlx_created() -> Tes
     assert_eq!(before[0].info.status, MigrationStatus::Applied);
     assert_eq!(before[0].execution_time, Some(5));
     assert_eq!(
-        versions(run(&conn, &cfg, &all, PlanOptions::default()).await?),
+        versions(run(&conn, &cfg, &all, PlanOptions::default(), &LIVE).await?),
         [2]
     );
     assert_eq!(
@@ -1071,8 +1107,8 @@ async fn a_run_target_below_the_latest_applied_needs_out_of_order() -> TestResul
         simple(2, "CREATE TABLE b (i int)"),
         simple(3, "CREATE TABLE c (i int)"),
     ];
-    run(&conn, &config(), &all[1..], PlanOptions::default()).await?;
-    let denied = run(&conn, &config(), &all, target(1)).await;
+    run(&conn, &config(), &all[1..], PlanOptions::default(), &LIVE).await?;
+    let denied = run(&conn, &config(), &all, target(1), &LIVE).await;
     assert!(
         matches!(
             denied,
@@ -1087,7 +1123,10 @@ async fn a_run_target_below_the_latest_applied_needs_out_of_order() -> TestResul
         allow_out_of_order: true,
         ..target(1)
     };
-    assert_eq!(versions(run(&conn, &config(), &all, allowed).await?), [1]);
+    assert_eq!(
+        versions(run(&conn, &config(), &all, allowed, &LIVE).await?),
+        [1]
+    );
     conn.close().await;
     db.finish().await
 }
@@ -1101,9 +1140,17 @@ async fn revert_targets_and_missing_versions_are_checked_before_reverting() -> T
     let [up1, down1] = reversible(1, "CREATE TABLE a (i int)", "DROP TABLE a");
     let [up2, down2] = reversible(2, "CREATE TABLE b (i int)", "DROP TABLE b");
     let both = [up1.clone(), down1.clone(), up2.clone(), down2.clone()];
-    run(&conn, &config(), &both, PlanOptions::default()).await?;
+    run(&conn, &config(), &both, PlanOptions::default(), &LIVE).await?;
 
-    let too_new = undo(&conn, &config(), &both, RevertTarget::Above(3), false).await;
+    let too_new = undo(
+        &conn,
+        &config(),
+        &both,
+        RevertTarget::Above(3),
+        false,
+        &LIVE,
+    )
+    .await;
     assert!(
         matches!(
             too_new,
@@ -1113,7 +1160,15 @@ async fn revert_targets_and_missing_versions_are_checked_before_reverting() -> T
     );
     // with the files of version 2 gone, reverting it is a missing-file error even with ignore_missing
     let only_first = [up1, down1];
-    let missing = undo(&conn, &config(), &only_first, RevertTarget::All, true).await;
+    let missing = undo(
+        &conn,
+        &config(),
+        &only_first,
+        RevertTarget::All,
+        true,
+        &LIVE,
+    )
+    .await;
     assert!(
         matches!(
             &missing,
@@ -1124,10 +1179,28 @@ async fn revert_targets_and_missing_versions_are_checked_before_reverting() -> T
     // nothing was reverted
     assert_eq!(history(&conn, TABLE).await?, [(1, true), (2, true)]);
     assert_eq!(
-        versions(undo(&conn, &config(), &both, RevertTarget::Above(1), false).await?),
+        versions(
+            undo(
+                &conn,
+                &config(),
+                &both,
+                RevertTarget::Above(1),
+                false,
+                &LIVE
+            )
+            .await?
+        ),
         [2]
     );
-    let beyond = undo(&conn, &config(), &both, RevertTarget::Above(2), false).await;
+    let beyond = undo(
+        &conn,
+        &config(),
+        &both,
+        RevertTarget::Above(2),
+        false,
+        &LIVE,
+    )
+    .await;
     assert!(
         matches!(
             beyond,
@@ -1180,7 +1253,7 @@ async fn concurrent_runs_wait_on_the_lock_then_find_nothing_to_do() -> TestResul
         let conn = db.connect().await?;
         let all = Arc::clone(&all);
         tasks.push(tokio::spawn(async move {
-            let result = run(&conn, &config(), &*all, PlanOptions::default())
+            let result = run(&conn, &config(), &*all, PlanOptions::default(), &LIVE)
                 .await
                 .map(versions)
                 .map_err(|e| e.to_string());
@@ -1228,7 +1301,7 @@ async fn concurrent_runs_wait_on_the_lock_then_find_nothing_to_do() -> TestResul
         simple(2, "SELECT 2"),
     ];
     assert_eq!(
-        versions(run(&free, &unlocked, &more, PlanOptions::default()).await?),
+        versions(run(&free, &unlocked, &more, PlanOptions::default(), &LIVE).await?),
         [2]
     );
     holder.close().await;
@@ -1264,7 +1337,7 @@ async fn cancelled_run(db: &TestDb, file: &str) -> TestResult<(Vec<(i64, bool)>,
     let hook = Hook::default();
     let pending = spawn(&conn.cancel, claim, &hook, async move {
         let guard = inner.lock().await;
-        run(&guard, &config(), &local, PlanOptions::default())
+        run(&guard, &config(), &local, PlanOptions::default(), &LIVE)
             .await
             .map(|_| ())
     });
@@ -1326,5 +1399,278 @@ async fn cancelling_a_no_transaction_migration_leaves_a_dirty_row() -> TestResul
     let (rows, locks) = cancelled_run(&db, "-- no-transaction\nSELECT pg_sleep(600)").await?;
     assert_eq!(rows, [(1, false)]);
     assert_eq!(locks, 0);
+    db.finish().await
+}
+
+async fn table_exists(conn: &Connection, name: &str) -> TestResult<bool> {
+    Ok(count(
+        conn,
+        &format!("SELECT count(*) FROM pg_tables WHERE tablename = '{name}'"),
+    )
+    .await?
+        == 1)
+}
+
+fn ended_transaction(err: &MigrateError, expected_version: i64) -> bool {
+    matches!(
+        err,
+        MigrateError::Failed { version, ended_transaction: true, dirty: false, source: Error::Db { sqlstate, .. }, .. }
+            if *version == expected_version && &**sqlstate == "25P01"
+    )
+}
+
+#[tokio::test]
+async fn a_file_ending_in_rollback_fails_the_probe_and_records_nothing() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let all = [simple(1, "CREATE TABLE rolled (i int); ROLLBACK;")];
+
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(ended_transaction(&err, 1), "{err:?}");
+    assert!(
+        err.to_string().contains("ended rowx's transaction"),
+        "{err}"
+    );
+    // no row (dirty or otherwise) and no DDL
+    assert_eq!(history(&conn, TABLE).await?, []);
+    assert!(!table_exists(&conn, "rolled").await?);
+    assert_eq!(advisory_locks(&conn).await?, 0);
+    // the session is out of any transaction
+    assert_eq!(count(&conn, "SELECT 1::bigint").await?, 1);
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_file_ending_in_commit_fails_the_probe_but_its_ddl_stays() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let all = [simple(1, "CREATE TABLE committed (i int); COMMIT;")];
+
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(ended_transaction(&err, 1), "{err:?}");
+    assert!(err.to_string().contains("stays committed"), "{err}");
+    // the file committed its own DDL before the probe ran, so it stays, unrecorded
+    assert_eq!(history(&conn, TABLE).await?, []);
+    assert!(table_exists(&conn, "committed").await?);
+    assert_eq!(advisory_locks(&conn).await?, 0);
+    assert_eq!(count(&conn, "SELECT 1::bigint").await?, 1);
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_down_file_that_ends_the_transaction_fails_the_probe_and_keeps_the_row() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let all = reversible(1, "CREATE TABLE r (i int)", "DROP TABLE r; COMMIT;");
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+
+    let err = undo(&conn, &config(), &all, RevertTarget::Latest, false, &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(ended_transaction(&err, 1), "{err:?}");
+    // the DROP was committed by the file, but the row was not deleted
+    assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
+    assert!(!table_exists(&conn, "r").await?);
+    assert_eq!(advisory_locks(&conn).await?, 0);
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_file_that_reopens_its_own_transaction_passes_the_probe() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let all = [simple(
+        1,
+        "CREATE TABLE a (i int); COMMIT; BEGIN; CREATE TABLE b (i int);",
+    )];
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    assert_eq!(history(&conn, TABLE).await?, [(1, true)]);
+    assert!(table_exists(&conn, "a").await? && table_exists(&conn, "b").await?);
+    conn.close().await;
+    db.finish().await
+}
+
+// the advisory locks `pid` holds or waits for in the database
+async fn advisory_locks_of(conn: &Connection, pid: i32) -> TestResult<i64> {
+    Ok(conn
+        .client()?
+        .query_one(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = $1",
+            &[&pid],
+        )
+        .await?
+        .get(0))
+}
+
+async fn backend_pid(conn: &Connection) -> TestResult<i32> {
+    Ok(conn
+        .client()?
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await?
+        .get(0))
+}
+
+#[tokio::test]
+async fn info_and_dry_runs_return_while_another_backend_holds_the_lock() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut holder = db.connect().await?;
+    let mut reader = db.connect().await?;
+    let reader_pid = backend_pid(&reader).await?;
+    let all = reversible(1, "CREATE TABLE t (i int)", "DROP TABLE t");
+    run(&holder, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    let more = [
+        all[0].clone(),
+        all[1].clone(),
+        simple(2, "CREATE TABLE u (i int)"),
+    ];
+
+    let holder_pid = backend_pid(&holder).await?;
+    holder
+        .client()?
+        .query("SELECT pg_advisory_lock($1)", &[&lock_key(&db.name)])
+        .await?;
+    assert_eq!(advisory_locks_of(&holder, holder_pid).await?, 1);
+
+    // each returns instead of waiting behind the held lock
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let statuses = info(&reader, &config(), &more).await?;
+        assert_eq!(
+            statuses.iter().map(|d| d.info.status).collect::<Vec<_>>(),
+            [MigrationStatus::Applied, MigrationStatus::Pending]
+        );
+        let planned = run_dry(&reader, &config(), &more, PlanOptions::default()).await?;
+        assert_eq!(versions(planned), [2]);
+        let planned = undo_dry(&reader, &config(), &more, RevertTarget::Latest, false).await?;
+        assert_eq!(versions(planned), [1]);
+        Ok::<_, MigrateError>(())
+    })
+    .await??;
+    // and took no lock of their own, nor created anything
+    assert_eq!(advisory_locks_of(&holder, reader_pid).await?, 0);
+    assert_eq!(history(&holder, TABLE).await?, [(1, true)]);
+    assert!(!table_exists(&holder, "u").await?);
+    holder.close().await;
+    reader.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn reads_create_nothing_in_a_fresh_database_while_the_lock_is_held() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut holder = db.connect().await?;
+    let mut reader = db.connect().await?;
+    holder
+        .client()?
+        .query("SELECT pg_advisory_lock($1)", &[&lock_key(&db.name)])
+        .await?;
+    let all = [simple(1, "SELECT 1")];
+    tokio::time::timeout(Duration::from_secs(20), async {
+        assert_eq!(
+            versions(run_dry(&reader, &config(), &all, PlanOptions::default()).await?),
+            [1]
+        );
+        assert_eq!(info(&reader, &config(), &all).await?.len(), 1);
+        Ok::<_, MigrateError>(())
+    })
+    .await??;
+    assert_eq!(
+        count(
+            &holder,
+            "SELECT count(*) FROM pg_tables WHERE tablename = '_rowx_migrations'"
+        )
+        .await?,
+        0
+    );
+    holder.close().await;
+    reader.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_cancelled_flag_stops_before_any_step_and_releases_the_lock() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let all = [simple(1, "CREATE TABLE never (i int)")];
+    let cancelled = AtomicBool::new(true);
+
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &cancelled)
+        .await
+        .err()
+        .ok_or("expected a stop")?;
+    assert!(matches!(err, MigrateError::Cancelled), "{err:?}");
+    assert!(!err.connection_broken());
+    assert_eq!(history(&conn, TABLE).await?, []);
+    assert!(!table_exists(&conn, "never").await?);
+    assert_eq!(advisory_locks(&conn).await?, 0);
+    conn.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_failed_rollback_or_unlock_reports_a_broken_connection() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let mut observer = db.connect().await?;
+    // the file kills its own backend, so the rollback and the unlock after the failure can't run
+    let all = [simple(
+        1,
+        "SELECT pg_terminate_backend(pg_backend_pid()); SELECT pg_sleep(60)",
+    )];
+
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(err.connection_broken(), "{err:?}");
+    assert!(
+        matches!(err.root(), MigrateError::Failed { version: 1, .. }),
+        "{err:?}"
+    );
+    // the server released the dead session's lock
+    assert_eq!(advisory_locks(&observer).await?, 0);
+    conn.close().await;
+    observer.close().await;
+    db.finish().await
+}
+
+#[tokio::test]
+async fn a_clean_failure_is_not_a_broken_connection() -> TestResult {
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut conn = db.connect().await?;
+    let all = [simple(1, "SELECT 1/0")];
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(!err.connection_broken(), "{err:?}");
+    conn.close().await;
     db.finish().await
 }

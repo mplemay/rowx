@@ -40,6 +40,8 @@ struct Job {
     ignore_missing: bool,
     allow_out_of_order: bool,
     op: Op,
+    // set when the Python future is cancelled, so no step starts after that
+    cancelled: Arc<AtomicBool>,
 }
 
 // a row of the result: version, description, state, installed_on (microseconds since the epoch), execution_time (ns)
@@ -91,22 +93,34 @@ async fn work(conn: &PgConnection, job: &Job) -> Result<Vec<Status>, MigrateErro
     let local = job.migrations.as_slice();
     let details = match job.op {
         Op::Info => pg::info(conn, &job.config, local).await?,
-        Op::Run(target, false) => pg::run(conn, &job.config, local, options(target)).await?,
+        Op::Run(target, false) => {
+            pg::run(conn, &job.config, local, options(target), &job.cancelled).await?
+        }
         Op::Run(target, true) => pg::run_dry(conn, &job.config, local, options(target)).await?,
         Op::Undo(target, false) => {
-            pg::undo(conn, &job.config, local, target, job.ignore_missing).await?
+            pg::undo(
+                conn,
+                &job.config,
+                local,
+                target,
+                job.ignore_missing,
+                &job.cancelled,
+            )
+            .await?
         }
         Op::Undo(target, true) => {
             pg::undo_dry(conn, &job.config, local, target, job.ignore_missing).await?
         }
-        Op::Skip(target) => pg::skip(conn, &job.config, local, options(target)).await?,
+        Op::Skip(target) => {
+            pg::skip(conn, &job.config, local, options(target), &job.cancelled).await?
+        }
     };
     Ok(details.into_iter().map(status).collect())
 }
 
 // the lock and the connection's state follow the same rules as any other statement
 fn note(access: &Access, cancel: &Cancel, err: &MigrateError) {
-    if let MigrateError::Connection(e) | MigrateError::Failed { source: e, .. } = err {
+    if let MigrateError::Connection(e) | MigrateError::Failed { source: e, .. } = err.root() {
         let _ = access.fail(&cancel.state, e.clone());
     }
 }
@@ -114,11 +128,19 @@ fn note(access: &Access, cancel: &Cancel, err: &MigrateError) {
 // An error before the plan's first step changes nothing; any later one may follow committed
 // migrations or a file that changed the schema before it failed, so it drops the plans as well
 fn may_have_changed(op: Op, result: &Result<Vec<Status>, MigrateError>) -> bool {
-    match (op, result) {
+    match (op, result.as_ref().map_err(MigrateError::root)) {
         (Op::Info | Op::Run(_, true) | Op::Undo(_, true), _)
         | (_, Err(MigrateError::Plan(_) | MigrateError::Source(_))) => false,
         (_, Ok(statuses)) => !statuses.is_empty(),
-        (_, Err(MigrateError::Failed { .. } | MigrateError::Connection(_))) => true,
+        (
+            _,
+            Err(
+                MigrateError::Failed { .. }
+                | MigrateError::Connection(_)
+                | MigrateError::Cancelled
+                | MigrateError::Unclean(_),
+            ),
+        ) => true,
     }
 }
 
@@ -132,10 +154,16 @@ async fn run_job(
     let claim = access.settle_claim(&cancel.state, claim).await?;
     let inner = Arc::clone(&cancel.backend.conn);
     let pool = access.pool.clone();
+    let state = Arc::clone(&cancel.state);
     // the invalidation runs in the task, so it also happens when the caller is cancelled
     let pending = cancel::spawn(&cancel, claim, &hook, async move {
         let mut conn = inner.lock().await;
         let result = work(&conn, &job).await;
+        // a rollback or unlock that failed may leave the lock or a transaction on the session; this
+        // runs before the claim is released, so a cancelled settle can't return it to service
+        if result.as_ref().is_err_and(MigrateError::connection_broken) {
+            state.mark_broken();
+        }
         if may_have_changed(job.op, &result) {
             // the connection's own prepared statements may now be stale
             if let Ok((_, cache)) = conn.parts() {
@@ -178,6 +206,7 @@ fn to_list(py: Python<'_>, statuses: Vec<Status>) -> PyResult<Py<PyAny>> {
 }
 
 fn on_connection<'py>(py: Python<'py>, conn: &Connection, job: Job) -> PyResult<Bound<'py, PyAny>> {
+    let flag = Arc::clone(&job.cancelled);
     // claimed synchronously so a second call made before the first is awaited fails immediately
     let claim = conn
         .access
@@ -190,6 +219,8 @@ fn on_connection<'py>(py: Python<'py>, conn: &Connection, job: Job) -> PyResult<
     let future = future_into_py(py, async move {
         run_job(cancel, claim, access, hook, job).await
     })?;
+    // the flag first: callbacks run in order, so no step starts once the cancel is being sent
+    watch_flag(&future, flag)?;
     watch(&future, watched)?;
     Ok(future)
 }
@@ -199,8 +230,8 @@ fn on_pool<'py>(py: Python<'py>, pool: &PgPool, job: Job) -> PyResult<Bound<'py,
     let pool = pool.clone();
     let hook = Hook::default();
     let watched = hook.clone();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&cancelled);
+    let cancelled = Arc::clone(&job.cancelled);
+    let flag = Arc::clone(&job.cancelled);
     let future = future_into_py(py, async move {
         let pooled = pool.acquire().await.map_err(|e| PgError(e.into()))?;
         // a cancelled waiter must never run its migrations
@@ -216,8 +247,8 @@ fn on_pool<'py>(py: Python<'py>, pool: &PgPool, job: Job) -> PyResult<Bound<'py,
         drop(pooled);
         result
     })?;
-    watch(&future, watched)?;
     watch_flag(&future, cancelled)?;
+    watch(&future, watched)?;
     Ok(future)
 }
 
@@ -238,6 +269,7 @@ impl Migrator {
             ignore_missing: self.ignore_missing,
             allow_out_of_order: self.allow_out_of_order,
             op,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 

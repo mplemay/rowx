@@ -83,12 +83,16 @@ pub fn migrate_to_py_err(py: Python<'_>, err: &MigrateError) -> PyErr {
     match err {
         MigrateError::Source(e) => shared::source_error(py, e),
         MigrateError::Plan(e) => shared::plan_error(py, e),
-        MigrateError::Failed { version, source } => {
+        MigrateError::Failed {
+            version, source, ..
+        } => {
             let failed = shared::migration_failed_error(py, *version, &err.to_string());
             failed.set_cause(py, Some(to_py_err(py, source)));
             failed
         }
         MigrateError::Connection(e) => to_py_err(py, e),
+        MigrateError::Cancelled => shared::interface_error(py, &err.to_string()),
+        MigrateError::Unclean(inner) => migrate_to_py_err(py, inner),
     }
 }
 
