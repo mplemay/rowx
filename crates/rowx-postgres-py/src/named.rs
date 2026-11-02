@@ -175,7 +175,10 @@ pub fn construct<'py>(
                 (0..shape.keys.len()).map(|_| None).collect();
             for (index, target) in layout.targets.iter().enumerate() {
                 if let Some(field) = target {
-                    slots[*field] = Some(cell(py, row, index, layout)?);
+                    let Some(slot) = slots.get_mut(*field) else {
+                        return Err(field_out_of_range(py));
+                    };
+                    *slot = Some(cell(py, row, index, layout)?);
                 }
             }
             // the cells fill a prefix of the fields, and the constructor fills the trailing defaults
@@ -196,21 +199,21 @@ pub fn construct<'py>(
             ctor.call1(PyTuple::new(py, args)?)
         }
         Form::Keyword => {
-            let kwargs = fill(py, row, layout, |_, field| {
-                field.map(|f| shape.keys[f].bind(py).clone())
-            })?;
+            let kwargs = fill(py, row, layout, |_, field| field_key(py, shape, field))?;
             ctor.call((), Some(&kwargs))
         }
         // the row is the dict itself
         Form::Dict => {
-            return fill(py, row, layout, |_, field| {
-                field.map(|f| shape.keys[f].bind(py).clone())
-            })
-            .map(Bound::into_any);
+            return fill(py, row, layout, |_, field| field_key(py, shape, field))
+                .map(Bound::into_any);
         }
         Form::Validator { validate } => {
             let dict = fill(py, row, layout, |index, _| {
-                layout.keys.get(index).map(|k| k.bind(py).clone())
+                layout
+                    .keys
+                    .get(index)
+                    .map(|k| Some(k.bind(py).clone()))
+                    .ok_or_else(|| interface_error(py, "a column has no key in its row layout"))
             })?;
             if validate {
                 ctor.call_method1("validate_python", (dict,))
@@ -227,15 +230,35 @@ fn fill<'py>(
     py: Python<'py>,
     row: &Row,
     layout: &Layout,
-    key: impl Fn(usize, Option<usize>) -> Option<Bound<'py, PyString>>,
+    key: impl Fn(usize, Option<usize>) -> PyResult<Option<Bound<'py, PyString>>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     for (index, target) in layout.targets.iter().enumerate() {
-        if let Some(key) = key(index, *target) {
+        if let Some(key) = key(index, *target)? {
             dict.set_item(key, cell(py, row, index, layout)?)?;
         }
     }
     Ok(dict)
+}
+
+fn field_key<'py>(
+    py: Python<'py>,
+    shape: &RowShape,
+    field: Option<usize>,
+) -> PyResult<Option<Bound<'py, PyString>>> {
+    field
+        .map(|f| {
+            shape
+                .keys
+                .get(f)
+                .map(|k| k.bind(py).clone())
+                .ok_or_else(|| field_out_of_range(py))
+        })
+        .transpose()
+}
+
+fn field_out_of_range(py: Python<'_>) -> PyErr {
+    interface_error(py, "a column maps to a field its row type does not have")
 }
 
 // only an `Exception` is a construction failure; `CancelledError`, `KeyboardInterrupt` and the like
@@ -251,8 +274,28 @@ fn wrap(py: Python<'_>, err: PyErr, shape: &RowShape, row_index: usize) -> PyErr
 impl Layout {
     /// The layout of a named row: each column's target field, its `Interval` flag from that field,
     /// and the validator form's keys from the column names.
-    pub fn named(py: Python<'_>, shape: &Py<RowShape>, mapping: &Mapping, first: &Row) -> Self {
+    ///
+    /// # Errors
+    /// `InterfaceError` when the mapping does not fit the row or the row type.
+    pub fn named(
+        py: Python<'_>,
+        shape: &Py<RowShape>,
+        mapping: &Mapping,
+        first: &Row,
+    ) -> PyResult<Self> {
         let row_type = shape.get();
+        if mapping.columns.len() != first.len()
+            || mapping
+                .columns
+                .iter()
+                .flatten()
+                .any(|f| *f >= row_type.keys.len())
+        {
+            return Err(interface_error(
+                py,
+                "the column mapping does not fit the result or the row type",
+            ));
+        }
         let spans = mapping
             .columns
             .iter()
@@ -269,12 +312,12 @@ impl Layout {
         } else {
             Vec::new()
         };
-        Self {
+        Ok(Self {
             form: crate::exec::RowForm::Named(shape.clone_ref(py)),
             spans,
             targets: mapping.columns.clone(),
             keys,
-        }
+        })
     }
 }
 
@@ -302,7 +345,7 @@ pub fn render_shape(
                 format!("field \"{}\" of `{type_name}` has no column", key(*field))
             }
             ShapeError::DuplicateColumn { field, indices } => {
-                let first = name(indices[0]);
+                let first = indices.first().map_or("", |i| name(*i));
                 if indices.iter().all(|i| name(*i) == first) {
                     let numbers = join(indices.iter().map(|i| (i + 1).to_string()));
                     let verb = if indices.len() == 2 { "both" } else { "all" };
@@ -361,7 +404,7 @@ pub fn render_shape(
 #[must_use]
 pub fn render_null(type_name: &str, key: &str, column: usize, name: &str, row: usize) -> String {
     format!(
-        "NULL in column {} \"{}\" for non-nullable field \"{key}\" of `{type_name}` (row {row})",
+        "{type_name}: NULL in column {} \"{}\" for non-nullable field \"{key}\" of `{type_name}` (row {row})",
         column + 1,
         column_name(name).0
     )
@@ -422,14 +465,17 @@ impl ShapeIssue {
                 ..Self::new("missing-column")
             },
             ShapeError::DuplicateColumn { field, indices } => {
-                let same = indices
-                    .iter()
-                    .all(|i| names.get(*i) == names.get(indices[0]));
+                let head = indices.first().and_then(|i| names.get(*i));
+                let same = indices.iter().all(|i| names.get(*i) == head);
                 Self {
                     columns: indices.clone(),
                     fields: field.iter().copied().collect(),
                     // two accepted names of one field have no single column name
-                    name: if same { name(indices[0]) } else { None },
+                    name: if same {
+                        indices.first().and_then(|i| name(*i))
+                    } else {
+                        None
+                    },
                     ..Self::new("duplicate-column")
                 }
             }

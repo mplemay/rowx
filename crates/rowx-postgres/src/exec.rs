@@ -566,7 +566,10 @@ fn check_nulls(
                     column: index,
                     field,
                     row: row_index,
-                    name: row.columns()[index].name().into(),
+                    name: row
+                        .columns()
+                        .get(index)
+                        .map_or_else(Box::default, |c| c.name().into()),
                 });
             }
             return Err(Error::RowShape(format!(

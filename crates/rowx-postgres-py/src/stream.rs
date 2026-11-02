@@ -8,16 +8,16 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
 use rowx_core::row_shape::Mapping;
 use rowx_core::state::{Claim, State};
-use rowx_postgres::Type;
 use rowx_postgres::cancel::{self, Cancel, Hook, StreamHandle};
 use rowx_postgres::conn::Connection as PgConnection;
 use rowx_postgres::error::Error;
 use rowx_postgres::exec::{self as pg, Batch};
 use rowx_postgres::pool::{Pool as PgPool, Pooled};
+use rowx_postgres::{Row, Type};
 use tokio::sync::{Notify, mpsc};
 
 use crate::codec::{self, PyParam};
-use crate::errors::{PgError, to_py_err};
+use crate::errors::{PgError, interface_error, to_py_err};
 use crate::exec::{
     Access, Layout, decode_row, driver_shape, fail_named, note_sql, nullable_mask, watch,
 };
@@ -64,6 +64,8 @@ struct Shared {
     // a named row's column-to-field mapping, set by the producer once the statement is prepared and
     // before it sends anything
     mapping: OnceLock<Mapping>,
+    // the named layout, built from the first batch and fixed for the stream
+    named: OnceLock<Layout>,
     // rows already handed to Python, so a constructor error names its position in the whole stream
     built: AtomicUsize,
     // the error of a batch whose earlier rows were already handed over
@@ -75,6 +77,27 @@ struct Shared {
 }
 
 impl Shared {
+    // the named layout is built from the first batch and fixed for the stream
+    fn named_layout(&self, py: Python<'_>, shape: &Py<RowShape>, first: &Row) -> PyResult<&Layout> {
+        if let Some(named) = self.named.get() {
+            return Ok(named);
+        }
+        // a mapping is always published with a named shape; running on without one would silently
+        // decode tuples
+        let Some(mapping) = self.mapping.get() else {
+            return Err(interface_error(
+                py,
+                "a named row type was given no column mapping",
+            ));
+        };
+        let built = Layout::named(py, shape, mapping, first)?;
+        // only the task awaiting `_next` builds it, so the first `set` wins
+        let _ = self.named.set(built);
+        self.named
+            .get()
+            .ok_or_else(|| interface_error(py, "the named row layout was not kept"))
+    }
+
     // idempotent and synchronous: the claim is released (Busy → Idle) before this returns
     fn finish(&self) {
         self.finished.store(true, Ordering::Release);
@@ -364,12 +387,14 @@ async fn receive(
     }
     match message {
         Some(Ok(Batch::Rows(rows))) => Python::attach(|py| {
-            let named;
-            let layout = match (shape, shared.mapping.get(), rows.first()) {
-                (Some(shape), Some(mapping), Some(first)) => {
-                    named = Layout::named(py, shape, mapping, first);
-                    &named
-                }
+            let layout = match (shape, rows.first()) {
+                (Some(shape), Some(first)) => match shared.named_layout(py, shape, first) {
+                    Ok(named) => named,
+                    Err(err) => {
+                        shared.finish();
+                        return Err(err);
+                    }
+                },
                 _ => layout,
             };
             let first_index = shared.built.load(Ordering::Acquire);

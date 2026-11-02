@@ -14,7 +14,7 @@ use rowx_postgres::pool::{Pool as PgPool, is_stale_plan};
 use rowx_postgres::{Row, Type};
 
 use crate::codec::{self, PyParam};
-use crate::errors::{PgError, named_to_py_err, to_py_err};
+use crate::errors::{PgError, interface_error, named_to_py_err, to_py_err};
 use crate::named::{RowShape, construct};
 
 #[derive(Debug)]
@@ -198,8 +198,18 @@ pub async fn run_fetch(
         .map_err(|e| PgError(e.into()))?
         .map_err(|e| fail_named(&access, &cancel.state, e, named.as_ref()))?;
     Python::attach(|py| {
-        let layout = match (&named, &mapping, rows.first()) {
-            (Some(shape), Some(mapping), Some(first)) => Layout::named(py, shape, mapping, first),
+        let layout = match (&named, rows.first()) {
+            (Some(shape), Some(first)) => {
+                // a mapping is always published with a named shape; running on without one would
+                // silently decode tuples
+                let Some(mapping) = &mapping else {
+                    return Err(interface_error(
+                        py,
+                        "a named row type was given no column mapping",
+                    ));
+                };
+                Layout::named(py, shape, mapping, first)?
+            }
             _ => layout,
         };
         build(py, &rows, &layout)
@@ -572,7 +582,13 @@ pub fn cell<'py>(
     let raw = row
         .try_get::<_, Raw>(index)
         .map_err(|e| to_py_err(py, &Error::from(e)))?;
-    let ty = row.columns()[index].type_();
+    let Some(column) = row.columns().get(index) else {
+        return Err(interface_error(
+            py,
+            "a row has fewer columns than its layout",
+        ));
+    };
+    let ty = column.type_();
     let as_span = layout.spans.get(index).copied().unwrap_or(false);
     codec::decode_with(py, ty, raw.0, as_span)
 }
