@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import secrets
 from typing import TYPE_CHECKING, Final
@@ -14,13 +15,14 @@ from rowx.errors import (
     DatabaseError,
     DirtyMigrationError,
     InterfaceError,
+    IrreversibleMigrationError,
     MigrationChecksumError,
     MigrationFailedError,
     MigrationMissingError,
     MigrationOrderError,
     MigrationSourceError,
 )
-from rowx.postgres import Connection, Migrator, Pool, connect
+from rowx.postgres import Connection, MigrationResult, Migrator, Pool, connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -71,13 +73,13 @@ def test_run_on_a_connection_applies_in_version_order(schema: str, tmp_path: Pat
     async def run() -> None:
         async with await connect(schema) as conn:
             applied = await migrator.run(conn)
-            assert [(s.version, s.description, s.state) for s in applied] == [
-                (1, "first", "applied"),
-                (2, "second", "applied"),
+            assert [(r.migration.version, r.migration.description) for r in applied] == [
+                (1, "first"),
+                (2, "second"),
             ]
-            assert all(s.installed_on is not None for s in applied)
+            assert all(isinstance(r, MigrationResult) for r in applied)
             # the time is written after the commit, so it is a real duration
-            assert all(s.execution_time is not None and s.execution_time.total_seconds() > 0 for s in applied)
+            assert all(r.elapsed is not None and r.elapsed.total_seconds() > 0 for r in applied)
             assert await table_exists(conn, "first")
             assert await table_exists(conn, "second")
             assert await history(conn) == [(1, True), (2, True)]
@@ -96,8 +98,8 @@ def test_run_reports_from_the_history_table_it_resolved_before_the_files(schema:
     async def run() -> None:
         async with await connect(schema) as conn:
             applied = await migrator.run(conn)
-            assert [(s.version, s.state) for s in applied] == [(1, "applied")]
-            assert applied[0].installed_on is not None
+            assert [r.migration.version for r in applied] == [1]
+            assert applied[0].elapsed is not None
 
     asyncio.run(run())
 
@@ -110,7 +112,7 @@ def test_run_on_a_pool_releases_the_connection_and_the_lock(schema: str, tmp_pat
         async with Pool(schema, max_size=1, acquire_timeout=10) as pool:
             pid = await backend_pid(pool)
             applied = await migrator.run(pool)
-            assert [s.version for s in applied] == [1]
+            assert [r.migration.version for r in applied] == [1]
             # with a single connection, this only succeeds when the migrator gave it back
             assert await table_exists(pool, "first")
             assert await backend_pid(pool) == pid
@@ -145,14 +147,14 @@ def test_run_stops_at_a_target(schema: str, tmp_path: Path) -> None:
 
     async def run() -> None:
         async with await connect(schema) as conn:
-            assert [s.version for s in await migrator.run(conn, target=2)] == [1, 2]
+            assert [r.migration.version for r in await migrator.run(conn, target=2)] == [1, 2]
             assert not await table_exists(conn, "t3")
-            assert [s.version for s in await migrator.run(conn)] == [3]
+            assert [r.migration.version for r in await migrator.run(conn)] == [3]
 
     asyncio.run(run())
 
 
-def test_undo_reverts_newest_first_to_a_target_and_to_zero(schema: str, tmp_path: Path) -> None:
+def test_revert_reverts_newest_first_to_a_target_and_everything(schema: str, tmp_path: Path) -> None:
     for version in (1, 2, 3):
         reversible(tmp_path, version, f"t{version}")
     migrator = Migrator(tmp_path)
@@ -160,21 +162,22 @@ def test_undo_reverts_newest_first_to_a_target_and_to_zero(schema: str, tmp_path
     async def run() -> None:
         async with await connect(schema) as conn:
             await migrator.run(conn)
-            reverted = await migrator.undo(conn, target=1)
-            assert [(s.version, s.state) for s in reverted] == [(3, "pending"), (2, "pending")]
+            reverted = await migrator.revert(conn, target=1)
+            assert [r.migration.version for r in reverted] == [3, 2]
+            assert all(r.elapsed is not None for r in reverted)
             assert await table_exists(conn, "t1")
             assert not await table_exists(conn, "t2")
             assert await history(conn) == [(1, True)]
-            assert [s.version for s in await migrator.undo(conn, target=0)] == [1]
+            assert [r.migration.version for r in await migrator.revert(conn, all=True)] == [1]
             assert not await table_exists(conn, "t1")
-            assert await migrator.undo(conn, target=0) == ()
+            assert await migrator.revert(conn, all=True) == ()
             # reverted migrations apply again
-            assert [s.version for s in await migrator.run(conn)] == [1, 2, 3]
+            assert [r.migration.version for r in await migrator.run(conn)] == [1, 2, 3]
 
     asyncio.run(run())
 
 
-def test_undo_without_a_target_reverts_the_latest_only_and_times_it(schema: str, tmp_path: Path) -> None:
+def test_revert_without_a_target_reverts_the_latest_only_and_times_it(schema: str, tmp_path: Path) -> None:
     for version in (1, 5):
         reversible(tmp_path, version, f"t{version}")
     migrator = Migrator(tmp_path)
@@ -182,13 +185,13 @@ def test_undo_without_a_target_reverts_the_latest_only_and_times_it(schema: str,
     async def run() -> None:
         async with await connect(schema) as conn:
             await migrator.run(conn)
-            (reverted,) = await migrator.undo(conn, target=None)
-            assert (reverted.version, reverted.description, reverted.state) == (5, "t5", "pending")
-            assert reverted.execution_time is not None
-            assert reverted.execution_time.total_seconds() > 0
+            (reverted,) = await migrator.revert(conn)
+            assert (reverted.migration.version, reverted.migration.description) == (5, "t5")
+            assert reverted.elapsed is not None
+            assert reverted.elapsed.total_seconds() > 0
             assert await history(conn) == [(1, True)]
-            assert [s.version for s in await migrator.undo(conn, target=None)] == [1]
-            assert await migrator.undo(conn, target=None) == ()
+            assert [r.migration.version for r in await migrator.revert(conn)] == [1]
+            assert await migrator.revert(conn) == ()
 
     asyncio.run(run())
 
@@ -203,25 +206,23 @@ def test_a_dry_run_returns_the_planned_statuses_and_changes_nothing(schema: str,
 
     async def run() -> None:
         async with await connect(schema) as conn:
-            assert [s.version for s in await dry.run(conn, dry_run=True)] == [1, 2, 3]
-            assert await dry.undo(conn, target=None, dry_run=True) == ()
+            assert [r.migration.version for r in await dry.run(conn, dry_run=True)] == [1, 2, 3]
+            assert await dry.revert(conn, dry_run=True) == ()
             assert not await query[bool](t"SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname = {never})").one(conn)
 
             planned = await migrator.run(conn, target=2, dry_run=True)
-            assert [(s.version, s.description, s.state) for s in planned] == [
-                (1, "t1", "applied"),
-                (2, "t2", "applied"),
-            ]
-            assert all(s.installed_on is None and s.execution_time is None for s in planned)
-            assert await migrator.undo(conn, target=0, dry_run=True) == ()
+            assert [(r.migration.version, r.migration.description) for r in planned] == [(1, "t1"), (2, "t2")]
+            assert all(r.elapsed is None for r in planned)
+            assert await migrator.revert(conn, all=True, dry_run=True) == ()
             assert not await table_exists(conn, HISTORY)
             assert not await table_exists(conn, "t1")
 
             await migrator.run(conn, target=2)
-            assert [s.version for s in await migrator.run(conn, dry_run=True)] == [3]
-            reverting = await migrator.undo(conn, target=0, dry_run=True)
-            assert [(s.version, s.state) for s in reverting] == [(2, "pending"), (1, "pending")]
-            assert [s.version for s in await migrator.undo(conn, target=None, dry_run=True)] == [2]
+            assert [r.migration.version for r in await migrator.run(conn, dry_run=True)] == [3]
+            reverting = await migrator.revert(conn, all=True, dry_run=True)
+            assert [r.migration.version for r in reverting] == [2, 1]
+            assert all(r.elapsed is None for r in reverting)
+            assert [r.migration.version for r in await migrator.revert(conn, dry_run=True)] == [2]
             assert await history(conn) == [(1, True), (2, True)]
             assert await table_exists(conn, "t2")
 
@@ -231,15 +232,15 @@ def test_a_dry_run_returns_the_planned_statuses_and_changes_nothing(schema: str,
             # the same up file as a simple migration has the same checksum, but no .down.sql
             (tmp_path / "1_t1.down.sql").unlink()
             (tmp_path / "1_t1.up.sql").rename(tmp_path / "1_t1.sql")
-            with pytest.raises(MigrationSourceError) as exc:
-                await Migrator(tmp_path).undo(conn, target=0, dry_run=True)
+            with pytest.raises(IrreversibleMigrationError) as exc:
+                await Migrator(tmp_path).revert(conn, all=True, dry_run=True)
             assert exc.value.version == 1
             assert await history(conn) == [(1, True), (2, True)]
 
     asyncio.run(run())
 
 
-def test_undo_without_a_down_file_raises_before_reverting_anything(schema: str, tmp_path: Path) -> None:
+def test_revert_without_a_down_file_raises_before_reverting_anything(schema: str, tmp_path: Path) -> None:
     reversible(tmp_path, 1, "t1")
     write(tmp_path, "2_t2.sql", "CREATE TABLE t2 (id int4);")
     migrator = Migrator(tmp_path)
@@ -247,9 +248,10 @@ def test_undo_without_a_down_file_raises_before_reverting_anything(schema: str, 
     async def run() -> None:
         async with await connect(schema) as conn:
             await migrator.run(conn)
-            with pytest.raises(MigrationSourceError) as exc:
-                await migrator.undo(conn, target=0)
+            with pytest.raises(IrreversibleMigrationError) as exc:
+                await migrator.revert(conn, all=True)
             assert exc.value.version == 2
+            assert isinstance(exc.value, MigrationSourceError)
             assert await history(conn) == [(1, True), (2, True)]
             assert await table_exists(conn, "t1")
 
@@ -264,10 +266,11 @@ def test_skip_records_migrations_without_running_them(schema: str, tmp_path: Pat
     async def run() -> None:
         async with await connect(schema) as conn:
             skipped = await migrator.skip(conn, target=2)
-            assert [(s.version, s.state) for s in skipped] == [(1, "applied"), (2, "applied")]
-            assert all(s.installed_on is not None and s.execution_time is None for s in skipped)
+            assert [r.migration.version for r in skipped] == [1, 2]
+            assert all(r.elapsed is None for r in skipped)
+            assert [s.state for s in await migrator.info(conn)] == ["applied", "applied", "pending"]
             assert not await table_exists(conn, "t1")
-            assert [s.version for s in await migrator.run(conn)] == [3]
+            assert [r.migration.version for r in await migrator.run(conn)] == [3]
             assert await table_exists(conn, "t3")
             assert not await table_exists(conn, "t2")
 
@@ -309,6 +312,15 @@ def test_info_reports_every_state_and_creates_nothing(schema: str, tmp_path: Pat
             }
             assert states[1].installed_on is not None
             assert states[1].execution_time is not None
+            assert states[1].kind == "simple"
+            assert states[1].local_checksum == states[1].applied_checksum
+            # a modified row has both checksums, and they differ
+            assert states[2].local_checksum == hashlib.sha384(b"CREATE TABLE t2 (id int8);").digest()
+            assert states[2].applied_checksum == hashlib.sha384(b"CREATE TABLE t2 (id int4);").digest()
+            assert states[4].local_checksum is not None
+            assert states[4].applied_checksum is None
+            # a missing migration has no local file
+            assert (states[5].kind, states[5].local_checksum, states[5].applied_checksum) == (None, None, b"x")
             assert states[4].installed_on is None
             assert states[3].description == "three"
             assert not states[5].description
@@ -328,6 +340,12 @@ def test_a_failing_file_is_a_failed_error_caused_by_the_database_error(schema: s
             assert exc.value.version == 2
             assert isinstance(exc.value.__cause__, DatabaseError)
             assert exc.value.__cause__.sqlstate == "22012"
+            assert exc.value.error is exc.value.__cause__
+            assert exc.value.error.sqlstate == "22012"
+            assert exc.value.path == tmp_path / "2_bad.sql"
+            assert exc.value.dirty is False
+            # what completed before the failure
+            assert [(r.migration.version, r.elapsed is not None) for r in exc.value.applied] == [(1, True)]
             # a transactional file leaves nothing behind, and the earlier migration stays
             assert await history(conn) == [(1, True)]
             assert not await table_exists(conn, "half")
@@ -347,6 +365,9 @@ def test_a_failed_no_transaction_file_leaves_a_dirty_row(schema: str, tmp_path: 
             with pytest.raises(MigrationFailedError) as failed:
                 await migrator.run(conn)
             assert failed.value.version == 1
+            assert failed.value.dirty is True
+            assert failed.value.applied == ()
+            assert failed.value.error.sqlstate == "22012"
             assert await history(conn) == [(1, False)]
             with pytest.raises(DirtyMigrationError) as dirty:
                 await migrator.run(conn)
@@ -369,6 +390,8 @@ def test_create_index_concurrently_needs_to_be_the_only_statement(schema: str, t
             assert exc.value.version == 3
             assert isinstance(exc.value.__cause__, DatabaseError)
             assert exc.value.__cause__.sqlstate == "25001"
+            assert exc.value.dirty is True
+            assert [r.migration.version for r in exc.value.applied] == [1, 2]
             assert await history(conn) == [(1, True), (2, True), (3, False)]
 
     asyncio.run(run())
@@ -385,6 +408,8 @@ def test_a_modified_file_is_a_checksum_error(schema: str, tmp_path: Path) -> Non
             with pytest.raises(MigrationChecksumError) as exc:
                 await Migrator(tmp_path).run(conn)
             assert exc.value.version == 1
+            assert exc.value.local_checksum == hashlib.sha384(b"CREATE TABLE t (id int8);").digest()
+            assert exc.value.applied_checksum == hashlib.sha384(b"CREATE TABLE t (id int4);").digest()
 
     asyncio.run(run())
 
@@ -400,8 +425,8 @@ def test_a_missing_file_is_a_missing_error_unless_ignored(schema: str, tmp_path:
             write(tmp_path, "3_v.sql", "CREATE TABLE v (id int4);")
             with pytest.raises(MigrationMissingError) as exc:
                 await Migrator(tmp_path).run(conn)
-            assert exc.value.version == 2
-            assert [s.version for s in await Migrator(tmp_path, ignore_missing=True).run(conn)] == [3]
+            assert exc.value.versions == (2,)
+            assert [r.migration.version for r in await Migrator(tmp_path, ignore_missing=True).run(conn)] == [3]
 
     asyncio.run(run())
 
@@ -415,23 +440,26 @@ def test_out_of_order_is_an_error_unless_allowed(schema: str, tmp_path: Path) ->
             write(tmp_path, "1_a.sql", "CREATE TABLE a (id int4);")
             with pytest.raises(MigrationOrderError) as exc:
                 await Migrator(tmp_path).run(conn)
-            assert exc.value.version == 1
+            assert (exc.value.version, exc.value.latest) == (1, 2)
             assert not await table_exists(conn, "a")
-            assert [s.version for s in await Migrator(tmp_path, allow_out_of_order=True).run(conn)] == [1]
+            assert [r.migration.version for r in await Migrator(tmp_path, allow_out_of_order=True).run(conn)] == [1]
 
     asyncio.run(run())
 
 
-def test_an_unknown_target_or_one_below_the_latest_is_an_order_error(schema: str, tmp_path: Path) -> None:
+def test_an_unknown_target_is_a_value_error_and_one_below_the_latest_an_order_error(
+    schema: str, tmp_path: Path
+) -> None:
     write(tmp_path, "1_a.sql", "CREATE TABLE a (id int4);")
     write(tmp_path, "2_b.sql", "CREATE TABLE b (id int4);")
     migrator = Migrator(tmp_path)
 
     async def run() -> None:
         async with await connect(schema) as conn:
-            with pytest.raises(MigrationOrderError) as unknown:
+            with pytest.raises(ValueError, match="99"):
                 await migrator.run(conn, target=99)
-            assert unknown.value.version == 99
+            # before any IO: nothing was created
+            assert not await table_exists(conn, HISTORY)
             await migrator.run(conn)
             with pytest.raises(MigrationOrderError):
                 await migrator.run(conn, target=1)
@@ -459,7 +487,7 @@ def test_a_transaction_argument_is_an_interface_error(schema: str, tmp_path: Pat
 
     async def run() -> None:
         async with await connect(schema) as conn, conn.transaction() as tx:
-            for call in (migrator.run(tx), migrator.undo(tx, target=0), migrator.skip(tx), migrator.info(tx)):  # ty: ignore[invalid-argument-type]
+            for call in (migrator.run(tx), migrator.revert(tx), migrator.skip(tx), migrator.info(tx)):  # ty: ignore[invalid-argument-type]
                 with pytest.raises(InterfaceError, match="Transaction"):
                     await call
             # a pool transaction is a transaction too
@@ -847,5 +875,105 @@ def test_a_file_ending_in_commit_fails_but_its_changes_stay_committed(schema: st
             # the file committed its own DDL before the probe, so it stays, unrecorded
             assert await history(conn) == []
             assert await table_exists(conn, "ended_commit")
+
+    asyncio.run(run())
+
+
+def test_revert_rejects_a_target_with_all_and_a_bad_target(schema: str, tmp_path: Path) -> None:
+    for version in (1, 2):
+        reversible(tmp_path, version, f"t{version}")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            with pytest.raises(ValueError, match="target"):
+                await migrator.revert(conn, target=1, all=True)
+            # an unknown target fails before any IO, so the history table isn't created
+            with pytest.raises(ValueError, match="99"):
+                await migrator.revert(conn, target=99)
+            assert not await table_exists(conn, HISTORY)
+            await migrator.run(conn, target=1)
+            # a target above the latest applied version
+            with pytest.raises(ValueError, match="newer"):
+                await migrator.revert(conn, target=2)
+            assert await history(conn) == [(1, True)]
+
+    asyncio.run(run())
+
+
+def test_a_dry_skip_records_nothing_and_a_skip_has_no_elapsed(schema: str, tmp_path: Path) -> None:
+    for version in (1, 2):
+        write(tmp_path, f"{version}_t{version}.sql", f"CREATE TABLE t{version} (id int4);")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            planned = await migrator.skip(conn, dry_run=True)
+            assert [r.migration.version for r in planned] == [1, 2]
+            assert all(r.elapsed is None for r in planned)
+            assert not await table_exists(conn, HISTORY)
+            skipped = await migrator.skip(conn)
+            assert [r.migration.version for r in skipped] == [1, 2]
+            assert await history(conn) == [(1, True), (2, True)]
+
+    asyncio.run(run())
+
+
+def test_revert_results_carry_the_migration_and_info_reports_its_kind(schema: str, tmp_path: Path) -> None:
+    write(tmp_path, "1_t1.sql", "CREATE TABLE t1 (id int4);")
+    reversible(tmp_path, 2, "t2")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            applied = await migrator.run(conn)
+            assert [r.migration for r in applied] == list(migrator.migrations)
+            assert [s.kind for s in await migrator.info(conn)] == ["simple", "reversible"]
+            (reverted,) = await migrator.revert(conn, target=1)
+            assert reverted.migration.kind == "reversible"
+            assert reverted.migration.down_path == tmp_path / "2_t2.down.sql"
+
+    asyncio.run(run())
+
+
+def test_a_failing_down_file_is_a_failed_error_with_the_down_path_and_the_reverts_before_it(
+    schema: str, tmp_path: Path
+) -> None:
+    reversible(tmp_path, 1, "t1")
+    write(tmp_path, "2_t2.up.sql", "CREATE TABLE t2 (id int4);")
+    write(tmp_path, "2_t2.down.sql", "SELECT 1 / 0;")
+    reversible(tmp_path, 3, "t3")
+    migrator = Migrator(tmp_path)
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            await migrator.run(conn)
+            with pytest.raises(MigrationFailedError) as exc:
+                await migrator.revert(conn, all=True)
+            failed = exc.value
+            assert failed.version == 2
+            assert failed.path == tmp_path / "2_t2.down.sql"
+            assert failed.dirty is False
+            assert failed.error.sqlstate == "22012"
+            assert [r.migration.version for r in failed.applied] == [3]
+            assert all(r.elapsed is not None for r in failed.applied)
+            assert await history(conn) == [(1, True), (2, True)]
+
+    asyncio.run(run())
+
+
+def test_revert_of_a_version_missing_locally_is_a_missing_error_even_when_ignored(schema: str, tmp_path: Path) -> None:
+    reversible(tmp_path, 1, "t1")
+    reversible(tmp_path, 2, "t2")
+
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            await Migrator(tmp_path).run(conn)
+            (tmp_path / "2_t2.up.sql").unlink()
+            (tmp_path / "2_t2.down.sql").unlink()
+            with pytest.raises(MigrationMissingError) as exc:
+                await Migrator(tmp_path, ignore_missing=True).revert(conn)
+            assert exc.value.versions == (2,)
+            assert await history(conn) == [(1, True), (2, True)]
 
     asyncio.run(run())

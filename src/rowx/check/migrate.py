@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from rowx import query_unchecked
 from rowx.check.config import Config, MigrateConfig, database_url, load_config
 from rowx.check.runner import CheckError, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
@@ -16,7 +15,7 @@ if TYPE_CHECKING:
     from argparse import ArgumentParser, _SubParsersAction
     from collections.abc import Coroutine, Iterable
 
-    from rowx.postgres import Connection, Migration, MigrationStatus
+    from rowx.postgres import Connection, Migration, MigrationResult
 
 TIMESTAMP_FORMAT: Final[str] = "%Y%m%d%H%M%S"
 SEQUENTIAL_WIDTH: Final[int] = 4
@@ -97,6 +96,9 @@ def run_guarded(dsn: str, work: Coroutine[Any, Any, None]) -> None:
         raise CheckError(redact(str(error), dsn)) from None
     except MigrateError as error:
         raise CheckError(redact(_describe(error), dsn)) from None
+    except ValueError as error:
+        # an unknown or too new target
+        raise CheckError(redact(str(error), dsn)) from None
     except (InterfaceError, DatabaseError, OSError) as error:
         msg = f"could not reach the database: {redact(str(error), dsn)}"
         raise CheckError(msg) from None
@@ -144,7 +146,7 @@ def _load(target: Target, args: Namespace) -> Migrator:
 
 
 def _forward(migrations: Iterable[Migration]) -> list[Migration]:
-    return sorted((m for m in migrations if m.kind != "down"), key=lambda m: m.version)
+    return sorted(migrations, key=lambda m: m.version)
 
 
 def _is_sequential(versions: list[int]) -> bool:
@@ -171,7 +173,7 @@ def add(target: Target, args: Namespace) -> None:
         versioning = "sequential" if _is_sequential(versions) else "timestamp"
     kind = "reversible" if args.reversible else "simple" if args.simple else target.migrate.kind
     if kind == "inferred":
-        kind = "reversible" if existing and existing[-1].kind == "up" else "simple"
+        kind = "reversible" if existing and existing[-1].kind == "reversible" else "simple"
 
     version = (
         int(utc_now().strftime(TIMESTAMP_FORMAT))
@@ -235,10 +237,10 @@ def format_duration(value: timedelta | None) -> str:
 
 
 def _line(
-    verb: str, status: MigrationStatus, label: str, elapsed: timedelta | None = None, *, timed: bool = True
+    verb: str, result: MigrationResult, label: str, elapsed: timedelta | None = None, *, timed: bool = True
 ) -> str:
     suffix = f" ({format_duration(elapsed)})" if timed else ""
-    return f"{verb} {status.version}/{label} {status.description}{suffix}\n"
+    return f"{verb} {result.migration.version}/{label} {result.migration.description}{suffix}\n"
 
 
 async def _database_command(target: Target, args: Namespace, dsn: str) -> None:
@@ -254,42 +256,33 @@ async def _database_command(target: Target, args: Namespace, dsn: str) -> None:
 
 
 async def _run(migrator: Migrator, conn: Connection, args: Namespace) -> None:
-    statuses = await migrator.run(conn, target=args.target_version, dry_run=args.dry_run)
-    for status in statuses:
+    for result in await migrator.run(conn, target=args.target_version, dry_run=args.dry_run):
         if args.dry_run:
-            sys.stdout.write(_line("Would apply", status, "migrate", timed=False))
+            sys.stdout.write(_line("Would apply", result, "migrate", timed=False))
         else:
-            sys.stdout.write(_line("Applied", status, "migrate", status.execution_time))
+            sys.stdout.write(_line("Applied", result, "migrate", result.elapsed))
 
 
 async def _revert(migrator: Migrator, conn: Connection, args: Namespace) -> None:
-    # one undo, so the versions are chosen and reverted under one lock; without a target, only the
-    # latest applied migration is reverted
-    statuses = await migrator.undo(conn, target=args.target_version, dry_run=args.dry_run)
-    for status in statuses:
+    # one revert, so the versions are chosen and reverted under one lock; without a target, only the
+    # latest applied migration is reverted. `--target-version 0` keeps meaning "everything" until
+    # `revert --all` exists, as version 0 is a real version only to the Python API
+    everything = args.target_version == 0
+    target = None if everything else args.target_version
+    for result in await migrator.revert(conn, target=target, all=everything, dry_run=args.dry_run):
         if args.dry_run:
-            sys.stdout.write(_line("Would revert", status, "revert", timed=False))
+            sys.stdout.write(_line("Would revert", result, "revert", timed=False))
         else:
-            sys.stdout.write(_line("Reverted", status, "revert", status.execution_time))
-
-
-async def _applied_checksums(migrator: Migrator, conn: Connection) -> dict[int, bytes]:
-    # the migrator's parsed name, so `MySchema.Migrations` and `"My"."T"` resolve to the same table it uses
-    table = migrator._impl.table  # ruff: ignore[private-member-access]
-    rows = await query_unchecked[tuple[int, bytes]](t"SELECT version, checksum FROM {table:ident}").all(conn)
-    return dict(rows)
+            sys.stdout.write(_line("Reverted", result, "revert", result.elapsed))
 
 
 async def _info(migrator: Migrator, conn: Connection) -> None:
-    statuses = await migrator.info(conn)
-    local = {m.version: m.checksum for m in migrator.migrations if m.kind != "down"}
-    applied = await _applied_checksums(migrator, conn) if any(s.state == "modified" for s in statuses) else {}
-    for status in statuses:
+    for status in await migrator.info(conn):
         line = f"{status.version}/{status.state}"
         if status.description:
             line += f" {status.description}"
-        if status.state == "modified":
-            line += f" (local {local[status.version].hex()[:SHORT_HEX]}, applied {applied[status.version].hex()[:SHORT_HEX]})"
+        if status.state == "modified" and status.local_checksum is not None and status.applied_checksum is not None:
+            line += f" (local {status.local_checksum.hex()[:SHORT_HEX]}, applied {status.applied_checksum.hex()[:SHORT_HEX]})"
         elif status.execution_time is not None:
             line += f" ({format_duration(status.execution_time)})"
         sys.stdout.write(line + "\n")

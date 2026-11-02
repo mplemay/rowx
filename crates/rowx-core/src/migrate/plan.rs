@@ -27,7 +27,11 @@ pub enum PlanError {
     #[error("{}", missing_message(.versions))]
     Missing { versions: Vec<i64> },
     #[error("migration {version} was modified after it was applied")]
-    Checksum { version: i64 },
+    Checksum {
+        version: i64,
+        local: Vec<u8>,
+        applied: Vec<u8>,
+    },
     #[error("migration {pending} is older than the latest applied migration {latest}")]
     Order { pending: i64, latest: i64 },
     #[error("target migration {target} does not exist")]
@@ -58,7 +62,7 @@ impl PlanError {
     pub fn version(&self) -> i64 {
         match self {
             Self::Dirty { version }
-            | Self::Checksum { version }
+            | Self::Checksum { version, .. }
             | Self::MissingDown { version } => *version,
             Self::Missing { versions } => versions.first().copied().unwrap_or_default(),
             Self::Order { pending, .. } => *pending,
@@ -67,7 +71,7 @@ impl PlanError {
     }
 }
 
-// Which applied versions `plan_undo` reverts
+// Which applied versions `plan_revert` reverts
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevertTarget {
     // Only the latest applied version
@@ -79,7 +83,7 @@ pub enum RevertTarget {
 }
 
 // The migrations to carry out, in the order to carry them out. `run` and `skip` plans hold
-// the forward (simple or up) migrations oldest first, an `undo` plan holds the down
+// the forward (simple or up) migrations oldest first, an `revert` plan holds the down
 // migrations newest first.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunPlan {
@@ -120,13 +124,17 @@ fn validate(
             return Err(PlanError::Missing { versions });
         }
     }
-    if let Some(&version) = by_version.iter().find_map(|(version, row)| {
+    if let Some((version, local, applied)) = by_version.iter().find_map(|(version, row)| {
         forward
             .get(version)
-            .is_some_and(|m| m.checksum[..] != row.checksum[..])
-            .then_some(version)
+            .filter(|m| m.checksum[..] != row.checksum[..])
+            .map(|m| (*version, m.checksum.to_vec(), row.checksum.clone()))
     }) {
-        return Err(PlanError::Checksum { version });
+        return Err(PlanError::Checksum {
+            version,
+            local,
+            applied,
+        });
     }
     Ok(())
 }
@@ -212,7 +220,7 @@ pub fn plan_skip(
 /// Returns a failed validation, [`PlanError::TargetNotFound`] or [`PlanError::TargetTooNew`] for
 /// an `Above` target, [`PlanError::Missing`] for in-range versions without local files, or
 /// [`PlanError::MissingDown`] for the newest in-range version that has no `.down.sql` file.
-pub fn plan_undo(
+pub fn plan_revert(
     local: &[Migration],
     applied: &[AppliedMigration],
     target: RevertTarget,
@@ -403,10 +411,10 @@ mod tests {
     fn a_modified_checksum_is_an_error() {
         let mut applied = rows(&[1, 2]);
         applied[1].checksum[0] ^= 0xff;
-        assert_eq!(
+        assert!(matches!(
             plan_run(&simple(&[1, 2]), &applied, opts()),
-            Err(PlanError::Checksum { version: 2 })
-        );
+            Err(PlanError::Checksum { version: 2, .. })
+        ));
     }
 
     #[test]
@@ -419,10 +427,10 @@ mod tests {
             checksum: checksum(down_sql.as_bytes()).to_vec(),
             success: true,
         }];
-        assert_eq!(
+        assert!(matches!(
             plan_run(&reversible(&[1]), &applied, opts()),
-            Err(PlanError::Checksum { version: 1 })
-        );
+            Err(PlanError::Checksum { version: 1, .. })
+        ));
     }
 
     #[test]
@@ -447,7 +455,7 @@ mod tests {
         );
 
         // with ignore_missing the checksum is reached
-        assert_eq!(
+        assert!(matches!(
             plan_run(
                 &migrations,
                 &applied,
@@ -456,8 +464,8 @@ mod tests {
                     ..opts()
                 }
             ),
-            Err(PlanError::Checksum { version: 1 })
-        );
+            Err(PlanError::Checksum { version: 1, .. })
+        ));
     }
 
     #[test]
@@ -753,7 +761,7 @@ mod tests {
         let migrations = reversible(&[1, 2, 3]);
         let applied = up_rows(&[1, 2, 3]);
         assert_eq!(
-            undo_versions(&plan_undo(&migrations, &applied, Above(1), false)),
+            undo_versions(&plan_revert(&migrations, &applied, Above(1), false)),
             [down(3), down(2)]
         );
     }
@@ -763,10 +771,10 @@ mod tests {
         let all = reversible(&[1, 5, 9]);
         let applied = up_rows(&[1, 5]);
         assert_eq!(
-            undo_versions(&plan_undo(&all, &applied, Latest, false)),
+            undo_versions(&plan_revert(&all, &applied, Latest, false)),
             [down(5)]
         );
-        assert!(plan_undo(&all, &[], Latest, false).is_ok_and(|p| p.is_empty()));
+        assert!(plan_revert(&all, &[], Latest, false).is_ok_and(|p| p.is_empty()));
     }
 
     #[test]
@@ -774,10 +782,10 @@ mod tests {
         let migrations = reversible(&[1, 2]);
         let applied = up_rows(&[1, 2]);
         assert_eq!(
-            undo_versions(&plan_undo(&migrations, &applied, All, false)),
+            undo_versions(&plan_revert(&migrations, &applied, All, false)),
             [down(2), down(1)]
         );
-        assert!(plan_undo(&migrations, &[], All, false).is_ok_and(|p| p.is_empty()));
+        assert!(plan_revert(&migrations, &[], All, false).is_ok_and(|p| p.is_empty()));
     }
 
     #[test]
@@ -785,11 +793,11 @@ mod tests {
         let migrations = reversible(&[0, 1]);
         let applied = up_rows(&[0, 1]);
         assert_eq!(
-            undo_versions(&plan_undo(&migrations, &applied, Above(0), false)),
+            undo_versions(&plan_revert(&migrations, &applied, Above(0), false)),
             [down(1)]
         );
         assert_eq!(
-            undo_versions(&plan_undo(&migrations, &applied, All, false)),
+            undo_versions(&plan_revert(&migrations, &applied, All, false)),
             [down(1), down(0)]
         );
     }
@@ -798,9 +806,9 @@ mod tests {
     fn revert_above_the_latest_applied_version_itself_is_a_no_op() {
         let migrations = reversible(&[1, 2, 3]);
         let applied = up_rows(&[1, 2]);
-        assert!(plan_undo(&migrations, &applied, Above(2), false).is_ok_and(|p| p.is_empty()));
+        assert!(plan_revert(&migrations, &applied, Above(2), false).is_ok_and(|p| p.is_empty()));
         // nothing is applied, so there is nothing above the target either
-        assert!(plan_undo(&migrations, &[], Above(3), false).is_ok_and(|p| p.is_empty()));
+        assert!(plan_revert(&migrations, &[], Above(3), false).is_ok_and(|p| p.is_empty()));
     }
 
     #[test]
@@ -808,20 +816,20 @@ mod tests {
         let migrations = reversible(&[1, 3]);
         let applied = up_rows(&[1, 3]);
         assert_eq!(
-            plan_undo(&migrations, &applied, Above(2), false),
+            plan_revert(&migrations, &applied, Above(2), false),
             Err(PlanError::TargetNotFound { target: 2 })
         );
         assert_eq!(
-            plan_undo(&migrations, &applied, Above(0), false),
+            plan_revert(&migrations, &applied, Above(0), false),
             Err(PlanError::TargetNotFound { target: 0 })
         );
         assert_eq!(
-            plan_undo(&migrations, &[], Above(2), false),
+            plan_revert(&migrations, &[], Above(2), false),
             Err(PlanError::TargetNotFound { target: 2 })
         );
         // a down file alone is not a local migration
         assert_eq!(
-            plan_undo(&[local(4, MigrationKind::Down)], &[], Above(4), false),
+            plan_revert(&[local(4, MigrationKind::Down)], &[], Above(4), false),
             Err(PlanError::TargetNotFound { target: 4 })
         );
     }
@@ -831,7 +839,7 @@ mod tests {
         let migrations = reversible(&[1, 2, 3]);
         let applied = up_rows(&[1, 2]);
         assert_eq!(
-            plan_undo(&migrations, &applied, Above(3), false),
+            plan_revert(&migrations, &applied, Above(3), false),
             Err(PlanError::TargetTooNew {
                 target: 3,
                 latest: 2
@@ -847,16 +855,16 @@ mod tests {
         migrations.sort();
         let applied = vec![up_row(1), row(2), up_row(3)];
         assert_eq!(
-            plan_undo(&migrations, &applied, All, false),
+            plan_revert(&migrations, &applied, All, false),
             Err(PlanError::MissingDown { version: 2 })
         );
         // the version at the target is not in range, so the plan is fine
         assert_eq!(
-            undo_versions(&plan_undo(&migrations, &applied, Above(2), false)),
+            undo_versions(&plan_revert(&migrations, &applied, Above(2), false)),
             [down(3)]
         );
         assert_eq!(
-            plan_undo(&migrations, &[up_row(1), row(2)], Latest, false),
+            plan_revert(&migrations, &[up_row(1), row(2)], Latest, false),
             Err(PlanError::MissingDown { version: 2 })
         );
     }
@@ -866,22 +874,22 @@ mod tests {
         let migrations = reversible(&[1]);
         let applied = vec![up_row(1), row(9)];
         assert_eq!(
-            plan_undo(&migrations, &applied, All, false),
+            plan_revert(&migrations, &applied, All, false),
             Err(PlanError::Missing { versions: vec![9] })
         );
         // ignore_missing does not hide it: a missing file can't be reverted, and is not
         // reported as a missing down file either
         assert_eq!(
-            plan_undo(&migrations, &applied, All, true),
+            plan_revert(&migrations, &applied, All, true),
             Err(PlanError::Missing { versions: vec![9] })
         );
         assert_eq!(
-            plan_undo(&migrations, &applied, Latest, true),
+            plan_revert(&migrations, &applied, Latest, true),
             Err(PlanError::Missing { versions: vec![9] })
         );
         // out of range, the missing version is ignored as everywhere else
         assert_eq!(
-            undo_versions(&plan_undo(
+            undo_versions(&plan_revert(
                 &reversible(&[1, 2]),
                 &[row(0), up_row(1), up_row(2)],
                 Above(1),
@@ -902,20 +910,20 @@ mod tests {
             })
         );
         assert_eq!(
-            plan_undo(&reversible(&[1]), &applied, All, false),
+            plan_revert(&reversible(&[1]), &applied, All, false),
             Err(PlanError::Missing {
                 versions: vec![4, 5, 7]
             })
         );
         // with ignore_missing, only the versions in range are listed
         assert_eq!(
-            plan_undo(&reversible(&[1]), &applied, Above(1), true),
+            plan_revert(&reversible(&[1]), &applied, Above(1), true),
             Err(PlanError::Missing {
                 versions: vec![4, 5, 7]
             })
         );
         assert_eq!(
-            plan_undo(&reversible(&[1, 5]), &applied, Above(5), true),
+            plan_revert(&reversible(&[1, 5]), &applied, Above(5), true),
             Err(PlanError::Missing { versions: vec![7] })
         );
         let message = error.err().map(|e| e.to_string()).unwrap_or_default();
@@ -929,23 +937,23 @@ mod tests {
         let mut applied = up_rows(&[1, 2]);
         applied[1].success = false;
         assert_eq!(
-            plan_undo(&migrations, &applied, All, false),
+            plan_revert(&migrations, &applied, All, false),
             Err(PlanError::Dirty { version: 2 })
         );
 
         let mut applied = up_rows(&[1, 7]);
         applied[0].checksum[0] ^= 0xff;
         assert_eq!(
-            plan_undo(&migrations, &applied, All, false),
+            plan_revert(&migrations, &applied, All, false),
             Err(PlanError::Missing { versions: vec![7] })
         );
 
         let mut applied = up_rows(&[1]);
         applied[0].checksum[0] ^= 0xff;
-        assert_eq!(
-            plan_undo(&migrations, &applied, All, false),
-            Err(PlanError::Checksum { version: 1 })
-        );
+        assert!(matches!(
+            plan_revert(&migrations, &applied, All, false),
+            Err(PlanError::Checksum { version: 1, .. })
+        ));
     }
 
     #[test]
@@ -959,7 +967,15 @@ mod tests {
         assert!(message.contains('2') && message.contains('3'));
         assert_eq!(PlanError::Dirty { version: 4 }.version(), 4);
         assert_eq!(PlanError::Missing { versions: vec![5] }.version(), 5);
-        assert_eq!(PlanError::Checksum { version: 6 }.version(), 6);
+        assert_eq!(
+            PlanError::Checksum {
+                version: 6,
+                local: vec![1],
+                applied: vec![2]
+            }
+            .version(),
+            6
+        );
         assert_eq!(PlanError::MissingDown { version: 7 }.version(), 7);
         assert_eq!(PlanError::TargetNotFound { target: 8 }.version(), 8);
         assert_eq!(

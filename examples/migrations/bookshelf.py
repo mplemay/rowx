@@ -48,8 +48,8 @@ async def main(dsn: str) -> None:
     migrator = Migrator(MIGRATIONS)
     async with Pool(dsn, max_size=4) as pool:
         # taking the advisory lock makes this safe when several instances start at once
-        for status in await migrator.run(pool):
-            print(f"applied {status.version} {status.description} in {status.execution_time}")  # ruff: ignore[print]
+        for result in await migrator.run(pool):
+            print(f"applied {result.migration.version} {result.migration.description} in {result.elapsed}")  # ruff: ignore[print]
 
         author_id = await add_author(pool, "Octavia Butler")
         if not await books_by(pool, author_id):

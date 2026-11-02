@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, reveal_type
+from typing import TYPE_CHECKING, Any, Literal, reveal_type
 
 from rowx import query, query_unchecked
 
@@ -112,15 +112,40 @@ async def negative_executor(conn: NotAnExecutor) -> None:
     await query[int](t"SELECT 1").one(conn)  # error  # ty: ignore[invalid-argument-type]
 
 
+def takes_kind(kind: Literal["simple", "reversible"]) -> None: ...
+
+
+def takes_optional_kind(kind: Literal["simple", "reversible"] | None) -> None: ...
+
+
+def takes_legacy_kind(kind: Literal["up", "down"]) -> None: ...
+
+
 async def migrator_runs_on_connection_or_pool(migrator: Migrator, conn: Connection, pool: Pool) -> None:
     reveal_type(migrator.migrations)  # reveal: tuple[Migration, ...]
+    reveal_type(migrator.path)  # reveal: Path
     reveal_type(await migrator.info(conn))  # reveal: tuple[MigrationStatus, ...]
     reveal_type(await migrator.info(pool))  # reveal: tuple[MigrationStatus, ...]
-    reveal_type(await migrator.run(pool, target=1))  # reveal: tuple[MigrationStatus, ...]
-    reveal_type(await migrator.undo(conn, target=0))  # reveal: tuple[MigrationStatus, ...]
-    reveal_type(await migrator.run(conn, dry_run=True))  # reveal: tuple[MigrationStatus, ...]
-    reveal_type(await migrator.undo(pool, target=None, dry_run=True))  # reveal: tuple[MigrationStatus, ...]
-    reveal_type(await migrator.skip(conn))  # reveal: tuple[MigrationStatus, ...]
+    reveal_type(await migrator.run(pool, target=1))  # reveal: tuple[MigrationResult, ...]
+    reveal_type(await migrator.revert(conn))  # reveal: tuple[MigrationResult, ...]
+    reveal_type(await migrator.revert(conn, target=1))  # reveal: tuple[MigrationResult, ...]
+    reveal_type(await migrator.revert(conn, all=True))  # reveal: tuple[MigrationResult, ...]
+    reveal_type(await migrator.run(conn, dry_run=True))  # reveal: tuple[MigrationResult, ...]
+    reveal_type(await migrator.revert(pool, target=None, dry_run=True))  # reveal: tuple[MigrationResult, ...]
+    reveal_type(await migrator.skip(conn))  # reveal: tuple[MigrationResult, ...]
+    reveal_type(await migrator.skip(conn, dry_run=True))  # reveal: tuple[MigrationResult, ...]
+    # `target` with `all` is accepted by the type checker and rejected at runtime with a ValueError
+    reveal_type(await migrator.revert(conn, target=1, all=True))  # reveal: tuple[MigrationResult, ...]
+    for result in await migrator.run(conn):
+        reveal_type(result.migration)  # reveal: Migration
+        takes_kind(result.migration.kind)
+        takes_legacy_kind(result.migration.kind)  # error  # ty: ignore[invalid-argument-type]
+        reveal_type(result.elapsed)  # reveal: timedelta | None
+        reveal_type(result.migration.down_path)  # reveal: Path | None
+    for status in await migrator.info(conn):
+        takes_optional_kind(status.kind)
+        takes_kind(status.kind)  # error  # ty: ignore[invalid-argument-type]
+        reveal_type(status.applied_checksum)  # reveal: bytes | None
 
 
 async def negative_migrator(migrator: Migrator, tx: Transaction) -> None:
@@ -129,5 +154,6 @@ async def negative_migrator(migrator: Migrator, tx: Transaction) -> None:
 
 
 async def negative_migrator_arguments(migrator: Migrator, conn: Connection) -> None:
-    await migrator.undo(conn)  # error  # ty: ignore[missing-argument]
-    await migrator.skip(conn, dry_run=True)  # error  # ty: ignore[unknown-argument]
+    await migrator.undo(conn)  # error  # ty: ignore[unresolved-attribute]
+    await migrator.revert(conn, 1)  # error  # ty: ignore[too-many-positional-arguments]
+    await migrator.info(conn, dry_run=True)  # error  # ty: ignore[unknown-argument]

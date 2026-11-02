@@ -1,4 +1,3 @@
-import copy
 import dataclasses
 import hashlib
 from datetime import UTC, datetime, timedelta
@@ -6,17 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from rowx.errors import (
-    DirtyMigrationError,
-    Error,
-    MigrateError,
-    MigrationChecksumError,
-    MigrationFailedError,
-    MigrationMissingError,
-    MigrationOrderError,
-    MigrationSourceError,
-)
-from rowx.postgres import Migration, MigrationStatus, Migrator
+from rowx.errors import MigrationSourceError
+from rowx.postgres import Migration, MigrationResult, MigrationStatus, Migrator
 from rowx.postgres._migrate import status_from
 
 
@@ -36,12 +26,26 @@ def test_resolves_files_without_a_database(tmp_path: Path) -> None:
 
     assert isinstance(migrations, tuple)
     assert [(m.version, m.description, m.kind, m.no_transaction) for m in migrations] == [
-        (20260101000000, "create users", "up", False),
-        (20260101000000, "create users", "down", False),
+        (20260101000000, "create users", "reversible", False),
         (20260102000000, "add index", "simple", True),
     ]
     assert all(isinstance(m.path, Path) and m.path.parent == tmp_path for m in migrations)
     assert all(len(m.checksum) == 48 for m in migrations)
+
+
+def test_a_reversible_pair_is_one_migration_with_both_files(tmp_path: Path) -> None:
+    write(tmp_path, "1_a.up.sql", "create table a ();")
+    write(tmp_path, "1_a.down.sql", "drop table a;")
+    write(tmp_path, "2_b.sql", "select 2;")
+
+    reversible, simple = Migrator(tmp_path).migrations
+
+    assert reversible.kind == "reversible"
+    assert reversible.path == tmp_path / "1_a.up.sql"
+    assert reversible.down_path == tmp_path / "1_a.down.sql"
+    assert reversible.checksum == hashlib.sha384(b"create table a ();").digest()
+    assert reversible.down_checksum == hashlib.sha384(b"drop table a;").digest()
+    assert (simple.kind, simple.down_path, simple.down_checksum) == ("simple", None, None)
 
 
 def test_version_zero_and_leading_zeros_are_accepted(tmp_path: Path) -> None:
@@ -65,6 +69,17 @@ def test_accepts_a_str_path_and_checksums_the_raw_bytes(tmp_path: Path) -> None:
     (migration,) = Migrator(str(tmp_path)).migrations
 
     assert migration.checksum == hashlib.sha384(b"select 1;").digest()
+
+
+def test_the_path_is_resolved_against_the_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "migrations").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    migrator = Migrator("migrations")
+    monkeypatch.chdir(tmp_path / "migrations")
+
+    assert migrator.path == tmp_path / "migrations"
+    assert Migrator(tmp_path / "migrations").path == tmp_path / "migrations"
 
 
 def test_an_empty_directory_has_no_migrations(tmp_path: Path) -> None:
@@ -171,54 +186,48 @@ def test_the_dataclasses_are_frozen_slotted_and_keyword_only(tmp_path: Path) -> 
     write(tmp_path, "1_a.sql")
     (migration,) = Migrator(tmp_path).migrations
     status = MigrationStatus(version=1, description="a", state="pending")
+    result = MigrationResult(migration=migration, elapsed=None)
 
     for instance in (migration, status):
         assert not hasattr(instance, "__dict__")
         with pytest.raises(dataclasses.FrozenInstanceError):
             instance.version = 2  # type: ignore[misc]  # ty: ignore[invalid-assignment]
     with pytest.raises(TypeError):
-        Migration(1, "a", "simple", b"", False, Path())  # ruff: ignore[boolean-positional-value-in-call]  # type: ignore[misc]  # ty: ignore[too-many-positional-arguments, missing-argument]
+        Migration(1, "a", "simple", Path(), None, b"", None, False)  # ruff: ignore[boolean-positional-value-in-call]  # type: ignore[misc]  # ty: ignore[too-many-positional-arguments, missing-argument]
     with pytest.raises(TypeError):
         MigrationStatus(1, "a", "pending")  # type: ignore[misc]  # ty: ignore[too-many-positional-arguments, missing-argument]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.elapsed = timedelta()  # type: ignore[misc]  # ty: ignore[invalid-assignment]
+    assert not hasattr(result, "__dict__")
+    with pytest.raises(TypeError):
+        MigrationResult(migration, None)  # type: ignore[misc]  # ty: ignore[too-many-positional-arguments, missing-argument]
+    assert (status.kind, status.local_checksum, status.applied_checksum) == (None, None, None)
     assert status.installed_on is None
     assert status.execution_time is None
 
 
 def test_a_status_row_becomes_a_status() -> None:
-    status = status_from((5, "five", "applied", 1_700_000_000_123_456, 2_500_000))
+    status = status_from((5, "five", "applied", 1_700_000_000_123_456, 2_500_000, b"x"), None)
 
     assert status.installed_on == datetime(2023, 11, 14, 22, 13, 20, 123456, tzinfo=UTC)
     assert status.execution_time == timedelta(milliseconds=2.5)
+    assert (status.kind, status.local_checksum, status.applied_checksum) == (None, None, b"x")
+
+
+def test_a_status_takes_its_kind_and_local_checksum_from_the_local_migration(tmp_path: Path) -> None:
+    write(tmp_path, "5_five.up.sql")
+    write(tmp_path, "5_five.down.sql")
+    (local,) = Migrator(tmp_path).migrations
+
+    status = status_from((5, "five", "modified", 0, 1, b"old"), local)
+
+    assert (status.kind, status.local_checksum, status.applied_checksum) == ("reversible", local.checksum, b"old")
 
 
 def test_an_unknown_execution_time_is_none() -> None:
-    assert status_from((5, "five", "applied", 0, -1)).execution_time is None
-    assert status_from((5, "five", "pending", None, None)) == MigrationStatus(
+    assert status_from((5, "five", "applied", 0, -1, b""), None).execution_time is None
+    assert status_from((5, "five", "pending", None, None, None), None) == MigrationStatus(
         version=5,
         description="five",
         state="pending",
     )
-
-
-@pytest.mark.parametrize(
-    "cls",
-    [
-        MigrationSourceError,
-        MigrationChecksumError,
-        MigrationMissingError,
-        MigrationOrderError,
-        DirtyMigrationError,
-        MigrationFailedError,
-    ],
-)
-def test_every_migration_error_is_a_migrate_error_with_a_version(cls: type[MigrateError]) -> None:
-    err = cls("boom", 12)
-
-    assert isinstance(err, MigrateError)
-    assert isinstance(err, Error)
-    assert err.version == 12
-    assert str(err) == "boom"
-    assert cls("boom").version is None
-    clone = copy.copy(err)
-    assert type(clone) is cls
-    assert (str(clone), clone.version) == ("boom", 12)

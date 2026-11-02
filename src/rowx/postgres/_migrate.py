@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 
 from rowx._core.postgres import Migrator as MigratorImpl
-from rowx.errors import InterfaceError
+from rowx.errors import InterfaceError, MigrationFailedError
 from rowx.postgres._connection import Connection
 from rowx.postgres._pool import Pool
 from rowx.postgres._transaction import Transaction
@@ -14,14 +14,18 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from os import PathLike
 
-    from rowx._core.postgres import Connection as ConnectionImpl, Pool as PoolImpl
+    from rowx._core.postgres import (
+        Connection as ConnectionImpl,
+        MigrationState,
+        Pool as PoolImpl,
+        ResultRow,
+        StatusRow,
+    )
 
 DEFAULT_TABLE: Final[str] = "_rowx_migrations"
 EPOCH: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
 
-type MigrationKind = Literal["simple", "up", "down"]
-type MigrationState = Literal["applied", "pending", "modified", "missing", "dirty"]
-type Row = tuple[int, str, MigrationState, int | None, int | None]
+type MigrationKind = Literal["simple", "reversible"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -29,10 +33,21 @@ class Migration:
     version: int
     description: str
     kind: MigrationKind
-    # SHA-384 of the raw file bytes
-    checksum: bytes
-    no_transaction: bool
+    # the simple file, or the `.up.sql`
     path: Path
+    # the `.down.sql` of a reversible migration
+    down_path: Path | None
+    # SHA-384 of the up file's raw bytes; the down checksum is never compared against the database
+    checksum: bytes
+    down_checksum: bytes | None
+    no_transaction: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MigrationResult:
+    migration: Migration
+    # None for a dry run or a skip
+    elapsed: timedelta | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -40,28 +55,34 @@ class MigrationStatus:
     version: int
     description: str
     state: MigrationState
+    # None when the migration is missing locally
+    kind: MigrationKind | None = None
     installed_on: datetime | None = None
     execution_time: timedelta | None = None
+    local_checksum: bytes | None = None
+    applied_checksum: bytes | None = None
 
 
-def status_from(row: Row) -> MigrationStatus:
-    version, description, state, installed_on, execution_time = row
+def to_timedelta(nanos: int | None) -> timedelta | None:
+    # -1 is the placeholder of a row whose time is not known (a skipped or still running migration)
+    return None if nanos is None or nanos < 0 else timedelta(microseconds=nanos / 1000)
+
+
+def status_from(row: StatusRow, local: Migration | None) -> MigrationStatus:
+    version, description, state, installed_on, execution_time, applied_checksum = row
     return MigrationStatus(
         version=version,
         description=description,
         state=state,
+        kind=None if local is None else local.kind,
         installed_on=None if installed_on is None else EPOCH + timedelta(microseconds=installed_on),
-        # -1 is the placeholder of a row whose time is not known (a skipped or still running migration)
-        execution_time=None
-        if execution_time is None or execution_time < 0
-        else timedelta(microseconds=execution_time / 1000),
+        execution_time=to_timedelta(execution_time),
+        local_checksum=None if local is None else local.checksum,
+        applied_checksum=applied_checksum,
     )
 
 
-async def call(
-    executor: Connection | Pool,
-    start: Callable[[ConnectionImpl | PoolImpl], Awaitable[list[Row]]],
-) -> tuple[MigrationStatus, ...]:
+async def call[T](executor: Connection | Pool, start: Callable[[ConnectionImpl | PoolImpl], Awaitable[T]]) -> T:
     # each migration manages its own transaction, and a `-- no-transaction` file can't run inside one
     if isinstance(executor, Transaction):
         msg = "a migrator runs on a Connection or a Pool, not a Transaction"
@@ -89,7 +110,7 @@ async def call(
     else:
         msg = "a migrator runs on a Connection or a Pool"
         raise TypeError(msg)
-    return tuple(status_from(row) for row in rows)
+    return rows
 
 
 class Migrator:
@@ -107,6 +128,8 @@ class Migrator:
         if isinstance(create_schemas, str):
             msg = "create_schemas must be an iterable of schema names, not a string"
             raise TypeError(msg)
+        # resolved against the cwd now, so a later chdir doesn't change what `path` names
+        self._path = Path(path).absolute()
         # reads and validates the files and the table name; no database IO
         self._impl = MigratorImpl(
             Path(path),
@@ -118,18 +141,50 @@ class Migrator:
         )
 
     @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
     def migrations(self) -> tuple[Migration, ...]:
         return tuple(
             Migration(
                 version=version,
                 description=description,
                 kind=kind,
-                checksum=checksum,
-                no_transaction=no_transaction,
                 path=path,
+                down_path=down_path,
+                checksum=checksum,
+                down_checksum=down_checksum,
+                no_transaction=no_transaction,
             )
-            for version, description, kind, checksum, no_transaction, path in self._impl.migrations
+            for (
+                version,
+                description,
+                kind,
+                path,
+                down_path,
+                checksum,
+                down_checksum,
+                no_transaction,
+            ) in self._impl.migrations
         )
+
+    def _results(self, rows: Iterable[ResultRow]) -> tuple[MigrationResult, ...]:
+        by_version = {m.version: m for m in self.migrations}
+        return tuple(
+            MigrationResult(migration=by_version[version], elapsed=to_timedelta(nanos)) for version, nanos in rows
+        )
+
+    async def _change(
+        self, executor: Connection | Pool, start: Callable[[ConnectionImpl | PoolImpl], Awaitable[list[ResultRow]]]
+    ) -> tuple[MigrationResult, ...]:
+        try:
+            rows = await call(executor, start)
+        except MigrationFailedError as error:
+            # the binding reports what completed before the failure as raw (version, nanoseconds) pairs
+            error.applied = self._results(error.applied)  # ty: ignore[invalid-argument-type]
+            raise
+        return self._results(rows)
 
     async def run(
         self,
@@ -138,25 +193,22 @@ class Migrator:
         *,
         target: int | None = None,
         dry_run: bool = False,
-    ) -> tuple[MigrationStatus, ...]:
-        return await call(executor, lambda impl: self._impl.run(impl, target, dry_run))
+    ) -> tuple[MigrationResult, ...]:
+        return await self._change(executor, lambda impl: self._impl.run(impl, target, dry_run))
 
-    async def undo(
+    async def revert(
         self,
         executor: Connection | Pool,
         /,
         *,
-        # required; `None` reverts only the latest applied migration, chosen under the operation's lock
-        target: int | None,
+        target: int | None = None,
+        all: bool = False,  # ruff: ignore[builtin-argument-shadowing]
         dry_run: bool = False,
-    ) -> tuple[MigrationStatus, ...]:
-        # the binding takes `all` explicitly; the legacy `target=0` keeps meaning "everything" until the
-        # `revert` API replaces `undo`
-        revert_all = target == 0
-        return await call(
-            executor,
-            lambda impl: self._impl.undo(impl, None if revert_all else target, revert_all, dry_run),
-        )
+    ) -> tuple[MigrationResult, ...]:
+        if all and target is not None:
+            msg = "pass either target or all=True, not both"
+            raise ValueError(msg)
+        return await self._change(executor, lambda impl: self._impl.revert(impl, target, all, dry_run))
 
     async def skip(
         self,
@@ -164,8 +216,11 @@ class Migrator:
         /,
         *,
         target: int | None = None,
-    ) -> tuple[MigrationStatus, ...]:
-        return await call(executor, lambda impl: self._impl.skip(impl, target))
+        dry_run: bool = False,
+    ) -> tuple[MigrationResult, ...]:
+        return await self._change(executor, lambda impl: self._impl.skip(impl, target, dry_run))
 
     async def info(self, executor: Connection | Pool, /) -> tuple[MigrationStatus, ...]:
-        return await call(executor, self._impl.info)
+        rows = await call(executor, self._impl.info)
+        local = {m.version: m for m in self.migrations}
+        return tuple(status_from(row, local.get(row[0])) for row in rows)

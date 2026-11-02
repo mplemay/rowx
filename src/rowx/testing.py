@@ -51,7 +51,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def template_name(migrator: Migrator, *, table: str = DEFAULT_MIGRATE_TABLE, create_schemas: Iterable[str] = ()) -> str:
     # everything that shapes the template: the history table, the schemas created first and the forward migrations
     # (a `.down.sql` never changes what the template holds)
-    pairs = sorted((m.version, m.checksum) for m in migrator.migrations if m.kind != "down")
+    pairs = sorted((m.version, m.checksum) for m in migrator.migrations)
     lines = [f"table:{table}", *(f"schema:{schema}" for schema in sorted(set(create_schemas)))]
     lines += [f"{version}:{checksum.hex()}" for version, checksum in pairs]
     digest = sha256("".join(f"{line}\n" for line in lines).encode()).hexdigest()

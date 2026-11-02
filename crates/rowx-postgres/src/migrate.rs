@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use rowx_core::migrate::{
     AppliedMigration, Migration, MigrationInfo, MigrationStatus, PlanError, PlanOptions,
-    RevertTarget, SchemaName, SourceError, TableName, migration_info, plan_run, plan_skip,
-    plan_undo,
+    RevertTarget, SchemaName, SourceError, TableName, migration_info, plan_revert, plan_run,
+    plan_skip,
 };
 use thiserror::Error;
 
@@ -109,6 +109,8 @@ pub struct MigrationDetail {
     // `Some` for versions that have a history row
     pub installed_on_micros: Option<i64>,
     pub execution_time: Option<i64>,
+    // the checksum the history row holds
+    pub applied_checksum: Option<Vec<u8>>,
 }
 
 /// sqlx's advisory-lock key for a database name.
@@ -205,6 +207,7 @@ fn details(local: &[Migration], applied: &[AppliedRecord]) -> Vec<MigrationDetai
             MigrationDetail {
                 installed_on_micros: record.map(|r| r.installed_on_micros),
                 execution_time: record.map(|r| r.execution_time),
+                applied_checksum: record.map(|r| r.migration.checksum.clone()),
                 info,
             }
         })
@@ -313,6 +316,8 @@ async fn with_applied(
     quoted: &str,
     local: &[Migration],
     done: &[i64],
+    // how long each completed step took, when the history row no longer says (a revert)
+    elapsed: Option<&[i64]>,
     err: MigrateError,
 ) -> MigrateError {
     let MigrateError::Failed {
@@ -326,10 +331,13 @@ async fn with_applied(
         return err;
     };
     let _ = conn.simple("ROLLBACK").await;
-    let applied = touched(conn, quoted, local, done)
-        .await
-        .unwrap_or_default()
-        .into_boxed_slice();
+    let mut applied = touched(conn, quoted, local, done).await.unwrap_or_default();
+    if let Some(elapsed) = elapsed {
+        for (detail, nanos) in applied.iter_mut().zip(elapsed) {
+            detail.execution_time = Some(*nanos);
+        }
+    }
+    let applied = applied.into_boxed_slice();
     MigrateError::Failed {
         version,
         source,
@@ -374,7 +382,7 @@ async fn apply(conn: &Connection, quoted: &str, migration: &Migration) -> Result
     Ok(())
 }
 
-async fn revert(
+async fn revert_step(
     conn: &Connection,
     quoted: &str,
     migration: &Migration,
@@ -533,7 +541,7 @@ pub async fn run(
         for step in &plan.steps {
             stop(cancelled)?;
             if let Err(err) = apply(conn, &quoted, step).await {
-                return Err(with_applied(conn, &quoted, local, &done, err).await);
+                return Err(with_applied(conn, &quoted, local, &done, None, err).await);
             }
             done.push(step.version);
         }
@@ -548,7 +556,7 @@ pub async fn run(
 ///
 /// # Errors
 /// As [`run`]; `Plan(MissingDown)` is raised before anything is reverted.
-pub async fn undo(
+pub async fn revert(
     conn: &Connection,
     config: &MigrateConfig,
     local: &[Migration],
@@ -562,14 +570,14 @@ pub async fn undo(
         let applied = list_applied(conn, &config.table).await?;
         let applied = plain(&applied);
         // `Latest` is resolved by the plan, under the same lock as the revert
-        let plan = plan_undo(local, &applied, target, ignore_missing)?;
+        let plan = plan_revert(local, &applied, target, ignore_missing)?;
         let mut done = Vec::with_capacity(plan.steps.len());
         let mut elapsed = Vec::with_capacity(plan.steps.len());
         for step in &plan.steps {
             stop(cancelled)?;
             let started = Instant::now();
-            if let Err(err) = revert(conn, &quoted, step).await {
-                return Err(with_applied(conn, &quoted, local, &done, err).await);
+            if let Err(err) = revert_step(conn, &quoted, step).await {
+                return Err(with_applied(conn, &quoted, local, &done, Some(&elapsed), err).await);
             }
             done.push(step.version);
             elapsed.push(nanos(started));
@@ -596,6 +604,7 @@ fn planned(steps: &[Migration], status: MigrationStatus) -> Vec<MigrationDetail>
             },
             installed_on_micros: None,
             execution_time: None,
+            applied_checksum: None,
         })
         .collect()
 }
@@ -616,12 +625,12 @@ pub async fn run_dry(
     Ok(planned(&plan.steps, MigrationStatus::Applied))
 }
 
-/// The statuses [`undo`] would return (with no `execution_time`), without reverting anything or
+/// The statuses [`revert`] would return (with no `execution_time`), without reverting anything or
 /// taking the lock. Creates nothing.
 ///
 /// # Errors
-/// The `Plan` errors [`undo`] raises and `Connection`.
-pub async fn undo_dry(
+/// The `Plan` errors [`revert`] raises and `Connection`.
+pub async fn revert_dry(
     conn: &Connection,
     config: &MigrateConfig,
     local: &[Migration],
@@ -629,8 +638,24 @@ pub async fn undo_dry(
     ignore_missing: bool,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     let applied = list_applied(conn, &config.table).await?;
-    let plan = plan_undo(local, &plain(&applied), target, ignore_missing)?;
+    let plan = plan_revert(local, &plain(&applied), target, ignore_missing)?;
     Ok(planned(&plan.steps, MigrationStatus::Pending))
+}
+
+/// The statuses [`skip`] would return, from the same plan, without recording anything or taking the
+/// lock. Creates nothing.
+///
+/// # Errors
+/// The `Plan` errors [`skip`] raises and `Connection`.
+pub async fn skip_dry(
+    conn: &Connection,
+    config: &MigrateConfig,
+    local: &[Migration],
+    options: PlanOptions,
+) -> Result<Vec<MigrationDetail>, MigrateError> {
+    let applied = list_applied(conn, &config.table).await?;
+    let plan = plan_skip(local, &plain(&applied), options)?;
+    Ok(planned(&plan.steps, MigrationStatus::Applied))
 }
 
 /// Records the pending migrations as applied without running them, and returns the status of each.

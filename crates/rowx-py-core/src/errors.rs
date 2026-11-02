@@ -1,6 +1,9 @@
+use std::path::Path;
+
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::PyType;
+use pyo3::types::{PyBytes, PyTuple, PyType};
 use rowx_core::error::CoreError;
 use rowx_core::migrate::{PlanError, SourceError};
 
@@ -12,6 +15,7 @@ static ROW_SHAPE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DECODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ENCODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static MIGRATION_SOURCE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static IRREVERSIBLE_MIGRATION_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static MIGRATION_CHECKSUM_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static MIGRATION_MISSING_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static MIGRATION_ORDER_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -47,6 +51,11 @@ pub fn init(py: Python<'_>) -> PyResult<()> {
     class(py, &DECODE_ERROR, "DecodeError")?;
     class(py, &ENCODE_ERROR, "EncodeError")?;
     class(py, &MIGRATION_SOURCE_ERROR, "MigrationSourceError")?;
+    class(
+        py,
+        &IRREVERSIBLE_MIGRATION_ERROR,
+        "IrreversibleMigrationError",
+    )?;
     class(py, &MIGRATION_CHECKSUM_ERROR, "MigrationChecksumError")?;
     class(py, &MIGRATION_MISSING_ERROR, "MigrationMissingError")?;
     class(py, &MIGRATION_ORDER_ERROR, "MigrationOrderError")?;
@@ -139,43 +148,84 @@ pub fn source_error(py: Python<'_>, err: &SourceError) -> PyErr {
         py,
         &MIGRATION_SOURCE_ERROR,
         "MigrationSourceError",
-        (err.to_string(), err.version()),
+        (err.to_string(), err.path(), err.version()),
     )
 }
 
 /// A failed file or commit; the caller sets the `DatabaseError` as the cause.
-#[must_use]
-pub fn migration_failed_error(py: Python<'_>, version: i64, message: &str) -> PyErr {
-    build(
+///
+/// `applied` holds a `(version, nanoseconds or None)` pair for each migration completed before the
+/// failure, which the Python wrapper turns into results.
+///
+/// # Errors
+/// A Python error when the arguments cannot be converted.
+pub fn migration_failed_error<'py>(
+    py: Python<'py>,
+    message: &str,
+    version: i64,
+    path: Option<&Path>,
+    dirty: bool,
+    applied: &[(i64, Option<i64>)],
+    error: Bound<'py, PyAny>,
+) -> PyResult<PyErr> {
+    let applied = PyTuple::new(py, applied)?;
+    Ok(build(
         py,
         &MIGRATION_FAILED_ERROR,
         "MigrationFailedError",
-        (message, version),
-    )
+        (message, version, path, dirty, applied, error),
+    ))
 }
 
-// a bad target is an ordering problem, and a missing `.down.sql` is a problem with the files
+// an unknown or too new target is a bad argument; a missing `.down.sql` is a problem with the files
 #[must_use]
 pub fn plan_error(py: Python<'_>, err: &PlanError) -> PyErr {
-    let args = (err.to_string(), err.version());
+    let message = err.to_string();
     match err {
-        PlanError::Dirty { .. } => build(py, &DIRTY_MIGRATION_ERROR, "DirtyMigrationError", args),
-        PlanError::Missing { .. } => {
-            build(py, &MIGRATION_MISSING_ERROR, "MigrationMissingError", args)
-        }
-        PlanError::Checksum { .. } => build(
+        PlanError::Dirty { version } => build(
+            py,
+            &DIRTY_MIGRATION_ERROR,
+            "DirtyMigrationError",
+            (message, *version),
+        ),
+        PlanError::Missing { versions } => match PyTuple::new(py, versions) {
+            Ok(versions) => build(
+                py,
+                &MIGRATION_MISSING_ERROR,
+                "MigrationMissingError",
+                (message, versions),
+            ),
+            Err(e) => e,
+        },
+        PlanError::Checksum {
+            version,
+            local,
+            applied,
+        } => build(
             py,
             &MIGRATION_CHECKSUM_ERROR,
             "MigrationChecksumError",
-            args,
+            (
+                message,
+                *version,
+                PyBytes::new(py, local),
+                PyBytes::new(py, applied),
+            ),
         ),
-        PlanError::Order { .. }
-        | PlanError::TargetNotFound { .. }
-        | PlanError::TargetTooNew { .. } => {
-            build(py, &MIGRATION_ORDER_ERROR, "MigrationOrderError", args)
+        PlanError::Order { pending, latest } => build(
+            py,
+            &MIGRATION_ORDER_ERROR,
+            "MigrationOrderError",
+            (message, *pending, *latest),
+        ),
+        PlanError::TargetNotFound { .. } | PlanError::TargetTooNew { .. } => {
+            PyValueError::new_err(message)
         }
-        PlanError::MissingDown { .. } => {
-            build(py, &MIGRATION_SOURCE_ERROR, "MigrationSourceError", args)
-        }
+        PlanError::MissingDown { version } => build(
+            py,
+            &IRREVERSIBLE_MIGRATION_ERROR,
+            "IrreversibleMigrationError",
+            (message, *version),
+        ),
     }
 }

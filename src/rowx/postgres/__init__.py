@@ -2,7 +2,7 @@ from rowx.postgres._connection import RESET_QUERY, Connection, connect
 from rowx.postgres._cube import Cube
 from rowx.postgres._geometric import Box, Circle, Line, LineSegment, Path, Point, Polygon
 from rowx.postgres._interval import Interval
-from rowx.postgres._migrate import Migration, MigrationStatus, Migrator
+from rowx.postgres._migrate import Migration, MigrationResult, MigrationStatus, Migrator
 from rowx.postgres._money import Money
 from rowx.postgres._options import ConnectOptions
 from rowx.postgres._pool import Pool
@@ -20,6 +20,7 @@ __all__ = [
     "Line",
     "LineSegment",
     "Migration",
+    "MigrationResult",
     "MigrationStatus",
     "Migrator",
     "Money",

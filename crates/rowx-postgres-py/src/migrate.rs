@@ -5,14 +5,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyList, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
 use rowx_core::migrate::{
-    Migration, MigrationKind, MigrationStatus, PlanOptions, RevertTarget, SchemaName, TableName,
-    resolve,
+    Migration, MigrationStatus, PlanOptions, RevertTarget, SchemaName, TableName, resolve,
 };
 use rowx_core::state::Claim;
 use rowx_postgres::cancel::{self, Cancel, Hook};
@@ -30,8 +29,9 @@ use crate::pool::Pool;
 enum Op {
     // the target, and whether it is a dry run
     Run(Option<i64>, bool),
-    Undo(RevertTarget, bool),
-    Skip(Option<i64>),
+    Revert(RevertTarget, bool),
+    // the target, and whether it is a dry run
+    Skip(Option<i64>, bool),
     Info,
 }
 
@@ -47,16 +47,6 @@ struct Job {
     cancelled: Arc<AtomicBool>,
 }
 
-// a row of the result: version, description, state, installed_on (microseconds since the epoch), execution_time (ns)
-#[derive(Debug)]
-struct Status {
-    version: i64,
-    description: String,
-    state: &'static str,
-    installed_on_micros: Option<i64>,
-    execution_time: Option<i64>,
-}
-
 const fn state_name(status: MigrationStatus) -> &'static str {
     match status {
         MigrationStatus::Applied => "applied",
@@ -67,27 +57,9 @@ const fn state_name(status: MigrationStatus) -> &'static str {
     }
 }
 
-const fn kind_name(kind: MigrationKind) -> &'static str {
-    match kind {
-        MigrationKind::Simple => "simple",
-        MigrationKind::Up => "up",
-        MigrationKind::Down => "down",
-    }
-}
-
-fn status(detail: MigrationDetail) -> Status {
-    Status {
-        version: detail.info.version,
-        description: detail.info.description.unwrap_or_default(),
-        state: state_name(detail.info.status),
-        installed_on_micros: detail.installed_on_micros,
-        execution_time: detail.execution_time,
-    }
-}
-
 // What the call changed is reported with the state the migrations are in afterwards, which the
 // executor reads under the same lock as the change
-async fn work(conn: &PgConnection, job: &Job) -> Result<Vec<Status>, MigrateError> {
+async fn work(conn: &PgConnection, job: &Job) -> Result<Vec<MigrationDetail>, MigrateError> {
     let options = |target| PlanOptions {
         target,
         ignore_missing: job.ignore_missing,
@@ -100,8 +72,8 @@ async fn work(conn: &PgConnection, job: &Job) -> Result<Vec<Status>, MigrateErro
             pg::run(conn, &job.config, local, options(target), &job.cancelled).await?
         }
         Op::Run(target, true) => pg::run_dry(conn, &job.config, local, options(target)).await?,
-        Op::Undo(target, false) => {
-            pg::undo(
+        Op::Revert(target, false) => {
+            pg::revert(
                 conn,
                 &job.config,
                 local,
@@ -111,14 +83,15 @@ async fn work(conn: &PgConnection, job: &Job) -> Result<Vec<Status>, MigrateErro
             )
             .await?
         }
-        Op::Undo(target, true) => {
-            pg::undo_dry(conn, &job.config, local, target, job.ignore_missing).await?
+        Op::Revert(target, true) => {
+            pg::revert_dry(conn, &job.config, local, target, job.ignore_missing).await?
         }
-        Op::Skip(target) => {
+        Op::Skip(target, false) => {
             pg::skip(conn, &job.config, local, options(target), &job.cancelled).await?
         }
+        Op::Skip(target, true) => pg::skip_dry(conn, &job.config, local, options(target)).await?,
     };
-    Ok(details.into_iter().map(status).collect())
+    Ok(details)
 }
 
 // the lock and the connection's state follow the same rules as any other statement
@@ -130,9 +103,9 @@ fn note(access: &Access, cancel: &Cancel, err: &MigrateError) {
 
 // An error before the plan's first step changes nothing; any later one may follow committed
 // migrations or a file that changed the schema before it failed, so it drops the plans as well
-fn may_have_changed(op: Op, result: &Result<Vec<Status>, MigrateError>) -> bool {
+fn may_have_changed(op: Op, result: &Result<Vec<MigrationDetail>, MigrateError>) -> bool {
     match (op, result.as_ref().map_err(MigrateError::root)) {
-        (Op::Info | Op::Run(_, true) | Op::Undo(_, true), _)
+        (Op::Info | Op::Run(_, true) | Op::Revert(_, true) | Op::Skip(_, true), _)
         | (_, Err(MigrateError::Plan(_) | MigrateError::Source(_))) => false,
         (_, Ok(statuses)) => !statuses.is_empty(),
         (
@@ -188,6 +161,8 @@ async fn run_job(
     let pool = access.pool.clone();
     let state = Arc::clone(&cancel.state);
     let flag = Arc::clone(&job.cancelled);
+    let migrations = Arc::clone(&job.migrations);
+    let op = job.op;
     // the invalidation runs in the task, so it also happens when the caller is cancelled
     let pending = cancel::spawn(&cancel, claim, &hook, async move {
         let mut conn = inner.lock().await;
@@ -217,28 +192,59 @@ async fn run_job(
     .await
     .map_err(|e| PgError(e.into()))?;
     match result {
-        Ok(statuses) => Python::attach(|py| to_list(py, statuses)),
+        Ok(details) => Python::attach(|py| to_list(py, op, details)),
         Err(err) => {
             note(&access, &cancel, &err);
-            Err(MigrateFailure(err).into())
+            Err(MigrateFailure {
+                error: err,
+                migrations,
+                reverting: matches!(op, Op::Revert(..)),
+            }
+            .into())
         }
     }
 }
 
-fn to_list(py: Python<'_>, statuses: Vec<Status>) -> PyResult<Py<PyAny>> {
-    let rows = statuses
+// `Info` rows are (version, description, state, installed_on in microseconds since the epoch,
+// execution_time in ns, applied checksum). Every other operation returns (version, elapsed in ns),
+// which only a real run or revert has: a dry run and a skip took no time.
+fn to_list(py: Python<'_>, op: Op, details: Vec<MigrationDetail>) -> PyResult<Py<PyAny>> {
+    let rows = details
         .into_iter()
-        .map(|s| {
-            PyTuple::new(
+        .map(|d| match op {
+            Op::Info => PyTuple::new(
                 py,
                 [
-                    s.version.into_pyobject(py)?.into_any(),
-                    s.description.into_pyobject(py)?.into_any(),
-                    s.state.into_pyobject(py)?.into_any(),
-                    s.installed_on_micros.into_pyobject(py)?.into_any(),
-                    s.execution_time.into_pyobject(py)?.into_any(),
+                    d.info.version.into_pyobject(py)?.into_any(),
+                    d.info
+                        .description
+                        .unwrap_or_default()
+                        .into_pyobject(py)?
+                        .into_any(),
+                    state_name(d.info.status).into_pyobject(py)?.into_any(),
+                    d.installed_on_micros.into_pyobject(py)?.into_any(),
+                    d.execution_time.into_pyobject(py)?.into_any(),
+                    d.applied_checksum
+                        .as_deref()
+                        .map(|bytes| PyBytes::new(py, bytes))
+                        .into_pyobject(py)?
+                        .into_any(),
                 ],
-            )
+            ),
+            Op::Run(_, false) | Op::Revert(_, false) => PyTuple::new(
+                py,
+                [
+                    d.info.version.into_pyobject(py)?.into_any(),
+                    d.execution_time.into_pyobject(py)?.into_any(),
+                ],
+            ),
+            Op::Run(_, true) | Op::Revert(_, true) | Op::Skip(..) => PyTuple::new(
+                py,
+                [
+                    d.info.version.into_pyobject(py)?.into_any(),
+                    py.None().into_bound(py),
+                ],
+            ),
         })
         .collect::<PyResult<Vec<_>>>()?;
     Ok(PyList::new(py, rows)?.into_any().unbind())
@@ -312,12 +318,33 @@ impl Migrator {
         }
     }
 
+    // an unknown target is a bad argument, so it fails before any IO
+    fn check_target(&self, op: Op) -> PyResult<()> {
+        let (Op::Run(Some(target), _)
+        | Op::Skip(Some(target), _)
+        | Op::Revert(RevertTarget::Above(target), _)) = op
+        else {
+            return Ok(());
+        };
+        if self
+            .migrations
+            .iter()
+            .any(|m| m.version == target && !m.kind.is_down())
+        {
+            return Ok(());
+        }
+        Err(PyValueError::new_err(format!(
+            "target migration {target} does not exist"
+        )))
+    }
+
     fn start<'py>(
         &self,
         py: Python<'py>,
         executor: &Bound<'py, PyAny>,
         op: Op,
     ) -> PyResult<Bound<'py, PyAny>> {
+        self.check_target(op)?;
         let job = self.job(op);
         if let Ok(conn) = executor.cast::<Connection>() {
             return on_connection(py, conn.get(), job);
@@ -368,24 +395,37 @@ impl Migrator {
         })
     }
 
-    // (version, description, kind, checksum, no_transaction, path)
+    // (version, description, kind, path, down_path, checksum, down_checksum, no_transaction), one per
+    // version: a reversible pair is a single entry
     #[getter]
     fn migrations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let rows = self
             .migrations
             .iter()
+            .filter(|m| !m.kind.is_down())
             .map(|m| {
+                let down = self
+                    .migrations
+                    .iter()
+                    .find(|d| d.version == m.version && d.kind.is_down());
+                let kind = if down.is_some() {
+                    "reversible"
+                } else {
+                    "simple"
+                };
                 PyTuple::new(
                     py,
                     [
                         m.version.into_pyobject(py)?.into_any(),
                         m.description.as_str().into_pyobject(py)?.into_any(),
-                        kind_name(m.kind).into_pyobject(py)?.into_any(),
-                        pyo3::types::PyBytes::new(py, &m.checksum).into_any(),
-                        pyo3::types::PyBool::new(py, m.no_transaction)
-                            .to_owned()
-                            .into_any(),
+                        kind.into_pyobject(py)?.into_any(),
                         m.path.as_path().into_pyobject(py)?.into_any(),
+                        down.map(|d| d.path.as_path()).into_pyobject(py)?.into_any(),
+                        PyBytes::new(py, &m.checksum).into_any(),
+                        down.map(|d| PyBytes::new(py, &d.checksum))
+                            .into_pyobject(py)?
+                            .into_any(),
+                        PyBool::new(py, m.no_transaction).to_owned().into_any(),
                     ],
                 )
             })
@@ -415,8 +455,8 @@ impl Migrator {
 
     // `revert_all` reverts everything, otherwise `None` is the latest applied version only and
     // `Some(V)` every applied version above `V`
-    #[pyo3(signature = (executor, target, revert_all=false, dry_run=false))]
-    fn undo<'py>(
+    #[pyo3(signature = (executor, target=None, revert_all=false, dry_run=false))]
+    fn revert<'py>(
         &self,
         py: Python<'py>,
         executor: &Bound<'py, PyAny>,
@@ -429,17 +469,18 @@ impl Migrator {
             (false, None) => RevertTarget::Latest,
             (false, Some(version)) => RevertTarget::Above(version),
         };
-        self.start(py, executor, Op::Undo(target, dry_run))
+        self.start(py, executor, Op::Revert(target, dry_run))
     }
 
-    #[pyo3(signature = (executor, target=None))]
+    #[pyo3(signature = (executor, target=None, dry_run=false))]
     fn skip<'py>(
         &self,
         py: Python<'py>,
         executor: &Bound<'py, PyAny>,
         target: Option<i64>,
+        dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.start(py, executor, Op::Skip(target))
+        self.start(py, executor, Op::Skip(target, dry_run))
     }
 
     fn info<'py>(
