@@ -200,6 +200,71 @@
     `--rowx-keep-templates` is set.
   - *Orphans:* a clone orphaned by a SIGKILLed inner session is swept on the next run, and another project's old clone
     is left.
+- **Security hardening** ([Security](security.md)). Each guarantee has a test.
+  - *Already-sound guarantees (regression tests):* values are always bound and encoders are strict (no `str()`
+    fallback); Parse rejects multiple statements; isolation levels are allowlisted; savepoint names are built from an
+    integer; admin and migration identifiers are quoted and `quote_literal` uses `E''`; protocol length overflow is
+    guarded; `"` is never a trail byte in any client-only encoding; `RESET` restores `client_encoding` (the role half is
+    now `RESET SESSION AUTHORIZATION`); error 26000 after an application `DEALLOCATE ALL` clears the cache and
+    re-prepares; the array decoder bounds `ndim` and uses `checked_mul`; GitHub Actions are pinned by SHA.
+  - *Template compiler (unit):* `str` subclasses that override `__contains__`, `__len__`, `encode`, `replace`,
+    `__iter__`, `__add__` and `__radd__`; a `tuple` subclass; control characters; a lone surrogate; NUL; 65536
+    parameters across nested templates; a runtime `ident` spec; `"é"` accepted and `"\u0085"` rejected; `:ident`
+    placement (`'{n:ident}'`, `E'…{n:ident}…'`, `$$ {n:ident} $$`, `$q$…$q$`, `"…{n:ident}…"` inside a quoted
+    identifier, `/* {n:ident} */`, a nested block comment, `-- {n:ident}` and `--\r` each raise; `{n:ident}` in code
+    position and after a closed literal or comment passes; state carried across a nested template); a `conversion` or
+    `format_spec` that is a `str` subclass whose `__eq__` returns True or whose `__bool__` is False raises `TypeError`;
+    an object that that is not exactly a `Template` is bound, never compiled as SQL text. The connection is still usable
+    after each failure.
+  - *Binary arrays and ranges:* `wire_send.rs` round-trips every element family through the server with adversarial
+    strings (`"`, `\`, `,`, `{}`, `NULL`, whitespace, `empty`, SJIS lead-byte characters), `Numeric::from_decimal_parts`
+    edge cases (a `Decimal` subclass overriding `as_tuple`, an `int` past the int-to-str digit limit), a test that no
+    array or range parameter is ever sent in text format, and a test pinning `json.dumps(ensure_ascii=True)`.
+    `bench/fetch_100k.py` shows no regression.
+  - *Session encoding watch:* `SET client_encoding = 'SJIS'` and `SET standard_conforming_strings = off` make the next
+    call raise `InterfaceError`, a pooled connection that drifted is replaced after release, and
+    `SET client_encoding = 'UTF8'` (no change) keeps the connection. `SJIS` then `RESET ALL` is still discarded, and a
+    role-level `standard_conforming_strings = off` raises at the first call.
+  - *Options:* `dsn.rs` unit tests for tab, newline, backslash and overlong keys and control characters in values;
+    `repr` redaction; a percent-encoded password (`p%40ss`) and an unparseable DSN are redacted; the password, in each
+    of the URL userinfo, `?password=` and key=value forms, never appears in `str(exc)`, `repr(exc)`,
+    `repr(exc.__cause__)` or `rowx check` output; unit tests for `channel_binding` (parsed into the typed field, an
+    `extra` key rejected, an invalid value rejected, `require` with `sslmode=disable` rejected from the DSN and from the
+    field).
+  - *Fake server* (`crates/rowx-postgres/tests/common/fake_server.rs`, a scripted server on a local socket): with
+    `channel_binding=require`, a server asking for cleartext, MD5 or SCRAM-SHA-256 without `-PLUS` gets no password or
+    SASL response; `verify-full` and `require` never fall back to plaintext on `N`; a cancel request follows the TLS
+    mode. A live test negotiates SCRAM-SHA-256-PLUS against the TLS container.
+  - *Pool reset and internal SQL:* after release, `current_user = session_user =` the startup role (the login role, or
+    the role set at startup through `server_settings={"role": …}` or `ALTER ROLE … SET role`) after `SET ROLE` and after
+    `SET SESSION AUTHORIZATION`, including a case with `server_settings={"role": …}` (`RESET SESSION AUTHORIZATION`
+    restores the role in effect at connection start, so a startup `-c role=…` setting survives, verified on Postgres 18,
+    and the expected value is the startup role); a custom placeholder GUC (`app.tenant`) is empty after release; a
+    statement whose transaction keyword follows a `--` comment ended by `\r` leaves no transaction in the next checkout;
+    with the flag clear and a transaction open, the reset fails and the connection is discarded, for the default and a
+    custom reset query (with `reset_query=None` no guard runs, because there is no reset batch, and it remains unsafe as
+    documented); a `reset=` hook after an aborted transaction sees an idle connection and its `SET` survives into the
+    next checkout; with `search_path` set to a schema holding a same-named `pg_advisory_unlock_all()` and an advisory
+    lock held, no advisory lock survives release; with `search_path` set to a schema holding a same-named `=` operator
+    for `timestamptz` that always returns true, the guard still fails inside an open transaction; a temp table is gone.
+    Migrations under `search_path = evil, pg_catalog` record the real time, and a test asserts that rowx's internal SQL
+    constants call no unqualified function.
+  - *Fuzzing:* a `cargo-fuzz` target for every `wire/` decoder, arrays of each element family, `explain` plan JSON and
+    `dsn::parse`, each run with `-rss_limit_mb` so an over-allocation fails, plus `decode(encode(x)) == x` targets for
+    the encoders. They run in the scheduled fuzz workflow. A panic-boundary test checks that a malformed value of every
+    type is a `DecodeError`, never a `PanicException`.
+  - *Protocol limits (RUSTSEC-2024-0363):* a parameter of at least 2³¹ bytes raises `EncodeError`/`InterfaceError` and
+    the same connection then runs `SELECT 1`. It needs about 2 GiB, so it is `#[ignore]` and runs in the scheduled fuzz
+    workflow. Cheap twins (a NUL in the SQL, 65536 placeholders) run in `just test-rust`.
+  - *Checker:* conformance and golden rows for `template-construction` (`Template(x)`, `Template(*parts)`,
+    `t"a" + Template(x)`, an aliased import and `T = Template` fail; `Template("lit", Interpolation(...))` passes), and
+    a non-literal format spec in `query_unchecked` as `dynamic-query`. Further rows: a helper returning
+    `t"{v:{spec}}"` is `template-construction`; `import string` then `string.templatelib.Template(x)`,
+    `from string.templatelib import *`, `Template.__new__` and `type(t"…")(x)` are each flagged; an f-string and an
+    implicitly concatenated `str` constant as `Template` arguments (the f-string fails, the constant passes). A server
+    message containing an escape sequence renders without it.
+  - *EXPLAIN of a prepared statement* (only if #229 lands): the `fuzz-nullability` parity run (both forms, identical
+    verdicts), zero- and many-parameter statements, views, and a test that no EXPLAIN text contains the user's SQL.
 - **Module split.** `import rowx` loads neither `rowx._core` nor `rowx.postgres`. `rowx._core.postgres` is importable
   and registered in `sys.modules`, its classes report `module == "rowx._core.postgres"`, and `rowx.connect`,
   `rowx.Connection` and `rowx.ping` no longer exist. `Connection`, `Pool` and `Transaction` satisfy `Executor`.

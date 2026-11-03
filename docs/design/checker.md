@@ -181,6 +181,17 @@ package. Both import `rowx.postgres` and run the same [`Migrator`](migrations.md
 - If the name is also bound any other way in that scope (by assignment, a parameter, a
   `for` target, and so on), the name is ambiguous, and each use of it is `indirect-query`.
 
+**`string.templatelib` names** are resolved with the same lexical scope rules as `query` (innermost scope wins, and a
+name that is also bound another way in that scope is ambiguous). The binding forms are:
+
+- `from string.templatelib import Template [as X]`;
+- `import string.templatelib [as m]`, then `m.Template` (or `string.templatelib.Template` without an alias);
+- `from string import templatelib [as m]`, then `m.Template`;
+- `import string [as s]`, then `s.templatelib.Template` (or `string.templatelib.Template` without an alias).
+
+`Interpolation` resolves the same way. These bindings drive the [`template-construction`](#rules-all-errors) rule and
+the "evident `Template`" test in [Interpolations in `query`](#discovery-checkdiscoverpy).
+
 **Allowed uses** of a name that resolves to `rowx.query` or `rowx.query_unchecked`:
 
 - (a) `NAME[T](arg)` or `NAME(arg)`, where the `Call`'s `func` is exactly that `Subscript`
@@ -197,7 +208,42 @@ package. Both import `rowx.postgres` and run the same [`Migrator`](migrations.md
   starred arguments or `**`. That argument must be an inline `ast.TemplateStr`, optionally
   parenthesised. Anything else is `dynamic-query`.
 - For `query_unchecked`, the call is counted and its SQL is skipped. Its `T` is still
-  resolved, and is reported as `invalid-row-type`/`unresolved-row-type` when it fails.
+  resolved, and is reported as `invalid-row-type`/`unresolved-row-type` when it fails. Its **interpolations are
+  inspected**: a `format_spec` that isn't a literal (`{x:{spec}}`) is `dynamic-query`, because at runtime a spec that
+  evaluates to `"ident"` can't be told apart from a literal `:ident`
+  ([`:ident`](api.md#ident-identifiers)). A literal spec, including `:ident`, is accepted, and the SQL is still not
+  checked.
+
+**Template construction.** The `template-construction` rule applies to **every file under the include roots**, not only
+to query call sites, because a helper can build a template in one place and pass it to `query_unchecked` in another.
+
+- A call that resolves to `string.templatelib.Template` **MUST** take only these arguments: `str` literals, inline
+  t-strings, and `Interpolation(...)` calls. Anything else is `template-construction`. A starred argument
+  (`Template(*parts)`) fails.
+- `t"…" + <operand>` fails unless the operand is an inline t-string or evidently a `Template`
+  ([Parameter type inference](#parameter-type-inference-checkparamspy-sqlty-style)).
+- An indirect use of the class, such as `T = Template` or passing `Template` as a value, fails, because the call can't
+  be seen. That includes:
+  - `from string.templatelib import *`;
+  - any attribute access on the class other than a direct call, such as `Template.__new__`;
+  - `type(<t-string>)` or `<t-string>.__class__` used as a callable.
+- A **`str` literal** is an `ast.Constant` whose value is a `str`. Implicit concatenation of constants is one constant,
+  and an f-string is not a literal.
+- **Format specs in any t-string.** Any t-string literal in a file under the include roots whose interpolation has a
+  non-literal `format_spec` (`{x:{spec}}`) is `template-construction`, wherever it appears, because a helper such as
+  `def w(spec): return t"… {v:{spec}}"` can be nested into `query_unchecked` without the call site ever showing the
+  spec. A conversion is not part of this rule, because the runtime rejects one everywhere. For the t-string that is
+  the argument of a `query_unchecked` call, `dynamic-query` reports the spec instead (see
+  [Call shape](#discovery-checkdiscoverpy)), so one interpolation is never reported twice.
+- `Interpolation(...)` is allowed, because its value is always bound (or quoted by `:ident`), but only when its
+  `conversion` and `format_spec` arguments (the 3rd and 4th positional arguments, or the keywords `conversion=` and
+  `format_spec=`) are absent or literals (`None` or a `str` literal). A non-literal one is `template-construction`, for
+  the same reason a non-literal format spec in `query_unchecked` is `dynamic-query`: at runtime it could evaluate to
+  `"ident"`. A starred or `**` argument to `Interpolation(...)` is also `template-construction`.
+- There are **no ignore comments**. The only escape is to exclude the path in config.
+- **Best-effort.** The rule reads source only. `getattr`, `eval`, code outside the include roots and generated code can
+  still build a template. `Template(...)` with a non-literal string is the one raw-SQL path, and the docs name it as
+  such ([Security](security.md#parameters-and-sql-text)).
 
 **Interpolations in `query`.**
 
@@ -394,7 +440,8 @@ field add `note: field defined at path:line:col`.
 |---|---|
 | `syntax-error` | The file can't be decoded or parsed. |
 | `indirect-query` | A disallowed use of `query`/`query_unchecked` ([Discovery](#discovery-checkdiscoverpy)). |
-| `dynamic-query` | The argument is not one inline t-string, or it has a conversion, format spec, or evident nested Template. |
+| `dynamic-query` | The argument is not one inline t-string, or it has a conversion, format spec, or evident nested Template. In a `query_unchecked` call, a non-literal format spec on an interpolation. |
+| `template-construction` | A t-string literal anywhere under the include roots whose interpolation has a non-literal `format_spec` (except an interpolation of a `query_unchecked` call's own argument, which is `dynamic-query`); a call that resolves to `string.templatelib.Template` takes anything other than `str` literals, inline t-strings and `Interpolation(...)` calls; an `Interpolation(...)` call with a non-literal `conversion` or `format_spec`, or a starred or `**` argument; has a starred argument; `t"…" + <operand>` where the operand is neither an inline t-string nor evidently a `Template`; or an indirect use of the class (`T = Template`, `from string.templatelib import *`, an attribute access other than a direct call, or `type(<t-string>)`/`<t-string>.__class__` used as a callable). Help: "build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL". Applies to every file under the include roots; no ignore comments. |
 | `unresolved-row-type` | `T` can't be resolved statically. |
 | `invalid-row-type` | `T` isn't derivable from the [Row-type grammar and runtime row plan](api.md#row-type-grammar-and-runtime-row-plan) grammar. |
 | `sql-error` | The server rejected the SQL at Parse. The diagnostic carries sqlstate, message, detail and hint. Help text is added for 42P18/42P08 ("cast the parameter: `{x}::int`") and for 42501. |
@@ -555,5 +602,8 @@ others are named in the message), `ambiguous-column`, `column-name-mismatch`, `t
 `type-mismatch`, `nullability-mismatch`, and the pydantic two-names kind of `duplicate-column`. It is `null` when no
 field is involved (a `duplicate-column` on `?column?` or on a name no field has). Otherwise it is `null`, so
 `missing-column` leaves `column_index` null. `ambiguous-column` adds one `field defined at` note for each field.
+
+Text output strips C0 and C1 control characters, except `\n` and `\t`, from server-supplied text (message, detail and
+hint) before printing, so server text is sanitised before it reaches a terminal.
 
 Exit-2 failures go to stderr as text. The DSN or password is never printed.

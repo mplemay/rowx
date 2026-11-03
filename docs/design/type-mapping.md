@@ -35,13 +35,13 @@ declared.
 | `int2`, `int4`, `int8` | `int` | binary | `int` (never `bool`) | binary, range-checked → `EncodeError` |
 | `oid` | `int` | binary | `int` | binary |
 | `float4`, `float8` | `float` | binary | `float`, `int` | binary (`int` > 2^53 loses precision; documented) |
-| `numeric` | `decimal.Decimal` | binary → Decimal (NaN, ±Infinity) | `Decimal`, `int` | text (`Decimal('sNaN')` → `EncodeError`) |
+| `numeric` | `decimal.Decimal` | binary → Decimal (NaN, ±Infinity) | `Decimal`, `int` | text as a scalar (`Decimal('sNaN')` → `EncodeError`); binary inside an array or range |
 | `text`, `varchar`, `bpchar`, `name`, `citext` | `str` | binary UTF-8 | `str` **only** | binary |
 | `"char"` (OID 18) | `str` | binary (1 byte) | `str` (len 1) | binary |
 | `bytea` | `bytes` | binary | `bytes`, `bytearray`, `memoryview` | binary |
 | `date` | `datetime.date` | binary | `date` (not `datetime`) | binary |
 | `time` | `datetime.time` (naive) | binary | naive `time` | binary |
-| `timetz` | `datetime.time` (aware) | binary; the zone is stored as seconds **west** of UTC, so negate it | aware `time` (naive → `EncodeError`) | text |
+| `timetz` | `datetime.time` (aware) | binary; the zone is stored as seconds **west** of UTC, so negate it | aware `time` (naive → `EncodeError`) | text as a scalar; binary inside an array or range |
 | `timestamp` | `datetime.datetime` (naive) | binary | naive `datetime` (aware → `EncodeError`) | binary |
 | `timestamptz` | `datetime.datetime` (UTC-aware) | binary | aware `datetime` (naive → `EncodeError`) | binary |
 | `interval` | `datetime.timedelta` | binary | `timedelta` | binary |
@@ -49,18 +49,18 @@ declared.
 | `inet` | `ipaddress.IPv4Interface \| ipaddress.IPv6Interface` (one leaf) | binary | `IPv4Interface`, `IPv6Interface`, `IPv4Address`, `IPv6Address`, `str` | binary (`str` is parsed by `ipaddress` first) |
 | `cidr` | `ipaddress.IPv4Network \| ipaddress.IPv6Network` (one leaf) | binary | `IPv4Network`, `IPv6Network`, `str` | binary |
 | `macaddr`, `macaddr8` | `str` (`08:00:2b:01:02:03`, lower case) | binary | `str` | binary |
-| `int4range`, `int8range`, `numrange`, `daterange`, `tsrange`, `tstzrange` | `rowx.postgres.Range[T]`, with `T` the leaf of the subtype | binary | `Range[T]` with `T` accepted by the subtype | binary |
+| `int4range`, `int8range`, `numrange`, `daterange`, `tsrange`, `tstzrange` | `rowx.postgres.Range[T]`, with `T` the leaf of the subtype | binary | `Range[T]` with `T` accepted by the subtype | always binary; a bound whose scalar form is text uses the binary element encoder ([Binary arrays and ranges](driver.md#binary-arrays-and-ranges)) |
 | `money` | `rowx.postgres.Money` (`minor_units: int`; no scale) | binary (int8) | `Money` | binary |
 | `bit(n)`, `varbit` | `str` of `0` and `1` | binary | `str` of `0` and `1` (`bit(n)` length checked by the server) | binary |
 | `point`, `line`, `lseg`, `box`, `path`, `polygon`, `circle` | frozen dataclasses `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle` in `rowx.postgres` | binary | the matching dataclass | binary |
 | `hstore` (extension) | `dict[str, str \| None]` | binary | `dict[str, str \| None]` | binary |
 | `ltree`, `lquery` (extensions) | `str` | binary | `str` | binary |
 | `cube` (extension) | `rowx.postgres.Cube` (`lower_left` and `upper_right`, each a `tuple[float, ...]` of the same length; a point has equal corners) | binary | `Cube` | binary |
-| `uuid` | `uuid.UUID` | binary | `UUID`, `str` | binary (`UUID`), text (`str`) |
-| `json`, `jsonb` | any annotation ([Rules](checker.md#rules-all-errors)) | `json.loads` (jsonb: strip the `0x01` version byte) | any JSON-serialisable value, always `json.dumps`-ed. A `str` becomes a JSON **string**; to bind raw JSON text, write `{s}::jsonb` | text |
-| enum | `str` | binary (the label) | `str` | text |
+| `uuid` | `uuid.UUID` | binary | `UUID`, `str` | binary (`UUID`), text (`str`) as a scalar; inside an array or range both are binary (a `str` is parsed to 16 bytes on the client) |
+| `json`, `jsonb` | any annotation ([Rules](checker.md#rules-all-errors)) | `json.loads` (jsonb: strip the `0x01` version byte) | any JSON-serialisable value, always `json.dumps`-ed. A `str` becomes a JSON **string**; to bind raw JSON text, write `{s}::jsonb` | text as a scalar; binary inside an array or range (`jsonb` is `0x01` plus UTF-8) |
+| enum | `str` | binary (the label) | `str` | text as a scalar; binary label (UTF-8) inside an array or range |
 | domain | as its base type | as its base type | as its base type | as its base type |
-| `X[]` | `list[X']`; nested lists for multi-dim | binary arrays | `list`/`tuple` of accepted X (`str`/`bytes` are never sequences) | binary if every element encodes binary, else a text literal ([Codec](driver.md#codec-rowx-postgres-pysrccodec-rowx-postgressrcwire)) |
+| `X[]` | `list[X']`; nested lists for multi-dim | binary arrays | `list`/`tuple` of accepted X (`str`/`bytes` are never sequences) | always binary; elements whose scalar form is text get binary element encoders ([Binary arrays and ranges](driver.md#binary-arrays-and-ranges)) |
 | `void` | `None` (tuple element only; [Rules](checker.md#rules-all-errors)) | → `None` | – | – |
 
 Decode errors (`DecodeError`, each with a hint to cast to `text`):
