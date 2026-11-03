@@ -1,0 +1,56 @@
+[
+  {
+    "rule": "type-mismatch",
+    "message": "column 2 \"item\" is `str` but field \"item\" of `Page[int]` is `int`",
+    "file": "queries.py",
+    "line": 4,
+    "col": 7,
+    "end_line": 4,
+    "end_col": 16,
+    "notes": [
+      "field defined at <root>/app/models.py:7:5",
+      "`Page` is generic, defined at <root>/app/models.py:5:1, with T = int"
+    ],
+    "help": null,
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 1,
+    "field": "item"
+  },
+  {
+    "rule": "type-mismatch",
+    "message": "column 3 \"extra\" is `str` but field \"extra\" of `Child[int]` is `int`",
+    "file": "queries.py",
+    "line": 6,
+    "col": 7,
+    "end_line": 6,
+    "end_col": 17,
+    "notes": [
+      "field defined at <root>/app/models.py:18:5",
+      "`Child` is generic, defined at <root>/app/models.py:17:1, with U = int"
+    ],
+    "help": null,
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 2,
+    "field": "extra"
+  },
+  {
+    "rule": "type-mismatch",
+    "message": "column 2 \"name\": column type is `str` but the annotation is `int`",
+    "file": "queries.py",
+    "line": 7,
+    "col": 7,
+    "end_line": 7,
+    "end_col": 16,
+    "notes": [
+      "alias defined at <root>/app/models.py:21:1",
+      "generic alias `Rows` defined at <root>/app/models.py:21:1, with X = int"
+    ],
+    "help": null,
+    "sqlstate": null,
+    "sql": null,
+    "column_index": 1,
+    "field": null
+  }
+]

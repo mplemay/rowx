@@ -219,8 +219,7 @@ def _row_span(site: _Site) -> Span:
 def _alias_note(row_type: RowType | None) -> tuple[str, ...]:
     if row_type is None or row_type.alias is None:
         return ()
-    alias = row_type.alias
-    return (f"alias defined at {alias.path}:{alias.span.line}:{alias.span.col}",)
+    return row_type.alias.notes()
 
 
 def _plural(count: int, noun: str) -> str:
@@ -431,6 +430,8 @@ def _finding_report(
         for index in finding.fields:
             defined = row_type.fields[index]
             notes.append(f"field defined at {defined.path}:{defined.span.line}:{defined.span.col}")
+            if defined.generic is not None:
+                notes.append(defined.generic)
     name = columns[finding.column].name if finding.column is not None else None
     if reason := finding.reason:
         notes.append(null_reason_note(reason, finding.reason_detail, column=name))

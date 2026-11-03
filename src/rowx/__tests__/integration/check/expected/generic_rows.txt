@@ -1,0 +1,26 @@
+error[type-mismatch]: column 2 "item" is `str` but field "item" of `Page[int]` is `int`
+ --> queries.py:4:7
+  |
+4 | query[Page[int]](t"SELECT id, name AS item FROM users")
+  |       ^^^^^^^^^ row type
+  |
+  = note: field defined at <root>/app/models.py:7:5
+  = note: `Page` is generic, defined at <root>/app/models.py:5:1, with T = int
+
+error[type-mismatch]: column 3 "extra" is `str` but field "extra" of `Child[int]` is `int`
+ --> queries.py:6:7
+  |
+6 | query[Child[int]](t"SELECT id, NULL::int4 AS item, name AS extra FROM users")
+  |       ^^^^^^^^^^ row type
+  |
+  = note: field defined at <root>/app/models.py:18:5
+  = note: `Child` is generic, defined at <root>/app/models.py:17:1, with U = int
+
+error[type-mismatch]: column 2 "name": column type is `str` but the annotation is `int`
+ --> queries.py:7:7
+  |
+7 | query[Rows[int]](t"SELECT id, name FROM users")
+  |       ^^^^^^^^^
+  |
+  = note: alias defined at <root>/app/models.py:21:1
+  = note: generic alias `Rows` defined at <root>/app/models.py:21:1, with X = int

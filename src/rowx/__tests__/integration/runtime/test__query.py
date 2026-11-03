@@ -553,3 +553,71 @@ def test_value_classes_pass_through_a_model_and_a_pydantic_dataclass_unchanged(
         assert fields == plain
         assert [type(v) for v in fields] == [Range, Range, Money, Interval, Point, Cube]
         assert all(getattr(row, k) is seen[k] for k in keys)
+
+
+@dataclass
+class Page[T]:
+    id: int
+    item: T
+
+
+class ModelPage[T](BaseModel):
+    id: int
+    item: T
+
+
+@dataclass
+class Checked[T]:
+    id: int
+    item: T
+
+    def __post_init__(self) -> None:
+        if self.id < 0:
+            msg = "negative"
+            raise ValueError(msg)
+
+
+def test_a_generic_dataclass_row_is_the_origin_class_without_an_orig_class(schema: str) -> None:
+    q = query[Page[int]](t"SELECT g::int4 AS id, 2::int4 AS item FROM generate_series(1, 3) g")
+    rows = run_on(schema, "connection", q.all)
+    assert [type(row) for row in rows] == [Page, Page, Page]
+    # calling `Page[int](...)` would set `__orig_class__` on every row
+    assert not any(hasattr(row, "__orig_class__") for row in rows)
+    assert rows[0] == Page(1, 2)
+
+
+def test_a_generic_pydantic_row_is_built_by_the_subscripted_model(schema: str) -> None:
+    row = run_on(schema, "connection", query[ModelPage[int]](t"SELECT 1::int4 AS id, 2::int4 AS item").one)
+    assert type(row) is ModelPage[int]
+    assert isinstance(row, ModelPage)
+    assert (row.id, row.item) == (1, 2)
+
+
+def test_the_substituted_field_type_decides_nullability_for_a_generic_row(schema: str) -> None:
+    row = run_on(schema, "connection", query[Page[int | None]](t"SELECT 1::int4 AS id, NULL::int4 AS item").one)
+    assert row == Page(1, None)
+    with pytest.raises(RowShapeError, match=r'NULL in column 2 "item" for non-nullable field "item" of `Page\[int\]`'):
+        run_on(schema, "connection", query[Page[int]](t"SELECT 1::int4 AS id, NULL::int4 AS item").one)
+
+
+@pytest.mark.parametrize("row_type", [Page[int], ModelPage[int]], ids=["dataclass", "pydantic"])
+def test_a_shape_error_names_the_row_type_with_its_arguments(schema: str, row_type: type) -> None:
+    q = query[row_type](t"SELECT 1::int4 AS id")  # ty: ignore[invalid-type-form]
+    with pytest.raises(RowShapeError, match=r'field "item" of `(Page|ModelPage)\[int\]` has no column'):
+        run_on(schema, "connection", q.all)
+
+
+def test_a_construct_error_names_the_dataclass_with_its_arguments(schema: str) -> None:
+    with pytest.raises(RowConstructError) as caught:
+        run_on(schema, "connection", query[Checked[int]](t"SELECT -1::int4 AS id, 2::int4 AS item").one)
+    assert caught.value.type_name == "Checked[int]"
+    assert "Checked[int]" in str(caught.value)
+    assert isinstance(caught.value.__cause__, ValueError)
+
+
+def test_a_construct_error_names_the_pydantic_model_with_its_arguments(schema: str) -> None:
+    with pytest.raises(RowConstructError) as caught:
+        run_on(schema, "connection", query[ModelPage[int]](t"SELECT 1::int4 AS id, 'x'::text AS item").one)
+    assert caught.value.type_name == "ModelPage[int]"
+    assert "ModelPage[int]" in str(caught.value)
+    assert isinstance(caught.value.__cause__, ValidationError)

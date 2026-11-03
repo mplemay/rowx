@@ -16,10 +16,14 @@ from typing import (
     ForwardRef,
     Literal,
     NotRequired,
+    ParamSpec,
     ReadOnly,
     Required,
     TypeAliasType,
+    TypeVar,
+    TypeVarTuple,
     Union,
+    cast,
     get_args,
     get_origin,
     get_type_hints,
@@ -145,18 +149,78 @@ def _alias_value(t: TypeAliasType) -> object:
         raise _NameUnavailableError(t, err.name) from err
 
 
-def _unwrap(t: object) -> object:
-    for _ in range(MAX_ALIAS_DEPTH + 1):
-        if get_origin(t) is Annotated:
+# the text a type argument is shown as in a `type_name`, such as the `int | None` of `Box[int | None]`
+def _type_text(t: object) -> str:
+    if t is None or t is type(None):
+        return "None"
+    if isinstance(t, type | TypeAliasType):
+        return t.__name__
+    origin, args = get_origin(t), get_args(t)
+    if origin in {Union, types.UnionType}:
+        return " | ".join(_type_text(arg) for arg in args)
+    if isinstance(origin, type | TypeAliasType) and args:
+        return f"{_type_text(origin)}[{', '.join(_type_text(arg) for arg in args)}]"
+    return repr(t)
+
+
+# a substitution is the type's own: `t[args]` fills each `__parameters__` entry, whatever order the type uses them in
+def _subst(t: object, mapping: dict[object, object]) -> object:
+    if not mapping or isinstance(t, type | TypeAliasType):
+        return t
+    if isinstance(t, TypeVar):
+        return mapping.get(t, t)
+    if not (params := getattr(t, "__parameters__", None)):
+        return t
+    try:
+        return t[tuple(mapping.get(p, p) for p in params)]  # ty: ignore[not-subscriptable]
+    except TypeError as err:
+        raise _reject(t, f"it can't take {mapping!r}: {err}") from err
+
+
+# each parameter bound to its argument, or else to its PEP 696 default, which may name the parameters before it
+def _bind(owner: object, name: str, params: tuple[object, ...], args: tuple[object, ...]) -> dict[object, object]:
+    for param in params:
+        if isinstance(param, TypeVarTuple | ParamSpec):
+            kind = "TypeVarTuple" if isinstance(param, TypeVarTuple) else "ParamSpec"
+            raise _reject(owner, f"`{name}` has the {kind} `{param.__name__}`, which is not supported")
+    required = sum(1 for param in params if not param.has_default())  # ty: ignore[unresolved-attribute]
+    if not args and required:
+        first = next(param for param in params if not param.has_default())  # ty: ignore[unresolved-attribute]
+        msg = f"the type parameter `{first.__name__}` of `{name}` is not bound; subscript it, for example `{name}[int]`"  # ty: ignore[unresolved-attribute]
+        raise _reject(owner, msg)
+    if not required <= len(args) <= len(params):
+        takes = str(len(params)) if required == len(params) else f"{required} to {len(params)}"
+        raise _reject(owner, f"`{name}` takes {takes} type arguments, but {len(args)} were given")
+    mapping: dict[object, object] = {}
+    for index, param in enumerate(params):
+        mapping[param] = args[index] if index < len(args) else _subst(param.__default__, mapping)  # ty: ignore[unresolved-attribute]
+    return mapping
+
+
+def _expand(alias: TypeAliasType, t: object, args: tuple[object, ...]) -> object:
+    mapping = _bind(t, alias.__name__, alias.__type_params__, args)
+    return _subst(_alias_value(alias), mapping)
+
+
+# `t` with its aliases and `Annotated` layers removed, and how many hops that took; a generic alias is substituted
+# through its own parameters, never `__value__[args]`
+def _unwrap_hops(t: object) -> tuple[object, int]:
+    for hops in range(MAX_ALIAS_DEPTH + 1):
+        origin = get_origin(t)
+        if origin is Annotated:
             t = get_args(t)[0]
         elif isinstance(t, TypeAliasType):
-            if t.__type_params__:
-                raise _reject(t, "generic aliases are not supported")
-            t = _alias_value(t)
+            t = _expand(t, t, ())
+        elif isinstance(origin, TypeAliasType):
+            t = _expand(origin, t, get_args(t))
         else:
-            return t
+            return t, hops
     msg = f"alias chain deeper than {MAX_ALIAS_DEPTH}"
     raise _reject(t, msg)
+
+
+def _unwrap(t: object) -> object:
+    return _unwrap_hops(t)[0]
 
 
 def _is_none(t: object) -> bool:
@@ -233,6 +297,13 @@ def _union_elem(t: object) -> bool:
     return True
 
 
+def _not_derivable(t: object) -> InterfaceError:
+    if isinstance(t, TypeVar | TypeVarTuple | ParamSpec):
+        msg = f"the type parameter `{t.__name__}` is not bound; subscript the generic class or alias, for example `Box[int]`"
+        return _reject(t, msg)
+    return _reject(t, "not derivable from the row type grammar")
+
+
 def _elem(t: object) -> bool:
     t = _unwrap(t)
     if _is_none(t) or t is Any or t is object:
@@ -257,7 +328,7 @@ def _elem(t: object) -> bool:
         return False
     if isinstance(t, type) and _named_form(t) is not None:
         raise _reject(t, "a named row type is only allowed as the row, not inside a tuple, list, union or field")
-    raise _reject(t, "not derivable from the row type grammar")
+    raise _not_derivable(t)
 
 
 def _is_interval_elem(t: object) -> bool:
@@ -371,8 +442,10 @@ def _declared(t: type) -> dict[str, tuple[type, object]]:
 def _declared_typeddict(t: type) -> dict[str, tuple[type, object]]:
     inherited: dict[str, tuple[type, object]] = {}
     for base in getattr(t, "__orig_bases__", ()):
-        if isinstance(base, type) and _is_typeddict(base):
-            for key, owned in _declared_typeddict(base).items():
+        # a generic base is subscripted (`Base[U]`), and its keys are declared by the class it subscripts
+        origin = get_origin(base) or base
+        if isinstance(origin, type) and _is_typeddict(origin):
+            for key, owned in _declared_typeddict(origin).items():
                 inherited.setdefault(key, owned)
     out: dict[str, tuple[type, object]] = {}
     for key, annotation in get_annotations(t, format=Format.FORWARDREF).items():
@@ -387,14 +460,44 @@ def _declared_typeddict(t: type) -> dict[str, tuple[type, object]]:
 def _resolve(klass: type, annotation: object, key: str) -> object:
     holder = type("Holder", (), {"__annotations__": {key: annotation}})
     module = sys.modules.get(klass.__module__)
+    # a quoted `T` names a type parameter, which lives outside the class body
+    params = {param.__name__: param for param in getattr(klass, "__parameters__", ())}
     return get_type_hints(
-        holder, globalns=vars(module) if module is not None else {}, localns=dict(vars(klass)), include_extras=True
+        holder,
+        globalns=vars(module) if module is not None else {},
+        localns={**params, **vars(klass)},
+        include_extras=True,
     )[key]
+
+
+type Bindings = dict[type, dict[object, object]]
+
+
+# the arguments of each generic class along the bases of `root`, which is bound by `mapping`: `Child[U](Base[U])`
+# gives `Base`'s own `T` the argument `U` has, because `get_type_hints` still reports `T` for an inherited field
+def _class_bindings(root: type, mapping: dict[object, object]) -> Bindings:
+    out: Bindings = {root: mapping}
+    pending = [(root, 0)]
+    while pending:
+        klass, depth = pending.pop(0)
+        for base in klass.__dict__.get("__orig_bases__", klass.__bases__):
+            origin = get_origin(base) or base
+            if not isinstance(origin, type) or origin in out:
+                continue
+            # only a subscripted base is a hop; a plain base adds no depth
+            subscripted = get_origin(base) is not None
+            if subscripted and depth >= MAX_ALIAS_DEPTH:
+                raise _reject(root, f"generic bases deeper than {MAX_ALIAS_DEPTH}")
+            params = getattr(origin, "__parameters__", ())
+            args = tuple(_subst(arg, out[klass]) for arg in get_args(base)) if subscripted else ()
+            out[origin] = _bind(origin, origin.__name__, params, args) if params else {}
+            pending.append((origin, depth + int(subscripted)))
+    return out
 
 
 # only the selected fields are resolved, so an unresolvable annotation on a `ClassVar`, an `init=False` field or an
 # extra annotation on a subclass does not fail the row
-def _hints(t: type, keys: list[str]) -> dict[str, object]:
+def _hints(t: type, keys: list[str], bindings: Bindings) -> dict[str, object]:
     declared = _declared(t)
     out: dict[str, object] = {}
     for key in keys:
@@ -402,7 +505,7 @@ def _hints(t: type, keys: list[str]) -> dict[str, object]:
             continue
         klass, annotation = declared[key]
         try:
-            out[key] = _resolve(klass, annotation, key)
+            out[key] = _subst(_resolve(klass, annotation, key), bindings.get(klass, {}))
         except NameError as err:
             msg = (
                 f"{t.__name__}: field {key!r} names {err.name!r}, which is not available at runtime; "
@@ -476,18 +579,18 @@ def _typeddict_specs(t: type, hints: dict[str, object]) -> list[Spec]:
 
 
 def _build_shape(
-    t: type, form: RowForm, fields: tuple[FieldPlan, ...], ctor: object = None, *, validate: bool = True
+    ctor: object, type_name: str, form: RowForm, fields: tuple[FieldPlan, ...], *, validate: bool = True
 ) -> RowShape:
     # `rowx._core` is the backend, which `import rowx` must not load, so it is imported when a plan needs it
     from rowx._core.postgres import RowShape as RowShapeImpl  # ruff: ignore[import-outside-top-level]
 
     flags = [(int(f.nullable) | (int(f.interval) << 1)) for f in fields]
     return RowShapeImpl(
-        t if ctor is None else ctor,
+        ctor,
         form,
         # only a tuple is matched by position
         "positional" if form == "positional" else "by_name",
-        t.__name__,
+        type_name,
         [(f.key, f.names, f.required, flag) for f, flag in zip(fields, flags, strict=True)],
         validate=validate,
     )
@@ -558,7 +661,7 @@ def _pydantic_names(key: str, info: object, config: dict[str, object]) -> tuple[
     return (alias, key) if by_name and alias != key else (alias,)
 
 
-def _pydantic_specs(t: type, *, dataclass: bool) -> tuple[list[Spec], dict[str, object]]:
+def _pydantic_specs(t: type, bindings: Bindings, *, dataclass: bool) -> tuple[list[Spec], dict[str, object]]:
     if dataclass:
         # the decorator's `init` can only be `False`, which pydantic reads as "keep my validating `__init__`", so
         # there is no `init=False` to reject here; only an `InitVar` is
@@ -578,21 +681,23 @@ def _pydantic_specs(t: type, *, dataclass: bool) -> tuple[list[Spec], dict[str, 
             continue
         names = None if unknown else _pydantic_names(key, info, config)
         specs.append(Spec(key=key, required=info.is_required(), names=names))
-        # pydantic has already moved the `Annotated` metadata into the field, so this is the bare type
-        hints[key] = info.annotation
+        # pydantic has already moved the `Annotated` metadata into the field, so this is the bare type; a model's
+        # subscripted subclass has it resolved, but a pydantic dataclass keeps the declaring class's own parameters
+        declaring = _declared(t).get(key, (t, None))[0] if dataclass else t
+        hints[key] = _subst(info.annotation, bindings.get(declaring, {}))
     return specs, hints
 
 
-def _specs(t: type, kind: str) -> tuple[list[Spec], RowForm, Matching, dict[str, object]]:
+def _specs(t: type, kind: str, bindings: Bindings) -> tuple[list[Spec], RowForm, Matching, dict[str, object]]:
     # a TypedDict's keys come from its annotations, so its hints are resolved before its requiredness is known
     if kind == "typeddict":
-        hints = _hints(t, list(get_annotations(t, format=Format.FORWARDREF)))
+        hints = _hints(t, list(get_annotations(t, format=Format.FORWARDREF)), bindings)
         return _typeddict_specs(t, hints), "dict", "by_name", hints
     if kind == "namedtuple":
         specs, form, matching = _namedtuple_specs(t), "positional", "positional"
     else:
         specs, form, matching = _dataclass_specs(t), "keyword", "by_name"
-    return specs, form, matching, _hints(t, [spec.key for spec in specs])
+    return specs, form, matching, _hints(t, [spec.key for spec in specs], bindings)
 
 
 def _reject_pydantic(t: type) -> None:
@@ -604,50 +709,65 @@ def _reject_pydantic(t: type) -> None:
         raise _reject(t, "a pydantic v1 model is not supported")
 
 
-def _named(t: type, kind: str) -> RowPlan:
+# the class a generic row type names and the arguments it is bound with: a bare generic class takes its PEP 696
+# defaults, and a pydantic model is replaced by its parametrized subclass, which pydantic has already resolved
+def _bound_class(t: type, kind: str, args: tuple[object, ...] | None) -> tuple[type, dict[object, object], str]:
+    params = getattr(t, "__parameters__", ())
+    given = args if args is not None else ()
+    if not params and not given:
+        return t, {}, t.__name__
+    mapping = _bind(t, t.__name__, params, given)
+    if kind == "pydantic" and not _pydantic_dataclass(t):
+        concrete = cast("type", t[tuple(mapping[param] for param in params)])  # ty: ignore[not-subscriptable]
+        return concrete, {}, concrete.__name__
+    return t, mapping, f"{t.__name__}[{', '.join(_type_text(mapping[param]) for param in params)}]"
+
+
+def _field_plan(t: type, type_name: str, spec: Spec, hints: dict[str, object]) -> FieldPlan:
+    if spec.key not in hints:
+        raise _reject(
+            t, f"field {spec.key!r} has no type annotation; use typing.NamedTuple, not collections.namedtuple"
+        )
+    try:
+        annotation = _unwrap_field(hints[spec.key])
+        nullable = _elem(annotation)
+        interval = _is_interval_elem(annotation)
+    except _NameUnavailableError as err:
+        msg = (
+            f"{type_name}: field {spec.key!r} names {err.name!r}, which is not available at runtime; "
+            "import it outside `TYPE_CHECKING`"
+        )
+        raise InterfaceError(msg) from err
+    except InterfaceError as err:
+        msg = f"{err} (field {spec.key!r} of {type_name})"
+        raise InterfaceError(msg) from err
+    return FieldPlan(key=spec.key, names=spec.names, nullable=nullable, interval=interval, required=spec.required)
+
+
+def _named(t: type, kind: str, args: tuple[object, ...] | None = None) -> RowPlan:
     match kind:
         case "protocol":
             raise _reject(t, "a Protocol is not a row type")
-    # #189 lifts this: a generic row type will be substituted through its type parameters
-    if getattr(t, "__type_params__", ()) or getattr(t, "__parameters__", ()):
-        raise _reject(t, "generic row types are not supported yet")
-    ctor: object = None
+    if kind == "pydantic":
+        _reject_pydantic(t)
+    t, mapping, type_name = _bound_class(t, kind, args)
+    # pydantic has resolved a model's bases itself
+    bindings = {t: mapping} if kind == "pydantic" and not _pydantic_dataclass(t) else _class_bindings(t, mapping)
+    ctor: object = t
     validate = True
     if kind == "pydantic":
         dataclass = _pydantic_dataclass(t)
-        _reject_pydantic(t)
         _pydantic_complete(t, dataclass=dataclass)
-        specs, hints = _pydantic_specs(t, dataclass=dataclass)
+        specs, hints = _pydantic_specs(t, bindings, dataclass=dataclass)
         form, matching = "validator", "by_name"
         # a model is validated with its validator, but a pydantic dataclass's validator rejects a dict under
         # `strict=True`, so the class is called with the row as keywords instead
         ctor, validate = (t, False) if dataclass else (t.__pydantic_validator__, True)  # ty: ignore[unresolved-attribute]
     else:
-        specs, form, matching, hints = _specs(t, kind)
+        specs, form, matching, hints = _specs(t, kind, bindings)
     if not specs:
         raise _reject(t, "has no fields")
-    plans: list[FieldPlan] = []
-    for spec in specs:
-        if spec.key not in hints:
-            raise _reject(
-                t, f"field {spec.key!r} has no type annotation; use typing.NamedTuple, not collections.namedtuple"
-            )
-        try:
-            annotation = _unwrap_field(hints[spec.key])
-            nullable = _elem(annotation)
-            interval = _is_interval_elem(annotation)
-        except _NameUnavailableError as err:
-            msg = (
-                f"{t.__name__}: field {spec.key!r} names {err.name!r}, which is not available at runtime; "
-                "import it outside `TYPE_CHECKING`"
-            )
-            raise InterfaceError(msg) from err
-        except InterfaceError as err:
-            msg = f"{err} (field {spec.key!r} of {t.__name__})"
-            raise InterfaceError(msg) from err
-        plans.append(
-            FieldPlan(key=spec.key, names=spec.names, nullable=nullable, interval=interval, required=spec.required),
-        )
+    plans = [_field_plan(t, type_name, spec, hints) for spec in specs]
     fields = tuple(plans)
     return RowPlan(
         kind="named",
@@ -657,9 +777,14 @@ def _named(t: type, kind: str) -> RowPlan:
         fields=fields,
         form=form,
         matching=matching,
-        type_name=t.__name__,
-        shape=_build_shape(t, form, fields, ctor, validate=validate),
+        type_name=type_name,
+        shape=_build_shape(ctor, type_name, form, fields, validate=validate),
     )
+
+
+def _reject_depth(t: object, hops: int) -> None:
+    if hops >= MAX_ALIAS_DEPTH:
+        raise _reject(t, f"alias chain deeper than {MAX_ALIAS_DEPTH}")
 
 
 def _nullable_named(t: object) -> bool:
@@ -679,7 +804,7 @@ def _scalar(t: object) -> RowPlan:
 
 
 def _build(t: object) -> RowPlan:
-    t = _unwrap(t)
+    t, hops = _unwrap_hops(t)
     if _is_none(t):
         return NO_ROWS
     if get_origin(t) is tuple:
@@ -692,11 +817,14 @@ def _build(t: object) -> RowPlan:
     # the leaves come before the named forms, so a value class that is a dataclass stays a scalar
     if (isinstance(t, type) and (_is_value_leaf(t) or _is_range(t))) or _is_range(get_origin(t)):
         return _scalar(t)
+    # a class reached through the full alias depth is one hop too deep, as the checker counts it
     if isinstance(t, type) and (kind := _named_form(t)) is not None:
+        _reject_depth(t, hops)
         return _named(t, kind)
-    # `G[int]` of a generic named class; #189 lifts this
-    if isinstance(origin := get_origin(t), type) and _named_form(origin) is not None:
-        raise _reject(t, "generic row types are not supported yet")
+    # `G[int]` of a generic named class
+    if isinstance(origin := get_origin(t), type) and (kind := _named_form(origin)) is not None:
+        _reject_depth(t, hops)
+        return _named(origin, kind, get_args(t))
     if _nullable_named(t):
         raise _reject(t, "a named row cannot be nullable; use .optional()")
     return _scalar(t)

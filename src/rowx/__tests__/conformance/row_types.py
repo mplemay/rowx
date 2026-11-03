@@ -115,7 +115,7 @@ ROWS: Final[list[Row]] = [
     ("T = 'int'", "InterfaceError", "invalid-row-type"),
     ("T = tuple['int', str]", "InterfaceError", "invalid-row-type"),
     ("T = TypeVar('T')", "InterfaceError", "invalid-row-type"),
-    ("type Row[X] = tuple[X, str]\nT = Row[int]", "InterfaceError", "invalid-row-type"),
+    ("type Row[X] = tuple[X, str]\nT = Row[int]", ("tuple", 2, (False, False)), "ok"),
     ("T = Literal[1]", "InterfaceError", "invalid-row-type"),
     ("T = dict[str, int]", "InterfaceError", "invalid-row-type"),
     ("T = dict[str, str]", "InterfaceError", "invalid-row-type"),
@@ -663,8 +663,8 @@ NAMED_ROWS: Final[list[Row]] = [
     ("class I2(Interval): ...\nT = I2", "InterfaceError", REJECTED),
     ("class M2(Money): ...\nT = M2", "InterfaceError", REJECTED),
     ("class C2(Cube): ...\nT = C2", "InterfaceError", REJECTED),
-    # generic row types are rejected by the runtime until #189; the checker has no class binding for them yet
-    ("@dataclass\nclass T[X]:\n    a: int", "InterfaceError", REJECTED),  # #189 lifts this
+    # a generic class that is never subscripted has an unbound parameter
+    ("@dataclass\nclass T[X]:\n    a: int", "InterfaceError", REJECTED),
     ("class T(Protocol):\n    id: int", "InterfaceError", REJECTED),
     ("T = collections.namedtuple('T', ['id', 'name'])", "InterfaceError", REJECTED),
     ("@dataclass(init=False)\nclass T:\n    id: int", "InterfaceError", REJECTED),
@@ -775,4 +775,202 @@ NAMED_ROWS: Final[list[Row]] = [
     ("class T(TypedDict):\n    __x: int", dict_form(f("_T__x")), "ok"),
 ]
 
+
+def alias_chain(length: int, body: str, final: str) -> str:
+    # `length` generic aliases, each defined by the one before it, the first by `body`
+    lines = [f"type A0[X] = {body}"]
+    lines += [f"type A{index}[X] = A{index - 1}[X]" for index in range(1, length)]
+    return "\n".join(lines) + f"\nT = A{length - 1}[{final}]"
+
+
+CRATE: Final[str] = "@dataclass\nclass Crate[X]:\n    a: X\n    b: str\n"
+GENERIC_ROWS: Final[list[Row]] = [
+    # generic aliases: scalar, tuple, nested, and the order the arguments are used in
+    ("type Opt[X] = X | None\nT = Opt[int]", ("scalar", 1, (True,)), "ok"),
+    ("type Swap[A, B] = tuple[B, A]\nT = Swap[int, str | None]", ("tuple", 2, (True, False)), "ok"),
+    ("type Pair[A, B] = tuple[A, B]\nT = Pair[int, str | None]", ("tuple", 2, (False, True)), "ok"),
+    ("type Nested[X] = tuple[list[X], X | None]\nT = Nested[int]", ("tuple", 2, (False, True)), "ok"),
+    (
+        "type Inner[X] = tuple[X, str]\ntype Outer[Y] = Inner[Y | None]\nT = Outer[int]",
+        ("tuple", 2, (True, False)),
+        "ok",
+    ),
+    ("type Row[A, B = str | None] = tuple[A, B]\nT = Row[int]", ("tuple", 2, (False, True)), "ok"),
+    ("type Row[X] = tuple[X, str]\nT = Row", "InterfaceError", REJECTED),
+    ("type Row[X] = tuple[X, str]\nT = Row[int, str]", "InterfaceError", REJECTED),
+    ("type Row[X] = tuple[X, str]\nT = Row[()]", "InterfaceError", REJECTED),
+    ("type Two[A, B] = tuple[A, B]\nT = Two[int]", "InterfaceError", REJECTED),
+    ("type Two[A, B = int] = tuple[A, B]\nT = Two[int, str, bytes]", "InterfaceError", REJECTED),
+    ("type Row[*Ts] = tuple[int, str]\nT = Row[int]", "InterfaceError", REJECTED),
+    ("type Row[**P] = tuple[int, str]\nT = Row[[int]]", "InterfaceError", REJECTED),
+    ("type Row[X] = tuple[X, str]\nT = Row[Row[int]]", "InterfaceError", REJECTED),
+    # one hop is one alias (or class) substitution along a chain: 16 are followed, and 17 are not
+    (alias_chain(16, "tuple[X, str]", "int"), ("tuple", 2, (False, False)), "ok"),
+    (alias_chain(17, "tuple[X, str]", "int"), "InterfaceError", REJECTED),
+    (alias_chain(15, "Crate[X]", "int") + "\n" + CRATE, keyword(f("a"), f("b")), "ok"),
+    (CRATE + alias_chain(16, "Crate[X]", "int"), "InterfaceError", REJECTED),
+]
+NAMED_ROWS.extend([
+    # generic dataclasses with one and with two parameters, in PEP 695 and `Generic[X]` form
+    (CRATE + "T = Crate[int | None]", keyword(f("a", nullable=True), f("b")), "ok"),
+    (
+        "@dataclass\nclass Crate[A, B]:\n    a: A\n    b: list[B]\nT = Crate[int, str | None]",
+        keyword(f("a"), f("b")),
+        "ok",
+    ),
+    # a parameter that is named like the row alias still reads as the parameter inside the class
+    ("@dataclass\nclass Crate[T]:\n    a: T\nT = Crate[int]", keyword(f("a")), "ok"),
+    (
+        "X = TypeVar('X')\n@dataclass\nclass Crate(typing.Generic[X]):\n    a: X\nT = Crate[int | None]",
+        keyword(f("a", nullable=True)),
+        "ok",
+    ),
+    (
+        (
+            "A = TypeVar('A')\nB = TypeVar('B')\n@dataclass\nclass Crate(typing.Generic[A, B]):\n    a: B\n    b: A\n"
+            "T = Crate[int, str | None]"
+        ),
+        keyword(f("a", nullable=True), f("b")),
+        "ok",
+    ),
+    ("@dataclass\nclass Crate[X]:\n    a: 'X | None'\nT = Crate[int]", keyword(f("a", nullable=True)), "ok"),
+    (
+        "type Opt[Y] = Y | None\n@dataclass\nclass Crate[X]:\n    a: Opt[X]\nT = Crate[int]",
+        keyword(f("a", nullable=True)),
+        "ok",
+    ),
+    ("@dataclass\nclass Crate[X]:\n    a: Annotated[X, 'm']\nT = Crate[int]", keyword(f("a")), "ok"),
+    # a generic NamedTuple and TypedDict
+    ("class Crate[X](NamedTuple):\n    a: X\n    b: str\nT = Crate[int]", positional(f("a"), f("b")), "ok"),
+    (
+        "class Crate[A, B](NamedTuple):\n    a: A\n    b: B = None\nT = Crate[int, str | None]",
+        positional(f("a"), f("b", nullable=True, required=False)),
+        "ok",
+    ),
+    (
+        "class Crate[X](TypedDict):\n    a: X\n    b: NotRequired[str]\nT = Crate[int | None]",
+        dict_form(f("a", nullable=True), f("b", required=False)),
+        "ok",
+    ),
+    (
+        "class Crate[A, B](TypedDict):\n    a: A\n    b: B\nT = Crate[int, str | None]",
+        dict_form(f("a"), f("b", nullable=True)),
+        "ok",
+    ),
+    # generic pydantic models and pydantic dataclasses; a subscripted model is already a concrete subclass
+    ("class Page[X](BaseModel):\n    a: X\n    b: str\nT = Page[int]", validator(f("a"), f("b")), "ok"),
+    (
+        "class Page[A, B](BaseModel):\n    a: A\n    b: B\nT = Page[int, str | None]",
+        validator(f("a"), f("b", nullable=True)),
+        "ok",
+    ),
+    (
+        "X = TypeVar('X')\nclass Page(BaseModel, typing.Generic[X]):\n    a: X\nT = Page[int | None]",
+        validator(f("a", nullable=True)),
+        "ok",
+    ),
+    (
+        "@pydantic.dataclasses.dataclass\nclass Crate[X]:\n    a: X\n    b: str\nT = Crate[int]",
+        validator(f("a"), f("b")),
+        "ok",
+    ),
+    (
+        "@pydantic.dataclasses.dataclass\nclass Crate[A, B]:\n    a: A\n    b: B\nT = Crate[int, str | None]",
+        validator(f("a"), f("b", nullable=True)),
+        "ok",
+    ),
+    # inherited parameters are rebound through the base's arguments
+    (
+        "@dataclass\nclass Base[X]:\n    a: X\n@dataclass\nclass Child[U](Base[U]):\n    b: U | None\nT = Child[int]",
+        keyword(f("a"), f("b", nullable=True)),
+        "ok",
+    ),
+    (
+        (
+            "@dataclass\nclass Base[A, B]:\n    a: A\n    b: B\n@dataclass\nclass Child[U](Base[U | None, str]):\n    c: U\n"
+            "T = Child[int]"
+        ),
+        keyword(f("a", nullable=True), f("b"), f("c")),
+        "ok",
+    ),
+    (
+        (
+            "@dataclass\nclass Base[X]:\n    a: X\n@dataclass\nclass Mid[Y](Base[Y | None]):\n    b: Y\n"
+            "@dataclass\nclass Child[U](Mid[U]):\n    c: U\nT = Child[int]"
+        ),
+        keyword(f("a", nullable=True), f("b"), f("c")),
+        "ok",
+    ),
+    (
+        (
+            "A = TypeVar('A')\n@dataclass\nclass Base(typing.Generic[A]):\n    a: A\n@dataclass\nclass Child(Base[int | None]):\n    b: str\n"
+            "T = Child"
+        ),
+        keyword(f("a", nullable=True), f("b")),
+        "ok",
+    ),
+    (
+        "class Base[X](TypedDict):\n    a: X\nclass Child[U](Base[U | None], TypedDict):\n    b: U\nT = Child[int]",
+        dict_form(f("a", nullable=True), f("b")),
+        "ok",
+    ),
+    (
+        "class Base[X](BaseModel):\n    a: X\nclass Child[U](Base[U | None]):\n    b: U\nT = Child[int]",
+        validator(f("a", nullable=True), f("b")),
+        "ok",
+    ),
+    (
+        (
+            "@pydantic.dataclasses.dataclass\nclass Base[X]:\n    a: X\n@pydantic.dataclasses.dataclass\nclass Child[U](Base[U | None]):\n"
+            "    b: U\nT = Child[int]"
+        ),
+        validator(f("a", nullable=True), f("b")),
+        "ok",
+    ),
+    # PEP 696 defaults make a bare generic class usable (a bare alias is left to the unit tests: the type checkers
+    # report it unsolved)
+    ("@dataclass\nclass Crate[X = int]:\n    a: X\nT = Crate", keyword(f("a")), "ok"),
+    ("@dataclass\nclass Crate[X = int | None]:\n    a: X\nT = Crate", keyword(f("a", nullable=True)), "ok"),
+    (
+        "@dataclass\nclass Crate[A, B = str | None]:\n    a: A\n    b: B\nT = Crate[int]",
+        keyword(f("a"), f("b", nullable=True)),
+        "ok",
+    ),
+    ("@dataclass\nclass Crate[A = int, B = list[A]]:\n    a: A\n    b: B\nT = Crate", keyword(f("a"), f("b")), "ok"),
+    (
+        "X = TypeVar('X', default=int)\n@dataclass\nclass Crate(typing.Generic[X]):\n    a: X\nT = Crate",
+        keyword(f("a")),
+        "ok",
+    ),
+    ("class Page[X = int](BaseModel):\n    a: X\nT = Page", validator(f("a")), "ok"),
+    ("class Crate[X = int](NamedTuple):\n    a: X\nT = Crate", positional(f("a")), "ok"),
+    ("class Crate[X = int](TypedDict):\n    a: X\nT = Crate", dict_form(f("a")), "ok"),
+    ("@pydantic.dataclasses.dataclass\nclass Crate[X = int]:\n    a: X\nT = Crate", validator(f("a")), "ok"),
+    # a generic alias of a generic class, and a generic class used through an alias
+    (CRATE + "type B[Y] = Crate[Y]\nT = B[int | None]", keyword(f("a", nullable=True), f("b")), "ok"),
+    (CRATE + "type B = Crate[int]\nT = B", keyword(f("a"), f("b")), "ok"),
+    (CRATE + "type B[Y] = Crate[Y]\nT = B", "InterfaceError", REJECTED),
+    (CRATE + "Alias = Crate\nT = Alias[int]", keyword(f("a"), f("b")), "ok"),
+    # the rejections: an unbound parameter, a TypeVarTuple and a ParamSpec (Python rejects a wrong argument count to a
+    # class itself, so only the checker sees one; the alias rows above cover it on both sides)
+    (CRATE + "T = Crate", "InterfaceError", REJECTED),
+    ("@dataclass\nclass Crate[*Ts]:\n    a: int\nT = Crate[int]", "InterfaceError", REJECTED),
+    ("@dataclass\nclass Crate[**P]:\n    a: int\nT = Crate[[int]]", "InterfaceError", REJECTED),
+    ("X = TypeVar('X')\n@dataclass\nclass Crate:\n    a: X\nT = Crate", "InterfaceError", REJECTED),
+    ("class Page[X](BaseModel):\n    a: X\nT = Page", "InterfaceError", REJECTED),
+    ("@pydantic.dataclasses.dataclass\nclass Crate[X]:\n    a: X\nT = Crate", "InterfaceError", REJECTED),
+    ("class Crate[X](NamedTuple):\n    a: X\nT = Crate", "InterfaceError", REJECTED),
+    ("class Crate[X](TypedDict):\n    a: X\nT = Crate", "InterfaceError", REJECTED),
+    (
+        "@dataclass\nclass Base[X]:\n    a: X\n@dataclass\nclass Child(Base):\n    b: int\nT = Child",
+        "InterfaceError",
+        REJECTED,
+    ),
+    # a substituted field is checked like any other: a named type or a bad leaf can't be an argument
+    (CRATE + "@dataclass\nclass U:\n    id: int\nT = Crate[U]", "InterfaceError", REJECTED),
+    (CRATE + "T = Crate[dict[str, int]]", "InterfaceError", REJECTED),
+    (CRATE + "T = Crate[int | str]", "InterfaceError", REJECTED),
+    (CRATE + "T = Crate[None]", keyword(f("a", nullable=True), f("b")), "ok"),
+])
+ROWS.extend(GENERIC_ROWS)
 ROWS.extend(NAMED_ROWS)

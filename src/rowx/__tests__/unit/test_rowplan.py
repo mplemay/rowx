@@ -2,12 +2,12 @@ import importlib
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 import types
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeVar
 
 import pytest
 
 from rowx.__tests__.conformance.row_types import PRELUDE, ROWS, NamedPlan, Plan
-from rowx._rowplan import NO_ROWS, RowPlan, row_plan
+from rowx._rowplan import MAX_ALIAS_DEPTH, NO_ROWS, RowPlan, row_plan
 from rowx.errors import InterfaceError
 
 if TYPE_CHECKING:
@@ -714,7 +714,7 @@ def test_a_model_that_stays_incomplete_is_an_interface_error_naming_the_missing_
             "class U(BaseModel):\n    id: int\nclass T(BaseModel):\n    u: U",
             "named row type is only allowed as the row",
         ),
-        ("class T[X](BaseModel):\n    id: int", "generic row types"),
+        ("class T[X](BaseModel):\n    id: int", "is not bound"),
     ],
 )
 def test_pydantic_rejections_have_their_messages(source: str, message: str, evaluate: Evaluate) -> None:
@@ -997,12 +997,11 @@ def test_a_subclass_of_a_value_class_is_not_a_row_type(source: str, evaluate: Ev
         "G = TypeVar('G')\n@dataclass\nclass Box(typing.Generic[G]):\n    a: int\nT = Box",
         "class T[X](NamedTuple):\n    a: int",
         "class T[X](TypedDict):\n    a: int",
-        "@dataclass\nclass Box[X]:\n    a: int\nT = Box[int]",
         "S = TypeVar('S')\nclass T(NamedTuple, typing.Generic[S]):\n    a: S",
     ],
 )
-def test_generic_row_types_are_rejected_until_189(source: str, evaluate: Evaluate) -> None:
-    with pytest.raises(InterfaceError, match="generic row types are not supported yet"):
+def test_a_generic_row_type_that_is_not_subscripted_has_an_unbound_parameter(source: str, evaluate: Evaluate) -> None:
+    with pytest.raises(InterfaceError, match="is not bound; subscript it"):
         row_plan(evaluate(source))
 
 
@@ -1029,3 +1028,204 @@ def test_a_quoted_classvar_naming_a_missing_name_still_builds(tmp_path: Path, mo
     )
     module = load_module(tmp_path, monkeypatch, "classvar_quoted", source)
     assert [f.key for f in row_plan(module.T).fields] == ["a"]
+
+
+type Swap[A, B] = tuple[B, A]
+type Pair[A, B] = tuple[A, B]
+type Wrap[X] = tuple[X, str]
+type Defaulted[X = int] = tuple[X, str]
+type Partly[A, B = str] = tuple[A, B]
+type Variadic[*Ts] = tuple[int, str]
+type Spec[**P] = tuple[int, str]
+
+CRATE: Final[str] = "@dataclass\nclass Crate[X]:\n    a: X\n    b: str\n"
+
+
+def test_a_generic_alias_is_substituted_through_its_type_parameters_not_the_order_of_use() -> None:
+    assert row_plan(Swap[int, str | None]).nullable_mask == (True, False)
+    assert row_plan(Pair[int, str | None]).nullable_mask == (False, True)
+
+
+def test_a_generic_alias_is_substituted_recursively() -> None:
+    type Nested[X] = tuple[list[X | None], X | None]
+    type Outer[Y] = Wrap[Y | None]
+    assert row_plan(Nested[int]).nullable_mask == (False, True)
+    assert row_plan(Outer[int]).nullable_mask == (True, False)
+
+
+def test_a_scalar_generic_alias_is_a_scalar_plan() -> None:
+    type Opt[X] = X | None
+    plan = row_plan(Opt[int])
+    assert (plan.kind, plan.nullable_mask) == ("scalar", (True,))
+
+
+def test_a_bare_generic_alias_takes_its_defaults() -> None:
+    assert row_plan(Defaulted).nullable_mask == (False, False)
+    assert row_plan(Partly[int]).nullable_mask == (False, False)
+
+
+def test_a_bare_generic_alias_without_defaults_is_unbound() -> None:
+    with pytest.raises(InterfaceError, match=r"the type parameter `X` of `Wrap` is not bound; subscript it"):
+        row_plan(Wrap)
+
+
+@pytest.mark.parametrize(
+    ("t", "message"),
+    [
+        (Swap[int], "`Swap` takes 2 type arguments, but 1 were given"),  # ty: ignore[invalid-type-arguments]
+        (Swap[int, str, bytes], "`Swap` takes 2 type arguments, but 3 were given"),  # ty: ignore[invalid-type-arguments]
+        (Partly[int, str, bytes], "`Partly` takes 1 to 2 type arguments, but 3 were given"),  # ty: ignore[invalid-type-arguments]
+        (Variadic[int], "the TypeVarTuple `Ts`"),
+        (Spec[[int]], "the ParamSpec `P`"),
+    ],
+)
+def test_a_generic_alias_is_rejected_for_a_wrong_count_or_an_unsupported_parameter(t: object, message: str) -> None:
+    with pytest.raises(InterfaceError, match=message):
+        row_plan(t)
+
+
+def test_an_unbound_type_variable_is_rejected() -> None:
+    with pytest.raises(InterfaceError, match="the type parameter `Y` is not bound"):
+        row_plan(TypeVar("Y"))  # ty: ignore[invalid-legacy-type-variable]
+
+
+def test_a_type_variable_bound_or_constraint_is_not_enforced() -> None:
+    type Bounded[X: str] = tuple[X, str]
+    type Constrained[X: (int, str)] = tuple[X, str]
+    assert row_plan(Bounded[int]).nullable_mask == (False, False)  # ty: ignore[invalid-type-arguments]
+    assert row_plan(Constrained[bytes]).nullable_mask == (False, False)  # ty: ignore[invalid-type-arguments]
+
+
+def test_a_generic_dataclass_is_built_by_the_origin_class_and_named_with_its_arguments(evaluate: Evaluate) -> None:
+    crate = evaluate(CRATE + "T = Crate")
+    plan = row_plan(crate[int | None])  # ty: ignore[not-subscriptable]
+    assert plan.type_name == "Crate[int | None]"
+    assert plan.shape is not None
+    # calling the alias would set `__orig_class__` on every row
+    assert plan.shape.ctor is crate
+    assert [(f.key, f.nullable) for f in plan.fields] == [("a", True), ("b", False)]
+
+
+@pytest.mark.parametrize(
+    ("argument", "name"),
+    [
+        ("int", "int"),
+        ("datetime.date", "date"),
+        ("list[int]", "list[int]"),
+        ("int | None", "int | None"),
+        ("Range[datetime.date]", "Range[date]"),
+        ("list[datetime.date | None]", "list[date | None]"),
+    ],
+)
+def test_the_type_name_renders_the_arguments(argument: str, name: str, evaluate: Evaluate) -> None:
+    assert row_plan(evaluate(f"{CRATE}T = Crate[{argument}]")).type_name == f"Crate[{name}]"
+
+
+def test_the_type_name_of_two_parameters_and_of_defaults(evaluate: Evaluate) -> None:
+    two = "@dataclass\nclass Crate[A, B = str]:\n    a: A\n    b: B\n"
+    assert row_plan(evaluate(f"{two}T = Crate[int]")).type_name == "Crate[int, str]"
+    assert row_plan(evaluate(f"{two}T = Crate[int, bytes]")).type_name == "Crate[int, bytes]"
+    assert row_plan(evaluate("@dataclass\nclass Crate[X = int]:\n    a: X\nT = Crate")).type_name == "Crate[int]"
+
+
+def test_a_generic_row_plan_is_cached_per_subscripted_type(evaluate: Evaluate) -> None:
+    crate = evaluate(CRATE + "T = Crate")
+    first = row_plan(crate[int])  # ty: ignore[not-subscriptable]
+    assert row_plan(crate[int]) is first  # ty: ignore[not-subscriptable]
+    other = row_plan(crate[int | None])  # ty: ignore[not-subscriptable]
+    assert other is not first
+    assert other.nullable_mask == (True, False)
+
+
+def test_a_generic_alias_of_a_generic_class(evaluate: Evaluate) -> None:
+    plan = row_plan(evaluate(CRATE + "type B[Y] = Crate[Y | None]\nT = B[int]"))
+    assert plan.type_name == "Crate[int | None]"
+    assert [f.nullable for f in plan.fields] == [True, False]
+
+
+def test_inherited_parameters_are_rebound_through_the_bases(evaluate: Evaluate) -> None:
+    source = (
+        "@dataclass\nclass Base[A, B]:\n    a: A\n    b: B\n"
+        "@dataclass\nclass Child[U](Base[U | None, str]):\n    c: U\nT = Child[int]"
+    )
+    plan = row_plan(evaluate(source))
+    assert plan.type_name == "Child[int]"
+    assert [(f.key, f.nullable) for f in plan.fields] == [("a", True), ("b", False), ("c", False)]
+
+
+def test_inherited_parameters_of_a_generic_base_class_are_rebound(evaluate: Evaluate) -> None:
+    source = (
+        "A = TypeVar('A')\n@dataclass\nclass Base(typing.Generic[A]):\n    a: A\n"
+        "@dataclass\nclass Child(Base[int | None]):\n    b: str\nT = Child"
+    )
+    assert [(f.key, f.nullable) for f in row_plan(evaluate(source)).fields] == [("a", True), ("b", False)]
+
+
+def test_a_bare_generic_base_without_defaults_is_unbound(evaluate: Evaluate) -> None:
+    source = "@dataclass\nclass Base[X]:\n    a: X\n@dataclass\nclass Child(Base):\n    b: int\nT = Child"
+    with pytest.raises(InterfaceError, match="the type parameter `X` of `Base` is not bound"):
+        row_plan(evaluate(source))
+
+
+def test_a_quoted_field_annotation_names_the_type_parameter(evaluate: Evaluate) -> None:
+    plan = row_plan(evaluate("@dataclass\nclass Crate[X]:\n    a: 'X | None'\nT = Crate[int]"))
+    assert [f.nullable for f in plan.fields] == [True]
+
+
+def test_a_generic_typeddict_and_namedtuple_inherit_their_parameters(evaluate: Evaluate) -> None:
+    typeddict = evaluate(
+        "class Base[X](TypedDict):\n    a: X\nclass Child[U](Base[U | None], TypedDict):\n    b: NotRequired[U]\nT = Child[int]"
+    )
+    plan = row_plan(typeddict)
+    assert [(f.key, f.nullable, f.required) for f in plan.fields] == [("a", True, True), ("b", False, False)]
+    assert row_plan(evaluate("class Pt[X](NamedTuple):\n    a: X\n    b: str\nT = Pt[int | None]")).nullable_mask == (
+        True,
+        False,
+    )
+
+
+def test_a_subscripted_pydantic_model_is_used_as_it_is(evaluate: Evaluate) -> None:
+    page = evaluate("class Page[X](BaseModel):\n    a: X\nT = Page")
+    plan = row_plan(page[int])  # ty: ignore[not-subscriptable]
+    assert plan.type_name == "Page[int]"
+    assert plan.shape is not None
+    assert plan.shape.ctor is page[int].__pydantic_validator__  # ty: ignore[not-subscriptable]
+
+
+def test_a_bare_pydantic_model_takes_its_defaults_or_is_unbound(evaluate: Evaluate) -> None:
+    assert row_plan(evaluate("class Page[X = int](BaseModel):\n    a: X\nT = Page")).type_name == "Page[int]"
+    with pytest.raises(InterfaceError, match="the type parameter `X` of `Page` is not bound"):
+        row_plan(evaluate("class Page[X](BaseModel):\n    a: X\nT = Page"))
+
+
+def test_a_generic_pydantic_dataclass_is_called_as_the_origin_class(evaluate: Evaluate) -> None:
+    crate = evaluate("@pydantic.dataclasses.dataclass\nclass Crate[X]:\n    a: X\nT = Crate")
+    plan = row_plan(crate[int | None])  # ty: ignore[not-subscriptable]
+    assert plan.type_name == "Crate[int | None]"
+    assert plan.shape is not None
+    assert plan.shape.ctor is crate
+    assert [f.nullable for f in plan.fields] == [True]
+
+
+def chain(length: int) -> str:
+    lines = ["@dataclass\nclass C0[X]:\n    a: X"]
+    lines += [f"@dataclass\nclass C{index}[X](C{index - 1}[X]):\n    f{index}: X" for index in range(1, length)]
+    return "\n".join(lines) + f"\nT = C{length - 1}[int]"
+
+
+def test_generic_bases_are_followed_to_the_depth_limit(evaluate: Evaluate) -> None:
+    assert len(row_plan(evaluate(chain(MAX_ALIAS_DEPTH + 1))).fields) == MAX_ALIAS_DEPTH + 1
+
+
+def test_generic_bases_deeper_than_the_depth_limit_are_rejected(evaluate: Evaluate) -> None:
+    with pytest.raises(InterfaceError, match=f"generic bases deeper than {MAX_ALIAS_DEPTH}"):
+        row_plan(evaluate(chain(MAX_ALIAS_DEPTH + 2)))
+
+
+def test_a_generic_alias_chain_is_followed_to_the_depth_limit_and_no_further() -> None:
+    namespace: dict[str, object] = {}
+    lines = ["type A0[X] = tuple[X, str]"] + [f"type A{i}[X] = A{i - 1}[X]" for i in range(1, MAX_ALIAS_DEPTH + 1)]
+    exec("\n".join(lines), namespace)  # ruff: ignore[exec-builtin]
+    assert row_plan(namespace[f"A{MAX_ALIAS_DEPTH - 1}"][int]).arity == 2  # ty: ignore[not-subscriptable]
+    with pytest.raises(InterfaceError, match=f"alias chain deeper than {MAX_ALIAS_DEPTH}"):
+        row_plan(namespace[f"A{MAX_ALIAS_DEPTH}"][int])  # ty: ignore[not-subscriptable]

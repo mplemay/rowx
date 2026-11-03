@@ -168,6 +168,40 @@ query[Row](t"SELECT id, id AS user_id, name FROM users")
 """
 
 
+GENERIC_MODELS: Final[str] = """\
+from dataclasses import dataclass
+
+
+@dataclass
+class Page[T]:
+    id: int
+    item: T
+
+
+@dataclass
+class Base[A]:
+    id: int
+    item: A
+
+
+@dataclass
+class Child[U](Base[U | None]):
+    extra: U
+
+
+type Rows[X] = tuple[int, X]
+"""
+GENERIC_QUERIES: Final[str] = """\
+from app.models import Child, Page, Rows
+from rowx import query
+
+query[Page[int]](t"SELECT id, name AS item FROM users")
+query[Page[str]](t"SELECT id, name AS item FROM users")
+query[Child[int]](t"SELECT id, NULL::int4 AS item, name AS extra FROM users")
+query[Rows[int]](t"SELECT id, name FROM users")
+"""
+
+
 def golden(name: str, actual: str) -> None:
     path = EXPECTED / name
     if "ROWX_UPDATE_GOLDENS" in os.environ:
@@ -219,3 +253,12 @@ def test_pydantic_rows_text(tmp_path: Path, schema: str, capsys: pytest.CaptureF
 def test_pydantic_rows_json(tmp_path: Path, schema: str, capsys: pytest.CaptureFixture[str]) -> None:
     out = run(tmp_path, schema, capsys, "--output-format", "json", models=PYDANTIC_MODELS, queries=PYDANTIC_QUERIES)
     golden("pydantic_rows.json.txt", out)
+
+
+def test_generic_rows_text(tmp_path: Path, schema: str, capsys: pytest.CaptureFixture[str]) -> None:
+    golden("generic_rows.txt", run(tmp_path, schema, capsys, models=GENERIC_MODELS, queries=GENERIC_QUERIES))
+
+
+def test_generic_rows_json(tmp_path: Path, schema: str, capsys: pytest.CaptureFixture[str]) -> None:
+    out = run(tmp_path, schema, capsys, "--output-format", "json", models=GENERIC_MODELS, queries=GENERIC_QUERIES)
+    golden("generic_rows.json.txt", out)
