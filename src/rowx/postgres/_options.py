@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Final, Self
+from dataclasses import dataclass, field, fields, replace
+from typing import TYPE_CHECKING, Final, Self, override
 
 from rowx._core.postgres import parse_dsn as parse_dsn_impl
 
@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 DEFAULT_STATEMENT_CACHE_SIZE: Final[int] = 256
 
 
-@dataclass(slots=True, kw_only=True, frozen=True)
+@dataclass(slots=True, kw_only=True, frozen=True, repr=False)
 class ConnectOptions:
     host: str | None = None
     port: int | None = None
@@ -27,3 +27,12 @@ class ConnectOptions:
     @classmethod
     def from_dsn(cls, dsn: str, /, **overrides: object) -> Self:
         return replace(cls(**parse_dsn_impl(dsn)), **overrides)
+
+    # the dataclass repr, except that `extra` values (which can hold secrets such as `sslpassword`) are hidden
+    @override
+    def __repr__(self) -> str:
+        shown = {"extra": dict.fromkeys(self.extra, "<redacted>")}
+        parts = [
+            f"{item.name}={shown.get(item.name, getattr(self, item.name))!r}" for item in fields(self) if item.repr
+        ]
+        return f"{type(self).__qualname__}({', '.join(parts)})"

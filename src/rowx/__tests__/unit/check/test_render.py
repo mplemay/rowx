@@ -343,3 +343,34 @@ def test_named_row_resolver_text(tmp_path: Path) -> None:
 def test_named_row_resolver_json(tmp_path: Path) -> None:
     reports, _ = resolver_reports(tmp_path)
     golden("named_rows_resolver.json.txt", relative(render_json(reports, tmp_path), tmp_path))
+
+
+def test_text_output_strips_control_characters_from_server_text() -> None:
+    escape = "\x1b[2J\x1b]0;owned\x07"
+    c1 = "\x9b31m"
+    diagnostic = Diagnostic(
+        rule="sql-error",
+        message=f'relation {escape}"x" does not exist\n\tdetail{c1}',
+        path=PATH,
+        span=Span(line=1, col=1, end_line=1, end_col=2),
+        notes=(f"note{escape}",),
+    )
+    out = render_text([Report(diagnostic=diagnostic, help=f"help{escape}{c1}")], {})
+    assert "\x1b" not in out
+    assert "\x07" not in out
+    assert "\x9b" not in out
+    assert 'relation [2J]0;owned"x" does not exist\n\tdetail31m' in out
+    assert "= note: note[2J]0;owned" in out
+    assert "= help: help[2J]0;owned31m" in out
+
+
+def test_json_output_escapes_control_characters() -> None:
+    diagnostic = Diagnostic(
+        rule="sql-error",
+        message="bad \x1b[2J",
+        path=PATH,
+        span=Span(line=1, col=1, end_line=1, end_col=2),
+    )
+    out = render_json([Report(diagnostic=diagnostic)])
+    assert "\x1b" not in out
+    assert "\\u001b" in out

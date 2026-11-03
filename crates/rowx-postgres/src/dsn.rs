@@ -5,6 +5,7 @@ use tokio_postgres::Config;
 use tokio_postgres::config::Host;
 
 use crate::error::Error;
+use crate::redact;
 use crate::tls::{Mode, TlsSettings};
 
 pub const DEFAULT_STATEMENT_CACHE_SIZE: usize = 256;
@@ -93,6 +94,20 @@ impl ConnectOptions {
     /// `Interface` for malformed DSNs, an unusable `sslmode`, and the client-certificate keys.
     pub fn from_dsn(dsn: &str) -> Result<Self, Error> {
         let dsn = dsn.trim();
+        match Self::parse_text(dsn).and_then(|opts| opts.validate().map(|()| opts)) {
+            Ok(opts) => {
+                opts.register_secrets();
+                Ok(opts)
+            }
+            // no message may echo a secret, however the DSN spelled it
+            Err(Error::Interface(message)) => {
+                Err(Error::Interface(redact::redact(&message, Some(dsn))))
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    fn parse_text(dsn: &str) -> Result<Self, Error> {
         let mut opts = Self::default();
         let pairs = if dsn.starts_with("postgres://") || dsn.starts_with("postgresql://") {
             let (base, pairs) = split_url(dsn)?;
@@ -105,6 +120,53 @@ impl ConnectOptions {
             opts.apply(&key, value)?;
         }
         Ok(opts)
+    }
+
+    fn register_secrets(&self) {
+        if let Some(password) = &self.password {
+            redact::register(password);
+        }
+        for (key, value) in &self.extra {
+            if key.contains("password") {
+                redact::register(value);
+            }
+        }
+    }
+
+    /// # Errors
+    /// `Interface` for a malformed `server_settings` or `extra` key, and for a NUL or other C0 control
+    /// character in any value. The message names the key and never the value.
+    pub fn validate(&self) -> Result<(), Error> {
+        let typed = [
+            ("host", &self.host),
+            ("user", &self.user),
+            ("password", &self.password),
+            ("database", &self.database),
+            ("sslmode", &self.sslmode),
+            ("sslrootcert", &self.sslrootcert),
+            ("application_name", &self.application_name),
+        ];
+        for (name, value) in typed {
+            if let Some(value) = value {
+                check_value(name, value)?;
+            }
+        }
+        for (key, value) in &self.server_settings {
+            if !is_guc_name(key) {
+                return Err(invalid(&format!(
+                    "malformed server setting name {}",
+                    shown(key)
+                )));
+            }
+            check_value(key, value)?;
+        }
+        for (key, value) in &self.extra {
+            if key.is_empty() || !key.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+                return Err(invalid(&format!("malformed key {}", shown(key))));
+            }
+            check_value(key, value)?;
+        }
+        Ok(())
     }
 
     // the URL authority and path, which tokio-postgres already knows how to read
@@ -171,7 +233,10 @@ impl ConnectOptions {
                 // libpq reads 0 as no timeout
                 self.connect_timeout = (!timeout.is_zero()).then_some(timeout);
             }
-            "options" => self.apply_options(&value)?,
+            "options" => {
+                check_value("options", &value)?;
+                self.apply_options(&value)?;
+            }
             "sslmode" => {
                 Mode::parse(&value)?;
                 self.sslmode = Some(value);
@@ -217,6 +282,8 @@ impl ConnectOptions {
     /// # Errors
     /// `Interface` for an unusable `sslmode`, a malformed setting name, or a key the driver rejects.
     pub fn build(&self) -> Result<ParsedDsn, Error> {
+        self.validate()?;
+        self.register_secrets();
         let mut pairs: Vec<(&str, String)> = Vec::new();
         let mut push = |key: &'static str, value: Option<String>| {
             if let Some(value) = value {
@@ -238,9 +305,6 @@ impl ConnectOptions {
             .unwrap_or_default();
         let mut settings = Vec::new();
         for (key, value) in &self.server_settings {
-            if key.is_empty() || key.contains(['=', ' ']) {
-                return Err(invalid("malformed server setting name"));
-            }
             settings.push(format!("-c {key}={}", escape_option(value)));
         }
         if !settings.is_empty() {
@@ -259,9 +323,6 @@ impl ConnectOptions {
                 || (key == "port" && self.port.is_some())
             {
                 continue;
-            }
-            if key.is_empty() || key.contains(['=', ' ']) {
-                return Err(invalid("malformed key"));
             }
             pairs.push((key.as_str(), value.clone()));
         }
@@ -287,6 +348,38 @@ impl ConnectOptions {
         }
         Ok(ParsedDsn { config, tls })
     }
+}
+
+// a key in an error message, escaped and bounded so it can't carry a control character
+fn shown(key: &str) -> String {
+    let mut text = format!("{:?}", key.chars().take(64).collect::<String>());
+    if key.chars().count() > 64 {
+        text.push_str("...");
+    }
+    text
+}
+
+// `^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)*$` with at most 63 bytes per segment
+fn is_guc_name(key: &str) -> bool {
+    key.split('.').all(|segment| {
+        let mut bytes = segment.bytes();
+        segment.len() <= 63
+            && bytes
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+    })
+}
+
+// NUL and the other C0 characters (tab included) are never valid in an option value
+fn check_value(name: &str, value: &str) -> Result<(), Error> {
+    if value.chars().any(|c| c <= '\u{1f}') {
+        return Err(invalid(&format!(
+            "the value of {} contains a control character",
+            shown(name)
+        )));
+    }
+    Ok(())
 }
 
 // libpq's rule for the startup `options` string: a backslash escapes the next character
@@ -350,7 +443,7 @@ fn split_url(dsn: &str) -> Result<(&str, Pairs), Error> {
     Ok((base, pairs))
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -599,6 +692,195 @@ mod tests {
             assert!(
                 parse(dsn).is_err_and(|err| !err.to_string().contains("hunter2")),
                 "{dsn}"
+            );
+        }
+    }
+
+    fn with_setting(key: &str, value: &str) -> ConnectOptions {
+        ConnectOptions {
+            host: Some("h".to_owned()),
+            server_settings: vec![(key.to_owned(), value.to_owned())],
+            ..ConnectOptions::default()
+        }
+    }
+
+    fn with_extra(key: &str, value: &str) -> ConnectOptions {
+        ConnectOptions {
+            host: Some("h".to_owned()),
+            extra: vec![(key.to_owned(), value.to_owned())],
+            ..ConnectOptions::default()
+        }
+    }
+
+    fn message(opts: &ConnectOptions) -> Option<String> {
+        match opts.build() {
+            Err(Error::Interface(message)) => Some(message),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn server_setting_keys_follow_the_guc_grammar() -> Result<(), Error> {
+        for key in [
+            "a\tb", "a\nb", "a\\b", "-c", "-x", "a=b", "a b", "", ".a", "a.", "a..b", "1a", "a-b",
+            "a\u{0}b",
+        ] {
+            let opts = with_setting(key, "v");
+            assert!(message(&opts).is_some(), "{key:?}");
+        }
+        for key in ["search_path", "app.tenant", "_x$1", "A.b_C"] {
+            with_setting(key, "v").build()?;
+        }
+        let segment = "a".repeat(63);
+        with_setting(&segment, "v").build()?;
+        with_setting(&format!("{segment}.{segment}"), "v").build()?;
+        let long = "a".repeat(64);
+        assert!(message(&with_setting(&long, "v")).is_some());
+        assert!(message(&with_setting(&format!("ok.{long}"), "v")).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn extra_keys_are_lowercase_and_underscore_only() -> Result<(), Error> {
+        for key in [
+            "Keepalives",
+            "keep-alives",
+            "a\n",
+            "a b",
+            "a=b",
+            "",
+            "a1",
+            "-c",
+            "a\tb",
+        ] {
+            assert!(message(&with_extra(key, "v")).is_some(), "{key:?}");
+        }
+        with_extra("keepalives", "0").build()?;
+        with_extra("target_session_attrs", "any").build()?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_key_messages_never_carry_control_characters() {
+        let shown = message(&with_setting("a\nb\tc", "v")).unwrap_or_default();
+        assert!(shown.contains("a\\nb\\tc"), "{shown}");
+        assert!(!shown.contains('\n') && !shown.contains('\t'), "{shown}");
+    }
+
+    #[test]
+    fn control_characters_in_values_are_rejected_by_key() {
+        for bad in ["a\u{0}b", "a\nb", "a\u{1f}b", "a\tb", "a\rb"] {
+            let secret = format!("zz{bad}zz");
+            let cases = [
+                (
+                    "password",
+                    ConnectOptions {
+                        password: Some(secret.clone()),
+                        ..ConnectOptions::default()
+                    },
+                ),
+                (
+                    "user",
+                    ConnectOptions {
+                        user: Some(secret.clone()),
+                        ..ConnectOptions::default()
+                    },
+                ),
+                (
+                    "database",
+                    ConnectOptions {
+                        database: Some(secret.clone()),
+                        ..ConnectOptions::default()
+                    },
+                ),
+                (
+                    "host",
+                    ConnectOptions {
+                        host: Some(secret.clone()),
+                        ..ConnectOptions::default()
+                    },
+                ),
+                (
+                    "application_name",
+                    ConnectOptions {
+                        application_name: Some(secret.clone()),
+                        ..ConnectOptions::default()
+                    },
+                ),
+                (
+                    "sslrootcert",
+                    ConnectOptions {
+                        sslrootcert: Some(secret.clone()),
+                        ..ConnectOptions::default()
+                    },
+                ),
+                ("work_mem", with_setting("work_mem", &secret)),
+                ("sslpassword", with_extra("sslpassword", &secret)),
+                ("options", with_extra("options", &secret)),
+            ];
+            for (name, opts) in cases {
+                let text = message(&opts).unwrap_or_default();
+                assert!(text.contains(name), "{name}: {text}");
+                assert!(!text.contains("zz"), "{name}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn dsn_values_with_control_characters_are_rejected_without_the_value() {
+        for dsn in [
+            "host=h password='pw\tsecret'",
+            "host=h options='-c work_mem=a\nsecret'",
+            "postgres://u:pw%0Asecret@h/db",
+            "postgres://u@h/db?sslpassword=pw%00secret",
+        ] {
+            let text = match parse(dsn) {
+                Err(Error::Interface(message)) => message,
+                other => format!("unexpected {other:?}"),
+            };
+            assert!(text.contains("control character"), "{dsn}: {text}");
+            assert!(!text.contains("secret"), "{dsn}: {text}");
+        }
+    }
+
+    #[test]
+    fn dsn_keys_are_validated_too() {
+        for dsn in [
+            "host=h Keepalives=0",
+            "postgres://u@h/db?bad-key=1",
+            "host=h options='--a-b=1'",
+        ] {
+            assert!(matches!(parse(dsn), Err(Error::Interface(_))), "{dsn}");
+        }
+    }
+
+    #[test]
+    fn dotted_gucs_round_trip_through_a_dsn() -> Result<(), Error> {
+        let opts = ConnectOptions::from_dsn("host=h options='-c app.tenant=acme'")?;
+        assert_eq!(
+            opts.server_settings,
+            vec![("app.tenant".to_owned(), "acme".to_owned())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_errors_redact_every_spelling_of_the_password() {
+        for dsn in [
+            "postgres://u:p%40ss@h:notaport/db",
+            "postgres://u:p%40ss@h/db?port=zz",
+            "host=h password=p@ss port=zz",
+            "host=h password='p@ss' port=zz",
+            "host=h password='p@ss",
+            "p@ss password=p@ss oops",
+        ] {
+            let text = match parse(dsn) {
+                Err(Error::Interface(message)) => message,
+                other => format!("unexpected {other:?}"),
+            };
+            assert!(
+                !text.contains("p@ss") && !text.contains("p%40ss"),
+                "{dsn}: {text}"
             );
         }
     }

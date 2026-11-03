@@ -3,11 +3,18 @@ import asyncio
 from collections import Counter, deque
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
-from re import DOTALL, IGNORECASE, VERBOSE, compile as re_compile
+from re import DOTALL, IGNORECASE, VERBOSE, compile as re_compile, sub
 from typing import TYPE_CHECKING, Final
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote
 
-from rowx._core.postgres import ColumnInfo, Connection, Describe, connect_checker, describe as describe_impl
+from rowx._core.postgres import (
+    ColumnInfo,
+    Connection,
+    Describe,
+    connect_checker,
+    describe as describe_impl,
+    parse_dsn as parse_dsn_impl,
+)
 from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
 from rowx.check.discover import discover_source
 from rowx.check.model import Diagnostic, Rule, Span
@@ -49,7 +56,11 @@ SQL_TOKEN: Final = re_compile(
     """,
     flags=VERBOSE | DOTALL,
 )
-PASSWORD_PARAM: Final = re_compile(r"password\s*=\s*(?:'((?:[^'\\]|\\.)*)'|([^\s&]+))", flags=IGNORECASE)
+PASSWORD_PARAM: Final = re_compile(
+    r"(?P<key>password\s*=\s*)(?P<value>'(?:[^'\\]|\\.)*'?|[^\s&]+)",
+    flags=IGNORECASE | DOTALL,
+)
+USERINFO: Final = re_compile(r"(?P<key>://[^/?#\s:@]*:)(?P<value>[^/?#\s]*)@")
 
 
 class CheckError(Exception):
@@ -100,13 +111,41 @@ class _Site:
     inference: ParamInference | None
 
 
+def _unescape(raw: str) -> str:
+    inner = raw.removeprefix("'")
+    return sub(r"\\(.)|'", lambda match: match[1] or "", inner, flags=DOTALL)
+
+
+def _spellings(raw: str) -> set[str]:
+    plain = _unescape(raw)
+    escaped = sub(r"([\\'])", r"\\\1", plain)
+    spaced = sub(r"(\s)", r"\\\1", escaped)
+    return {raw, unquote(raw), plain, unquote(plain), quote(plain, safe=""), escaped, spaced}
+
+
+# the decoded values the options parser finds, which covers a spelling the syntax scan above doesn't know
+def _parsed_secrets(dsn: str) -> set[str]:
+    try:
+        options = parse_dsn_impl(dsn)
+    except InterfaceError:
+        return set()
+    found: set[str] = {str(options.get("password") or "")}
+    found.update(str(value) for key, value in options.get("extra", {}).items() if "password" in key)
+    return found
+
+
 def secrets_in(dsn: str) -> list[str]:
-    found: list[str] = []
-    with suppress(ValueError):
-        if (password := urlparse(dsn).password) is not None:
-            found.extend([password, unquote(password)])
-    found.extend(match[1] or match[2] for match in PASSWORD_PARAM.finditer(dsn))
+    found = _parsed_secrets(dsn)
+    for pattern in (PASSWORD_PARAM, USERINFO):
+        for match in pattern.finditer(dsn):
+            found |= _spellings(match["value"])
     return sorted({secret for secret in found if secret}, key=len, reverse=True)
+
+
+# URL userinfo and `password=` tokens are masked by syntax, so a DSN that can't be parsed is still covered
+def _mask_syntax(text: str) -> str:
+    text = USERINFO.sub(lambda match: f"{match['key']}***@", text)
+    return PASSWORD_PARAM.sub(lambda match: f"{match['key']}***", text)
 
 
 def redact(text: str, dsn: str) -> str:
@@ -114,7 +153,7 @@ def redact(text: str, dsn: str) -> str:
     text = text.replace(dsn, "<database url>") if dsn else text
     for secret in secrets_in(dsn):
         text = text.replace(secret, "***")
-    return text
+    return _mask_syntax(text)
 
 
 async def _connect(dsn: str, timeout_ms: int) -> Connection:

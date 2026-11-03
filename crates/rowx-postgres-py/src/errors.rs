@@ -7,6 +7,7 @@ use rowx_core::migrate::{Migration, NameError};
 use rowx_core::pool::OptionsError;
 use rowx_postgres::error::Error;
 use rowx_postgres::migrate::MigrateError;
+use rowx_postgres::redact::redact;
 use rowx_py_core::errors as shared;
 
 use crate::named::{RowShape, render_null, render_shape};
@@ -73,9 +74,10 @@ pub fn construct_to_py_err(
     type_name: &str,
     row_index: usize,
 ) -> PyErr {
+    // the cause is user code's, so a secret it echoes is redacted by value in the message
     let detail = cause.value(py).repr().map_or_else(
         |_| "<unrepresentable>".to_owned(),
-        |r| r.to_string_lossy().into_owned(),
+        |r| redact(&r.to_string_lossy(), None),
     );
     shared::row_construct_error(
         py,

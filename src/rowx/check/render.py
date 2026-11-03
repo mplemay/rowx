@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from json import dumps
+from re import compile as re_compile
 from typing import TYPE_CHECKING, Final, Literal, assert_never
 
 from rowx.check.sourcemap import LINE_PATTERN
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
     from rowx.postgres._vocab import NullReasonName
 
 TAB_WIDTH: Final[int] = 4
+# C0 and C1 controls other than newline and tab, which a terminal would act on
+CONTROL_CHARS: Final = re_compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 # `Diagnostic` carries what every rule has; the rest is only known to some rules
@@ -109,6 +112,10 @@ def _source_lines(source: str) -> list[str]:
     return [line.rstrip("\r\n") for line in LINE_PATTERN.findall(source)]
 
 
+def strip_controls(text: str) -> str:
+    return CONTROL_CHARS.sub("", text)
+
+
 def _expand(text: str) -> str:
     return text.replace("\t", " " * TAB_WIDTH)
 
@@ -157,15 +164,15 @@ def _block(report: Report, source: str | None, width: int, root: Path | None) ->
     span = diagnostic.span
     pad = " " * width
     out = [
-        f"error[{diagnostic.rule}]: {diagnostic.message}",
+        f"error[{diagnostic.rule}]: {strip_controls(diagnostic.message)}",
         f"{pad}--> {_relative(diagnostic.path, root)}:{span.line}:{span.col}",
     ]
     if source is not None and 1 <= span.line <= len(_source_lines(source)):
         out.append(f"{pad} |")
         out.extend(_snippet(report, source, width))
-    trailer = [f"= note: {note}" for note in diagnostic.notes]
+    trailer = [f"= note: {strip_controls(note)}" for note in diagnostic.notes]
     if report.help is not None:
-        trailer.append(f"= help: {report.help}")
+        trailer.append(f"= help: {strip_controls(report.help)}")
     if trailer:
         out.append(f"{pad} |")
         out.extend(f"{pad} {line}" for line in trailer)
