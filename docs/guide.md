@@ -456,7 +456,8 @@ asyncio.run(main())
 
 - A row class from attrs or msgspec, a `Protocol`, an untyped `collections.namedtuple`, a `RootModel` and `pydantic.v1`
   models. They are deferred, not rejected for good: see the [roadmap](design/roadmap.md).
-- A dataclass with `init=False` or an `InitVar` field, and a class with no fields.
+- A stdlib dataclass with `init=False`, an `InitVar` field (a pydantic dataclass accepts `init=False`), and a class
+  with no fields.
 - A nullable row (`User | None`): call `.optional()` instead. A row class nested in a tuple, a list or a union, or used
   as a field type, so there are no JSON-shaped or composite columns yet.
 - The checker can't see through a class decorator other than the dataclass ones, a `metaclass=` or an unknown class

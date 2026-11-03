@@ -143,15 +143,20 @@ is per field.
   arity mismatch.
 - `fetch` returns the `Mapping` with the rows, and `RowBatches` carries it. `check_nulls` uses a per-column mask derived
   from it: a mapped column takes its field's flag, and a pass-through column counts as nullable.
-- `ShapeError` is a source of `Error::RowShape`, which maps to `RowShapeError` in `rowx-postgres-py/src/errors.rs`. The
-  message names the row type and every error.
+- A mapping failure is `Error::Shape { errors, columns }`, which maps to `RowShapeError` in
+  `rowx-postgres-py/src/errors.rs`; the binding renders the message from the indices and `columns`, naming the row type
+  and every error. A NULL in a non-nullable mapped field is `Error::NullField { column, field, row, name }`. A named
+  shape must carry a full per-field mask, or the call is an `Interface` error.
 
 **`rowx-postgres-py/src/exec.rs`.**
 
-- **`RowShape`** is a pyclass exported from `_core.postgres`. It is immutable, and Python builds it once per plan. It
-  holds:
+- **`RowShape`** is a pyclass exported from `_core.postgres`. It is immutable, and Python builds it once per plan, as
+  `RowShape(ctor, form, matching, type_name, fields, /, *, validate=True)`. It holds:
   - `ctor`: the class, or for a pydantic model its `__pydantic_validator__` (a pydantic dataclass uses the class);
-  - `form`: `positional`, `keyword`, `dict` or `validator`; the `validator` form records which call it makes;
+  - `form`: `positional`, `keyword`, `dict` or `validator`; the `validator` form records which call it makes.
+    `validate=True` calls `ctor.validate_python(dict)` (a `BaseModel`, with `ctor=__pydantic_validator__`), and
+    `validate=False` calls `ctor(**dict)` (a pydantic dataclass, with `ctor=cls`), because a `strict=True` pydantic
+    dataclass rejects a dict in `validate_python`;
   - `matching`, and `type_name`;
   - for each field: an interned key `PyString`, the accepted names (or unknown), `required`, and flags (bit 0
     nullable, bit 1 `Interval`).
@@ -184,6 +189,10 @@ is per field.
   `(names | None, required)`, so the checker needn't build a `RowShape`. It returns
   `tuple[list[int | None], list[ShapeIssue]]`: for each column, the field index or `None` for a pass-through (the absent
   optional fields are the field indices not in the mapping), and the issues.
+  - **On failure the mapping is partial**, not empty. By name, a column maps to the one field that accepts its name,
+    or to `None` when no field or several fields do (the columns of a `duplicate-column` keep the field index); by
+    position, every entry is `None`. The checker uses it to run the type and nullability rules on cleanly mapped
+    columns, and skips the columns named in `duplicate-column` and `ambiguous-column`.
   - `ShapeIssue` is a frozen pyclass with `kind` (the rule name: `"missing-column"`, `"unexpected-column"`,
     `"duplicate-column"`, `"ambiguous-column"`, `"column-name-mismatch"`, `"arity-mismatch"`), `columns: list[int]`
     (0-based), `fields: list[int]` (empty when no field), `name: str | None` (the stripped column name), and, for arity,

@@ -485,23 +485,28 @@ and is checked in the same way as a tuple, field by field.
   it.
 - **TypedDict class keywords.** The known keywords are `total`, `closed` and `extra_items`. `closed` and `extra_items`
   add no fields and don't relax `unexpected-column`. Optionality follows `__required_keys__`: `Required[...]` overrides
-  `total=False`, `NotRequired[...]` overrides `total=True`, and `total` applies to the declaring class only. `typing`
-  supports `closed` and `extra_items` on 3.15 (PEP 728), and `typing_extensions` on 3.14. Any other class keyword on a
-  non-pydantic form is a [checker-only rejection](#checker-only-rejections).
+  `total=False`, `NotRequired[...]` overrides `total=True`, and `total` applies to the declaring class only. The
+  wrappers count inside `Annotated` and `ReadOnly`, in a quoted annotation, and under
+  `from __future__ import annotations`. `typing` supports `closed` and `extra_items` on 3.15 (PEP 728), and
+  `typing_extensions` on 3.14. Any other class keyword on a non-pydantic form is a
+  [checker-only rejection](#checker-only-rejections).
 - **Pydantic** is never imported by rowx. A pydantic class is detected through `sys.modules.get("pydantic")`, as
   `Range` is. A pydantic dataclass is checked before the stdlib dataclass rule, because `dataclasses.is_dataclass` is
   true for it.
 - **Inheritance.** Fields come from the bases in the order the library itself uses. A field redeclared in a child
   replaces the base's field in place. A project base that is not a row type (a plain mixin) contributes no fields. A
   NamedTuple's fields are only those of the class that directly subclasses `NamedTuple` (`_fields`), and annotations a
-  subclass adds are ignored.
+  subclass adds are ignored. The checker follows the real C3 method resolution order over project classes, so an
+  inconsistent MRO or an inheritance cycle is `unresolved-row-type`; there is no inheritance depth cap. A private name
+  `__x` is keyed by its mangled name, as the class mangles it.
 
 **Which members are fields.** A field is an annotated member that the constructor accepts. These are **not** fields:
 `ClassVar`, `KW_ONLY`, `dataclasses.field(init=False)`, pydantic private attributes (`_x`, `PrivateAttr`),
-`computed_field`, and `Field(init=False)` on a pydantic dataclass. A field's annotation is exactly an `ELEM`, after
-`Annotated`, `ReadOnly`, `Required` and `NotRequired` are unwrapped. A field typed `None` matches a `void` column, as a
-tuple element does. A field is **optional** (the constructor fills it, or a TypedDict lacks the key) when it has a
-dataclass `default` or `default_factory`, a pydantic default, `NotRequired`, or `total=False`.
+`computed_field`, and `Field(init=False)` on a pydantic dataclass (on a `BaseModel` it is an ordinary field). A field's
+annotation is exactly an `ELEM`, after `Annotated`, `ReadOnly`, `Required` and `NotRequired` are unwrapped. A field
+typed `None` matches a `void` column, as a tuple element does. A field is **optional** (the constructor fills it, or a
+TypedDict lacks the key) when it has a dataclass `default` or `default_factory`, a pydantic default, `NotRequired`, or
+`total=False`.
 
 **Column names.** The name a column is matched under is the server's name after the override suffix is stripped
 ([Nullability overrides](#nullability-overrides-sqlx-convention)).
@@ -577,22 +582,35 @@ behave as in `Model.model_validate`.
   `model_rebuild(force=True)` isn't seen by a plan that is already built.
 - **Column names** of a field: its `str` `validation_alias`, else its `str` `alias`, else its name. `validate_by_name`
   (or `populate_by_name`) adds the field name, and `validate_by_alias=False` keeps only the name. Config is read with
-  `.get`, so 2.11's keys and the older `populate_by_name` both work.
+  `.get`, so 2.11's keys and the older `populate_by_name` both work. Both sides mirror pydantic's
+  `_build_effective_config`: an explicit `validate_by_name` wins; else `populate_by_name` forces `validate_by_alias` on
+  and sets `validate_by_name` to its own value; else `validate_by_alias=False` implies `validate_by_name`. The legacy
+  `class Config: allow_population_by_field_name` is ignored, because pydantic 2.14 ignores it.
+- **Field metadata** (`Field(...)`, aliases, defaults) is read through plain and `TypeAlias` aliases. Inside a PEP 695
+  `type` alias it is ignored, as pydantic ignores it. On a model only, `= ...` clears a default that `Annotated`
+  metadata gave. A model's plain mixins contribute their annotations and their before/wrap validators.
 - **Class keywords are config.** `class M(BaseModel, populate_by_name=True)` is pydantic config, not an unknown class
   keyword: literal class keywords on a model merge into its config, and the child wins. A non-literal one makes the
-  names unknown, in the checker.
+  names unknown, in the checker. The merge order is pydantic's: the direct bases left to right (the last wins), then
+  the class's own `model_config` or `class Config` (the last assignment wins), then the class keywords. A pydantic
+  dataclass's config does not merge: it is the decorator's `config=`, else the nearest base's.
 - **Pydantic dataclass config** is the decorator's literal `config=ConfigDict(...)` in the checker (a non-literal value
-  makes the names unknown), and `__pydantic_config__` at runtime. The decorator's `init=False`, or an `InitVar` field,
-  on a pydantic dataclass is rejected on both sides (the runtime checks `__dataclass_fields__` for `InitVar`);
-  `Field(init=False)` on a field just makes it a non-field.
+  makes the names unknown), and `__pydantic_config__` at runtime. `pydantic.dataclasses.dataclass` accepts only
+  `init=False` (it means "keep pydantic's own `__init__`", and `init=True` raises), so a literal `init=False` on its
+  decorator is **accepted** on both sides. Only an `InitVar` field is rejected (the runtime checks
+  `__dataclass_fields__`); `Field(init=False)` on a field just makes it a non-field.
 - **Unknown names.** This is a deliberate exception to "uncheckable is an error", for parity with sqlty. It has two
   scopes:
   - An `AliasChoices`, an `AliasPath` or a non-literal alias makes **that field's** names unknown.
-  - A `model_validator(mode="before" | "wrap")` anywhere in the MRO makes **every** field's names unknown. So does an
+  - A `model_validator(mode="before" | "wrap")`, or one with a non-literal `mode`, anywhere in the MRO (a plain mixin
+    and an assigned `model_validator(...)(...)` included) makes **every** field's names unknown. So does an
     `alias_generator`, or a `model_config` the checker can't read, **in the checker only**: at runtime the generated
-    aliases are plain strings, and are checked.
+    aliases are plain strings, and are checked. Config or a validator inside a conditional block makes every field
+    unknown too, because the checker can't follow it.
   - If any field is unknown, the four by-name rules (`missing-column`, `unexpected-column`, `duplicate-column`,
-    `ambiguous-column`) are skipped for the whole model, and the checker adds `note: names not checked: <reason>`.
+    `ambiguous-column`) are skipped for the whole model. The checker adds `note: names not checked: <reason>` to the
+    diagnostics it emits on that call, and to nothing else: unknown names stay errors-only, so an otherwise clean model
+    prints nothing, even when all its names are unknown.
     Type and nullability checks still run for columns that map to a field with known names.
   - At runtime, every column goes into the dict, and the NULL check applies only to columns that match a known name.
     A pass-through column decodes with the default decoder (no `Interval` flag), and two columns with one name collapse
@@ -616,7 +634,10 @@ behave as in `Model.model_validate`.
   `invalid-row-type`.
 - A name that resolves only through a `TYPE_CHECKING` import is `invalid-row-type` inside a named-type field, with the
   help "import `datetime` at runtime", because `get_type_hints` would fail on it (ruff's TC003 produces exactly this).
-  Aliases used as `T` keep today's rule.
+  Only the selected fields count: a `ClassVar`, an `init=False` field and a NamedTuple-subclass extra are not resolved.
+  A **row-level** alias whose value names a `TYPE_CHECKING`-only import is `invalid-row-type` too, with the same help,
+  because the runtime always fails to build that plan (an `InterfaceError`). In a class body the checker skips the
+  `if TYPE_CHECKING:` body and follows its `else:`, as the runtime does.
 
 #### Generics
 
@@ -633,7 +654,23 @@ supported on both sides, once subscripted.
   16, shared with `MAX_ALIAS_DEPTH`, and the conformance rows sit at 16 (accepted) and 17 (rejected).
 - `TypeVar` bounds and constraints are not enforced; the leaf check does the work. A generic alias of a generic class
   (`type B[T] = Box[T]`) and a bare generic class whose parameters all have PEP 696 defaults are supported.
-- `type_name` renders the arguments (`Box[int]`).
+- **Parameter order.** A legacy generic's parameters are collected depth first, by first appearance over
+  `__orig_bases__`, and an explicit `Generic[...]` overrides that order. `Annotated` metadata and string forward refs
+  are not collected. A `TypeVar` imported from another module is matched by identity, and its default is read in the
+  defining module. A PEP 696 default may refer to an earlier parameter, and is substituted through the mapping.
+- **Old-style aliases.** `Row = tuple[T, str]` and `X: TypeAlias = ...` are generic aliases like a `type` alias. A bare
+  plain generic alias is `invalid-row-type` even when its parameters have defaults, because Python gives a plain alias
+  none; `Pair[()]` takes the defaults.
+- **Hops.** A `type` alias, a class substitution and a re-export each count; a plain assignment does not. A class at the
+  end of an alias chain is one hop, and a `Generic[...]` or `Protocol[...]` base is none. Running out of hops on a
+  generic chain is `invalid-row-type`; any other chain stays `unresolved-row-type`. A generic class chain is capped at
+  16 subscripted bases, and pydantic models are exempt.
+- `type_name` renders the arguments (`Box[int]`), in one canonical text on both sides: `X | None` for an Optional or a
+  Union with `None`, unions flattened and deduplicated, `Annotated` metadata dropped, a plain alias as its target, a
+  `type` alias by name, a `TypeVar` by name, and `...` for an `Ellipsis`. A bare generic with defaults shows them.
+- **Known limit.** A pydantic dataclass `Box[int]` is built by calling the origin class, so pydantic validates the field
+  as the unparametrized `T`: values pass through, and a `TypeVar` bound is enforced by pydantic there but not by the
+  checker ([known limits](../known-limits.md)).
 - The constructor is the origin class, not the subscripted alias, so `__orig_class__` isn't set on every row. A pydantic
   `Page[int]` is already a concrete subclass with resolved fields, and is used as it is.
 
@@ -642,7 +679,8 @@ supported on both sides, once subscripted.
 Rejected on **both sides** (`invalid-row-type` in the checker, `InterfaceError` at the first row-returning call):
 
 - `Protocol`, `collections.namedtuple` (untyped), attrs, msgspec, `RootModel` and pydantic v1 (`pydantic.v1`);
-- a dataclass with `init=False`, and a dataclass `InitVar` field (also on a pydantic dataclass);
+- a stdlib dataclass with `init=False`, and a dataclass `InitVar` field (also on a pydantic dataclass, whose decorator
+  accepts `init=False`);
 - a named row type with no fields (`invalid-row-type`, "has no fields");
 - a nullable named row (`User | None`), with the help "use .optional()";
 - a named type anywhere below the row level: in a tuple, a list, a union, or as a field type;
@@ -658,7 +696,15 @@ accepts them, and any failure surfaces as `RowConstructError`:
 - a hand-written `__init__` on a stdlib dataclass;
 - a pydantic constraint alias that is `Annotated[<leaf>, ...]` (`PositiveInt`, `constr()` and the like). The runtime
   strips the `Annotated` metadata, and the checker sees only a pydantic name it can't look through (there is no pydantic
-  type table).
+  type table);
+- `pydantic.Json[...]`;
+- mixed forms: a model with a stdlib dataclass base, a stdlib dataclass over a pydantic dataclass, and a pydantic
+  dataclass over a stdlib one;
+- an undecorated subclass of a pydantic dataclass;
+- an external stdlib base (`abc.ABC`, `Exception`), because inheritance is project-only;
+- a field declared inside a conditional block, which the runtime runs and the checker can't follow (the
+  `if TYPE_CHECKING:` body is skipped and its `else:` is live);
+- a plain alias over a `TypeVarTuple`, which the runtime builds.
 
 The runtime can't see a decorator or a class keyword once the class exists. It can see a hand-written `__init__`, but it
 doesn't reject one, because a failing constructor already has a runtime error. A pydantic model **may** define
@@ -675,7 +721,8 @@ doesn't reject one, because a failing constructor already has a runtime error. A
 - **NULL check.** A NULL in a position the mask marks non-nullable raises `RowShapeError`
   naming the column index and name. The Rust decoder performs this check. For a named row the mask is per mapped
   field; a column that maps to no known field (unknown names) counts as nullable. The named message names the field and
-  the column: ``NULL in column 2 "email" for non-nullable field "email" of `User` (row {k})``. The tuple message is
+  the column: ``{type_name}: NULL in column 2 "email" for non-nullable field "email" of `User` (row {k})``, where `k` is
+  0-based, like `RowConstructError.row_index`. The tuple message is
   unchanged. In `all` and `one` the NULL checks run while the rows are collected, before any constructor runs. In a
   stream, earlier rows are constructed and yielded first.
 - **Construction errors.** An exception from the constructor or validator (a pydantic `ValidationError`, a raising

@@ -40,10 +40,18 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
 - **Models with unknown names are partly checked.** For `AliasChoices`, `AliasPath`, a non-literal alias, a
   `model_validator(mode="before" | "wrap")`, an `alias_generator` or an unreadable `model_config`, the checker skips
   `missing-column`, `unexpected-column`, `duplicate-column` and `ambiguous-column` for the whole model. A
-  `names not checked` note is attached to any diagnostic the model does emit, and a clean model with unknown names is
+  `names not checked` note is attached only to a diagnostic the model emits, and a clean model with unknown names is
   silent. Type and nullability checks still run on columns that map to a field with known names. At
   runtime a column that matches no known name passes through with the default decoder, so an `interval` column there
   has no `Interval` flag, and two columns with one name collapse to the last one in the dict.
+- **A generic pydantic dataclass is not parametrized.** `Box[int]` is built by calling the origin class, so pydantic
+  validates the field as the unparametrized `T` and values pass through. A `TypeVar` bound is enforced by pydantic there
+  but not by the checker.
+- **Checker-only rejections beyond pydantic aliases.** `Json[...]`, mixed row type forms (a model with a stdlib
+  dataclass base, or a stdlib and a pydantic dataclass stacked), an undecorated subclass of a pydantic dataclass, a
+  base from the stdlib (`abc.ABC`, `Exception`), a field declared in a conditional block, and a plain alias over a
+  `TypeVarTuple` work at runtime and fail `rowx check`.
+- **Notes print absolute paths.** The `field defined at` and similar notes show an absolute path (#208).
 - **No column rename for dataclasses and TypedDicts.** There is no equivalent of sqlx's `rename`, so a column that
   needs a different name than the field uses a quoted alias in SQL.
 - **Some rejections are checker-only.** A class decorator other than the dataclass decorators and `typing.final`, a
@@ -52,10 +60,10 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
   `rowx check`, because it can't see what they do. The runtime accepts them, and a constructor failure surfaces as
   `RowConstructError`.
 - **Not supported:** attrs, msgspec, `Protocol`, `collections.namedtuple`, `RootModel`, pydantic v1, a dataclass with
-  `init=False` or an `InitVar` (a pydantic dataclass accepts `init=False` but rejects `InitVar`), a named row with no
-  fields, a nullable named row (`User | None`, use `.optional()`), named parameters, and row classes from installed
-  packages (the checker resolves classes in the project only). Pydantic needs 2.11 or later. A plan caches
-  `__pydantic_validator__`, so a later `model_rebuild(force=True)` isn't seen by a plan that is already built.
+  `init=False` or an `InitVar` (a pydantic dataclass accepts the decorator's `init=False` but rejects `InitVar`), a
+  named row with no fields, a nullable named row (`User | None`, use `.optional()`), named parameters, and row classes
+  from installed packages (the checker resolves classes in the project only). Pydantic needs 2.11 or later. A plan
+  caches `__pydantic_validator__`, so a later `model_rebuild(force=True)` isn't seen by a plan that is already built.
 - **Types are not checked at runtime**, except by pydantic. A class whose annotations don't match its columns fails
   only in `rowx check`.
 

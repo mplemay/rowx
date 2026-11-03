@@ -298,7 +298,10 @@ Additional rules:
   substituted when subscripted ([Generics](#generics)).
 - At most 16 hops are followed, one per alias or class substitution along a chain (nesting depth, not breadth),
   shared with `MAX_ALIAS_DEPTH`. A cycle is `unresolved-row-type`.
-- `TYPE_CHECKING` branches are followed, and the first binding wins.
+- `TYPE_CHECKING` branches are followed, and the first binding wins, except that a name bound only there is
+  `invalid-row-type` in a named-type field and as a row-level alias value ([Named row types](#named-row-types)).
+- `KNOWN_ROOTS` (the stdlib, `typing_extensions`, `rowx` and `pydantic`) never resolve into project modules, even when
+  a project directory shares a name.
 
 ### Named row types
 
@@ -326,7 +329,14 @@ A name that resolves to a class is a named row type ([Named row types](api.md#na
   - **A NamedTuple's fields** come only from the class that directly subclasses `NamedTuple`, which mirrors `_fields`.
     Annotations a subclass adds are ignored.
 - **Inheritance is project-only.** Every base must be a project class or a known form base (`NamedTuple`,
-  `TypedDict`, `BaseModel`, `Generic`).
+  `TypedDict`, `BaseModel`, `Generic`). The order is the real C3 MRO over project classes, and an inheritance cycle or
+  an inconsistent MRO is `unresolved-row-type`; there is no depth cap.
+  - An inherited dataclass default is found by walking the class attributes in MRO order: `field(default=…)` keeps the
+    attribute, while `default_factory` and `kw_only` delete it. An undecorated subclass of a dataclass uses the first
+    dataclass in its MRO.
+  - A private name `__x` is keyed by its mangled name.
+  - A TypedDict field is required by its declaring class's `total`, overridden by `Required[…]` or `NotRequired[…]`,
+    which count inside `Annotated` or `ReadOnly`, when quoted, and under `from __future__ import annotations`.
 - **Names from outside the roots.**
   - A name from the stdlib, `typing`/`typing_extensions`, `rowx` or `pydantic` that isn't a supported form stays
     `invalid-row-type`, as today.
@@ -335,10 +345,11 @@ A name that resolves to a class is a named row type ([Named row types](api.md#na
   or another unknown class keyword, a hand-written dataclass `__init__`, a pydantic constraint alias such as
   `PositiveInt`), are in
   [Rejected named forms](api.md#rejected-named-forms) and [Checker-only rejections](api.md#checker-only-rejections).
-- **Annotations.** A name that resolves only through a `TYPE_CHECKING` binding is `invalid-row-type` inside a field,
-  with the help "import `X` at runtime". Field types are `ELEM`s, so pydantic-only types are `invalid-row-type`, and so
-  are constraint aliases such as `PositiveInt` (the checker has no pydantic type table). A named row type with no fields
-  is `invalid-row-type`.
+- **Annotations.** A name that resolves only through a `TYPE_CHECKING` binding is `invalid-row-type` inside a field and
+  as a row-level alias value, with the help "import `X` at runtime". Only selected fields count, so a `ClassVar`, an
+  `init=False` field or a NamedTuple-subclass extra is not resolved. Field types are `ELEM`s, so pydantic-only types are
+  `invalid-row-type`, and so are constraint aliases such as `PositiveInt` (the checker has no pydantic type table). A
+  named row type with no fields is `invalid-row-type`.
 - **Pydantic names and config** are read from the AST, and pydantic is never imported:
   - a field's names are a literal `str` `validation_alias=`, else a literal `alias=`, else its name. These can be in
     `Field(...)`, as the value or in `Annotated` metadata;
@@ -352,13 +363,19 @@ A name that resolves to a class is a named row type ([Named row types](api.md#na
     `alias_generator`, a non-literal class keyword or decorator `config=`, and a `model_config` that isn't a literal
     `ConfigDict(...)`. The runtime is stricter for an `alias_generator`, and the conformance rows record that.
 - A project without pydantic installed resolves identically.
+- **Note paths.** The paths inside `field defined at`, `alias defined at` and the generic notes are currently absolute,
+  unlike the diagnostic's own project-relative path (#208 tracks relativizing them).
 
 ### Generics
 
-A subscript of a generic alias or class substitutes AST nodes, with the arguments resolved in the call site's module
-and the body in the definition's module. Base arguments are rebound through project bases. The limits and rejections
-are those of [Generics](api.md#named-row-types), and each substitution step counts toward the 16-hop limit. The note
-names the definition and the call-site arguments.
+A subscript of a generic alias or class substitutes AST nodes, with the arguments resolved in the call site's module and
+the body in the definition's module. Base arguments are rebound through project bases. The limits and rejections are
+those of [Generics](api.md#named-row-types), and each substitution step counts toward the 16-hop limit. The note names
+the definition and the call-site arguments: ``generic alias `Row` defined at path:line:col, with X = int`` for an alias,
+and "Crate is generic, defined at path:line:col, with X = int" (with the class name in backticks) as a field note for a
+class. Parameter order, the `Generic[...]` override, imported `TypeVar`s, PEP 696 defaults, old-style aliases, hop
+counting and the `type_name` text are those of [Generics](api.md#generics). The checker is stricter in one case: a plain
+alias over a `TypeVarTuple` is rejected.
 
 **Module graph.**
 
@@ -409,11 +426,17 @@ builds one: it has no constructor and doesn't import user code. The result is ei
 - **Per-field rules after errors.** For a positional row, any `arity-mismatch` or `column-name-mismatch` suppresses
   `type-mismatch` and `nullability-mismatch` for that call. For a by-name row, those rules run on every column that
   mapped cleanly to exactly one field, and skip only the columns involved in `duplicate-column` or `ambiguous-column`.
-  `void` columns behave as for tuples.
+  `void` columns behave as for tuples. When `map_columns` fails it still returns a partial mapping (see
+  [Driver](driver.md#named-rows)), and the checker skips the columns named in `duplicate-column` or `ambiguous-column`.
+- **Order.** A named row's findings share one span, and `Report.order` sorts within it: whole-row findings first, then
+  the column-indexed ones by column, then `missing-column` by field declaration order.
 - **Unknown names.** A field with unknown names carries `None` in the field specs. If any field is unknown, the four
   by-name rules are skipped for the whole model, and a column that matches nothing passes through. The type and
   nullability rules still run on columns that map to a field with known names, and the diagnostic adds
   `note: names not checked: <reason>`, for example "field `x` uses AliasChoices" or "`Model` has a before-validator".
+  The note is attached only to diagnostics that are emitted: unknown names are errors-only, so a model whose names are
+  all unknown and which is otherwise clean prints nothing. Config or a validator inside a conditional block also makes
+  every field unknown.
 - **Wiring.** `check/compare.py`'s `ColumnDesc` gains `raw_name`, copied from `ColumnInfo.raw_name` in
   `runner._column_desc`, and compare passes the raw names to `map_columns` (a wiring edit for #187).
 - `unresolved-row-type` and `invalid-row-type` are reported before any describe result is compared.
