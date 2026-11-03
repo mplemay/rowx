@@ -1,35 +1,24 @@
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub const MASK: &str = "***";
 
-// every secret this process has parsed, so text that never saw the DSN (a wrapped cause's repr) is covered
-static KNOWN: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-
-fn known() -> MutexGuard<'static, BTreeSet<String>> {
-    KNOWN.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Remembers a secret value. Empty secrets are skipped.
-pub fn register(secret: &str) {
-    if !secret.is_empty() {
-        known().insert(secret.to_owned());
-    }
-}
-
 fn percent_encode(s: &str, lower: bool) -> String {
-    let mut out = String::with_capacity(s.len());
+    let digits: &[u8; 16] = if lower {
+        b"0123456789abcdef"
+    } else {
+        b"0123456789ABCDEF"
+    };
+    let mut out = Vec::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(b));
-        } else if lower {
-            let _ = write!(out, "%{b:02x}");
+            out.push(b);
         } else {
-            let _ = write!(out, "%{b:02X}");
+            out.push(b'%');
+            out.push(digits[usize::from(b >> 4)]);
+            out.push(digits[usize::from(b & 15)]);
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // the quote- and backslash-escaped spellings of a key=value DSN
@@ -59,8 +48,9 @@ fn unescape(raw: &str) -> String {
     out
 }
 
-fn spellings(secret: &str, out: &mut BTreeSet<String>) {
-    if secret.is_empty() {
+// every spelling is at least as long as the secret, so one longer than the text can't occur in it
+fn spellings(secret: &str, max_len: usize, out: &mut BTreeSet<String>) {
+    if secret.is_empty() || secret.len() > max_len {
         return;
     }
     out.insert(secret.to_owned());
@@ -165,23 +155,37 @@ pub fn mask_syntax(text: &str) -> String {
     out
 }
 
-/// Redacts `text` by secret value (the registry, the secrets of `dsn`, and every raw spelling of them),
+/// Redacts `text` by the value of each of `secrets` in every raw spelling, then masks the remaining
+/// userinfo and `password=` tokens by syntax.
+#[must_use]
+pub fn redact_secrets(text: &str, secrets: &[String]) -> String {
+    let max_len = text.len();
+    let mut spelled = BTreeSet::new();
+    for secret in secrets {
+        spellings(secret, max_len, &mut spelled);
+    }
+    replace_all(text, &spelled)
+}
+
+/// Redacts `text` by secret value (the secrets of `dsn` and every raw spelling of them),
 /// then masks the remaining userinfo and `password=` tokens by syntax.
 #[must_use]
 pub fn redact(text: &str, dsn: Option<&str>) -> String {
+    let max_len = text.len();
     let mut secrets = BTreeSet::new();
-    for secret in known().iter() {
-        spellings(secret, &mut secrets);
-    }
     if let Some(dsn) = dsn {
         for raw in raw_secrets(dsn) {
             let plain = unescape(&raw);
-            spellings(&raw, &mut secrets);
-            spellings(&crate::dsn::percent_decode(&raw), &mut secrets);
-            spellings(&plain, &mut secrets);
-            spellings(&crate::dsn::percent_decode(&plain), &mut secrets);
+            spellings(&raw, max_len, &mut secrets);
+            spellings(&crate::dsn::percent_decode(&raw), max_len, &mut secrets);
+            spellings(&plain, max_len, &mut secrets);
+            spellings(&crate::dsn::percent_decode(&plain), max_len, &mut secrets);
         }
     }
+    replace_all(text, &secrets)
+}
+
+fn replace_all(text: &str, secrets: &BTreeSet<String>) -> String {
     let mut ordered: Vec<&String> = secrets.iter().collect();
     ordered.sort_by_key(|s| std::cmp::Reverse(s.len()));
     let mut out = text.to_owned();
@@ -223,10 +227,10 @@ mod tests {
     }
 
     #[test]
-    fn registry_covers_text_without_a_dsn() {
-        register("zq-registry-secret");
-        assert!(!redact("cause: zq-registry-secret", None).contains("zq-registry-secret"));
-        register("");
-        assert!(redact("plain text", None).contains(' '));
+    fn redaction_uses_only_the_secrets_it_is_given() {
+        let secrets = vec!["zq-secret".to_owned(), String::new()];
+        assert_eq!(redact_secrets("a zq-secret b", &secrets), "a *** b");
+        assert_eq!(redact_secrets("a invalid b", &secrets), "a invalid b");
+        assert_eq!(redact("a invalid b", None), "a invalid b");
     }
 }

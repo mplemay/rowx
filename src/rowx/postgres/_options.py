@@ -31,7 +31,11 @@ class ConnectOptions:
     # the dataclass repr, except that `extra` values (which can hold secrets such as `sslpassword`) are hidden
     @override
     def __repr__(self) -> str:
-        shown = {"extra": dict.fromkeys(self.extra, "<redacted>")}
+        # a non-mapping `extra` must not make the repr raise
+        try:
+            shown = {"extra": dict.fromkeys(self.extra, "<redacted>")}
+        except TypeError:
+            shown = {"extra": "<redacted>"}
         parts = [
             f"{item.name}={shown.get(item.name, getattr(self, item.name))!r}" for item in fields(self) if item.repr
         ]

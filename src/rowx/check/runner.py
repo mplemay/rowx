@@ -112,15 +112,21 @@ class _Site:
 
 
 def _unescape(raw: str) -> str:
-    inner = raw.removeprefix("'")
-    return sub(r"\\(.)|'", lambda match: match[1] or "", inner, flags=DOTALL)
+    # a backslash pair is its second character, and a bare quote is a delimiter
+    return sub(r"\\(.)|'", r"\1", raw.removeprefix("'"), flags=DOTALL)
+
+
+def _lower_percent(text: str) -> str:
+    # only a hex letter right after a percent sign (or its first digit) changes
+    return sub(r"(?<=%)[A-F]|(?<=%[0-9A-F])[A-F]", lambda match: match[0].lower(), text)
 
 
 def _spellings(raw: str) -> set[str]:
     plain = _unescape(raw)
     escaped = sub(r"([\\'])", r"\\\1", plain)
     spaced = sub(r"(\s)", r"\\\1", escaped)
-    return {raw, unquote(raw), plain, unquote(plain), quote(plain, safe=""), escaped, spaced}
+    encoded = quote(plain, safe="")
+    return {raw, unquote(raw), plain, unquote(plain), encoded, _lower_percent(encoded), escaped, spaced}
 
 
 # the decoded values the options parser finds, which covers a spelling the syntax scan above doesn't know
@@ -135,10 +141,12 @@ def _parsed_secrets(dsn: str) -> set[str]:
 
 
 def secrets_in(dsn: str) -> list[str]:
-    found = _parsed_secrets(dsn)
+    raws = _parsed_secrets(dsn)
     for pattern in (PASSWORD_PARAM, USERINFO):
-        for match in pattern.finditer(dsn):
-            found |= _spellings(match["value"])
+        raws.update(match["value"] for match in pattern.finditer(dsn))
+    found: set[str] = set()
+    for raw in raws:
+        found |= _spellings(raw)
     return sorted({secret for secret in found if secret}, key=len, reverse=True)
 
 
@@ -148,12 +156,24 @@ def _mask_syntax(text: str) -> str:
     return PASSWORD_PARAM.sub(lambda match: f"{match['key']}***", text)
 
 
+def _split_secret(text: str, secret: str) -> list[tuple[str, bool]]:
+    pieces = text.split(secret)
+    out: list[tuple[str, bool]] = [(pieces[0], False)]
+    for piece in pieces[1:]:
+        out.extend([("", True), (piece, False)])
+    return out
+
+
 def redact(text: str, dsn: str) -> str:
     # the whole URL goes first so a password is never left half-replaced
     text = text.replace(dsn, "<database url>") if dsn else text
+    # longest spelling first; a masked span is kept apart, so it is never scanned again
+    parts: list[tuple[str, bool]] = [(text, False)]
     for secret in secrets_in(dsn):
-        text = text.replace(secret, "***")
-    return _mask_syntax(text)
+        parts = [
+            piece for chunk, masked in parts for piece in ([(chunk, True)] if masked else _split_secret(chunk, secret))
+        ]
+    return _mask_syntax("".join("***" if masked else chunk for chunk, masked in parts))
 
 
 async def _connect(dsn: str, timeout_ms: int) -> Connection:

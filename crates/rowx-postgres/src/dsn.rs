@@ -14,6 +14,23 @@ pub const DEFAULT_STATEMENT_CACHE_SIZE: usize = 256;
 pub struct ParsedDsn {
     pub config: Config,
     pub tls: TlsSettings,
+    // the password and `*password` extras, which an error on the connect path must not echo
+    secrets: Vec<String>,
+}
+
+impl ParsedDsn {
+    /// Masks the secrets of these options in an `Interface` message; other errors pass through.
+    #[must_use]
+    pub fn redact_error(&self, err: Error) -> Error {
+        redact_interface(err, &self.secrets)
+    }
+}
+
+fn redact_interface(err: Error, secrets: &[String]) -> Error {
+    match err {
+        Error::Interface(message) => Error::Interface(redact::redact_secrets(&message, secrets)),
+        other => other,
+    }
 }
 
 // error text never includes any part of the DSN, since it can carry the password
@@ -95,10 +112,7 @@ impl ConnectOptions {
     pub fn from_dsn(dsn: &str) -> Result<Self, Error> {
         let dsn = dsn.trim();
         match Self::parse_text(dsn).and_then(|opts| opts.validate().map(|()| opts)) {
-            Ok(opts) => {
-                opts.register_secrets();
-                Ok(opts)
-            }
+            Ok(opts) => Ok(opts),
             // no message may echo a secret, however the DSN spelled it
             Err(Error::Interface(message)) => {
                 Err(Error::Interface(redact::redact(&message, Some(dsn))))
@@ -122,15 +136,21 @@ impl ConnectOptions {
         Ok(opts)
     }
 
-    fn register_secrets(&self) {
-        if let Some(password) = &self.password {
-            redact::register(password);
-        }
-        for (key, value) in &self.extra {
-            if key.contains("password") {
-                redact::register(value);
-            }
-        }
+    fn secrets(&self) -> Vec<String> {
+        let mut found: Vec<String> = self.password.iter().cloned().collect();
+        found.extend(
+            self.extra
+                .iter()
+                .filter(|(key, _)| key.contains("password"))
+                .map(|(_, value)| value.clone()),
+        );
+        found
+    }
+
+    /// Masks the password and the `*password` extras of these options in an `Interface` message.
+    #[must_use]
+    pub fn redact_error(&self, err: Error) -> Error {
+        redact_interface(err, &self.secrets())
     }
 
     /// # Errors
@@ -261,7 +281,11 @@ impl ConnectOptions {
             } else if let Some(rest) = token.strip_prefix("-c") {
                 Some(rest.to_owned())
             } else {
-                token.strip_prefix("--").map(str::to_owned)
+                // like the server, `--search-path=x` is `search_path=x`
+                token.strip_prefix("--").and_then(|rest| {
+                    let (name, value) = rest.split_once('=')?;
+                    Some(format!("{}={value}", name.replace('-', "_")))
+                })
             };
             match setting {
                 Some(setting) => {
@@ -282,8 +306,12 @@ impl ConnectOptions {
     /// # Errors
     /// `Interface` for an unusable `sslmode`, a malformed setting name, or a key the driver rejects.
     pub fn build(&self) -> Result<ParsedDsn, Error> {
+        self.build_unredacted()
+            .map_err(|err| self.redact_error(err))
+    }
+
+    fn build_unredacted(&self) -> Result<ParsedDsn, Error> {
         self.validate()?;
-        self.register_secrets();
         let mut pairs: Vec<(&str, String)> = Vec::new();
         let mut push = |key: &'static str, value: Option<String>| {
             if let Some(value) = value {
@@ -346,7 +374,11 @@ impl ConnectOptions {
         if let Some(timeout) = self.connect_timeout.filter(|t| !t.is_zero()) {
             config.connect_timeout(timeout);
         }
-        Ok(ParsedDsn { config, tls })
+        Ok(ParsedDsn {
+            config,
+            tls,
+            secrets: self.secrets(),
+        })
     }
 }
 
@@ -845,12 +877,49 @@ mod tests {
 
     #[test]
     fn dsn_keys_are_validated_too() {
-        for dsn in [
-            "host=h Keepalives=0",
-            "postgres://u@h/db?bad-key=1",
-            "host=h options='--a-b=1'",
-        ] {
+        for dsn in ["host=h Keepalives=0", "postgres://u@h/db?bad-key=1"] {
             assert!(matches!(parse(dsn), Err(Error::Interface(_))), "{dsn}");
+        }
+    }
+
+    #[test]
+    fn long_options_map_dashes_to_underscores() -> Result<(), Error> {
+        let opts = ConnectOptions::from_dsn("host=h options='--search-path=x -c work_mem=1'")?;
+        assert_eq!(
+            opts.server_settings,
+            vec![
+                ("search_path".to_owned(), "x".to_owned()),
+                ("work_mem".to_owned(), "1".to_owned())
+            ]
+        );
+        assert!(ConnectOptions::from_dsn("host=h options='--1a-b=1'").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn build_errors_never_carry_the_password() {
+        for (sslmode, root) in [
+            (Some("bogus-Zq9pw"), None),
+            (Some("verify-full"), Some("/nonexistent/Zq9pw/ca.pem")),
+        ] {
+            let opts = ConnectOptions {
+                host: Some("h".to_owned()),
+                password: Some("Zq9pw".to_owned()),
+                sslmode: sslmode.map(str::to_owned),
+                sslrootcert: root.map(str::to_owned),
+                ..ConnectOptions::default()
+            };
+            let text = match opts.build().and_then(|parsed| {
+                parsed
+                    .tls
+                    .connector()
+                    .map_err(|e| parsed.redact_error(e))
+                    .map(|_| ())
+            }) {
+                Err(Error::Interface(message)) => message,
+                other => format!("unexpected {other:?}"),
+            };
+            assert!(text.contains("***") && !text.contains("Zq9pw"), "{text}");
         }
     }
 

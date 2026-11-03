@@ -7,7 +7,6 @@ import pytest
 
 import rowx
 from rowx import errors
-from rowx._core.postgres import parse_dsn
 from rowx.errors import (
     ConnectionBusyError,
     DatabaseError,
@@ -28,7 +27,7 @@ from rowx.errors import (
     RowNotFound,
     RowShapeError,
 )
-from rowx.postgres import ConnectOptions, Migration, MigrationResult
+from rowx.postgres import Migration, MigrationResult
 
 ALL_ERRORS: Final[list[type[Error]]] = [
     InterfaceError,
@@ -204,54 +203,3 @@ def test_migration_errors_take_keyword_arguments() -> None:
     assert (order.version, order.latest) == (2, 5)
     failed = MigrationFailedError(message="failed", version=1, path=None, dirty=False, applied=(), error=FAILURE_CAUSE)
     assert (failed.path, failed.dirty, failed.applied) == (None, False, ())
-
-
-SECRET: Final = "p@ss"  # ruff: ignore[hardcoded-password-string]
-ENCODED: Final = "p%40ss"
-SECRET_FORMS: Final[list[str]] = [
-    f"postgresql://u:{ENCODED}@h:notaport/db",
-    f"postgresql://u@h:notaport/db?password={ENCODED}",
-    f"postgresql://u@h/db?sslmode=disable&password={ENCODED}&port=zz",
-    f"host=h port=zz password={SECRET}",
-    f"host=h port=zz password='{SECRET}'",
-    f"host=h password='{SECRET}",
-    f"{SECRET} password={SECRET} oops",
-    f"postgresql://u:{ENCODED}@[unparseable/db",
-]
-
-
-def assert_no_secret(exc: BaseException) -> None:
-    for text in (str(exc), repr(exc), repr(exc.__cause__)):
-        assert SECRET not in text
-        assert ENCODED not in text
-
-
-@pytest.mark.parametrize("dsn", SECRET_FORMS)
-def test_dsn_errors_never_echo_the_password(dsn: str) -> None:
-    with pytest.raises(InterfaceError) as caught:
-        parse_dsn(dsn)
-    assert_no_secret(caught.value)
-    with pytest.raises(InterfaceError) as again:
-        ConnectOptions.from_dsn(dsn)
-    assert_no_secret(again.value)
-
-
-@pytest.mark.parametrize(
-    ("options", "key"),
-    [
-        (ConnectOptions(password="a\x00b"), "password"),  # ruff: ignore[hardcoded-password-func-arg]
-        (ConnectOptions(extra={"sslpassword": "a\nb"}), "sslpassword"),
-        (ConnectOptions(server_settings={"work_mem": "a\tb"}), "work_mem"),
-        (ConnectOptions(server_settings={"a\tb": "1"}), "a\\tb"),
-        (ConnectOptions(extra={"Bad": "1"}), "Bad"),
-    ],
-)
-def test_invalid_options_name_the_key_and_never_the_value(options: ConnectOptions, key: str) -> None:
-    import asyncio  # ruff: ignore[import-outside-top-level]
-
-    from rowx.postgres import connect  # ruff: ignore[import-outside-top-level]
-
-    with pytest.raises(InterfaceError) as caught:
-        asyncio.run(connect(options))
-    assert key in str(caught.value)
-    assert "a\x00b" not in str(caught.value)

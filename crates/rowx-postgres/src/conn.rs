@@ -38,9 +38,14 @@ impl Connection {
         statement_cache_size: usize,
         handle: &Handle,
     ) -> Result<Self, Error> {
-        let connector = parsed.tls.connector()?;
-        let (client, connection) = parsed.config.connect(connector.clone()).await?;
-        let cancel = CancelTarget::new(client.cancel_token(), &parsed.config, connector)?;
+        let connector = parsed.tls.connector().map_err(|e| parsed.redact_error(e))?;
+        let (client, connection) = parsed
+            .config
+            .connect(connector.clone())
+            .await
+            .map_err(|e| parsed.redact_error(Error::from(e)))?;
+        let cancel = CancelTarget::new(client.cancel_token(), &parsed.config, connector)
+            .map_err(|e| parsed.redact_error(e))?;
         let broken = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&broken);
         let task = handle.spawn(async move {

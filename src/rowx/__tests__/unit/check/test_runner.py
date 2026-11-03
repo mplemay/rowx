@@ -1,4 +1,5 @@
 import asyncio
+from time import perf_counter
 from typing import Any
 
 import pytest
@@ -109,6 +110,20 @@ def test_redact_removes_passwords(dsn: str, secret: str) -> None:
 def test_redact_covers_every_form_and_unparseable_dsns(dsn: str, secrets: list[str]) -> None:
     for secret in secrets:
         assert secret not in redact(f"boom {secret} in {dsn}", dsn)
+
+
+def test_redact_covers_lowercase_percent_encoding() -> None:
+    out = redact("boom p%c3%a4sss and p%C3%A4sss and pässs", "postgresql://u:pässs@h/db")
+    assert "p%c3%a4" not in out
+    assert "p%C3%A4" not in out
+    assert "pä" not in out
+
+
+def test_redact_is_linear_in_a_long_dsn() -> None:
+    dsn = "host=h password='" + "\\'" * 10**6
+    start = perf_counter()
+    assert redact("x", dsn) == "x"
+    assert perf_counter() - start < 1
 
 
 def test_redact_masks_userinfo_and_password_tokens_by_syntax() -> None:

@@ -11,7 +11,7 @@ from rowx.check.config import ConfigError, database_url, load_config
 from rowx.check.database import add_parsers as add_database_parsers, handle as handle_database
 from rowx.check.drift import DriftError, check_drift
 from rowx.check.migrate import add_parsers, handle as handle_migrate, load_migrator, resolve_target
-from rowx.check.render import render_json, render_text
+from rowx.check.render import render_json, render_text, strip_controls
 from rowx.check.runner import CheckError, Hooks, RunResult, redact, run_check
 from rowx.check.scratch import Scratch
 from rowx.check.walk import discover_files
@@ -97,9 +97,9 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
     except DriftError:
         raise
     except CheckError as error:
-        raise CheckError(redact(str(error), dsn)) from None
+        raise CheckError(strip_controls(redact(str(error), dsn))) from None
     except Exception as error:  # ruff: ignore[blind-except]
-        msg = f"internal error: {type(error).__name__}: {redact(str(error), dsn)}"
+        msg = f"internal error: {type(error).__name__}: {strip_controls(redact(str(error), dsn))}"
         raise CheckError(msg) from None
     finally:
         if built is not None:
@@ -110,7 +110,7 @@ def _subcommand(handler: Callable[[Namespace], None], args: Namespace) -> int:
     try:
         handler(args)
     except (ConfigError, CheckError) as error:
-        print(f"error: {error}", file=sys.stderr)  # ruff: ignore[print]
+        print(f"error: {strip_controls(str(error))}", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
     except KeyboardInterrupt:
         print("error: interrupted", file=sys.stderr)  # ruff: ignore[print]
@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result, root = _check(args)
     except (ConfigError, CheckError) as error:
-        print(f"error: {error}", file=sys.stderr)  # ruff: ignore[print]
+        print(f"error: {strip_controls(str(error))}", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
     except KeyboardInterrupt:
         print("error: interrupted", file=sys.stderr)  # ruff: ignore[print]

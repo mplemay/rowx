@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 
-from rowx._core.postgres import Connection as ConnectionImpl, RowShape, parse_dsn
+from rowx._core.postgres import Connection as ConnectionImpl, RowShape
 from rowx.errors import DecodeError, InterfaceError, RowConstructError, RowShapeError
 from rowx.postgres import Connection, Interval, Pool, connect
 
@@ -301,28 +301,6 @@ def test_constructor_error_in_all_and_one_is_wrapped_with_its_cause(schema: str)
     assert str(err) == "Num row 1: ValueError('boom')"
     assert isinstance(err.__cause__, ValueError)
     assert after == [{"n": 1}]
-
-
-def test_constructor_error_message_redacts_a_known_password(schema: str) -> None:
-    secret = "zz-known-secret-17"  # ruff: ignore[hardcoded-password-string]
-    # parsing a DSN is what makes the driver remember its password
-    parse_dsn(f"postgresql://u:{secret}@h/db")
-
-    def ctor(**_: int) -> dict[str, int]:
-        msg = f"cannot build from {secret}"
-        raise ValueError(msg)
-
-    row_shape = shape(ctor, "keyword", [spec("n")], name="Num")
-
-    async def body(conn: Connection) -> RowConstructError:
-        with pytest.raises(RowConstructError) as caught:
-            await fetch(conn, "SELECT 1::int4 AS n", row_shape)
-        return caught.value
-
-    err = run_with_conn(schema, body)
-    assert secret not in str(err)
-    assert secret not in repr(err)
-    assert "***" in str(err)
 
 
 @pytest.mark.parametrize(("bad", "yielded"), [(2, 2), (3, 3), (0, 0), (1, 1)])

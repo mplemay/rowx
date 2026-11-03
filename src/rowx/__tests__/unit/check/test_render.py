@@ -1,5 +1,7 @@
 import json
 import os
+import sys
+import unicodedata
 from pathlib import Path
 from textwrap import dedent
 from typing import Final, get_args
@@ -8,7 +10,7 @@ import pytest
 
 from rowx.check.discover import discover_file, discover_source
 from rowx.check.model import Diagnostic, Span
-from rowx.check.render import NULL_NOTES, Report, null_reason_note, render_json, render_text
+from rowx.check.render import NULL_NOTES, Report, null_reason_note, render_json, render_text, strip_controls
 from rowx.check.resolve import ModuleGraph, resolve_row_type
 from rowx.check.sourcemap import SourceMapper
 from rowx.postgres._vocab import NullReasonName
@@ -374,3 +376,25 @@ def test_json_output_escapes_control_characters() -> None:
     out = render_json([Report(diagnostic=diagnostic)])
     assert "\x1b" not in out
     assert "\\u001b" in out
+
+
+def test_strip_controls_removes_format_and_separator_characters() -> None:
+    hostile = "a\x1b[31m\u202eb\u200bc\u2028d\u2029e\ufeff\u2066f\u2069\nkeep\t"
+    assert strip_controls(hostile) == "a[31mbcdef\nkeep\t"
+    assert strip_controls("p\u00e4 \u4e2d") == "p\u00e4 \u4e2d"
+
+
+def test_strip_controls_covers_every_format_and_separator_codepoint() -> None:
+    for code in range(sys.maxunicode + 1):
+        if unicodedata.category(chr(code)) in {"Cf", "Zl", "Zp"}:
+            assert not strip_controls(chr(code)), hex(code)
+
+
+def test_text_output_strips_bidi_overrides() -> None:
+    diagnostic = Diagnostic(
+        rule="sql-error",
+        message="bad \u202etxet",
+        path=PATH,
+        span=Span(line=1, col=1, end_line=1, end_col=2),
+    )
+    assert "\u202e" not in render_text([Report(diagnostic=diagnostic)], {})
