@@ -200,6 +200,37 @@
     `--rowx-keep-templates` is set.
   - *Orphans:* a clone orphaned by a SIGKILLed inner session is swept on the next run, and another project's old clone
     is left.
+- **Security hardening** ([Security](security.md)). Each guarantee has a test.
+  - *Template compiler (unit):* `str` subclasses that override `__contains__`, `__len__`, `encode`, `replace`,
+    `__iter__`, `__add__` and `__radd__`; a `tuple` subclass; control characters; a lone surrogate; NUL; 65536
+    parameters across nested templates; a runtime `ident` spec. The connection is still usable after each failure.
+  - *Binary arrays and ranges:* `wire_send.rs` round-trips every element family through the server with adversarial
+    strings (`"`, `\`, `,`, `{}`, `NULL`, whitespace, `empty`, SJIS lead-byte characters), `Numeric::from_decimal_parts`
+    edge cases, a test that no array or range parameter is ever sent in text format, and a test pinning
+    `json.dumps(ensure_ascii=True)`. `bench/fetch_100k.py` shows no regression.
+  - *Session encoding watch:* `SET client_encoding = 'SJIS'` and `SET standard_conforming_strings = off` make the next
+    call raise `InterfaceError`, a pooled connection that drifted is replaced after release, and
+    `SET client_encoding = 'UTF8'` (no change) keeps the connection.
+  - *Options:* `dsn.rs` unit tests for tab, newline, backslash and overlong keys and control characters in values;
+    `repr` redaction; a DSN password never appears in a cause's `repr()`.
+  - *Fake server* (`crates/rowx-postgres/tests/common/fake_server.rs`, a scripted server on a local socket): with
+    `channel_binding=require`, a server asking for cleartext, MD5 or SCRAM-SHA-256 without `-PLUS` gets no password or
+    SASL response; `verify-full` and `require` never fall back to plaintext on `N`; a cancel request follows the TLS
+    mode. A live test negotiates SCRAM-SHA-256-PLUS against the TLS container.
+  - *Pool reset and internal SQL:* a role, `search_path`, a temp table and an advisory lock don't survive a release;
+    migrations under `search_path = evil, pg_catalog` record the real time.
+  - *Fuzzing:* a `cargo-fuzz` target for every `wire/` decoder, arrays of each element family, `explain` plan JSON and
+    `dsn::parse`, each run with `-rss_limit_mb` so an over-allocation fails, plus `decode(encode(x)) == x` targets for
+    the encoders. They run in the scheduled fuzz workflow. A panic-boundary test checks that a malformed value of every
+    type is a `DecodeError`, never a `PanicException`.
+  - *Protocol limits (RUSTSEC-2024-0363):* a parameter of at least 2³¹ bytes raises `EncodeError`/`InterfaceError` and
+    the same connection then runs `SELECT 1`. It needs about 2 GiB, so it is `#[ignore]` and runs in the scheduled fuzz
+    workflow. Cheap twins (a NUL in the SQL, 65536 placeholders) run in `just test-rust`.
+  - *Checker:* conformance and golden rows for `template-construction` (`Template(x)`, `Template(*parts)`,
+    `t"a" + Template(x)`, an aliased import and `T = Template` fail; `Template("lit", Interpolation(...))` passes), and
+    a non-literal format spec in `query_unchecked` as `dynamic-query`.
+  - *EXPLAIN of a prepared statement* (only if #229 lands): the `fuzz-nullability` parity run (both forms, identical
+    verdicts), zero- and many-parameter statements, views, and a test that no EXPLAIN text contains the user's SQL.
 - **Module split.** `import rowx` loads neither `rowx._core` nor `rowx.postgres`. `rowx._core.postgres` is importable
   and registered in `sys.modules`, its classes report `module == "rowx._core.postgres"`, and `rowx.connect`,
   `rowx.Connection` and `rowx.ping` no longer exist. `Connection`, `Pool` and `Transaction` satisfy `Executor`.

@@ -26,11 +26,35 @@ rowx **pre-parses** the DSN, in both URL and key=value forms. It removes `sslmod
   `database`, `application_name`, `client_encoding` and `options` in the startup packet. The DSN parser parses the `-c`
   pairs of `options` back into `server_settings` (overrides win), and every other key it keeps (keepalives,
   `target_session_attrs`, multiple hosts) is carried in `extra` and passed through.
+- **`channel_binding`** (`disable`, `prefer`, `require`) is a typed `ConnectOptions` field and a DSN key. rowx
+  parses it and maps it to tokio-postgres's `ChannelBinding`; tokio-postgres-rustls supplies the `tls-server-end-point`
+  digest, so SCRAM-SHA-256-PLUS can be negotiated. With `require`, the client **MUST NOT** send a password or SASL
+  response for cleartext, MD5 or SCRAM-SHA-256 without `-PLUS`: the connection fails first. `require` with
+  `sslmode=disable` is an `InterfaceError` at parse time. The default `sslmode` stays `prefer`, for parity with libpq,
+  sqlx and asyncpg, and production use is `sslmode=verify-full&channel_binding=require`
+  ([Security](security.md#tls-and-authentication)). `verify-full` and `require` **MUST NOT** fall back to plaintext
+  when the server answers `N` to SSLRequest, and a cancel request ([Cancellation](#cancellation-cancelrs)) follows the
+  connection's TLS mode. `require_auth` is a non-goal, because tokio-postgres has no support for it.
 - `connect_timeout` bounds each connect attempt.
+- **Redaction.** A DSN echoed in an exception or a diagnostic has its userinfo redacted, `ConnectOptions.__repr__`
+  shows `extra` values as `'<redacted>'`, and the `repr()` of a wrapped cause never contains the password.
 - `ping()` sends an empty simple query. `reset()` runs `RESET_QUERY` ([Release](#release)).
 - `close()` works as follows:
   - If the state is `Busy` or `Settling`, it cancels and settles first ([Cancellation](#cancellation-cancelrs)).
   - It then drops the client and awaits the connection task. Close is idempotent.
+
+### Option validation
+
+Options are trusted configuration, but they reach the server as startup text, so `dsn.rs` validates them when it
+parses a DSN or converts a `ConnectOptions`. Anything else is an `InterfaceError`.
+
+- **`server_settings` keys** **MUST** match the GUC grammar `^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)*$`,
+  with at most 63 bytes per dot-separated segment. Because `server_settings` travel inside the startup `options` as
+  `-c k=v`, a tab or newline in a key would be split by the server into extra `-c` options. This is reachable only
+  through programmatic `ConnectOptions`, since DSN-parsed keys can't hold whitespace.
+- **`extra` keys** **MUST** match `^[a-z_]+$`, which every libpq keyword does. They are re-parsed as conninfo.
+- **Values.** A NUL or other C0 control character in any option value (`password`, `options`, `server_settings` values,
+  `extra` values) is an `InterfaceError`. The message names the key and **never** the value.
 
 ## Execution path (`exec.rs`)
 
@@ -313,14 +337,35 @@ enum PyParam { Null, Bool(bool), Int(i64), BigInt(String), Float(f64), Str(Strin
 - When the target is `json`/`jsonb`, the encoder reacquires the GIL (`Python::attach`) to
   run `json.dumps` on the original object.
 
-**Array text literal** (used when an element needs text format):
+### Binary arrays and ranges
 
-- Build it recursively: `{` elements joined by `,` `}`.
-- Every non-NULL element is double-quoted, with `\` and `"` backslash-escaped. NULL is the
-  bare `NULL`, and an empty list is `{}`.
-- Nested lists must be rectangular; a ragged list raises `EncodeError`.
-- This is still a bound parameter, so an escaping bug can corrupt values but can never
-  inject SQL.
+Arrays and ranges are **always** sent in binary format. `array_enc.rs` and `range.rs` produce the binary form for every
+element and bound, and no element or bound is ever rendered as text. The invariant is that no untrusted input can
+change the element and bound structure of an array or range parameter
+([Threat model](security.md#threat-model)): with a text literal, a quote or backslash that a client-only encoding
+reinterprets could close an element early. `wire::array::encode_literal` and `wire::range::encode_literal` do not
+exist.
+
+- The array and range encoders do not consult `encode_format` for the element form. `TYPE_TABLE` is not edited, and
+  `accepted_params` is unchanged, so the checker is unaffected.
+- **Scalar parameters are unchanged.** A scalar has no literal grammar, so a text-format scalar (`numeric`, `timetz`)
+  can corrupt only itself. `json.dumps` stays ASCII-only (`ensure_ascii=True`), which a test pins.
+- **Elements and bounds whose scalar form is text get binary element encoders:**
+  - `numeric` through `Numeric::from_decimal_parts(sign, digits, exponent)` in `wire/numeric.rs`. A `Numeric` was built
+    only by `decode` before, so this constructor is new. It handles:
+    - a positive exponent: `Decimal('1E+100000')` becomes zero-padded digit groups, bounded by the `i16` weight, and
+      past that bound it is an `EncodeError`;
+    - a scale above `MAX_SCALE` is an `EncodeError`;
+    - quiet `NaN` and `±Infinity` encode as the special values;
+    - a signalling NaN is an `EncodeError`;
+    - an `int` outside `i64` is built from its decimal digits;
+  - `timetz` through `wire::temporal::encode_timetz`: microseconds since midnight plus the zone offset in seconds
+    *west* of UTC;
+  - `json` as UTF-8, and `jsonb` as `0x01` followed by UTF-8;
+  - an enum label as UTF-8, under the element OID taken from the prepared statement's `Kind::Array(inner)`;
+  - `uuid` from a `str`, parsed and validated to 16 bytes on the client.
+- Nested lists **MUST** be rectangular; a ragged list raises `EncodeError`. NULL elements use the binary NULL length.
+- Every encoder is strict, with no `str()` fallback.
 
 **Decode.** A custom `FromSql`, `Raw<'a>(Option<&'a [u8]>, &Type)`, accepts every type. Pure
 wire parsers in `rowx-postgres/src/wire/` produce Rust values, and `rowx-postgres-py/src/codec/` turns them
@@ -329,6 +374,22 @@ into Python objects.
 - Constructors for `Decimal`, `UUID`, `datetime`, `date`, `time`, `timedelta` and
   `timezone.utc` are cached.
 - jsonb strips its version byte, then calls `json.loads`.
+
+**Decoders under an untrusted server.** The decoders parse server bytes, which a MITM controls when `sslmode` is weaker
+than `verify-full`. They **MUST** return `DecodeError` for malformed input and never panic: a panic surfaces in Python
+as `PanicException`, a `BaseException`.
+
+- `wire/mod.rs` has `#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]`, scoped to the module and
+  not the workspace. Code uses `get` and `checked_*`, not `#[allow]`. The array decoder bounds `ndim` and uses
+  `checked_mul` for the element count.
+- **Fuzzing.** Every `wire/` decoder has a `cargo-fuzz` target, as do arrays of each element family, the `explain`
+  plan JSON reader and `dsn::parse`. Every target runs with `-rss_limit_mb`, so an over-allocation fails. Encoders have
+  `decode(encode(x)) == x` targets ([Testing](testing.md)).
+- **Protocol length limits** (RUSTSEC-2024-0363 class). A length that doesn't fit the protocol's `i32` (a parameter or
+  message of 2³¹ bytes or more) or `u16` (a parameter count above 65535) **MUST** raise `EncodeError` or
+  `InterfaceError` before anything is written, and the connection stays usable. A NUL in the SQL text fails closed the
+  same way, and the Python compiler rejects both earlier ([Compile limits](api.md#compile-limits)).
+- **Internal SQL** names `pg_catalog` objects explicitly, so `search_path` can't redirect a statement rowx builds.
 
 **Logging.** tokio-postgres's `log` debug output prints parameters through `Debug`. The
 parameter wrapper's `Debug` impl **MUST** redact values.
@@ -354,6 +415,30 @@ release build on macOS, with Postgres 18 in Docker. There is no threshold: only 
 asyncpg fetches the same rows in 50.8 ms. A `TypedDict` costs one dict per row, and a dataclass or NamedTuple one
 Python-level constructor call. A `BaseModel` adds validation (`validate_python`), and a pydantic dataclass calls its
 generated `__init__` with keyword arguments, which validates the same fields.
+
+### Session encoding watch
+
+tokio-postgres forces `client_encoding=UTF8` at startup, but it ignores a later `SET client_encoding = 'SJIS'` run by
+application SQL, and rowx would keep sending UTF-8, silently storing text in the wrong encoding. The watch is a
+backstop against that drift. It is not what protects array structure: binary arrays and ranges do
+([Binary arrays and ranges](#binary-arrays-and-ranges)), so a statement that slips through can suffer data drift but
+not element injection.
+
+- **Watching.** `conn.rs` drives the tokio-postgres `Connection` with
+  `poll_fn(|cx| { let r = conn.poll_message(cx); check(&conn); r })`, so the check runs on **every** poll, including
+  `Pending`. This matters because `ParameterStatus` is consumed inside `poll_read` and is never returned from
+  `poll_message`.
+- **Taint.** If `client_encoding` leaves `UTF8`, or `standard_conforming_strings` turns `off`, the check stores a taint
+  reason in an `AtomicU8` next to `broken`.
+- **Failing.** `Connection::client()` and `parts()` fail with an `InterfaceError` that names the encoding, for example
+  "the session changed client_encoding to SJIS; rowx requires UTF8". The pool's `is_broken` then discards the
+  connection through its existing `client().is_err()` path, so a drifted connection never serves another checkout.
+  Setting `client_encoding` to `UTF8` again (no change) keeps the connection.
+- **Residual window.** The server sends `ParameterStatus` before the `SET`'s `CommandComplete`, but `poll_read` may
+  forward `ReadyForQuery` to a waiting client on another worker before the check runs. Only a statement already queued
+  behind the `SET` can slip through.
+- **Cost.** A legitimate `SET standard_conforming_strings = off` now costs a connection. This is documented.
+- `DateStyle` and `IntervalStyle` are not watched, because every decoder rowx uses is binary.
 
 ## Statement cache (`stmt_cache.rs`)
 
@@ -493,9 +578,20 @@ There is no round trip on the hot path.
 
 ### Release
 
-- `RESET_QUERY` is asyncpg's `SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;`. There is no
-  `DISCARD ALL`, so the per-connection statement cache survives checkouts. Other state that `RESET ALL` keeps
-  (`SET ROLE`, `SET SESSION AUTHORIZATION`, temp tables) is documented.
+- `RESET_QUERY` is asyncpg's reset plus `DISCARD TEMP`:
+  `SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL; DISCARD TEMP;`. There is no `DISCARD ALL`, so
+  the per-connection statement cache survives checkouts.
+  - **`DISCARD TEMP`** drops the session's temp tables. `pg_temp` is searched first for relations, so a temp table left
+    by one checkout would otherwise shadow an application table for the next. This is a deliberate divergence from
+    asyncpg, which leaves them. It runs inside the multi-statement simple query (verified on Postgres 18). A cached
+    statement that referenced a dropped temp table fails on its next use like any statement against a dropped table.
+  - **`DEALLOCATE ALL` is not added**, because rowx's own protocol-level prepared statements are cached per connection
+    and it would destroy them. SQL-level `PREPARE` is therefore **unsupported across checkouts**: a statement prepared
+    with `PREPARE` may survive in the session or not. Use bound parameters.
+  - `RESET ALL` restores `client_encoding`, `SET ROLE` and `search_path`. The
+    [session encoding watch](#session-encoding-watch) catches an encoding change that happens during a checkout.
+  - `reset_query=None` **is unsafe for multi-tenant pools**: nothing clears the role, `search_path`, temp tables or
+    advisory locks. The guide says so.
 - **`ROLLBACK` is prepended only when needed.** An unconditional one logs a server WARNING (25P01) on every release, and
   tokio-postgres drops the ReadyForQuery transaction status. So rowx keeps a conservative "maybe in a transaction" flag,
   set by any of:

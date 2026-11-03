@@ -1,14 +1,120 @@
 # Security and safety
 
+## Threat model
+
+| Trusted (authored by the developer or operator) | Untrusted |
+|---|---|
+| static t-string text, migration files, `reset_query`, the DSN and `ConnectOptions`, the checker's database ([plan-time evaluation](nullability.md#interface-and-checker-session)) | interpolated values, `{x:ident}` values, and the **types** of those values (`str` and `tuple` subclasses) |
+| | server bytes when `sslmode` is weaker than `verify-full` (a MITM can impersonate the server) |
+| | session state that application SQL can change (`SET client_encoding`, `SET ROLE`, temp tables) and that outlives a pool checkout |
+
+Invariant: **no untrusted input can change the parse tree of a statement, or the element and bound structure of an
+array or range parameter.**
+
+Each guarantee below has a test. The sections that follow say how each row of the table is held.
+
+## Parameters and SQL text
+
 - Values are always bound as server-side parameters, never interpolated into SQL text.
   - `query` rejects every dynamic construct.
-  - In `query_unchecked`, nested templates also bind their values, and `:ident` is quoted
-    and length-checked.
+  - In `query_unchecked`, nested templates also bind their values, and `:ident` is quoted and length-checked
+    ([`:ident`](api.md#ident-identifiers)).
   - There is no public raw-SQL escape.
+- **`:ident` values are untrusted, and so are their types.** The compiler normalises a name once, with
+  `str.encode`, and every check and the quoting then run on those bytes, so a `str` or `tuple` subclass that overrides
+  `__contains__`, `__len__`, `encode`, `replace` or `__iter__` has no effect
+  ([`:ident`](api.md#ident-identifiers)). Identifiers are **not** restricted to enum members: an application that takes
+  a column name from a user **MUST** allowlist it (the guide shows `StrEnum`, and `Literal` with `assert_never`).
+- **Compile limits** are `TypeError`s raised before any IO: a NUL in the SQL text, and more than 65535 parameters after
+  flattening ([Compile limits](api.md#compile-limits)).
+- **Hand-built templates.** The only way to put attacker-controlled text into the static part of a query is
+  `Template(...)` with a non-literal string (or `t"…" + Template(user_str)`). The runtime compiles whatever `Template`
+  it is given, and has no provenance check. The checker's `template-construction` rule
+  ([Rules](checker.md#rules-all-errors)) rejects that construction in every file under the include roots.
+  - The rule is **best-effort**, and the docs say so. `getattr` and `eval` can still build a template, so can code
+    outside the include roots, and so can generated code. It also has no ignore comments: the only escape is to
+    exclude the path in config.
+  - Decision: a runtime provenance check and an `assert_sql_safe` escape hatch were both rejected
+    ([Security hardening](decision-log.md#security-hardening-2026-11-03)).
 - **Migration files are trusted code.** `Migrator` and `rowx check --scratch` run their statements over the simple query
   protocol, because a file holds many statements. This is internal, and it adds no public raw-SQL escape. Only the
   table name is built into SQL by rowx, and it is parsed into quoted identifiers
   ([History table](migrations.md#history-table)); so are database names in `rowx database` and `--scratch`.
+- **Internal SQL names `pg_catalog` objects explicitly** (`pg_catalog.now()` and so on), so a role or DSN `search_path`
+  can't make rowx's own statements resolve to a shadowing object ([History table](migrations.md#history-table)). A test
+  runs migrations under `search_path = evil, pg_catalog`.
+
+## Arrays, ranges and session encoding
+
+- **Arrays and ranges are always sent in binary format.** There is no text literal for an element or a range bound,
+  so there is no escaping rule to get wrong ([Binary arrays and ranges](driver.md#binary-arrays-and-ranges)). A test
+  asserts that no array or range parameter is ever sent in text format.
+- Scalar parameter formats are unchanged. A scalar has no literal grammar, so a text-format scalar can corrupt only
+  itself. `json.dumps` stays ASCII-only, which a test pins.
+- **Session encoding watch.** tokio-postgres forces `client_encoding=UTF8` at startup but ignores a later
+  `SET client_encoding` run by application SQL. rowx watches `ParameterStatus`: when `client_encoding` leaves `UTF8`,
+  or `standard_conforming_strings` turns `off`, the connection is tainted, every later call raises `InterfaceError`,
+  and the pool discards it ([Session encoding watch](driver.md#session-encoding-watch)).
+  - This is a backstop against **data drift** (text stored in the wrong encoding). It is not what stops element
+    injection: binary arrays and ranges do. So the watch's residual window, a statement already queued behind the
+    `SET`, can corrupt data but not change the structure of an array.
+  - A legitimate `SET standard_conforming_strings = off` therefore costs a connection. `DateStyle` and `IntervalStyle`
+    are not watched, because every decoder rowx uses is binary.
+
+## Connect options
+
+- Option keys and values are validated ([Option validation](driver.md#option-validation)): a `server_settings` key
+  **MUST** match the GUC grammar, an `extra` key **MUST** match `^[a-z_]+$`, and a NUL or other C0 control character in
+  any value is an `InterfaceError` that names the key and never the value. Without this, a tab or newline in a key
+  would be split by the server into extra startup `-c` options.
+- Neither diagnostics nor exceptions may include a DSN password. `ConnectOptions.__repr__` shows `extra` values as
+  `'<redacted>'`, the userinfo of a DSN echoed in an exception or checker diagnostic is redacted, and a wrapped cause's
+  `repr()` never contains the password ([API](api.md#rowxpostgres)). Parameter values are redacted from Rust debug logs
+  ([Codec](driver.md#codec-rowx-postgres-pysrccodec-rowx-postgressrcwire)).
+
+## TLS and authentication
+
+- `sslmode` defaults to `prefer`, which is encrypted but not verified, as in libpq, sqlx and asyncpg. Under `prefer`
+  or `disable` a MITM can impersonate the server, so it can request cleartext or MD5 authentication and receive the
+  password.
+- **Production recommendation:** `sslmode=verify-full&channel_binding=require`. `channel_binding=require` makes the
+  client refuse any authentication method that cannot be bound to the TLS channel, so a server that asks for a
+  cleartext or MD5 password, or SCRAM without `-PLUS`, gets nothing before the connection fails. rowx has a typed
+  `ConnectOptions.channel_binding` option, and `require` with `sslmode=disable` is a parse-time error
+  ([Connection and DSN](driver.md#connection-and-dsn-rowx-postgressrcdsnrs-tlsrs-connrs)).
+- `verify-full` and `require` never fall back to plaintext when the server answers `N` to SSLRequest, and a cancel
+  request follows the connection's TLS mode. Fake-server tests cover both.
+- Non-goals: `require_auth` (tokio-postgres has no support), client certificates (roadmap item 8), and changing the
+  `sslmode` default.
+
+## Server bytes
+
+- The wire decoders parse bytes that a MITM controls under any `sslmode` weaker than `verify-full`. They **MUST**
+  return `DecodeError` and never panic, because a panic surfaces in Python as `PanicException`, a `BaseException`.
+  - `wire/` denies `clippy::indexing_slicing` and `clippy::arithmetic_side_effects` at the module level, so slices
+    use `get` and arithmetic is checked.
+  - Every `wire/` decoder, array decoding for each element family, the EXPLAIN plan JSON reader and the DSN parser have
+    a fuzz target, run with `-rss_limit_mb` so an over-allocation fails. Encoders have
+    `decode(encode(x)) == x` targets ([Testing](testing.md)).
+  - A malformed value of every type surfaces as `DecodeError` (the panic-boundary test).
+- Length fields are bounds-checked on the way out as well. A parameter or message of 2³¹ bytes or more raises
+  `EncodeError`/`InterfaceError` and leaves the connection usable (the RUSTSEC-2024-0363 class, which tokio-postgres
+  fixed by checking `i32::from_usize` and `u16::from_usize`). A regression test covers it.
+
+## Pool reset
+
+- The default `RESET_QUERY` leaves a pooled connection with none of the previous checkout's session state: advisory
+  locks, cursors, `LISTEN`, every `SET` (so `SET ROLE` and `search_path`) and temp tables
+  ([Release](driver.md#release)). Tests assert that a role, `search_path`, a temp table and an advisory lock do not
+  survive a release.
+  - A temp table matters because `pg_temp` is searched first for relations, so a leftover one would shadow an
+    application table for the next checkout.
+  - `DEALLOCATE ALL` is not part of the reset, because rowx's protocol-level statements are cached per connection.
+    SQL-level `PREPARE` is unsupported across checkouts.
+- `reset_query=None` turns the reset off, and is **unsafe for multi-tenant pools**. The guide says so.
+
+## Checker
+
 - The checker's guarantees and limits are in
   [Interface and checker session](nullability.md#interface-and-checker-session), including plan-time evaluation of
   functions and locking, and the amended statement for `--scratch`, which executes migration files in a database it
@@ -17,7 +123,10 @@
   SQL as a single statement ([Algorithm](nullability.md#algorithm), step 1). This invariant is tested.
   - A view definition is held to the same rule: it is described under a pinned `search_path` and concatenated only
     after Parse accepts it as one statement ([View columns](nullability.md#view-columns)).
-- Neither diagnostics nor exceptions may include a DSN password. Parameter values are
-  redacted from Rust debug logs ([Codec](driver.md#codec-rowx-postgres-pysrccodec-rowx-postgressrcwire)).
-- TLS defaults to `prefer`, which is encrypted but not verified, as in libpq. The docs
-  recommend `verify-full`.
+  - **Conditional on #229.** The two bullets above describe the checker today and stay authoritative until #229 lands.
+    The target is that no SQL text reaches EXPLAIN at all: the checker prepares the statement and runs
+    `EXPLAIN … EXECUTE <name>(NULL, …)` over its server-side name, and view definitions take the same path
+    ([EXPLAIN of a prepared statement](nullability.md#explain-of-a-prepared-statement-conditional-on-229)). If the
+    verdicts differ from concatenation, the fallback keeps concatenation and asserts that the response is exactly one
+    result set and one `CommandComplete`.
+- The checker never imports or executes user code, and the `template-construction` rule reads source only.

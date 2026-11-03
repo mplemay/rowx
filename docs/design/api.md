@@ -159,7 +159,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Final, Literal, Self
 
-RESET_QUERY: Final[str]      # "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;"
+RESET_QUERY: Final[str]      # "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL; DISCARD TEMP;"
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ConnectOptions:
@@ -170,6 +170,7 @@ class ConnectOptions:
     database: str | None = None
     sslmode: str | None = None
     sslrootcert: str | None = None
+    channel_binding: Literal["disable", "prefer", "require"] | None = None
     connect_timeout: float | None = None
     statement_cache_size: int = 256
     application_name: str | None = None
@@ -272,6 +273,17 @@ class Migrator:
 - **Hard move, no aliases.** `rowx.connect` and `rowx.Connection` are removed, and `rowx.ping` is removed
   (use `Connection.ping`). `type_table()`, `_types.py` and `_vocab.py` move under `rowx.postgres`.
 - **`ConnectOptions`** is a frozen, slotted, keyword-only dataclass, and `password` is `repr=False`.
+  - **Redacted `__repr__`.** `ConnectOptions` has a custom `__repr__` that shows each `extra` key with the value
+    `'<redacted>'` (`extra={'sslpassword': '<redacted>'}`), as the Rust `Debug` does, because `extra` can hold secrets
+    such as `sslpassword`. `server_settings` stay visible. The userinfo of any DSN echoed in an exception or a checker
+    diagnostic is redacted too, and the `repr()` of a wrapped cause never contains the password.
+  - **`channel_binding`** is parsed from the DSN (`channel_binding=require`) and maps to tokio-postgres's
+    `ChannelBinding`. `None` leaves the driver default (`prefer`). `require` with `sslmode=disable` is an
+    `InterfaceError` at parse time, because nothing can be bound to a channel that has no TLS
+    ([Connection and DSN](driver.md#connection-and-dsn-rowx-postgressrcdsnrs-tlsrs-connrs)). The recommendation for
+    production is `sslmode=verify-full&channel_binding=require` ([Security](security.md#tls-and-authentication)).
+  - **Validation.** Keys and values are validated when the options are converted
+    ([Option validation](driver.md#option-validation)).
   - `ConnectOptions.from_dsn(dsn, **overrides)` parses with the Rust DSN parser, so there is one parser. `connect` and
     `Pool` accept `str | ConnectOptions`, and a pool parses a DSN only once.
   - **`server_settings`.** tokio-postgres puts only `user`, `database`, `application_name`, `client_encoding` and
@@ -772,10 +784,8 @@ when the next character is one. Without this, `x{y}` becomes the identifier `x$1
 **`compile_template` in `query_unchecked`** (`dynamic=True`):
 
 - A nested `Template` is flattened recursively, and its parameters are renumbered.
-- `{x:ident}` emits a quoted identifier, with any `"` doubled.
-  - `x` is a non-empty `str`, or a non-empty `tuple[str, ...]` joined with `.`.
-  - A name over 63 UTF-8 bytes, an empty name, a NUL character, or a non-str raises
-    `TypeError`. Postgres would otherwise truncate the name silently.
+- `{x:ident}` emits a quoted identifier, with any `"` doubled ([`:ident`](#ident-identifiers)).
+- The [compile limits](#compile-limits) apply to the flattened result.
 - Any other conversion or format spec raises `TypeError`. There is **no** raw-SQL spec.
 
 **Writing guidance** (in the docs and in checker help text):
@@ -789,6 +799,42 @@ when the next character is one. Without this, `x{y}` becomes the identifier `x$1
 - **Cast parameters whose type the server can't infer.** For example `{x}::int IS NULL`.
   Without a cast, Postgres fails with 42P18 or 42P08.
 - Don't write `$n` by hand. It causes the same count mismatch.
+
+### `:ident` identifiers
+
+`x` is a non-empty `str`, or a non-empty `tuple` of them joined with `.`. `{x:ident}` stays `query_unchecked`-only.
+The values, and the **types** of the values, are untrusted
+([Threat model](security.md#threat-model)), so the compiler never calls a method on the value that the caller could
+override.
+
+- **Exact normalisation.** Any `str` instance is accepted, so a `StrEnum` allowlist works. The first step for each part
+  is `raw = str.encode(name)`, which is strict UTF-8, so a lone surrogate raises `TypeError`. Every later check and the
+  quoting (`raw.replace(b'"', b'""')`) run on `raw`, and nothing is called on `name` again. A `str` subclass that
+  overrides `__contains__`, `__len__`, `encode`, `replace`, `__iter__`, `__add__` or `__radd__` therefore has no effect.
+- **Tuples** are iterated with `tuple.__iter__(value)`, so a `tuple` subclass can't override iteration, and each part
+  is normalised as above.
+- **Rejected with `TypeError`:**
+  - a non-`str` value or part, an empty name, an empty tuple or an empty part;
+  - a part longer than 63 UTF-8 bytes (Postgres would truncate it silently);
+  - a part with a C0 or C1 control character (U+0000 to U+001F, and U+007F to U+009F), NUL included.
+- **A runtime `ident` spec is not a separate path.** In `{x:{spec}}`, a `spec` that evaluates to `"ident"` turns a bound
+  value into a quoted identifier. At runtime that can't be told apart from a literal `:ident`, so it takes the same
+  path and gets the same checks. The checker is what flags it: it inspects the interpolations of `query_unchecked`
+  calls, and a non-literal format spec there is `dynamic-query`
+  ([Discovery](checker.md#discovery-checkdiscoverpy)).
+- **Identifiers are not restricted to enum members.** Quoting makes any allowed name safe as an identifier, but not
+  harmless as a choice: `ORDER BY {col:ident}` with an attacker-chosen column is a sort-order oracle. The guide shows
+  allowlisting.
+
+### Compile limits
+
+`compile_template` raises `TypeError` before any IO, like every other template misuse. The connection stays usable.
+
+- The compiled SQL contains a NUL character: `TypeError("SQL text must not contain a NUL character")`. This applies in
+  `query` too, because static text can hold one.
+- More than 65535 parameters after nested templates are flattened:
+  `TypeError("a query takes at most 65535 parameters, got N")`, where `N` is the count. The protocol carries the
+  parameter count in 16 bits.
 
 ## Nullability overrides (SQLx convention)
 

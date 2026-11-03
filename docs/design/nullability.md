@@ -82,6 +82,36 @@ rejects the SQL it raises `DatabaseError` with `.position` set.
 5. **Defaulting.** An Unknown column becomes Nullable (SQLx). Computed columns therefore
    need `"col!"`.
 
+### EXPLAIN of a prepared statement (conditional on #229)
+
+**Status: this section is conditional on #229, and the [Algorithm](#algorithm) above stays authoritative until #229
+lands.** #229 is the last, severable change of the security hardening ([Security](security.md#checker)). It is
+defence in depth, because the concatenation in step 3 is safe today only through the "Parse accepted one statement"
+invariant. If it lands, steps 1 and 3 are amended as follows, and the concatenation text above is removed.
+
+On the checker session, which has statement cache 0:
+
+1. `SET plan_cache_mode = force_generic_plan` at connect, so `EXPLAIN … EXECUTE` shows the generic plan that
+   `GENERIC_PLAN` would.
+2. **Prepare** with `client.prepare(sql)`, the Parse that already happens. Its errors are `sql-error` as before.
+3. **Find the server-side name.** tokio-postgres keeps `Statement::name` `pub(crate)`, so run
+   `SELECT DISTINCT name FROM pg_prepared_statements WHERE NOT from_sql AND statement = $1`, binding the SQL as a
+   parameter. A dropped statement's `Close` is asynchronous, so several names can match, and any of them is the same
+   text.
+4. **Plan pass.** Run `EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE <quote_ident(name)>(NULL, …)` over the simple
+   protocol, with one `NULL` per parameter and no parentheses for a statement with zero parameters. The EXPLAIN text
+   holds only a generated name and `NULL`s, never the user's SQL, so the statement boundary no longer depends on Parse.
+   A test asserts that no EXPLAIN text contains the user's SQL.
+5. The plan walk, failure handling and everything after are unchanged.
+
+- **Views.** [View columns](#view-columns) step 5 moves onto the same path: the definition is prepared and explained
+  by name, inside the same `search_path = pg_catalog` transaction, instead of being concatenated.
+- **Parity gate (mandatory).** During the PR, `fuzz-nullability` runs both forms over its corpus, and they **MUST**
+  produce identical verdicts.
+- **Fallback if parity fails.** Keep concatenation, and assert that the simple-query response is exactly one result set
+  and one `CommandComplete`, so a smuggled second statement is detected instead of trusted to Parse. The
+  [Algorithm](#algorithm) text then stays, with that assertion added.
+
 ### Plan walk (`explain.rs`, a pure function over `serde_json::Value`)
 
 Input is the plan JSON and the column count. Output is `Vec<Option<NullReason>>`, the
