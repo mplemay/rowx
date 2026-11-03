@@ -303,7 +303,9 @@ imports pydantic itself, and it needs pydantic 2.11 or later. The dict is keyed 
 
 A column is matched to a field's `validation_alias`, else its `alias`, else its name. `validate_by_name` or
 `populate_by_name` adds the field name, and `validate_by_alias=False` keeps only the name. Class keywords are config:
-`class M(BaseModel, populate_by_name=True)` works as it does in pydantic.
+`class M(BaseModel, populate_by_name=True)` works as it does in pydantic. Config merges the bases left to right (the
+last base wins), then the class's own `model_config` or `Config`, then the class keywords. `Field(...)` metadata inside
+a PEP 695 `type` alias is ignored, as pydantic ignores it, while a plain alias or a `TypeAlias` alias works.
 
 ```python test
 import asyncio
@@ -415,11 +417,12 @@ asyncio.run(main())
 ### Generics
 
 Generic classes (`class Box[T]`, `Generic[T]`) and generic aliases (`type Rows[T] = tuple[int, T]`) work once they are
-subscripted: `query[Box[str]](...)`. Every type parameter must be bound by an argument or a PEP 696 default, and the
-argument count is checked. An unbound parameter, a `TypeVarTuple`, a `ParamSpec` or a wrong argument count is
-`invalid-row-type`, and a chain of more than 16 alias or class substitutions is too deep. A `TypeVar`'s bound isn't
-enforced, but the column type is still checked against the substituted field type. The row is built by the class itself
-(`type_name` reads `Box[str]` in messages).
+subscripted: `query[Box[str]](...)`. Every type parameter must be bound by an argument or a PEP 696 default. For a
+generic class, Python itself raises `TypeError` on a wrong argument count when you subscript it; for a generic alias
+both the runtime (`InterfaceError`) and the checker (`invalid-row-type`) reject it. An unbound parameter, a
+`TypeVarTuple` or a `ParamSpec` is also `invalid-row-type`, and a chain of more than 16 alias or class substitutions is
+too deep. A `TypeVar`'s bound isn't enforced, but the column type is still checked against the substituted field type.
+The row is built by the class itself (`type_name` reads `Box[str]` in messages).
 
 ```python test
 import asyncio
