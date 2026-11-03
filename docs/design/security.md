@@ -30,7 +30,8 @@ Each guarantee below has a test. The sections that follow say how each row of th
 - **Hand-built templates.** The only way to put attacker-controlled text into the static part of a query is
   `Template(...)` with a non-literal string (or `t"…" + Template(user_str)`). The runtime compiles whatever `Template`
   it is given, and has no provenance check. The checker's `template-construction` rule
-  ([Rules](checker.md#rules-all-errors)) rejects that construction in every file under the include roots.
+  ([Rules](checker.md#rules-all-errors)) rejects that construction in every file under the include roots, and also a
+  non-literal format spec in any t-string literal there.
   - The rule is **best-effort**, and the docs say so. `getattr` and `eval` can still build a template, so can code
     outside the include roots, and so can generated code. It also has no ignore comments: the only escape is to
     exclude the path in config.
@@ -40,9 +41,16 @@ Each guarantee below has a test. The sections that follow say how each row of th
   protocol, because a file holds many statements. This is internal, and it adds no public raw-SQL escape. Only the
   table name is built into SQL by rowx, and it is parsed into quoted identifiers
   ([History table](migrations.md#history-table)); so are database names in `rowx database` and `--scratch`.
-- **Internal SQL names `pg_catalog` objects explicitly** (`pg_catalog.now()` and so on), so a role or DSN `search_path`
-  can't make rowx's own statements resolve to a shadowing object ([History table](migrations.md#history-table)). A test
-  runs migrations under `search_path = evil, pg_catalog`.
+- **Internal SQL names `pg_catalog` objects explicitly** (`pg_catalog.now()` in the history DDL,
+  `pg_catalog.pg_advisory_unlock_all()` in `RESET_QUERY`, and so on), so a role or DSN `search_path` can't make rowx's
+  own statements resolve to a shadowing object ([History table](migrations.md#history-table)). A test runs migrations
+  under `search_path = evil, pg_catalog`, and a test asserts that rowx's internal SQL constants, `RESET_QUERY`
+  included, call no unqualified function.
+- **A `Template` is recognised by exact type.** `compile_template` accepts a `Template`, as its argument and as a
+  nested value, only when `type(x) is Template` (`Template` can't be subclassed), never through `isinstance`, because
+  `isinstance` can be satisfied by objects that are not `Template`s. A nested value that isn't exactly a `Template` is
+  bound as a parameter, so an unsupported object fails in the encoder with `EncodeError`
+  ([t-string compilation](api.md#template-recognition)).
 
 ## Arrays, ranges and session encoding
 
@@ -55,6 +63,9 @@ Each guarantee below has a test. The sections that follow say how each row of th
   `SET client_encoding` run by application SQL. rowx watches `ParameterStatus`: when `client_encoding` leaves `UTF8`,
   or `standard_conforming_strings` turns `off`, the connection is tainted, every later call raises `InterfaceError`,
   and the pool discards it ([Session encoding watch](driver.md#session-encoding-watch)).
+  - The taint is **sticky** for the life of the connection: a later `RESET ALL` or `SET client_encoding = UTF8` doesn't
+    clear it. `standard_conforming_strings = off` set at role or database level taints the connection at connect, so
+    its first call raises `InterfaceError`.
   - This is a backstop against **data drift** (text stored in the wrong encoding). It is not what stops element
     injection: binary arrays and ranges do. So the watch's residual window, a statement already queued behind the
     `SET`, can corrupt data but not change the structure of an array.
@@ -67,9 +78,11 @@ Each guarantee below has a test. The sections that follow say how each row of th
   **MUST** match the GUC grammar, an `extra` key **MUST** match `^[a-z_]+$`, and a NUL or other C0 control character in
   any value is an `InterfaceError` that names the key and never the value. Without this, a tab or newline in a key
   would be split by the server into extra startup `-c` options.
-- Neither diagnostics nor exceptions may include a DSN password. `ConnectOptions.__repr__` shows `extra` values as
-  `'<redacted>'`, the userinfo of a DSN echoed in an exception or checker diagnostic is redacted, and a wrapped cause's
-  `repr()` never contains the password ([API](api.md#rowxpostgres)). Parameter values are redacted from Rust debug logs
+- Neither diagnostics nor exceptions may include a password. Redaction is by secret **value**, not by DSN syntax: every
+  occurrence of the password, and of the value of any `extra` key containing `password` (such as `sslpassword`), is
+  redacted in any exception message, `repr`, wrapped cause's `repr()` and checker diagnostic, whichever DSN form carried
+  it (URL userinfo, `?password=`, or key=value `password=`). `ConnectOptions.__repr__` shows `extra` values as
+  `'<redacted>'` ([API](api.md#rowxpostgres)). Parameter values are redacted from Rust debug logs
   ([Codec](driver.md#codec-rowx-postgres-pysrccodec-rowx-postgressrcwire)).
 
 ## TLS and authentication
@@ -80,7 +93,9 @@ Each guarantee below has a test. The sections that follow say how each row of th
 - **Production recommendation:** `sslmode=verify-full&channel_binding=require`. `channel_binding=require` makes the
   client refuse any authentication method that cannot be bound to the TLS channel, so a server that asks for a
   cleartext or MD5 password, or SCRAM without `-PLUS`, gets nothing before the connection fails. rowx has a typed
-  `ConnectOptions.channel_binding` option, and `require` with `sslmode=disable` is a parse-time error
+  `ConnectOptions.channel_binding` option, and `require` with `sslmode=disable` is a parse-time error. The server
+  certificate must be one for which tokio-postgres-rustls can compute `tls-server-end-point` (see the note in
+  [Connection and DSN](driver.md#connection-and-dsn-rowx-postgressrcdsnrs-tlsrs-connrs))
   ([Connection and DSN](driver.md#connection-and-dsn-rowx-postgressrcdsnrs-tlsrs-connrs)).
 - `verify-full` and `require` never fall back to plaintext when the server answers `N` to SSLRequest, and a cancel
   request follows the connection's TLS mode. Fake-server tests cover both.
@@ -92,11 +107,16 @@ Each guarantee below has a test. The sections that follow say how each row of th
 - The wire decoders parse bytes that a MITM controls under any `sslmode` weaker than `verify-full`. They **MUST**
   return `DecodeError` and never panic, because a panic surfaces in Python as `PanicException`, a `BaseException`.
   - `wire/` denies `clippy::indexing_slicing` and `clippy::arithmetic_side_effects` at the module level, so slices
-    use `get` and arithmetic is checked.
+    use `get` and arithmetic is checked. The lints cover `wire/` only: the PyObject decoders in
+    `crates/rowx-postgres-py/src/codec/` and the describe and explain parsing are covered by the panic-boundary test and
+    the fuzz targets instead.
   - Every `wire/` decoder, array decoding for each element family, the EXPLAIN plan JSON reader and the DSN parser have
     a fuzz target, run with `-rss_limit_mb` so an over-allocation fails. Encoders have
     `decode(encode(x)) == x` targets ([Testing](testing.md)).
-  - A malformed value of every type surfaces as `DecodeError` (the panic-boundary test).
+  - A malformed value of every type surfaces as `DecodeError` (the panic-boundary test). It decodes through Python, so
+    it exercises `codec/` as well as `wire/`.
+  - The checker's own connection uses the same TLS settings, so its server bytes are untrusted below `verify-full` even
+    though its database contents are trusted.
 - Length fields are bounds-checked on the way out as well. A parameter or message of 2³¹ bytes or more raises
   `EncodeError`/`InterfaceError` and leaves the connection usable (the RUSTSEC-2024-0363 class, which tokio-postgres
   fixed by checking `i32::from_usize` and `u16::from_usize`). A regression test covers it.
@@ -104,9 +124,12 @@ Each guarantee below has a test. The sections that follow say how each row of th
 ## Pool reset
 
 - The default `RESET_QUERY` leaves a pooled connection with none of the previous checkout's session state: advisory
-  locks, cursors, `LISTEN`, every `SET` (so `SET ROLE` and `search_path`) and temp tables
-  ([Release](driver.md#release)). Tests assert that a role, `search_path`, a temp table and an advisory lock do not
-  survive a release.
+  locks, cursors, `LISTEN`, every `SET`, the role and session authorization, and temp tables
+  ([Release](driver.md#release)). Tests assert that a role, a session authorization, `search_path`, a temp table and an
+  advisory lock do not survive a release.
+  - The batch runs under the previous checkout's session state, so it starts with `RESET SESSION AUTHORIZATION` (which
+    `RESET ALL` does not cover) and then `RESET ALL`, and its function is `pg_catalog`-qualified
+    ([Release](driver.md#release)).
   - A temp table matters because `pg_temp` is searched first for relations, so a leftover one would shadow an
     application table for the next checkout.
   - `DEALLOCATE ALL` is not part of the reset, because rowx's protocol-level statements are cached per connection.
@@ -129,4 +152,6 @@ Each guarantee below has a test. The sections that follow say how each row of th
     ([EXPLAIN of a prepared statement](nullability.md#explain-of-a-prepared-statement-conditional-on-229)). If the
     verdicts differ from concatenation, the fallback keeps concatenation and asserts that the response is exactly one
     result set and one `CommandComplete`.
+- Server-supplied text (message, detail, hint) is sanitised before it reaches a terminal: text output strips C0 and C1
+  control characters except `\n` and `\t` ([Output](checker.md#output)).
 - The checker never imports or executes user code, and the `template-construction` rule reads source only.

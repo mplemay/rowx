@@ -201,24 +201,40 @@
   - *Orphans:* a clone orphaned by a SIGKILLed inner session is swept on the next run, and another project's old clone
     is left.
 - **Security hardening** ([Security](security.md)). Each guarantee has a test.
+  - *Already-sound guarantees (regression tests):* values are always bound and encoders are strict (no `str()`
+    fallback); Parse rejects multiple statements; isolation levels are allowlisted; savepoint names are built from an
+    integer; admin and migration identifiers are quoted and `quote_literal` uses `E''`; protocol length overflow is
+    guarded; `"` is never a trail byte in any client-only encoding; `RESET` restores `client_encoding` (the role half is
+    now `RESET SESSION AUTHORIZATION`); error 26000 after an application `DEALLOCATE ALL` clears the cache and
+    re-prepares; the array decoder bounds `ndim` and uses `checked_mul`; GitHub Actions are pinned by SHA.
   - *Template compiler (unit):* `str` subclasses that override `__contains__`, `__len__`, `encode`, `replace`,
     `__iter__`, `__add__` and `__radd__`; a `tuple` subclass; control characters; a lone surrogate; NUL; 65536
-    parameters across nested templates; a runtime `ident` spec. The connection is still usable after each failure.
+    parameters across nested templates; a runtime `ident` spec; `"é"` accepted and `"\u0085"` rejected; an object that
+    is not a `Template` but satisfies `isinstance` is bound, never compiled as SQL text. The connection is still usable
+    after each failure.
   - *Binary arrays and ranges:* `wire_send.rs` round-trips every element family through the server with adversarial
     strings (`"`, `\`, `,`, `{}`, `NULL`, whitespace, `empty`, SJIS lead-byte characters), `Numeric::from_decimal_parts`
-    edge cases, a test that no array or range parameter is ever sent in text format, and a test pinning
-    `json.dumps(ensure_ascii=True)`. `bench/fetch_100k.py` shows no regression.
+    edge cases (a `Decimal` subclass overriding `as_tuple`, an `int` past the int-to-str digit limit), a test that no
+    array or range parameter is ever sent in text format, and a test pinning `json.dumps(ensure_ascii=True)`.
+    `bench/fetch_100k.py` shows no regression.
   - *Session encoding watch:* `SET client_encoding = 'SJIS'` and `SET standard_conforming_strings = off` make the next
     call raise `InterfaceError`, a pooled connection that drifted is replaced after release, and
-    `SET client_encoding = 'UTF8'` (no change) keeps the connection.
+    `SET client_encoding = 'UTF8'` (no change) keeps the connection. `SJIS` then `RESET ALL` is still discarded, and a
+    role-level `standard_conforming_strings = off` raises at the first call.
   - *Options:* `dsn.rs` unit tests for tab, newline, backslash and overlong keys and control characters in values;
-    `repr` redaction; a DSN password never appears in a cause's `repr()`.
+    `repr` redaction; the password, in each of the URL userinfo, `?password=` and key=value forms, never appears in
+    `str(exc)`, `repr(exc)`, `repr(exc.__cause__)` or `rowx check` output; unit tests for `channel_binding` (parsed into
+    the typed field, an `extra` key rejected, an invalid value rejected, `require` with `sslmode=disable` rejected from
+    the DSN and from the field).
   - *Fake server* (`crates/rowx-postgres/tests/common/fake_server.rs`, a scripted server on a local socket): with
     `channel_binding=require`, a server asking for cleartext, MD5 or SCRAM-SHA-256 without `-PLUS` gets no password or
     SASL response; `verify-full` and `require` never fall back to plaintext on `N`; a cancel request follows the TLS
     mode. A live test negotiates SCRAM-SHA-256-PLUS against the TLS container.
-  - *Pool reset and internal SQL:* a role, `search_path`, a temp table and an advisory lock don't survive a release;
-    migrations under `search_path = evil, pg_catalog` record the real time.
+  - *Pool reset and internal SQL:* after release, `current_user = session_user =` the login role after `SET ROLE` and
+    after `SET SESSION AUTHORIZATION`; with `search_path` set to a schema holding a same-named
+    `pg_advisory_unlock_all()` and an advisory lock held, no advisory lock survives release; a temp table is gone.
+    Migrations under `search_path = evil, pg_catalog` record the real time, and a test asserts that rowx's internal SQL
+    constants call no unqualified function.
   - *Fuzzing:* a `cargo-fuzz` target for every `wire/` decoder, arrays of each element family, `explain` plan JSON and
     `dsn::parse`, each run with `-rss_limit_mb` so an over-allocation fails, plus `decode(encode(x)) == x` targets for
     the encoders. They run in the scheduled fuzz workflow. A panic-boundary test checks that a malformed value of every
@@ -228,7 +244,11 @@
     workflow. Cheap twins (a NUL in the SQL, 65536 placeholders) run in `just test-rust`.
   - *Checker:* conformance and golden rows for `template-construction` (`Template(x)`, `Template(*parts)`,
     `t"a" + Template(x)`, an aliased import and `T = Template` fail; `Template("lit", Interpolation(...))` passes), and
-    a non-literal format spec in `query_unchecked` as `dynamic-query`.
+    a non-literal format spec in `query_unchecked` as `dynamic-query`. Further rows: a helper returning
+    `t"{v:{spec}}"` is `template-construction`; `import string` then `string.templatelib.Template(x)`,
+    `from string.templatelib import *`, `Template.__new__` and `type(t"…")(x)` are each flagged; an f-string and an
+    implicitly concatenated `str` constant as `Template` arguments (the f-string fails, the constant passes). A server
+    message containing an escape sequence renders without it.
   - *EXPLAIN of a prepared statement* (only if #229 lands): the `fuzz-nullability` parity run (both forms, identical
     verdicts), zero- and many-parameter statements, views, and a test that no EXPLAIN text contains the user's SQL.
 - **Module split.** `import rowx` loads neither `rowx._core` nor `rowx.postgres`. `rowx._core.postgres` is importable

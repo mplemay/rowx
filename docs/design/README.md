@@ -20,7 +20,7 @@ This directory is the **contract** for v1. Where it says **MUST**, the behaviour
 | [Checker](checker.md) | `rowx check`: CLI, config, discovery, source map, row-type resolution, rules, output |
 | [Testing](testing.md) | Test strategy and CI |
 | [Dependencies](dependencies.md) | Which crates and tools were evaluated, and the verdicts |
-| [Security](security.md) | Parameter binding, checker safety and TLS defaults |
+| [Security](security.md) | Threat model, parameter binding, checker safety, pool reset and TLS |
 | [Roadmap](roadmap.md) | Deferred work, by expected value |
 | [Decision log](decision-log.md) | Design interview and review decisions |
 

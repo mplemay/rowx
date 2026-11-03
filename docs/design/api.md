@@ -159,7 +159,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Final, Literal, Self
 
-RESET_QUERY: Final[str]      # "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL; DISCARD TEMP;"
+RESET_QUERY: Final[str]      # "RESET SESSION AUTHORIZATION; RESET ALL; SELECT pg_catalog.pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; DISCARD TEMP;"
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ConnectOptions:
@@ -275,11 +275,16 @@ class Migrator:
 - **`ConnectOptions`** is a frozen, slotted, keyword-only dataclass, and `password` is `repr=False`.
   - **Redacted `__repr__`.** `ConnectOptions` has a custom `__repr__` that shows each `extra` key with the value
     `'<redacted>'` (`extra={'sslpassword': '<redacted>'}`), as the Rust `Debug` does, because `extra` can hold secrets
-    such as `sslpassword`. `server_settings` stay visible. The userinfo of any DSN echoed in an exception or a checker
-    diagnostic is redacted too, and the `repr()` of a wrapped cause never contains the password.
-  - **`channel_binding`** is parsed from the DSN (`channel_binding=require`) and maps to tokio-postgres's
-    `ChannelBinding`. `None` leaves the driver default (`prefer`). `require` with `sslmode=disable` is an
-    `InterfaceError` at parse time, because nothing can be bound to a channel that has no TLS
+    such as `sslpassword`. `server_settings` stay visible.
+  - **Redaction is by secret value, not by DSN syntax.** Every occurrence of the password, and of the value of any
+    `extra` key containing `password` (such as `sslpassword`), is redacted in any exception message, `repr`, wrapped
+    cause's `repr()` and checker diagnostic, whichever DSN form carried it (URL userinfo, `?password=`, or key=value
+    `password=`).
+  - **`channel_binding`** is a typed key. It is parsed from the DSN (`channel_binding=require`) into the typed field,
+    never carried in `extra`, and maps to tokio-postgres's `ChannelBinding`. An `extra` key `channel_binding` and an
+    invalid value are each an `InterfaceError`, so there is one source. `None` leaves the driver default (`prefer`).
+    `require` with `sslmode=disable` is an `InterfaceError` at parse time, whether it came from the DSN or the field,
+    because nothing can be bound to a channel that has no TLS
     ([Connection and DSN](driver.md#connection-and-dsn-rowx-postgressrcdsnrs-tlsrs-connrs)). The recommendation for
     production is `sslmode=verify-full&channel_binding=require` ([Security](security.md#tls-and-authentication)).
   - **Validation.** Keys and values are validated when the options are converted
@@ -811,8 +816,11 @@ override.
   is `raw = str.encode(name)`, which is strict UTF-8, so a lone surrogate raises `TypeError`. Every later check and the
   quoting (`raw.replace(b'"', b'""')`) run on `raw`, and nothing is called on `name` again. A `str` subclass that
   overrides `__contains__`, `__len__`, `encode`, `replace`, `__iter__`, `__add__` or `__radd__` therefore has no effect.
+  The control-character check runs on the exact `str` decoded from `raw` (`raw.decode()`), so U+0080 to U+009F is
+  caught without rejecting multibyte text. The quoted identifier is built from bytes, so the builder only ever holds
+  an exact `str`.
 - **Tuples** are iterated with `tuple.__iter__(value)`, so a `tuple` subclass can't override iteration, and each part
-  is normalised as above.
+  is normalised as above. The empty-tuple check uses the parts that `tuple.__iter__` produced.
 - **Rejected with `TypeError`:**
   - a non-`str` value or part, an empty name, an empty tuple or an empty part;
   - a part longer than 63 UTF-8 bytes (Postgres would truncate it silently);
@@ -825,6 +833,17 @@ override.
 - **Identifiers are not restricted to enum members.** Quoting makes any allowed name safe as an identifier, but not
   harmless as a choice: `ORDER BY {col:ident}` with an attacker-chosen column is a sort-order oracle. The guide shows
   allowlisting.
+
+### Template recognition
+
+`compile_template` recognises a `Template`, both its argument and a nested value, with an exact type check
+(`type(x) is Template`; `Template` can't be subclassed), never `isinstance`, because `isinstance` can be satisfied by
+objects that are not `Template`s.
+
+- A nested value that isn't exactly a `Template` is bound as a parameter, so an unsupported object fails in the encoder
+  with `EncodeError`.
+- A `str` or `tuple` given for `:ident` is touched only through `str.encode` and `tuple.__iter__`
+  ([`:ident`](#ident-identifiers)).
 
 ### Compile limits
 

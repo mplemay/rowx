@@ -26,18 +26,25 @@ rowx **pre-parses** the DSN, in both URL and key=value forms. It removes `sslmod
   `database`, `application_name`, `client_encoding` and `options` in the startup packet. The DSN parser parses the `-c`
   pairs of `options` back into `server_settings` (overrides win), and every other key it keeps (keepalives,
   `target_session_attrs`, multiple hosts) is carried in `extra` and passed through.
-- **`channel_binding`** (`disable`, `prefer`, `require`) is a typed `ConnectOptions` field and a DSN key. rowx
-  parses it and maps it to tokio-postgres's `ChannelBinding`; tokio-postgres-rustls supplies the `tls-server-end-point`
+- **`channel_binding`** (`disable`, `prefer`, `require`) is a typed `ConnectOptions` field and a DSN key. It is parsed
+  from the DSN into the typed field and never carried in `extra`, so there is one source: an `extra` key
+  `channel_binding` and an invalid value are each an `InterfaceError`. rowx maps it to tokio-postgres's
+  `ChannelBinding`; tokio-postgres-rustls supplies the `tls-server-end-point`
   digest, so SCRAM-SHA-256-PLUS can be negotiated. With `require`, the client **MUST NOT** send a password or SASL
   response for cleartext, MD5 or SCRAM-SHA-256 without `-PLUS`: the connection fails first. `require` with
-  `sslmode=disable` is an `InterfaceError` at parse time. The default `sslmode` stays `prefer`, for parity with libpq,
+  `sslmode=disable` is an `InterfaceError` at parse time, whether it came from the DSN or the field.
+  tokio-postgres-rustls computes `tls-server-end-point` only for certificates signed with SHA-1, SHA-256, SHA-384 or
+  SHA-512 RSA, or ECDSA-SHA256 or ECDSA-SHA384 (not Ed25519 or ECDSA-SHA512), so `channel_binding=require` fails
+  against a server with another kind of certificate. The default `sslmode` stays `prefer`, for parity with libpq,
   sqlx and asyncpg, and production use is `sslmode=verify-full&channel_binding=require`
   ([Security](security.md#tls-and-authentication)). `verify-full` and `require` **MUST NOT** fall back to plaintext
   when the server answers `N` to SSLRequest, and a cancel request ([Cancellation](#cancellation-cancelrs)) follows the
   connection's TLS mode. `require_auth` is a non-goal, because tokio-postgres has no support for it.
 - `connect_timeout` bounds each connect attempt.
-- **Redaction.** A DSN echoed in an exception or a diagnostic has its userinfo redacted, `ConnectOptions.__repr__`
-  shows `extra` values as `'<redacted>'`, and the `repr()` of a wrapped cause never contains the password.
+- **Redaction** is by secret value, not by DSN syntax. Every occurrence of the password, and of the value of any `extra`
+  key containing `password` (such as `sslpassword`), is redacted in any exception message, `repr`, wrapped cause's
+  `repr()` and checker diagnostic, whichever DSN form carried it (URL userinfo, `?password=`, or key=value
+  `password=`). `ConnectOptions.__repr__` shows `extra` values as `'<redacted>'`.
 - `ping()` sends an empty simple query. `reset()` runs `RESET_QUERY` ([Release](#release)).
 - `close()` works as follows:
   - If the state is `Busy` or `Settling`, it cancels and settles first ([Cancellation](#cancellation-cancelrs)).
@@ -348,6 +355,11 @@ exist.
 
 - The array and range encoders do not consult `encode_format` for the element form. `TYPE_TABLE` is not edited, and
   `accepted_params` is unchanged, so the checker is unaffected.
+  - **Stale metadata.** The `encode_format = Text` row for `numrange` (and any other range or element row) is therefore
+    stale for arrays and ranges, which the encoders ignore. What reads it today is `codec/range.rs` (the `as_text`
+    lookup near line 137, removed in #219) and `type_table()` with its consumer `scripts/gen-types-doc.py`, which
+    renders `docs/types.md` (the array row says "binary, or text if an element needs it"). #219 updates
+    `docs/types.md` and the `type_table()` consumers, including `test_table_coverage.py`, to match.
 - **Scalar parameters are unchanged.** A scalar has no literal grammar, so a text-format scalar (`numeric`, `timetz`)
   can corrupt only itself. `json.dumps` stays ASCII-only (`ensure_ascii=True`), which a test pins.
 - **Elements and bounds whose scalar form is text get binary element encoders:**
@@ -358,7 +370,10 @@ exist.
     - a scale above `MAX_SCALE` is an `EncodeError`;
     - quiet `NaN` and `±Infinity` encode as the special values;
     - a signalling NaN is an `EncodeError`;
-    - an `int` outside `i64` is built from its decimal digits;
+    - an `int` outside `i64` is built from its decimal digits, and an `int` too large for `str()` (Python's int-to-str
+      digit limit) is an `EncodeError`;
+    - digits are read with `decimal.Decimal.as_tuple(value)` (the unbound method, so a `Decimal` subclass can't
+      override it) and each digit is validated as 0 to 9;
   - `timetz` through `wire::temporal::encode_timetz`: microseconds since midnight plus the zone offset in seconds
     *west* of UTC;
   - `json` as UTF-8, and `jsonb` as `0x01` followed by UTF-8;
@@ -379,9 +394,11 @@ into Python objects.
 than `verify-full`. They **MUST** return `DecodeError` for malformed input and never panic: a panic surfaces in Python
 as `PanicException`, a `BaseException`.
 
-- `wire/mod.rs` has `#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]`, scoped to the module and
-  not the workspace. Code uses `get` and `checked_*`, not `#[allow]`. The array decoder bounds `ndim` and uses
-  `checked_mul` for the element count.
+- `wire/mod.rs` has `#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]`, scoped to the module and not
+  the workspace. The lints cover `wire/` only. The PyObject decoders in `crates/rowx-postgres-py/src/codec/` and the
+  describe and explain parsing are covered by the panic-boundary test and fuzzing instead, and the panic-boundary test
+  decodes through Python so that it exercises `codec/`. Code uses `get` and `checked_*`, not `#[allow]`. The array
+  decoder bounds `ndim` and uses `checked_mul` for the element count.
 - **Fuzzing.** Every `wire/` decoder has a `cargo-fuzz` target, as do arrays of each element family, the `explain`
   plan JSON reader and `dsn::parse`. Every target runs with `-rss_limit_mb`, so an over-allocation fails. Encoders have
   `decode(encode(x)) == x` targets ([Testing](testing.md)).
@@ -433,10 +450,19 @@ not element injection.
 - **Failing.** `Connection::client()` and `parts()` fail with an `InterfaceError` that names the encoding, for example
   "the session changed client_encoding to SJIS; rowx requires UTF8". The pool's `is_broken` then discards the
   connection through its existing `client().is_err()` path, so a drifted connection never serves another checkout.
-  Setting `client_encoding` to `UTF8` again (no change) keeps the connection.
+  A `SET client_encoding = 'UTF8'` when it was already `UTF8` never taints the connection.
+- **Sticky.** The taint lasts for the life of the connection: a later `RESET ALL` or `SET client_encoding = UTF8`
+  doesn't clear it.
+- **Discard paths.** `is_broken` uses `try_lock`, so a connection whose lock is held is not reported broken there. The
+  release path's reset calls `client()`, which fails on a tainted connection, and the pool discards it.
+- **Role and database defaults.** A server-, database- or role-level default of `client_encoding` other than `UTF8` is
+  overridden by tokio-postgres's startup value. But `standard_conforming_strings = off` set at role or database level
+  taints the connection at connect, so the first call raises `InterfaceError`.
 - **Residual window.** The server sends `ParameterStatus` before the `SET`'s `CommandComplete`, but `poll_read` may
   forward `ReadyForQuery` to a waiting client on another worker before the check runs. Only a statement already queued
-  behind the `SET` can slip through.
+  behind the `SET` can slip through. Several `ParameterStatus` messages processed in one poll are observed only as the
+  final value, so `SET client_encoding = 'SJIS'; SET client_encoding = 'UTF8'` in one batch goes unseen. That is
+  drift-only, because arrays and ranges are binary.
 - **Cost.** A legitimate `SET standard_conforming_strings = off` now costs a connection. This is documented.
 - `DateStyle` and `IntervalStyle` are not watched, because every decoder rowx uses is binary.
 
@@ -578,9 +604,16 @@ There is no round trip on the hot path.
 
 ### Release
 
-- `RESET_QUERY` is asyncpg's reset plus `DISCARD TEMP`:
-  `SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL; DISCARD TEMP;`. There is no `DISCARD ALL`, so
-  the per-connection statement cache survives checkouts.
+- `RESET_QUERY` is asyncpg's reset with the authorization reset first, the function qualified, and `DISCARD TEMP` added:
+  `RESET SESSION AUTHORIZATION; RESET ALL; SELECT pg_catalog.pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; DISCARD TEMP;`.
+  There is no `DISCARD ALL`, so the per-connection statement cache survives checkouts.
+  - **Order and qualification.** The batch runs under whatever session state the previous checkout left. So the
+    authorization reset comes first, `RESET ALL` second (it restores `search_path`), and only then is a function
+    called, and that function is `pg_catalog`-qualified.
+  - **`RESET SESSION AUTHORIZATION`** resets both the session user and the role. `RESET ALL` does not: Postgres marks
+    `role` and `session_authorization` as excluded from `RESET ALL`, so it would keep `SET ROLE` and
+    `SET SESSION AUTHORIZATION`. This corrects #214's claim that `RESET ALL` restores `SET ROLE`
+    ([decision log](decision-log.md#security-hardening-2026-11-03), S11).
   - **`DISCARD TEMP`** drops the session's temp tables. `pg_temp` is searched first for relations, so a temp table left
     by one checkout would otherwise shadow an application table for the next. This is a deliberate divergence from
     asyncpg, which leaves them. It runs inside the multi-statement simple query (verified on Postgres 18). A cached
@@ -588,7 +621,8 @@ There is no round trip on the hot path.
   - **`DEALLOCATE ALL` is not added**, because rowx's own protocol-level prepared statements are cached per connection
     and it would destroy them. SQL-level `PREPARE` is therefore **unsupported across checkouts**: a statement prepared
     with `PREPARE` may survive in the session or not. Use bound parameters.
-  - `RESET ALL` restores `client_encoding`, `SET ROLE` and `search_path`. The
+  - `RESET ALL` restores `client_encoding`, `search_path` and other settings, but not the role or session
+    authorization, which `RESET SESSION AUTHORIZATION` covers. The
     [session encoding watch](#session-encoding-watch) catches an encoding change that happens during a checkout.
   - `reset_query=None` **is unsafe for multi-tenant pools**: nothing clears the role, `search_path`, temp tables or
     advisory locks. The guide says so.
