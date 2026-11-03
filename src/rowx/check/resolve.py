@@ -97,6 +97,7 @@ TYPED_DICT_KEYWORDS: Final[frozenset[str]] = frozenset({"total", "closed", "extr
 DECORATOR_HELP: Final[str] = "remove the decorator, or use `@dataclass`"
 INIT_HELP: Final[str] = "remove `__init__` and use `__post_init__`"
 KEYWORD_HELP: Final[str] = "remove the metaclass or class keyword"
+MIXED_HELP: Final[str] = "keep the class and its bases to one row type form, such as only dataclasses or only models"
 OUTSIDE_HELP: Final[str] = "define the row type inside the project"
 BASE_HELP: Final[str] = "inherit only from project classes and the row-type base"
 CONDITIONAL_FIELD: Final[str] = "a field declared inside a conditional block can't be checked"
@@ -105,7 +106,7 @@ PYDANTIC_HELP: Final[str] = (
 )
 MODEL_BASES: Final[frozenset[str]] = frozenset({"pydantic.BaseModel", "pydantic.main.BaseModel"})
 ROOT_MODELS: Final[frozenset[str]] = frozenset({"pydantic.RootModel", "pydantic.root_model.RootModel"})
-PYDANTIC_DATACLASSES: Final[frozenset[str]] = frozenset({"pydantic.dataclasses.dataclass", "pydantic.dataclass"})
+PYDANTIC_DATACLASSES: Final[frozenset[str]] = frozenset({"pydantic.dataclasses.dataclass"})
 CONFIG_DICTS: Final[frozenset[str]] = frozenset({"pydantic.ConfigDict", "pydantic.config.ConfigDict"})
 FIELD_CALLS: Final[frozenset[str]] = frozenset({"pydantic.Field", "pydantic.fields.Field"})
 MODEL_VALIDATORS: Final[frozenset[str]] = frozenset({
@@ -442,12 +443,35 @@ def _collect_import(module: _Module, stmt: ast.Import | ast.ImportFrom, *, tc: b
             module.bind(alias.asname or alias.name, binding)
 
 
+# a call, lambda or walrus makes an assignment no type alias, except in the metadata of an `Annotated[...]`, which
+# is never evaluated as a type (`Id = Annotated[int, Field(alias="id")]`)
+def _is_annotated(node: ast.AST) -> bool:
+    if not (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Tuple) and node.slice.elts):
+        return False
+    head = node.value
+    return (isinstance(head, ast.Name) and head.id == "Annotated") or (
+        isinstance(head, ast.Attribute) and head.attr == "Annotated"
+    )
+
+
+def _impure(value: ast.expr) -> bool:
+    pending: list[ast.AST] = [value]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.Call | ast.Lambda | ast.NamedExpr):
+            return True
+        if isinstance(node, ast.Subscript) and _is_annotated(node) and isinstance(node.slice, ast.Tuple):
+            pending.extend([node.value, node.slice.elts[0]])
+        else:
+            pending.extend(ast.iter_child_nodes(node))
+    return False
+
+
 # a call may be a functional `NamedTuple(...)` or `TypedDict(...)`, which only the resolver can tell
 def _assignment(name: str, value: ast.expr, site: Span, *, tc: bool) -> _Binding:
     if isinstance(value, ast.Call):
         return _Binding("call", name=name, node=value, site=site, tc=tc)
-    impure = any(isinstance(child, ast.Call | ast.Lambda | ast.NamedExpr) for child in ast.walk(value))
-    return _Binding("invalid" if impure else "alias", name=name, expr=value, site=site, tc=tc)
+    return _Binding("invalid" if _impure(value) else "alias", name=name, expr=value, site=site, tc=tc)
 
 
 def _collect_definition(module: _Module, stmt: ast.stmt, *, tc: bool) -> None:
@@ -1128,7 +1152,7 @@ class _Resolver:
             if (decor := self._decorator(decorator, klass)) is not None:
                 if found is not None and found.kind != decor.kind:
                     msg = f"`{klass.name}` mixes row type forms"
-                    raise _invalid(msg)
+                    raise _invalid(msg, help_=MIXED_HELP)
                 found = decor
         return found
 
@@ -1166,7 +1190,7 @@ class _Resolver:
             forms.add(decorated)
         if len(forms) > 1:
             msg = f"`{klass.name}` mixes row type forms"
-            raise _invalid(msg)
+            raise _invalid(msg, help_=MIXED_HELP)
         return next(iter(forms), None)
 
     def _info(self, klass: _Class, stack: tuple[ClassKey, ...]) -> _Info:
@@ -1267,8 +1291,15 @@ class _Resolver:
                 continue
             key = _mangle(node.name, stmt.target.id)
             value = stmt.value
-            if isinstance(value, ast.Call) and self._external_name(value.func, klass.module) in calls:
-                if any(keyword.arg == "default" for keyword in value.keywords):
+            if isinstance(value, ast.Call) and (name := self._external_name(value.func, klass.module)) in calls:
+                if name in FIELD_CALLS:
+                    # pydantic keeps a `Field(...)` without a default as the class attribute, so a redeclaring subclass
+                    # merges it, and turns one with a default into that plain default
+                    kwargs: dict[str, ast.expr] = {}
+                    self._field_keywords(kwargs, value, klass)
+                    if "default" in kwargs:
+                        attrs[key] = _Attr(klass.module, None)
+                elif any(keyword.arg == "default" for keyword in value.keywords):
                     attrs[key] = _Attr(klass.module, None)
                 else:
                     attrs.pop(key, None)
@@ -1315,18 +1346,52 @@ class _Resolver:
             total=total,
         )
 
-    # `ClassVar`, `InitVar` or `KW_ONLY`, which the dataclass module tells apart by the head of the annotation
-    def _special(self, annotation: ast.expr, module: _Module) -> str | None:
-        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+    # the expression a name stands for once its `X = ...` and `X: TypeAlias = ...` aliases are followed, and the module
+    # it is read in; a `type X = ...` is no alias here, because pydantic reads nothing from it
+    def _unalias(self, expr: ast.expr, module: _Module) -> tuple[ast.expr, _Module]:
+        for _ in range(MAX_HOPS + 1):
+            if not isinstance(expr, ast.Name | ast.Attribute):
+                break
             try:
-                annotation = ast.parse(annotation.value.strip(), mode="eval").body
-            except SyntaxError:
-                return None
-        head = annotation.value if isinstance(annotation, ast.Subscript) else annotation
-        if not isinstance(head, ast.Name | ast.Attribute):
-            return None
+                value = self._resolve_ref(expr, module, ())
+            except RejectError:
+                break
+            if not isinstance(value, _Alias) or value.type_stmt:
+                break
+            expr, module = value.expr, value.module
+        return expr, module
+
+    # `ClassVar`, `InitVar` or `KW_ONLY`, which the dataclass module tells apart by the head of the annotation, found
+    # behind an alias; pydantic also looks through `Annotated`
+    def _special(self, annotation: ast.expr, module: _Module, *, pydantic: bool = False) -> str | None:
         specials = {"typing.ClassVar": "ClassVar", "dataclasses.InitVar": "InitVar", "dataclasses.KW_ONLY": "KW_ONLY"}
-        return specials.get(self._external_name(head, module) or "")
+        expr = annotation
+        for _ in range(MAX_HOPS + 1):
+            if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+                try:
+                    expr = ast.parse(expr.value.strip(), mode="eval").body
+                except SyntaxError:
+                    return None
+            if isinstance(expr, ast.Subscript):
+                slice_ = expr.slice
+                if (
+                    pydantic
+                    and isinstance(slice_, ast.Tuple)
+                    and len(slice_.elts) >= MIN_ANNOTATED
+                    and self._external_name(expr.value, module) == "typing.Annotated"
+                ):
+                    expr = slice_.elts[0]
+                    continue
+                head, head_module = self._unalias(expr.value, module)
+            else:
+                head, head_module = self._unalias(expr, module)
+                if head is not expr and not isinstance(head, ast.Name | ast.Attribute):
+                    expr, module = head, head_module
+                    continue
+            if not isinstance(head, ast.Name | ast.Attribute):
+                return None
+            return specials.get(self._external_name(head, head_module) or "")
+        return None
 
     def _dataclass_fields(self, info: _Info, node: ast.ClassDef, klass: _Class, raw: dict[str, _Attr]) -> None:
         # the infos of the project classes after this one, in method resolution order
@@ -1351,7 +1416,7 @@ class _Resolver:
             raise _invalid(msg, help_=INIT_HELP)
         inherited = [raw, *(base.attrs for base in rest)]
         for stmt, key in self._annotated(node):
-            match self._special(stmt.annotation, klass.module):
+            match self._special(stmt.annotation, klass.module, pydantic=pydantic):
                 case "ClassVar":
                     info.fields[key] = None
                 case "KW_ONLY":
@@ -1416,7 +1481,8 @@ class _Resolver:
             "dataclasses.field",
         }
 
-    # the `Field(...)` calls in the `Annotated` layers of a field's annotation, innermost first
+    # the `Field(...)` calls in the `Annotated` layers of a field's annotation, innermost first, found behind the
+    # aliases that pydantic reads them through
     def _field_metadata(self, annotation: ast.expr, module: _Module, depth: int = 0) -> list[ast.Call]:
         expr = annotation
         if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
@@ -1424,10 +1490,14 @@ class _Resolver:
                 expr = ast.parse(expr.value.strip(), mode="eval").body
             except SyntaxError:
                 return []
+        if depth > MAX_HOPS:
+            return []
+        if isinstance(expr, ast.Name | ast.Attribute):
+            target, target_module = self._unalias(expr, module)
+            return [] if target is expr else self._field_metadata(target, target_module, depth + 1)
         slice_ = expr.slice if isinstance(expr, ast.Subscript) else None
         if (
-            depth > MAX_HOPS
-            or not isinstance(expr, ast.Subscript)
+            not isinstance(expr, ast.Subscript)
             or not (isinstance(slice_, ast.Tuple) and len(slice_.elts) >= MIN_ANNOTATED)
             or self._external_name(expr.value, module) != "typing.Annotated"
         ):
@@ -1489,9 +1559,13 @@ class _Resolver:
             expr, module = value
             if isinstance(expr, ast.Call) and self._is_field_call(expr, module):
                 self._field_keywords(kwargs, expr, owner)
+            elif isinstance(expr, ast.Constant) and expr.value is Ellipsis:
+                # `= ...` marks a pydantic field required, and a model's clears the `default` that `Annotated` carried
+                # (not a `default_factory`, and not a pydantic dataclass's)
+                if not dataclass:
+                    kwargs.pop("default", None)
             else:
-                # `= ...` marks a pydantic field required
-                plain = not (isinstance(expr, ast.Constant) and expr.value is Ellipsis)
+                plain = True
         # only a pydantic dataclass ignores a field with `init=False`; a model still takes it as an ordinary field
         if dataclass and (init := kwargs.get("init")) is not None:
             if not (isinstance(init, ast.Constant) and isinstance(init.value, bool)):
@@ -1526,7 +1600,7 @@ class _Resolver:
             if (
                 key == "model_config"
                 or key.startswith("_")
-                or self._special(stmt.annotation, member.module) == "ClassVar"
+                or self._special(stmt.annotation, member.module, pydantic=True) == "ClassVar"
             ):
                 continue
             if key not in own and key in inherited:
@@ -1573,9 +1647,8 @@ class _Resolver:
                     ast.Assign(targets=[ast.Name(id=key)], value=value)
                     | ast.AnnAssign(target=ast.Name(id=key), value=ast.expr() as value)
                 ):
-                    # pydantic renames this v1 key
-                    renamed = "populate_by_name" if key == "allow_population_by_field_name" else key
-                    self._config_key(config, renamed, value, klass)
+                    # pydantic 2 keeps the v1 key `allow_population_by_field_name` as an unknown key, so it is ignored
+                    self._config_key(config, key, value, klass)
         return config
 
     @staticmethod
@@ -1586,15 +1659,18 @@ class _Resolver:
     # the config a model declares itself: `model_config`, `class Config`, then the class keywords, which win
     def _model_config(self, node: ast.ClassDef, klass: _Class) -> _Config:
         config = _Config()
+        assigned = _Config()
         for stmt in _plain_statements(node.body):
             match stmt:
                 case (
                     ast.Assign(targets=[ast.Name(id="model_config")], value=value)
                     | ast.AnnAssign(target=ast.Name(id="model_config"), value=ast.expr() as value)
                 ):
-                    self._absorb(config, self._config_expr(value, klass))
+                    # a second assignment replaces the first
+                    assigned = self._config_expr(value, klass)
                 case ast.ClassDef(name="Config"):
                     self._absorb(config, self._config_class(stmt, klass))
+        self._absorb(config, assigned)
         for keyword in node.keywords:
             if keyword.arg is None:
                 config.blocked = f"`{klass.name}` takes `**` class keywords"
@@ -1607,40 +1683,78 @@ class _Resolver:
                 config.blocked = f"the class keyword `{keyword.arg}` of `{klass.name}` isn't a literal"
         return config
 
-    # a `model_validator(mode="before" | "wrap")` rewrites the input before the fields see it, and a mode that can't be
-    # read might
-    def _rewrites(self, node: ast.ClassDef, klass: _Class) -> str | None:
-        for stmt in _plain_statements(node.body):
-            if not isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
+    # what a `model_validator(...)` does to the names: nothing for `after`, and a `before`, a `wrap` or a mode that
+    # can't be read rewrites the input before the fields see it
+    def _validator_reason(self, func: ast.expr, call: ast.Call | None, klass: _Class) -> str | None:
+        if self._external_name(func, klass.module) not in MODEL_VALIDATORS:
+            return None
+        mode = next((keyword.value for keyword in call.keywords if keyword.arg == "mode"), None) if call else None
+        match mode:
+            case ast.Constant(value="after"):
+                return None
+            case ast.Constant(value="before" | "wrap" as literal):
+                return f"`{klass.name}` has a {literal}-validator"
+        return f"`{klass.name}` has a model validator whose mode isn't a literal"
+
+    # the validators a statement registers: a decorated `def`, or a `model_validator(...)` call in an assignment
+    def _statement_reason(self, stmt: ast.stmt, klass: _Class) -> str | None:
+        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
             for decorator in stmt.decorator_list:
                 call = decorator if isinstance(decorator, ast.Call) else None
+                if (reason := self._validator_reason(call.func if call else decorator, call, klass)) is not None:
+                    return reason
+        elif isinstance(stmt, ast.Assign | ast.AnnAssign) and stmt.value is not None:
+            for child in ast.walk(stmt.value):
                 if (
-                    self._external_name(call.func if call is not None else decorator, klass.module)
-                    not in MODEL_VALIDATORS
+                    isinstance(child, ast.Call)
+                    and (reason := self._validator_reason(child.func, child, klass)) is not None
                 ):
-                    continue
-                mode = (
-                    next((keyword.value for keyword in call.keywords if keyword.arg == "mode"), None) if call else None
-                )
-                match mode:
-                    case ast.Constant(value="after"):
-                        continue
-                    case ast.Constant(value="before" | "wrap" as literal):
-                        return f"`{klass.name}` has a {literal}-validator"
-                return f"`{klass.name}` has a model validator whose mode isn't a literal"
+                    return reason
+        return None
+
+    # why every name of a class is unknown: it rewrites the input before the fields see it, or sets what the checker
+    # can't follow inside a conditional block, which the checker skips and the runtime runs
+    def _rewrites(self, node: ast.ClassDef, klass: _Class, *, model: bool) -> str | None:
+        for stmt in _plain_statements(node.body):
+            if (reason := self._statement_reason(stmt, klass)) is not None:
+                return reason
+            if isinstance(stmt, DEF_TYPES):
+                continue
+            for nested in _nested_statements(stmt):
+                if self._statement_reason(nested, klass) is not None:
+                    return f"`{klass.name}` has a validator in a conditional block"
+                if model and (
+                    (isinstance(nested, ast.ClassDef) and nested.name == "Config")
+                    or (
+                        isinstance(nested, ast.Assign | ast.AnnAssign)
+                        and any(
+                            isinstance(target, ast.Name) and target.id == "model_config"
+                            for target in (nested.targets if isinstance(nested, ast.Assign) else [nested.target])
+                        )
+                    )
+                ):
+                    return f"`{klass.name}` sets config in a conditional block"
         return None
 
     def _pydantic_info(
         self, info: _Info, node: ast.ClassDef, klass: _Class, decor: _Decor | None, infos: list[_Info]
     ) -> None:
-        rest = [base for base in (self._info(member, ()) for member in self._mro(klass)[1:]) if base.form == info.form]
-        inherited = next((base.rewrites for base in rest if base.rewrites is not None), None)
-        own = self._rewrites(node, klass)
-        info.rewrites = own if own is not None else inherited
+        mro = self._mro(klass)
+        rest = [base for base in (self._info(member, ()) for member in mro[1:]) if base.form == info.form]
+        # pydantic registers a validator of any class in the MRO, a plain mixin's included
+        info.rewrites = next(
+            (
+                reason
+                for member in mro
+                if isinstance(member.node, ast.ClassDef)
+                and (reason := self._rewrites(member.node, member, model=info.form == "model")) is not None
+            ),
+            None,
+        )
         if info.form == "model":
-            # the bases' configs merge from the last to the first, so the first base wins, then the class's own
-            for base in reversed(infos):
+            # pydantic merges the direct bases' configs from the first to the last, so the last base wins, then the
+            # class's own
+            for base in infos:
                 if base.form == "model":
                     self._absorb(info.config, base.config)
             self._absorb(info.config, self._model_config(node, klass))

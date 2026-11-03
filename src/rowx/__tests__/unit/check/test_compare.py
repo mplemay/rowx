@@ -669,6 +669,18 @@ def test_the_reasons_of_every_unknown_field_are_listed_once() -> None:
     assert run(row, column("a", "text")) == []
 
 
+def test_a_model_reason_is_noted_on_the_diagnostics_that_are_emitted() -> None:
+    reason = "`M` has a before-validator"
+    # with the names of every field unknown, no column maps to a field, so there is no diagnostic to carry the note
+    row = named(unknown("a", reason), unknown("b", reason, "str"), form="validator")
+    assert run(row, column("a", "text"), column("b", "int4")) == []
+    # a known field beside them is compared, and its diagnostic says what was not checked, once
+    row = named(unknown("a", reason), unknown("b", reason), field("c", "str"), form="validator")
+    [finding] = run(row, column("c", "int4"), column("a"), column("b"))
+    assert finding.rule == "type-mismatch"
+    assert finding.notes == (f"names not checked: {reason}",)
+
+
 def test_known_names_carry_no_note() -> None:
     row = named(field("id", "str"), form="validator")
     [finding] = run(row, column("id", "int4"))

@@ -948,7 +948,8 @@ def test_the_alias_equal_to_the_field_name_is_listed_once(tmp_path: Path) -> Non
         ("class Config:\n        populate_by_name = True", ("u", "id")),
         ("class Config:\n        validate_by_name = True\n        validate_by_alias = True", ("u", "id")),
         ("class Config:\n        validate_by_alias = False", ("id",)),
-        ("class Config:\n        allow_population_by_field_name = True", ("u", "id")),
+        # pydantic 2 keeps this v1 key unrenamed and ignores it
+        ("class Config:\n        allow_population_by_field_name = True", ("u",)),
         ("class Config:\n        extra = 'forbid'", ("u",)),
         ("class Config:\n        pass", ("u",)),
     ],
@@ -983,13 +984,23 @@ def test_a_models_config_merges_through_its_bases_and_the_child_wins(tmp_path: P
     assert names(pyd(tmp_path, source)) == [("id", ("u", "id")), ("n", ("m", "n"))]
 
 
-def test_the_first_base_wins_when_several_models_set_a_config_key(tmp_path: Path) -> None:
+def test_the_last_base_wins_when_several_models_set_a_config_key(tmp_path: Path) -> None:
     source = (
         "class A(BaseModel, populate_by_name=True): ...\nclass B(BaseModel, populate_by_name=False): ...\n"
         "class T(A, B):\n    id: int = Field(alias='u')\n"
     )
-    assert names(pyd(tmp_path, source)) == [("id", ("u", "id"))]
+    assert names(pyd(tmp_path, source)) == [("id", ("u",))]
     source = source.replace("class T(A, B)", "class T(B, A)")
+    assert names(pyd(tmp_path, source)) == [("id", ("u", "id"))]
+
+
+def test_keys_from_different_bases_both_survive_and_a_class_keyword_wins_over_them(tmp_path: Path) -> None:
+    source = (
+        "class A(BaseModel, populate_by_name=True): ...\nclass B(BaseModel, validate_by_alias=True): ...\n"
+        "class T(A, B):\n    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("u", "id"))]
+    source = source.replace("class T(A, B)", "class T(A, B, populate_by_name=False)")
     assert names(pyd(tmp_path, source)) == [("id", ("u",))]
 
 
@@ -1146,12 +1157,12 @@ def test_after_and_field_validators_keep_the_names_known(tmp_path: Path, decorat
     assert reasons(resolution) == [None]
 
 
-def test_a_validator_in_a_plain_mixin_is_not_registered_by_pydantic(tmp_path: Path) -> None:
-    source = (
-        "class Mixin:\n    @model_validator(mode='before')\n    @classmethod\n    def pre(cls, data):\n        return data\n"
-        "class T(Mixin, BaseModel):\n    id: int\n"
-    )
-    assert names(pyd(tmp_path, source)) == [("id", ("id",))]
+def test_a_validator_in_a_plain_mixin_is_registered_by_pydantic(tmp_path: Path) -> None:
+    mixin = "class Mixin:\n    @model_validator(mode='before')\n    @classmethod\n    def pre(cls, data):\n        return data\n"
+    for head in ("class T(Mixin, BaseModel):", "class T(BaseModel, Mixin):"):
+        resolution = pyd(tmp_path, f"{mixin}{head}\n    id: int\n")
+        assert names(resolution) == [("id", None)]
+        assert reasons(resolution) == ["`Mixin` has a before-validator"]
 
 
 def test_an_unknown_field_next_to_known_ones_keeps_the_known_names(tmp_path: Path) -> None:
@@ -1621,3 +1632,214 @@ def test_the_else_of_a_type_checking_block_in_a_class_body_adds_fields(tmp_path:
     source = "from typing import TYPE_CHECKING\nfrom dataclasses import dataclass\n"
     source += "@dataclass\nclass T:\n    a: int\n    if TYPE_CHECKING:\n        ...\n    else:\n        b: int = 1\n"
     assert fields(named(tmp_path, source)) == [("a", False, True), ("b", False, False)]
+
+
+def test_a_field_is_read_through_an_alias(tmp_path: Path) -> None:
+    alias = "from typing import TypeAlias\nId: TypeAlias = Annotated[int, Field(alias='user_id')]\n"
+    assert names(pyd(tmp_path, f"{alias}class T(BaseModel):\n    id: Id\n")) == [("id", ("user_id",))]
+    plain = "Id = Annotated[int, Field(alias='user_id')]\n"
+    assert names(pyd(tmp_path, f"{plain}class T(BaseModel):\n    id: Id\n")) == [("id", ("user_id",))]
+    assert names(pyd(tmp_path, f"{plain}class T(BaseModel):\n    id: 'Id'\n")) == [("id", ("user_id",))]
+    nested = f"{plain}class T(BaseModel):\n    id: Annotated[Id, Field(gt=0)]\n"
+    assert names(pyd(tmp_path, nested)) == [("id", ("user_id",))]
+    chained = f"{plain}Alias = Id\nclass T(BaseModel):\n    id: Alias\n"
+    assert names(pyd(tmp_path, chained)) == [("id", ("user_id",))]
+    default = "Id = Annotated[int, Field(default=5)]\nclass T(BaseModel):\n    id: Id\n"
+    assert fields(pyd(tmp_path, default)) == [("id", False, False)]
+    dataclass = f"{plain}@pdc\nclass T:\n    id: Id\n"
+    assert names(pyd(tmp_path, dataclass)) == [("id", ("user_id",))]
+
+
+def test_a_field_is_read_through_an_alias_of_another_module(tmp_path: Path) -> None:
+    extra = {
+        "ids.py": "from typing import Annotated\nfrom pydantic import Field\nId = Annotated[int, Field(alias='uid')]\n"
+    }
+    for imports in ("from ids import Id\n", "import ids\n"):
+        annotation = "Id" if "from" in imports else "ids.Id"
+        source = f"{imports}class T(BaseModel):\n    id: {annotation}\n"
+        assert names(pyd(tmp_path, source, extra=extra)) == [("id", ("uid",))]
+
+
+def test_a_type_statement_alias_gives_pydantic_no_field_metadata(tmp_path: Path) -> None:
+    # pydantic drops the `Field` attributes inside a `type` alias, and the runtime follows pydantic
+    alias = "type Id = Annotated[int, Field(alias='user_id')]\nclass T(BaseModel):\n    id: Id\n"
+    assert names(pyd(tmp_path, alias)) == [("id", ("id",))]
+    default = "type D = Annotated[int, Field(default=1)]\nclass T(BaseModel):\n    id: D\n"
+    assert fields(pyd(tmp_path, default)) == [("id", False, True)]
+
+
+def test_a_plain_alias_with_a_field_call_is_a_row_type_alias(tmp_path: Path) -> None:
+    resolution = named(tmp_path, PYDANTIC + "Id = Annotated[int, Field(alias='x')]\nT = tuple[Id, Id | None]\n")
+    assert leaves(resolution) == [("int", False), ("int", True)]
+    # a call outside the `Annotated` metadata still isn't a type
+    assert rejected(named(tmp_path, PYDANTIC + "Id = Annotated[int, 'a'] | make()\nT = tuple[Id]\n")) is not None
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "CV",
+        "CV2",
+        "Annotated[ClassVar[int], 'meta']",
+        "'CV'",
+        "Annotated[CV, 'meta']",
+        "typing.ClassVar[int]",
+    ],
+)
+def test_a_class_var_behind_an_alias_or_annotated_is_no_pydantic_field(tmp_path: Path, annotation: str) -> None:
+    alias = "import typing\nfrom typing import TypeAlias\nCV = ClassVar[int]\nCV2: TypeAlias = ClassVar[int]\n"
+    assert names(pyd(tmp_path, f"{alias}class T(BaseModel):\n    a: int\n    b: {annotation}\n")) == [("a", ("a",))]
+    source = f"{alias}@pdc\nclass T:\n    a: int\n    b: {annotation}\n"
+    assert names(pyd(tmp_path, source)) == [("a", ("a",))]
+
+
+def test_kw_only_behind_an_alias_is_no_pydantic_dataclass_field(tmp_path: Path) -> None:
+    source = "from dataclasses import KW_ONLY\nK = KW_ONLY\n@pdc\nclass T:\n    a: int\n    _: K\n    b: int\n"
+    assert names(pyd(tmp_path, source)) == [("a", ("a",)), ("b", ("b",))]
+    annotated = (
+        "from dataclasses import KW_ONLY\n@pdc\nclass T:\n    a: int\n    _: Annotated[KW_ONLY, 1]\n    b: int\n"
+    )
+    assert names(pyd(tmp_path, annotated)) == [("a", ("a",)), ("b", ("b",))]
+
+
+def test_a_stdlib_dataclass_reads_a_class_var_alias_but_not_annotated(tmp_path: Path) -> None:
+    head = "from dataclasses import dataclass\nCV = ClassVar[int]\nIV = InitVar[int]\n"
+    assert names(pyd(tmp_path, f"{head}@dataclass\nclass T:\n    a: int\n    b: CV = 1\n")) == [("a", ("a",))]
+    assert rejected(pyd(tmp_path, f"{head}@dataclass\nclass T:\n    a: int\n    b: IV\n")) == "invalid-row-type"
+    annotated = f"{head}@dataclass\nclass T:\n    a: int\n    b: Annotated[ClassVar[int], 1] = 1\n"
+    assert rejected(pyd(tmp_path, annotated)) == "invalid-row-type"
+
+
+def test_a_before_validator_in_a_conditional_block_makes_every_name_unknown(tmp_path: Path) -> None:
+    validator = "        @model_validator(mode='before')\n        @classmethod\n        def pre(cls, data):\n            return data\n"
+    source = f"import sys\nclass T(BaseModel):\n    if sys.platform:\n{validator}    id: int\n"
+    resolution = pyd(tmp_path, source)
+    assert names(resolution) == [("id", None)]
+    assert reasons(resolution) == ["`T` has a validator in a conditional block"]
+    # an after-validator leaves the names alone
+    after = source.replace("mode='before'", "mode='after'")
+    assert names(pyd(tmp_path, after)) == [("id", ("id",))]
+    try_block = f"class T(BaseModel):\n    try:\n{validator}    except Exception:\n        pass\n    id: int\n"
+    assert names(pyd(tmp_path, try_block)) == [("id", None)]
+
+
+def test_config_in_a_conditional_block_makes_every_name_unknown(tmp_path: Path) -> None:
+    for config in (
+        "model_config = ConfigDict(populate_by_name=True)",
+        "class Config:\n            populate_by_name = True",
+    ):
+        source = (
+            f"import sys\nclass T(BaseModel):\n    if sys.platform:\n        {config}\n    id: int = Field(alias='u')\n"
+        )
+        resolution = pyd(tmp_path, source)
+        assert names(resolution) == [("id", None)]
+        assert reasons(resolution) == ["`T` sets config in a conditional block"]
+    # a base's conditional config reaches the subclass
+    base = "import sys\nclass B(BaseModel):\n    if sys.platform:\n        model_config = ConfigDict(populate_by_name=True)\n"
+    assert names(pyd(tmp_path, f"{base}class T(B):\n    id: int\n")) == [("id", None)]
+
+
+def test_the_else_of_a_type_checking_block_in_a_class_is_not_conditional(tmp_path: Path) -> None:
+    source = (
+        "from typing import TYPE_CHECKING\nclass T(BaseModel):\n    if TYPE_CHECKING:\n        pass\n    else:\n"
+        "        model_config = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("u", "id"))]
+    # a config in the `if TYPE_CHECKING:` body never runs
+    hidden = (
+        "from typing import TYPE_CHECKING\nclass T(BaseModel):\n    if TYPE_CHECKING:\n"
+        "        model_config = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, hidden)) == [("id", ("u",))]
+
+
+@pytest.mark.parametrize(
+    ("mode", "reason"),
+    [
+        ("mode='before'", "`T` has a before-validator"),
+        ("mode='wrap'", "`T` has a wrap-validator"),
+        ("mode=MODE", "`T` has a model validator whose mode isn't a literal"),
+    ],
+)
+def test_an_assigned_model_validator_makes_every_name_unknown(tmp_path: Path, mode: str, reason: str) -> None:
+    source = (
+        "MODE = 'before'\ndef g(cls, data):\n    return data\n"
+        f"class T(BaseModel):\n    f = model_validator({mode})(classmethod(g))\n    id: int\n"
+    )
+    resolution = pyd(tmp_path, source)
+    assert names(resolution) == [("id", None)]
+    assert reasons(resolution) == [reason]
+
+
+def test_an_assigned_after_validator_leaves_the_names_known(tmp_path: Path) -> None:
+    source = (
+        "def g(self):\n    return self\nclass T(BaseModel):\n    f = model_validator(mode='after')(g)\n    id: int\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("id",))]
+
+
+def test_an_ellipsis_clears_an_annotated_default_on_a_model_only(tmp_path: Path) -> None:
+    assert fields(pyd(tmp_path, "class T(BaseModel):\n    a: Annotated[int, Field(default=3)] = ...\n")) == [
+        ("a", False, True)
+    ]
+    # a `default_factory` survives it, and a pydantic dataclass keeps the default
+    factory = "class T(BaseModel):\n    a: Annotated[int, Field(default_factory=int)] = ...\n"
+    assert fields(pyd(tmp_path, factory)) == [("a", False, False)]
+    assert fields(pyd(tmp_path, "@pdc\nclass T:\n    a: Annotated[int, Field(default=3)] = ...\n")) == [
+        ("a", False, False)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("parent", "child", "expected"),
+    [
+        # a `Field(...)` without a default stays the class attribute, so a bare redeclaration merges it
+        ("b: int = Field(alias='B')", "b: int", (("B",), True)),
+        ("b: int = Field(alias='B')", "b: Annotated[int, Field(gt=0)]", (("B",), True)),
+        ("b: int = Field(alias='B')", "b: Annotated[int, Field(alias='C')]", (("B",), True)),
+        ("b: int = Field(alias='B', default_factory=int)", "b: int", (("B",), False)),
+        # one with a default becomes that plain default, and its alias is gone
+        ("b: int = Field(alias='B', default=1)", "b: int", (("b",), False)),
+        ("b: int = Field(alias='B')", "b: int = Field(alias='C')", (("C",), True)),
+        ("b: int = Field(alias='B')", "b: int = 7", (("b",), False)),
+        ("b: int = Field(gt=0)", "b: int", (("b",), True)),
+        ("b: Annotated[int, Field(alias='B')]", "b: int", (("b",), True)),
+    ],
+)
+def test_a_pydantic_dataclass_redeclaration_inherits_the_parents_field(
+    tmp_path: Path, parent: str, child: str, expected: tuple[tuple[str, ...], bool]
+) -> None:
+    source = f"@pdc\nclass P:\n    {parent}\n@pdc\nclass T(P):\n    {child}\n"
+    resolution = pyd(tmp_path, source)
+    [field] = row_type(resolution).fields
+    assert (field.names, field.required) == expected
+
+
+def test_a_redeclaration_inherits_through_an_intermediate_class(tmp_path: Path) -> None:
+    source = (
+        "@pdc\nclass P:\n    b: int = Field(alias='B')\n@pdc\nclass Q(P):\n    b: int\n@pdc\nclass T(Q):\n    b: int\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("b", ("B",))]
+
+
+def test_a_second_model_config_replaces_the_first(tmp_path: Path) -> None:
+    source = (
+        "class T(BaseModel):\n    model_config = ConfigDict(populate_by_name=True)\n"
+        "    model_config = ConfigDict(validate_by_alias=True)\n    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("u",))]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from dataclasses import dataclass\n@dataclass\nclass D:\n    x: int = 1\nclass T(BaseModel, D):\n    id: int\n",
+        "@pdc\nclass P:\n    x: int\nfrom dataclasses import dataclass\n@dataclass\nclass T(P):\n    id: int\n",
+        "from dataclasses import dataclass\n@dataclass\nclass S:\n    x: int\n@pdc\nclass T(S):\n    id: int\n",
+    ],
+)
+def test_mixed_row_type_forms_are_rejected_with_help(tmp_path: Path, source: str) -> None:
+    resolution = pyd(tmp_path, source)
+    assert rejected(resolution) == "invalid-row-type"
+    assert "mixes row type forms" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    assert resolution.help is not None
