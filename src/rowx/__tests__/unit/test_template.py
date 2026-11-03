@@ -393,6 +393,10 @@ def test_a_placeholder_never_closes_a_dollar_quote() -> None:
         t"SELECT 'a'\n'b'\n'c' {'n':ident}",
         t"SELECT 'a' 'b' {'n':ident}",
         t"SELECT 'a'\n/* c */'b' {'n':ident}",
+        t"SELECT E'a'\v\n'b\\'c' || {'n':ident}",
+        t"SELECT E'a'\v-- c\n'b\\'c' || {'n':ident}",
+        t"SELECT 'a'\v\n'b' {'n':ident}",
+        t"SELECT 'a'\n\v\f 'b' {'n':ident}",
     ],
 )
 def test_ident_after_a_completed_continued_literal_passes(template: Template) -> None:
@@ -409,11 +413,25 @@ def test_ident_after_a_completed_continued_literal_passes(template: Template) ->
         t"SELECT 'a'\r'b {'n':ident}'",
         t"SELECT 'a'\n-- c\n'b {'n':ident}'",
         t"SELECT E'a'\n'b'\n'c\\' {'n':ident} '",
+        t"SELECT E'a'\v\n'\\' {'n':ident} '",
+        t"SELECT E'a'\v-- c\n'\\' {'n':ident} '",
+        t"SELECT 'a'\v\n'b {'n':ident}'",
+        t"SELECT 'a'\n\v'b {'n':ident}'",
     ],
 )
 def test_ident_inside_a_continued_literal_is_rejected(template: Template) -> None:
     with pytest.raises(TypeError, match=PLACEMENT_ERROR):
         sql_of(template)
+
+
+# continued literal; no newline before the whitespace; no quote after it
+@pytest.mark.parametrize("gap", [" ", "\t", "\n", "\v", "\f", " \t\n", "\r\n", "-- c\n"])
+@pytest.mark.parametrize(("head", "tail"), [("SELECT 'a'\n", "'b' "), ("SELECT 'a'", ""), ("SELECT 'a'\n", "")])
+def test_long_whitespace_before_an_ident_compiles_quickly(gap: str, head: str, tail: str) -> None:
+    template = Template(head + gap * 10_000 + tail, Interpolation("n", "n", None, "ident"))
+    start = perf_counter()
+    compile_template(template, dynamic=True)
+    assert perf_counter() - start < 1
 
 
 def test_a_continuation_without_a_newline_starts_a_new_literal() -> None:

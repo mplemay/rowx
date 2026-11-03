@@ -17,9 +17,10 @@ CODE_TOKEN: Final[re.Pattern[str]] = re.compile(
 )
 ESCAPE_STRING_TOKEN: Final[re.Pattern[str]] = re.compile(r"\\.|''|'", re.DOTALL)
 # scan.l quotecontinue: whitespace with at least one newline (and `--` comments), then another quote, continues the
-# same literal in the same mode
+# same literal in the same mode. Possessive repetition keeps every step unambiguous, so a failed match is linear
+# (scan.l: horiz_space is [ \t\f\v], space adds the two newline characters)
 STRING_CONTINUATION: Final[re.Pattern[str]] = re.compile(
-    r"(?:[ \t\f]|--[^\n\r]*)*[\n\r](?:[ \t\n\r\f\v]+|--[^\n\r]*[\n\r])*'",
+    r"(?:[ \t\f\v]|--[^\n\r]*+)*+[\n\r](?:[ \t\n\r\f\v]|--[^\n\r]*+[\n\r])*+'",
 )
 LINE_END: Final[re.Pattern[str]] = re.compile(r"[\r\n]")
 BLOCK_TOKEN: Final[re.Pattern[str]] = re.compile(r"/\*|\*/")
@@ -219,7 +220,7 @@ def _walk(b: _Builder, t: Template, *, dynamic: bool) -> None:
         if i:
             _interpolation(b, t.interpolations[i - 1], dynamic=dynamic)
         # an exact str, so that len and indexing never reach a subclass override
-        b.static(s if type(s) is str else str.__str__(s))  # ruff: ignore[unnecessary-dunder-call]
+        b.static(str.join("", (s,)))
 
 
 def _exact_str(value: object) -> str | None:
