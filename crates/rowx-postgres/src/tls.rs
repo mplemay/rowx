@@ -37,9 +37,11 @@ impl Mode {
             "require" => Ok(Self::Require),
             "verify-ca" => Ok(Self::VerifyCa),
             "verify-full" => Ok(Self::VerifyFull),
-            _ => Err(Error::Interface(format!(
-                "unsupported sslmode '{value}'; expected disable, prefer, require, verify-ca or verify-full"
-            ))),
+            // the value is never echoed, since it may be a misplaced secret
+            _ => Err(Error::Interface(
+                "unsupported sslmode; expected disable, prefer, require, verify-ca or verify-full"
+                    .to_owned(),
+            )),
         }
     }
 
@@ -71,7 +73,9 @@ impl TlsSettings {
         let verifier = self.verifier(&provider)?;
         let config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .map_err(|e| Error::Interface(format!("TLS setup failed: {e}")))?
+            .map_err(|_| {
+                Error::Interface("TLS setup failed: unsupported protocol versions".to_owned())
+            })?
             .dangerous()
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
@@ -107,21 +111,23 @@ impl TlsSettings {
         };
         WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(provider))
             .build()
-            .map_err(|e| Error::Interface(format!("TLS setup failed: {e}")))
+            .map_err(|_| {
+                Error::Interface(
+                    "TLS setup failed: could not build the certificate verifier".to_owned(),
+                )
+            })
     }
 }
 
 fn load_roots(path: &std::path::Path) -> Result<RootCertStore, Error> {
+    // neither the path nor the io message (which can embed it) is echoed
     let unreadable = |what: &dyn std::fmt::Display| {
-        Error::Interface(format!(
-            "could not read sslrootcert {}: {what}",
-            path.display()
-        ))
+        Error::Interface(format!("could not read sslrootcert: {what}"))
     };
-    let file = File::open(path).map_err(|e| unreadable(&e))?;
+    let file = File::open(path).map_err(|e| unreadable(&e.kind()))?;
     let certs = rustls_pemfile::certs(&mut BufReader::new(file))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| unreadable(&e))?;
+        .map_err(|e| unreadable(&e.kind()))?;
     let mut roots = RootCertStore::empty();
     let (added, _) = roots.add_parsable_certificates(certs);
     if added == 0 {
@@ -276,9 +282,14 @@ mod tests {
     fn missing_root_cert_is_an_interface_error() {
         let settings = TlsSettings {
             mode: Mode::VerifyFull,
-            root_cert: Some(PathBuf::from("/nonexistent/ca.pem")),
+            root_cert: Some(PathBuf::from("/nonexistent/zq9-ca.pem")),
         };
-        assert!(matches!(settings.connector(), Err(Error::Interface(_))));
+        let message = match settings.connector() {
+            Err(Error::Interface(message)) => message,
+            _ => String::new(),
+        };
+        assert!(message.contains("could not read sslrootcert"), "{message}");
+        assert!(!message.contains("zq9"), "{message}");
     }
 
     #[test]

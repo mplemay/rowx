@@ -187,6 +187,22 @@ def test_password_never_appears(tmp_path: Path, capsys: pytest.CaptureFixture[st
             assert url not in out + err
 
 
+def test_password_never_appears_in_any_dsn_form(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = _write(tmp_path, "q.py", 'from rowx import query\n\nquery[int](t"SELECT 1")\n')
+    urls = [
+        "postgresql://someone:p%40ss@127.0.0.1:1/db?connect_timeout=2",
+        "postgresql://someone@127.0.0.1:1/db?password=p%40ss&connect_timeout=2",
+        "host=127.0.0.1 port=1 user=someone password='p@ss' dbname=db connect_timeout=2",
+        "postgresql://someone:p%40ss@127.0.0.1:notaport/db",
+        "host=127.0.0.1 password=p@ss oops",
+    ]
+    for url in urls:
+        code, out, err = _run(capsys, str(path), "--database-url", url, "--output-format", "text")
+        assert code == 2
+        assert "p@ss" not in out + err
+        assert "p%40ss" not in out + err
+
+
 def test_harness_rejects_a_wrong_marker(tmp_path: Path) -> None:
     source = (
         "from rowx import query\n\n"

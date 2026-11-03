@@ -8,6 +8,7 @@ pub mod exec;
 pub mod explain;
 pub mod migrate;
 pub mod pool;
+pub mod redact;
 pub mod stmt_cache;
 pub mod tls;
 pub mod types;

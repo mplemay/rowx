@@ -164,6 +164,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn manager_debug_output_never_carries_a_secret() -> Result<(), Box<dyn std::error::Error>> {
+        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+        let options = ConnectOptions::from_dsn("host=h password=Zq9pwSecret")?;
+        let manager = PgManager::new(&options, runtime.handle().clone(), None)?;
+        assert!(!format!("{manager:?}").contains("Zq9"));
+        Ok(())
+    }
+
+    #[test]
     fn stale_plan_codes() {
         let db = |code: &str| Error::Db {
             sqlstate: code.into(),

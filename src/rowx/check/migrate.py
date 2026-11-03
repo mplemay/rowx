@@ -9,6 +9,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, Final
 
 from rowx.check.config import Config, MigrateConfig, database_url, load_config
+from rowx.check.render import strip_controls
 from rowx.check.runner import CheckError, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
 from rowx.postgres import ConnectOptions, Migrator, connect
@@ -176,14 +177,14 @@ def run_guarded(dsn: str, work: Coroutine[Any, Any, None]) -> None:
     try:
         asyncio.run(work)
     except CheckError as error:
-        raise CheckError(redact(str(error), dsn)) from None
+        raise CheckError(strip_controls(redact(str(error), dsn))) from None
     except MigrateError as error:
-        raise CheckError(redact(_describe(error), dsn)) from None
+        raise CheckError(strip_controls(redact(_describe(error), dsn))) from None
     except ValueError as error:
         # an unknown or too new target
-        raise CheckError(redact(str(error), dsn)) from None
+        raise CheckError(strip_controls(redact(str(error), dsn))) from None
     except (InterfaceError, DatabaseError, OSError) as error:
-        msg = f"could not reach the database: {redact(str(error), dsn)}"
+        msg = f"could not reach the database: {strip_controls(redact(str(error), dsn))}"
         raise CheckError(msg) from None
 
 

@@ -1,0 +1,300 @@
+use std::collections::BTreeSet;
+
+pub const MASK: &str = "***";
+
+fn percent_encode(s: &str, lower: bool) -> String {
+    let digits: &[u8; 16] = if lower {
+        b"0123456789abcdef"
+    } else {
+        b"0123456789ABCDEF"
+    };
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push(char::from(digits[usize::from(b >> 4)]));
+            out.push(char::from(digits[usize::from(b & 15)]));
+        }
+    }
+    out
+}
+
+// the quote- and backslash-escaped spellings of a key=value DSN
+fn escaped(s: &str, whitespace: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\\' || c == '\'' || (whitespace && c.is_whitespace()) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+// a key=value DSN value without its quotes and backslashes
+fn unescape(raw: &str) -> String {
+    let inner = raw.strip_prefix('\'').unwrap_or(raw);
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            '\'' => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+// every spelling is at least as long as the secret, so one longer than the text can't occur in it
+fn spellings(secret: &str, max_len: usize, out: &mut BTreeSet<String>) {
+    if secret.is_empty() || secret.len() > max_len {
+        return;
+    }
+    out.insert(secret.to_owned());
+    out.insert(percent_encode(secret, false));
+    out.insert(percent_encode(secret, true));
+    out.insert(escaped(secret, false));
+    out.insert(escaped(secret, true));
+}
+
+// the raw value of each `*password` key and of the URL userinfo, with the extent of the value
+fn secret_spans(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    // `&` only delimits in the URL form; in key=value form it is part of the value
+    let url_form = {
+        let head = text.trim_start();
+        head.starts_with("postgres://") || head.starts_with("postgresql://")
+    };
+    let lower = text.to_ascii_lowercase();
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find("password") {
+        let mut i = from + found + "password".len();
+        from = i;
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'=') {
+            continue;
+        }
+        i += 1;
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        let start = i;
+        if bytes.get(i) == Some(&b'\'') {
+            i += 1;
+            while let Some(&b) = bytes.get(i) {
+                if b == b'\\' {
+                    i += 2;
+                } else if b == b'\'' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            while let Some(&b) = bytes.get(i) {
+                if b == b'\\' && !url_form {
+                    i += 2;
+                } else if b.is_ascii_whitespace() || (url_form && b == b'&') {
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        i = i.min(bytes.len());
+        if i > start {
+            spans.push((start, i));
+            from = i;
+        }
+    }
+    let mut at = 0;
+    while let Some(found) = text[at..].find("://") {
+        let auth = at + found + 3;
+        let end = text[auth..]
+            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
+            .map_or(text.len(), |n| auth + n);
+        at = end.max(auth);
+        if let Some(userinfo_end) = text[auth..end].rfind('@').map(|n| auth + n)
+            && let Some(colon) = text[auth..userinfo_end].find(':').map(|n| auth + n + 1)
+            && userinfo_end > colon
+        {
+            spans.push((colon, userinfo_end));
+        }
+    }
+    spans
+}
+
+// the raw secret text found in `text`, syntactically
+fn raw_secrets(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (start, end) in secret_spans(text) {
+        if let Some(raw) = text.get(start..end) {
+            out.push(raw.to_owned());
+        }
+    }
+    out
+}
+
+/// Masks URL userinfo passwords and `*password=` values by syntax, so an unparseable DSN is covered.
+#[must_use]
+pub fn mask_syntax(text: &str) -> String {
+    let mut spans = secret_spans(text);
+    spans.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end) in spans {
+        if start < cursor {
+            continue;
+        }
+        if let (Some(before), Some(_)) = (text.get(cursor..start), text.get(start..end)) {
+            out.push_str(before);
+            out.push_str(MASK);
+            cursor = end;
+        }
+    }
+    out.push_str(text.get(cursor..).unwrap_or_default());
+    out
+}
+
+/// Redacts `text` by the value of each of `secrets` in every raw spelling, then masks the remaining
+/// userinfo and `password=` tokens by syntax.
+#[must_use]
+pub fn redact_secrets(text: &str, secrets: &[String]) -> String {
+    let max_len = text.len();
+    let mut spelled = BTreeSet::new();
+    for secret in secrets {
+        spellings(secret, max_len, &mut spelled);
+    }
+    replace_all(text, &spelled)
+}
+
+/// Redacts `text` by secret value (the secrets of `dsn` and every raw spelling of them),
+/// then masks the remaining userinfo and `password=` tokens by syntax.
+#[must_use]
+pub fn redact(text: &str, dsn: Option<&str>) -> String {
+    let max_len = text.len();
+    let mut secrets = BTreeSet::new();
+    if let Some(dsn) = dsn {
+        for raw in raw_secrets(dsn) {
+            let plain = unescape(&raw);
+            spellings(&raw, max_len, &mut secrets);
+            spellings(&crate::dsn::percent_decode(&raw), max_len, &mut secrets);
+            spellings(&plain, max_len, &mut secrets);
+            spellings(&crate::dsn::percent_decode(&plain), max_len, &mut secrets);
+        }
+        // the real tokeniser's view, which also sees percent-encoded keys
+        for value in crate::dsn::tokenised_secrets(dsn) {
+            spellings(&value, max_len, &mut secrets);
+        }
+    }
+    replace_all(text, &secrets)
+}
+
+// every occurrence of every secret is found on the original text (overlapping ones too), then
+// overlapping and adjacent ones are merged and masked once, so no secret can re-match a mask
+fn replace_all(text: &str, secrets: &BTreeSet<String>) -> String {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for secret in secrets {
+        let mut from = 0;
+        while let Some(found) = text.get(from..).and_then(|rest| rest.find(secret.as_str())) {
+            let start = from + found;
+            spans.push((start, start + secret.len()));
+            from = start
+                + text
+                    .get(start..)
+                    .and_then(|r| r.chars().next())
+                    .map_or(1, char::len_utf8);
+        }
+    }
+    spans.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut current: Option<(usize, usize)> = None;
+    for (start, end) in spans {
+        match current {
+            Some((s, e)) if start <= e => current = Some((s, e.max(end))),
+            Some((s, e)) => {
+                out.push_str(text.get(cursor..s).unwrap_or_default());
+                out.push_str(MASK);
+                cursor = e;
+                current = Some((start, end));
+            }
+            None => current = Some((start, end)),
+        }
+    }
+    if let Some((s, e)) = current {
+        out.push_str(text.get(cursor..s).unwrap_or_default());
+        out.push_str(MASK);
+        cursor = e;
+    }
+    out.push_str(text.get(cursor..).unwrap_or_default());
+    mask_syntax(&out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn syntax_masks_userinfo_and_password_tokens() {
+        assert_eq!(
+            mask_syntax("postgres://u:p%40ss@h/db?sslpassword=x&a=b"),
+            "postgres://u:***@h/db?sslpassword=***&a=b"
+        );
+        assert_eq!(
+            mask_syntax("host=h password='a b\\'c' user=u"),
+            "host=h password=*** user=u"
+        );
+        assert_eq!(mask_syntax("password='unterminated"), "password=***");
+        assert_eq!(mask_syntax("postgres://u@h/db"), "postgres://u@h/db");
+    }
+
+    #[test]
+    fn values_are_replaced_in_every_spelling() {
+        let dsn = "postgres://u:p%40ss@h/db";
+        for text in ["p%40ss", "p@ss"] {
+            let out = redact(&format!("boom {text}"), Some(dsn));
+            assert!(!out.contains("ss"), "{out}");
+        }
+        assert_eq!(
+            redact("nothing here", Some("host=h password=")),
+            "nothing here"
+        );
+    }
+
+    #[test]
+    fn redaction_uses_only_the_secrets_it_is_given() {
+        let secrets = vec!["zq-secret".to_owned(), String::new()];
+        assert_eq!(redact_secrets("a zq-secret b", &secrets), "a *** b");
+        assert_eq!(redact_secrets("a invalid b", &secrets), "a invalid b");
+        assert_eq!(redact("a invalid b", None), "a invalid b");
+    }
+
+    #[test]
+    fn overlapping_secrets_are_merged_before_masking() {
+        let secrets = vec!["abcd".to_owned(), "cdef".to_owned()];
+        assert_eq!(redact_secrets("abcdef", &secrets), "***");
+        assert_eq!(redact_secrets("xx abcdef yy", &secrets), "xx *** yy");
+        assert_eq!(redact_secrets("a*b", &["*".to_owned()]), "a***b");
+        assert_eq!(redact_secrets("ababa", &["aba".to_owned()]), "***");
+    }
+
+    #[test]
+    fn escapes_and_ampersands_follow_the_dsn_form() {
+        assert_eq!(
+            mask_syntax("host=h password=foo\\ bar&baz user=u"),
+            "host=h password=*** user=u"
+        );
+        let dsn = "postgres://u@h/db?%70assword=Zq9pw";
+        assert_eq!(redact("bad Zq9pw here", Some(dsn)), "bad *** here");
+        let dsn = "host=h password=Zq9\\ pw&x";
+        assert_eq!(redact("bad Zq9 pw&x here", Some(dsn)), "bad *** here");
+    }
+}

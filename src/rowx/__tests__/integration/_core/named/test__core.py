@@ -303,6 +303,25 @@ def test_constructor_error_in_all_and_one_is_wrapped_with_its_cause(schema: str)
     assert after == [{"n": 1}]
 
 
+def test_constructor_error_text_from_user_code_passes_through_verbatim(schema: str) -> None:
+    text = "postgresql://u:hunter2@h/db password=hunter2"
+
+    def ctor(**_: int) -> dict[str, int]:
+        raise ValueError(text)
+
+    row_shape = shape(ctor, "keyword", [spec("n")], name="Num")
+
+    async def body(conn: Connection) -> RowConstructError:
+        with pytest.raises(RowConstructError) as caught:
+            await fetch(conn, "SELECT 1::int4 AS n", row_shape)
+        return caught.value
+
+    err = run_with_conn(schema, body)
+    assert str(err) == f"Num row 0: ValueError({text!r})"
+    assert isinstance(err.__cause__, ValueError)
+    assert err.__cause__.args == (text,)
+
+
 @pytest.mark.parametrize(("bad", "yielded"), [(2, 2), (3, 3), (0, 0), (1, 1)])
 def test_constructor_error_in_a_stream_yields_earlier_rows_across_batches(schema: str, bad: int, yielded: int) -> None:
     row_shape = shape(raising_on({bad + 1}), "keyword", [spec("n")], name="Num")

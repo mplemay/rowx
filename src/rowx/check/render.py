@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from json import dumps
 from typing import TYPE_CHECKING, Final, Literal, assert_never
+from unicodedata import category
 
 from rowx.check.sourcemap import LINE_PATTERN
 
@@ -12,6 +13,13 @@ if TYPE_CHECKING:
     from rowx.postgres._vocab import NullReasonName
 
 TAB_WIDTH: Final[int] = 4
+# kept: newline and tab, the joiners that real text needs (ZWNJ, ZWJ) and the soft hyphen
+KEPT_CHARS: Final = frozenset("\n\t\u200c\u200d\u00ad")
+# C1 bytes decoded with surrogateescape, which a terminal could act on once re-encoded
+ESCAPED_C1: Final = range(0xDC80, 0xDCA0)
+# Cc (controls), Zl and Zp (line and paragraph separators) and Cf (format characters: bidi overrides, isolates,
+# zero-width marks, BOM); built per character, since a compiled class of all of Unicode costs over 100 ms at import
+STRIPPED_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 # `Diagnostic` carries what every rule has; the rest is only known to some rules
@@ -109,6 +117,16 @@ def _source_lines(source: str) -> list[str]:
     return [line.rstrip("\r\n") for line in LINE_PATTERN.findall(source)]
 
 
+def _is_stripped(char: str) -> bool:
+    if char in KEPT_CHARS:
+        return False
+    return ord(char) in ESCAPED_C1 or category(char) in STRIPPED_CATEGORIES
+
+
+def strip_controls(text: str) -> str:
+    return "".join(char for char in text if not _is_stripped(char))
+
+
 def _expand(text: str) -> str:
     return text.replace("\t", " " * TAB_WIDTH)
 
@@ -157,15 +175,15 @@ def _block(report: Report, source: str | None, width: int, root: Path | None) ->
     span = diagnostic.span
     pad = " " * width
     out = [
-        f"error[{diagnostic.rule}]: {diagnostic.message}",
+        f"error[{diagnostic.rule}]: {strip_controls(diagnostic.message)}",
         f"{pad}--> {_relative(diagnostic.path, root)}:{span.line}:{span.col}",
     ]
     if source is not None and 1 <= span.line <= len(_source_lines(source)):
         out.append(f"{pad} |")
         out.extend(_snippet(report, source, width))
-    trailer = [f"= note: {note}" for note in diagnostic.notes]
+    trailer = [f"= note: {strip_controls(note)}" for note in diagnostic.notes]
     if report.help is not None:
-        trailer.append(f"= help: {report.help}")
+        trailer.append(f"= help: {strip_controls(report.help)}")
     if trailer:
         out.append(f"{pad} |")
         out.extend(f"{pad} {line}" for line in trailer)

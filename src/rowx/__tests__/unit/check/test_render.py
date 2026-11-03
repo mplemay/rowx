@@ -1,5 +1,7 @@
 import json
 import os
+import sys
+import unicodedata
 from pathlib import Path
 from textwrap import dedent
 from typing import Final, get_args
@@ -8,7 +10,7 @@ import pytest
 
 from rowx.check.discover import discover_file, discover_source
 from rowx.check.model import Diagnostic, Span
-from rowx.check.render import NULL_NOTES, Report, null_reason_note, render_json, render_text
+from rowx.check.render import NULL_NOTES, Report, null_reason_note, render_json, render_text, strip_controls
 from rowx.check.resolve import ModuleGraph, resolve_row_type
 from rowx.check.sourcemap import SourceMapper
 from rowx.postgres._vocab import NullReasonName
@@ -343,3 +345,67 @@ def test_named_row_resolver_text(tmp_path: Path) -> None:
 def test_named_row_resolver_json(tmp_path: Path) -> None:
     reports, _ = resolver_reports(tmp_path)
     golden("named_rows_resolver.json.txt", relative(render_json(reports, tmp_path), tmp_path))
+
+
+def test_text_output_strips_control_characters_from_server_text() -> None:
+    escape = "\x1b[2J\x1b]0;owned\x07"
+    c1 = "\x9b31m"
+    diagnostic = Diagnostic(
+        rule="sql-error",
+        message=f'relation {escape}"x" does not exist\n\tdetail{c1}',
+        path=PATH,
+        span=Span(line=1, col=1, end_line=1, end_col=2),
+        notes=(f"note{escape}",),
+    )
+    out = render_text([Report(diagnostic=diagnostic, help=f"help{escape}{c1}")], {})
+    assert "\x1b" not in out
+    assert "\x07" not in out
+    assert "\x9b" not in out
+    assert 'relation [2J]0;owned"x" does not exist\n\tdetail31m' in out
+    assert "= note: note[2J]0;owned" in out
+    assert "= help: help[2J]0;owned31m" in out
+
+
+def test_json_output_escapes_control_characters() -> None:
+    diagnostic = Diagnostic(
+        rule="sql-error",
+        message="bad \x1b[2J",
+        path=PATH,
+        span=Span(line=1, col=1, end_line=1, end_col=2),
+    )
+    out = render_json([Report(diagnostic=diagnostic)])
+    assert "\x1b" not in out
+    assert "\\u001b" in out
+
+
+def test_strip_controls_removes_format_and_separator_characters() -> None:
+    hostile = "a\x1b[31m\u202eb\u200bc\u2028d\u2029e\ufeff\u2066f\u2069\nkeep\t"
+    assert strip_controls(hostile) == "a[31mbcdef\nkeep\t"
+    assert strip_controls("p\u00e4 \u4e2d") == "p\u00e4 \u4e2d"
+
+
+def test_strip_controls_keeps_joiners_and_soft_hyphen() -> None:
+    kept = "a\u200cb\u200dc\u00add\ne\tf"
+    assert strip_controls(kept) == kept
+
+
+def test_strip_controls_covers_every_other_control_format_and_separator() -> None:
+    kept = {0x0A, 0x09, 0x200C, 0x200D, 0x00AD}
+    for code in range(sys.maxunicode + 1):
+        if code not in kept and unicodedata.category(chr(code)) in {"Cc", "Cf", "Zl", "Zp"}:
+            assert not strip_controls(chr(code)), hex(code)
+
+
+def test_strip_controls_removes_escaped_c1_bytes() -> None:
+    assert strip_controls("a\udc85b") == "ab"
+    assert strip_controls("a\udc7fb\udca0") == "a\udc7fb\udca0"
+
+
+def test_text_output_strips_bidi_overrides() -> None:
+    diagnostic = Diagnostic(
+        rule="sql-error",
+        message="bad \u202etxet",
+        path=PATH,
+        span=Span(line=1, col=1, end_line=1, end_col=2),
+    )
+    assert "\u202e" not in render_text([Report(diagnostic=diagnostic)], {})

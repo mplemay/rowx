@@ -1,4 +1,5 @@
 import asyncio
+from time import perf_counter
 from typing import Any
 
 import pytest
@@ -96,6 +97,44 @@ def test_redact_removes_passwords(dsn: str, secret: str) -> None:
     assert dsn not in redacted
 
 
+@pytest.mark.parametrize(
+    ("dsn", "secrets"),
+    [
+        ("postgresql://user:p%40ss@host:notaport/db", ["p%40ss", "p@ss"]),
+        ("postgresql://user@host/db?password=p%40ss&sslpassword=q%20r", ["p%40ss", "p@ss", "q%20r", "q r"]),
+        ("host=h user=u password='p\\'ss' sslpassword=q\\ r", ["p\\'ss", "p'ss", "q\\ r", "q r"]),
+        ("postgresql://user:p%40ss@[unparseable", ["p%40ss", "p@ss"]),
+        ("host=h password='p@ss", ["p@ss"]),
+    ],
+)
+def test_redact_covers_every_form_and_unparseable_dsns(dsn: str, secrets: list[str]) -> None:
+    for secret in secrets:
+        assert secret not in redact(f"boom {secret} in {dsn}", dsn)
+
+
+def test_redact_covers_lowercase_percent_encoding() -> None:
+    out = redact("boom p%c3%a4sss and p%C3%A4sss and pässs", "postgresql://u:pässs@h/db")
+    assert "p%c3%a4" not in out
+    assert "p%C3%A4" not in out
+    assert "pä" not in out
+
+
+def test_redact_is_linear_in_a_long_dsn() -> None:
+    dsn = "host=h password='" + "\\'" * 10**6
+    start = perf_counter()
+    assert redact("x", dsn) == "x"
+    assert perf_counter() - start < 1
+
+
+def test_redact_masks_userinfo_and_password_tokens_by_syntax() -> None:
+    text = "see postgresql://u:zzz@h/db?sslpassword=yyy and host=h password='x y'"
+    assert redact(text, "") == "see postgresql://u:***@h/db?sslpassword=*** and host=h password=***"
+
+
+def test_redact_skips_empty_secrets() -> None:
+    assert redact("plain text", "host=h password=") == "plain text"
+
+
 def test_aliases_come_only_from_as_clauses() -> None:
     sql = (
         'SELECT 1 AS "one!", 2 AS /* c */ "two?", "t"."col", \'AS "str!"\' AS x, $$ AS "dollar!" $$ AS y, '
@@ -103,3 +142,10 @@ def test_aliases_come_only_from_as_clauses() -> None:
     )
     assert [ident for _, ident in quoted_aliases(sql)] == ["one!", "two?", "three!", 'fo"ur!']
     assert [sql[offset] for offset, _ in quoted_aliases(sql)] == ['"'] * 4
+
+
+def test_redact_merges_overlapping_secrets_before_masking() -> None:
+    assert redact("abcdef", "host=h password=abcd sslpassword=cdef") == "***"
+    assert redact("xx abcdef yy", "host=h password=abcd sslpassword=cdef") == "xx *** yy"
+    assert redact("a*b", "host=h password=*") == "a***b"
+    assert redact("ababa", "host=h password=aba") == "***"
