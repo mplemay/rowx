@@ -332,13 +332,13 @@ class _Finder(ast.NodeVisitor):
         for part in template.values:
             if (
                 isinstance(part, ast.Interpolation)
-                and part.format_spec is not None
-                and not all(isinstance(value, ast.Constant) for value in part.format_spec.values)  # ty: ignore[unresolved-attribute]
+                and isinstance(part.format_spec, ast.JoinedStr)
+                and not all(isinstance(value, ast.Constant) for value in part.format_spec.values)
             ):
                 self._report(
                     "dynamic-query",
                     "a format spec in a `query_unchecked` interpolation must be a literal",
-                    template,
+                    part,
                 )
 
     def _template(self, node: ast.Call) -> ast.TemplateStr | None:

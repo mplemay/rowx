@@ -1,4 +1,5 @@
 from string.templatelib import Interpolation, Template
+from time import perf_counter
 from typing import Final
 
 import pytest
@@ -375,3 +376,95 @@ def test_numbered_placeholders_are_not_dollar_quotes() -> None:
 def test_a_placeholder_never_closes_a_dollar_quote() -> None:
     with pytest.raises(TypeError, match=PLACEMENT_ERROR):
         compile_template(t"SELECT $$ x ${X} {'n':ident}", dynamic=True)
+
+
+# each expectation below was checked against Postgres 18: the parts join into one literal in the same mode
+@pytest.mark.parametrize(
+    "template",
+    [
+        t"SELECT E'a'\n'b\\'c' || {'n':ident}",
+        t"SELECT E'a' -- c\n'b\\'c' || {'n':ident}",
+        t"SELECT E'a'\n-- c\n  'b\\'c' || {'n':ident}",
+        t"SELECT E'a'\r'b\\'c' || {'n':ident}",
+        t"SELECT E'a'\f\n\v'b\\'c' || {'n':ident}",
+        t"SELECT 'a'\n'b' {'n':ident}",
+        t"SELECT 'a' -- c\n'b' {'n':ident}",
+        t"SELECT 'a'\r'b' {'n':ident}",
+        t"SELECT 'a'\n'b'\n'c' {'n':ident}",
+        t"SELECT 'a' 'b' {'n':ident}",
+        t"SELECT 'a'\n/* c */'b' {'n':ident}",
+    ],
+)
+def test_ident_after_a_completed_continued_literal_passes(template: Template) -> None:
+    assert sql_of(template).endswith('"n"')
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        t"SELECT E'a'\n'b\\' {'n':ident} '",
+        t"SELECT E'a' -- c\n'b\\' {'n':ident} '",
+        t"SELECT E'a'\r'b\\' {'n':ident} '",
+        t"SELECT 'a'\n'b {'n':ident}'",
+        t"SELECT 'a'\r'b {'n':ident}'",
+        t"SELECT 'a'\n-- c\n'b {'n':ident}'",
+        t"SELECT E'a'\n'b'\n'c\\' {'n':ident} '",
+    ],
+)
+def test_ident_inside_a_continued_literal_is_rejected(template: Template) -> None:
+    with pytest.raises(TypeError, match=PLACEMENT_ERROR):
+        sql_of(template)
+
+
+def test_a_continuation_without_a_newline_starts_a_new_literal() -> None:
+    with pytest.raises(TypeError, match=PLACEMENT_ERROR):
+        sql_of(t"SELECT 'a' 'b {'n':ident}'")
+
+
+def test_an_ident_between_literal_parts_is_code() -> None:
+    assert sql_of(t"SELECT E'a'\n{'n':ident}'b\\''") == "SELECT E'a'\n\"n\"'b\\''"
+
+
+def test_adjacent_idents_are_two_identifiers() -> None:
+    c, _ = compile_template(t"SELECT {'a':ident}{'b':ident}", dynamic=True)
+    assert c.sql == 'SELECT "a" "b"'
+    c, _ = compile_template(t"SELECT {('a', 'b'):ident}{'c':ident}", dynamic=True)
+    assert c.sql == 'SELECT "a"."b" "c"'
+
+
+def test_an_ident_and_a_quoted_identifier_are_spaced() -> None:
+    c, _ = compile_template(t'SELECT "x"{"a":ident}', dynamic=True)
+    assert c.sql == 'SELECT "x" "a"'
+    c, _ = compile_template(t'SELECT {"a":ident}"x"', dynamic=True)
+    assert c.sql == 'SELECT "a" "x"'
+
+
+def test_ident_adjacency_space_stays_inside_the_segments() -> None:
+    c, _ = compile_template(t'SELECT "x"{"a":ident}{X}"y"', dynamic=True)
+    assert c.sql == 'SELECT "x" "a"$1"y"'
+    assert "".join(c.sql[a:b] for a, b in c.segments) == 'SELECT "x" "a""y"'
+
+
+def test_the_parameter_limit_fails_while_walking() -> None:
+    # 2^20 parameters if it were expanded in full
+    level = nested(2)
+    for _ in range(19):
+        level = Template(Interpolation(level, "l"), Interpolation(level, "l"))
+    start = perf_counter()
+    with pytest.raises(TypeError, match="a query takes at most 65535 parameters, got 65536"):
+        compile_template(level, dynamic=True)
+    assert perf_counter() - start < 5
+
+
+def test_static_strings_are_normalised_to_exact_str() -> None:
+    odd = type(
+        "OddStr",
+        (str,),
+        {"__len__": lambda *_, **__: 0, "__getitem__": lambda *_, **__: "x", "__iter__": lambda *_, **__: iter("x")},
+    )
+    template = Template(odd("SELECT 'a'"), Interpolation(1, "x"), odd(" || b"), Interpolation("n", "n", None, "ident"))
+    assert any(type(s) is not str for s in template.strings)
+    c, values = compile_template(template, dynamic=True)
+    assert c.sql == "SELECT 'a'$1 || b\"n\""
+    assert c.placeholders == ((10, 12),)
+    assert values == [1]

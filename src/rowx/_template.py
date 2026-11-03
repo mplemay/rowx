@@ -16,6 +16,11 @@ CODE_TOKEN: Final[re.Pattern[str]] = re.compile(
     rf"""'|"|--|/\*|\$(?:[{IDENT_START_CLASS}][{IDENT_START_CLASS}0-9]*)?\$|[{IDENT_START_CLASS}][{IDENT_START_CLASS}0-9$]*|[0-9]+""",
 )
 ESCAPE_STRING_TOKEN: Final[re.Pattern[str]] = re.compile(r"\\.|''|'", re.DOTALL)
+# scan.l quotecontinue: whitespace with at least one newline (and `--` comments), then another quote, continues the
+# same literal in the same mode
+STRING_CONTINUATION: Final[re.Pattern[str]] = re.compile(
+    r"(?:[ \t\f]|--[^\n\r]*)*[\n\r](?:[ \t\n\r\f\v]+|--[^\n\r]*[\n\r])*'",
+)
 LINE_END: Final[re.Pattern[str]] = re.compile(r"[\r\n]")
 BLOCK_TOKEN: Final[re.Pattern[str]] = re.compile(r"/\*|\*/")
 CONTROL_CHARACTER: Final[re.Pattern[str]] = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -38,6 +43,7 @@ class _Builder:
         self._len = 0
         self._last = ""
         self._after_param = False
+        self._after_ident = False
         self._segment_start = 0
         # index into _sql of the first chunk that has not been lexed yet
         self._lexed = 0
@@ -56,7 +62,11 @@ class _Builder:
         # A space after "$n" keeps "{y}x" from lexing as one identifier.
         if self._after_param and _is_ident_char(text[0]):
             self._push(" ")
+        # A space after an identifier keeps `"a"` followed by `"b"` from lexing as one identifier.
+        if self._after_ident and self._last == '"' and text[0] == '"':
+            self._push(" ")
         self._after_param = False
+        self._after_ident = False
         self._push(text)
 
     def param(self, value: object | None = None, *, keep: bool = True) -> None:
@@ -71,6 +81,7 @@ class _Builder:
         self.placeholders.append((start, self._len))
         self._segment_start = self._len
         self._after_param = True
+        self._after_ident = False
         if keep:
             self.values.append(value)
 
@@ -80,7 +91,11 @@ class _Builder:
         if not _ends_in_code("".join(self._sql[self._lexed :])):
             msg = "an ident interpolation must not be inside a string literal or comment"
             raise TypeError(msg)
+        # A space before the identifier keeps it from fusing with a preceding quoted identifier.
+        if self._last == '"':
+            self._push(" ")
         self.static(quoted)
+        self._after_ident = True
         self._lexed = len(self._sql)
 
     def finish(self) -> Compiled:
@@ -114,6 +129,14 @@ def _skip_escape_string(text: str, i: int) -> int:
     return -1
 
 
+def _skip_string(text: str, i: int, *, escapes: bool) -> int:
+    while (end := _skip_escape_string(text, i) if escapes else _skip_quoted(text, i, "'")) >= 0:
+        if not (m := STRING_CONTINUATION.match(text, end)):
+            return end
+        i = m.end()
+    return -1
+
+
 def _skip_line_comment(text: str, i: int) -> int:
     m = LINE_END.search(text, i)
     return m.end() if m else -1
@@ -136,7 +159,7 @@ def _ends_in_code(text: str) -> bool:
         i = m.end()
         match token[0]:
             case "'":
-                i = _skip_quoted(text, i, "'")
+                i = _skip_string(text, i, escapes=False)
             case '"':
                 i = _skip_quoted(text, i, '"')
             case "-":
@@ -149,7 +172,7 @@ def _ends_in_code(text: str) -> bool:
             case _:
                 # E'...' is the only string with backslash escapes; U&'', B'', X'' and N'' are ordinary strings
                 if token in {"e", "E"} and text.startswith("'", i):
-                    i = _skip_escape_string(text, i + 1)
+                    i = _skip_string(text, i + 1, escapes=True)
         if i < 0:
             return False
     return True
@@ -195,7 +218,8 @@ def _walk(b: _Builder, t: Template, *, dynamic: bool) -> None:
     for i, s in enumerate(t.strings):
         if i:
             _interpolation(b, t.interpolations[i - 1], dynamic=dynamic)
-        b.static(s)
+        # an exact str, so that len and indexing never reach a subclass override
+        b.static(s if type(s) is str else str.__str__(s))  # ruff: ignore[unnecessary-dunder-call]
 
 
 def _exact_str(value: object) -> str | None:
@@ -227,6 +251,10 @@ def _interpolation(b: _Builder, item: Interpolation[object], *, dynamic: bool) -
             raise TypeError(msg)
         _walk(b, value, dynamic=dynamic)
         return
+    # checked while walking so that a template that expands exponentially fails fast
+    if len(b.values) >= MAX_PARAMETERS:
+        msg = f"a query takes at most {MAX_PARAMETERS} parameters, got {len(b.values) + 1}"
+        raise TypeError(msg)
     b.param(value)
 
 
@@ -239,8 +267,5 @@ def compile_template(t: Template, *, dynamic: bool) -> tuple[Compiled, list[obje
     compiled = b.finish()
     if "\x00" in compiled.sql:
         msg = "SQL text must not contain a NUL character"
-        raise TypeError(msg)
-    if len(b.values) > MAX_PARAMETERS:
-        msg = f"a query takes at most {MAX_PARAMETERS} parameters, got {len(b.values)}"
         raise TypeError(msg)
     return compiled, b.values

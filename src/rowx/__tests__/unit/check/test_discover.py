@@ -439,3 +439,9 @@ def test_query_unchecked_with_a_non_template_argument_is_not_inspected() -> None
     result = run("from rowx import query_unchecked\nquery_unchecked(make())\nquery_unchecked(*args)\n")
     assert not result.diagnostics
     assert result.unchecked_count == 2
+
+
+def test_query_unchecked_dynamic_format_spec_is_anchored_at_the_interpolation() -> None:
+    result = run('from rowx import query_unchecked\nquery_unchecked(t"select {a} {x:{spec}}")\n')
+    (diagnostic,) = result.diagnostics
+    assert (diagnostic.span.line, diagnostic.span.col, diagnostic.span.end_col) == (2, 30, 40)
