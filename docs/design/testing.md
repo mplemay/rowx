@@ -44,8 +44,8 @@
     decorator, a `metaclass=`, a hand-written dataclass `__init__`. An `alias_generator` row records the runtime names
     and the checker's unknown-names verdict.
   - Further rows: a constraint alias (`PositiveInt`) recorded as runtime-ok and checker-invalid, `EmailStr` rejected on
-    both sides, `init=False` and an `InitVar` on a pydantic dataclass, a named type with no fields, a pydantic field
-    with two accepted names, and generic chains at 16 and 17 hops (#189).
+    both sides, `init=False` (accepted) and an `InitVar` (rejected) on a pydantic dataclass, a named type with no
+    fields, a pydantic field with two accepted names, and generic chains at 16 and 17 hops (#189).
   - A row that lands before its checker support records the checker verdict `invalid-row-type`, and the checker
     feature flips it: the rows added in #185 flip in #187, and the rows added in #186 flip in #188.
 - **Oracles.** Each compares rowx with something independent, and each is generated from `type_table()`, so a new
