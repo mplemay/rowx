@@ -1,6 +1,8 @@
+import json
 import sys
+from subprocess import run  # ruff: ignore[suspicious-subprocess-import]
 from textwrap import dedent
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -710,16 +712,697 @@ def test_generic_row_types_are_rejected_until_they_are_supported(tmp_path: Path,
     assert rejected(named(tmp_path, source)) == "invalid-row-type"
 
 
+PYDANTIC: Final[str] = (
+    "from typing import Annotated, ClassVar\nfrom dataclasses import InitVar\nimport pydantic as pd\n"
+    "from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, RootModel, model_validator\n"
+    "from pydantic.dataclasses import dataclass as pdc\n"
+)
+
+
+def pyd(tmp_path: Path, source: str, *, extra: dict[str, str] | None = None) -> Resolution:
+    return named(tmp_path, PYDANTIC + source, extra=extra)
+
+
+def names(resolution: Resolution) -> list[tuple[str, tuple[str, ...] | None]]:
+    return [(f.key, f.names) for f in row_type(resolution).fields]
+
+
+def reasons(resolution: Resolution) -> list[str | None]:
+    return [f.reason for f in row_type(resolution).fields]
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "from pydantic import BaseModel\nclass T(BaseModel):",
+        "import pydantic as pd\nclass T(pd.BaseModel):",
+        "import pydantic\nclass T(pydantic.BaseModel):",
+        "import pydantic.main as m\nclass T(m.BaseModel):",
+        "from pydantic.main import BaseModel as B\nclass T(B):",
+    ],
+)
+def test_a_pydantic_model_is_a_validator_row_by_name(tmp_path: Path, head: str) -> None:
+    row = row_type(named(tmp_path, f"{head}\n    id: int\n    name: str | None\n    tags: list[str] = []\n"))
+    assert (row.kind, row.form, row.matching, row.type_name) == ("named", "validator", "by_name", "T")
+    assert [(f.key, f.names, f.elem.nullable, f.required) for f in row.fields] == [
+        ("id", ("id",), False, True),
+        ("name", ("name",), True, True),
+        ("tags", ("tags",), False, False),
+    ]
+    assert [f.reason for f in row.fields] == [None, None, None]
+
+
+def test_a_pydantic_dataclass_is_a_validator_row_by_name(tmp_path: Path) -> None:
+    for decorator in (
+        "@pdc",
+        "@pdc()",
+        "@pd.dataclasses.dataclass(frozen=True)",
+        "@pd.dataclasses.dataclass(kw_only=True)",
+    ):
+        row = row_type(pyd(tmp_path, f"{decorator}\nclass T:\n    id: int\n    n: int = 0\n"))
+        assert (row.form, row.matching) == ("validator", "by_name")
+        assert [(f.key, f.required) for f in row.fields] == [("id", True), ("n", False)]
+
+
+def test_an_inherited_model_collects_the_base_fields_first_and_a_redeclared_one_keeps_its_place(tmp_path: Path) -> None:
+    source = "class A(BaseModel):\n    a: int\n    b: int\nclass B(A):\n    c: int\n    b: str | None = None\nclass T(B):\n    d: int\n"
+    assert [(f.key, f.elem.nullable, f.required) for f in row_type(pyd(tmp_path, source)).fields] == [
+        ("a", False, True),
+        ("b", True, False),
+        ("c", False, True),
+        ("d", False, True),
+    ]
+
+
+def test_a_redeclared_field_without_a_default_is_required_again(tmp_path: Path) -> None:
+    source = "class A(BaseModel):\n    x: int = 1\nclass T(A):\n    x: int\n"
+    assert fields(pyd(tmp_path, source)) == [("x", False, True)]
+
+
+def test_a_non_model_base_contributes_its_annotations_and_attributes(tmp_path: Path) -> None:
+    source = "class Mixin:\n    a: int\n    b: int = 1\nclass T(Mixin, BaseModel):\n    c: str\n    b: int\n"
+    assert fields(pyd(tmp_path, source)) == [("a", False, True), ("b", False, False), ("c", False, True)]
+
+
+def test_a_base_redeclared_through_two_models_takes_the_first_base_copy(tmp_path: Path) -> None:
+    source = (
+        "class A(BaseModel):\n    x: int = Field(alias='a')\nclass B(BaseModel):\n    x: int = Field(alias='b')\n"
+        "class T(A, B): ...\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("x", ("a",))]
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("id: int", ("id",)),
+        ("id: int = Field(alias='user_id')", ("user_id",)),
+        ("id: int = Field(validation_alias='user_id')", ("user_id",)),
+        ("id: int = Field(validation_alias='v', alias='a')", ("v",)),
+        ("id: int = Field(validation_alias=None, alias='a')", ("a",)),
+        ("id: int = Field(serialization_alias='out')", ("id",)),
+        ("id: int = Field(alias='a', serialization_alias='out')", ("a",)),
+        ("id: Annotated[int, Field(alias='a')]", ("a",)),
+        ("id: Annotated[Annotated[int, Field(alias='a')], 'note']", ("a",)),
+        ("id: Annotated[int, Field(alias='a')] = Field(alias='b')", ("b",)),
+        ("id: 'Annotated[int, Field(alias=\"a\")]'", ("a",)),
+    ],
+)
+def test_a_fields_alias_forms(tmp_path: Path, field: str, expected: tuple[str, ...]) -> None:
+    resolution = pyd(tmp_path, f"class T(BaseModel):\n    {field}\n")
+    assert names(resolution) == [("id", expected)]
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [
+        ("id: int = Field(validation_alias=AliasChoices('a', 'b'))", "field `id` uses AliasChoices"),
+        ("id: int = Field(alias=AliasChoices('a', 'b'))", "field `id` uses AliasChoices"),
+        ("id: int = Field(validation_alias=AliasPath('a', 0))", "field `id` uses AliasPath"),
+        ("id: int = Field(validation_alias=pd.AliasChoices('a'), alias='x')", "field `id` uses AliasChoices"),
+        ("id: int = Field(alias=NAME)", "field `id` has an alias that isn't a literal string"),
+        ("id: int = Field(validation_alias=f'{1}')", "field `id` has an alias that isn't a literal string"),
+        ("id: Annotated[int, Field(validation_alias=AliasChoices('a'))]", "field `id` uses AliasChoices"),
+    ],
+)
+def test_an_unreadable_alias_makes_only_that_fields_names_unknown(tmp_path: Path, field: str, reason: str) -> None:
+    resolution = pyd(tmp_path, f"NAME = 'x'\nclass T(BaseModel):\n    {field}\n    other: int = Field(alias='o')\n")
+    assert names(resolution) == [("id", None), ("other", ("o",))]
+    assert reasons(resolution) == [reason, None]
+
+
+@pytest.mark.parametrize(
+    ("value", "required"),
+    [
+        ("", True),
+        (" = 1", False),
+        (" = None", False),
+        (" = Field()", True),
+        (" = Field(...)", True),
+        (" = ...", True),
+        (" = Field(default=...)", True),
+        (" = Field(default=1)", False),
+        (" = Field(1)", False),
+        (" = Field(default=None)", False),
+        (" = Field(default_factory=list)", False),
+        (" = Field(alias='a')", True),
+        (" = pd.Field(default_factory=list, alias='a')", False),
+    ],
+)
+def test_a_pydantic_field_is_optional_by_a_default(tmp_path: Path, value: str, *, required: bool) -> None:
+    assert fields(pyd(tmp_path, f"class T(BaseModel):\n    x: int{value}\n")) == [("x", False, required)]
+
+
+@pytest.mark.parametrize(
+    ("annotation", "required"),
+    [
+        ("Annotated[int, Field(default=1)]", False),
+        ("Annotated[int, Field(default_factory=int)]", False),
+        ("Annotated[int, Field(...)]", True),
+        ("Annotated[int, Field()]", True),
+        ("Annotated[int | None, Field(default=None)]", False),
+    ],
+)
+def test_a_default_in_annotated_metadata_makes_a_field_optional(
+    tmp_path: Path, annotation: str, *, required: bool
+) -> None:
+    assert [f.required for f in row_type(pyd(tmp_path, f"class T(BaseModel):\n    x: {annotation}\n")).fields] == [
+        required
+    ]
+
+
+def test_a_value_field_overrides_annotated_metadata(tmp_path: Path) -> None:
+    source = "class T(BaseModel):\n    x: Annotated[int, Field(default=1)] = Field(...)\n"
+    assert fields(pyd(tmp_path, source)) == [("x", False, False)]
+
+
+def test_fields_that_are_not_fields(tmp_path: Path) -> None:
+    source = (
+        "class T(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    id: int\n    _secret: int = 0\n"
+        "    __hidden: int\n    k: ClassVar[int] = 0\n    m: ClassVar[dict[str, int]]\n"
+        "    @pd.computed_field\n    @property\n    def double(self) -> int:\n        return self.id * 2\n"
+    )
+    assert fields(pyd(tmp_path, source)) == [("id", False, True)]
+
+
+def test_a_model_config_with_an_annotation_is_not_a_field(tmp_path: Path) -> None:
+    source = "class T(BaseModel):\n    model_config: ClassVar[ConfigDict] = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='u')\n"
+    assert names(pyd(tmp_path, source)) == [("id", ("u", "id"))]
+
+
+def test_a_model_may_define_init(tmp_path: Path) -> None:
+    source = "class T(BaseModel):\n    id: int\n    def __init__(self, **data):\n        super().__init__(**data)\n"
+    assert fields(pyd(tmp_path, source)) == [("id", False, True)]
+    source = "@pdc\nclass T:\n    id: int\n    def __init__(self, id):\n        self.id = id\n"
+    assert fields(pyd(tmp_path, source)) == [("id", False, True)]
+
+
+# the config a field with an `alias='u'` accepts: `(populate_by_name, validate_by_name, validate_by_alias)`
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ("", ("u",)),
+        ("populate_by_name=True", ("u", "id")),
+        ("populate_by_name=False", ("u",)),
+        ("validate_by_name=True", ("u", "id")),
+        ("validate_by_name=False", ("u",)),
+        ("validate_by_alias=False", ("id",)),
+        ("validate_by_alias=True", ("u",)),
+        ("validate_by_alias=False, validate_by_name=True", ("id",)),
+        ("validate_by_alias=True, validate_by_name=True", ("u", "id")),
+        # an explicit `validate_by_name` wins outright
+        ("populate_by_name=True, validate_by_name=False", ("u",)),
+        ("populate_by_name=False, validate_by_name=True", ("u", "id")),
+        # otherwise a set `populate_by_name` forces `validate_by_alias=True`
+        ("populate_by_name=True, validate_by_alias=False", ("u", "id")),
+        ("populate_by_name=False, validate_by_alias=False", ("u",)),
+        # an explicit `None` is unset
+        ("populate_by_name=None, validate_by_alias=False", ("id",)),
+        ("validate_by_name=None, populate_by_name=True", ("u", "id")),
+        # keys that don't touch names are ignored, even when they aren't literal
+        ("extra='forbid', strict=True, json_schema_extra=SOMETHING", ("u",)),
+    ],
+)
+def test_the_name_config_keys_follow_pydantics_precedence(
+    tmp_path: Path, config: str, expected: tuple[str, ...]
+) -> None:
+    source = f"SOMETHING = {{}}\nclass T(BaseModel):\n    model_config = ConfigDict({config})\n    id: int = Field(alias='u')\n"
+    assert names(pyd(tmp_path, source)) == [("id", expected)]
+    # the same keys as class keywords
+    keywords = f"class T(BaseModel, {config}):" if config else "class T(BaseModel):"
+    if "SOMETHING" not in config:
+        assert names(pyd(tmp_path, f"{keywords}\n    id: int = Field(alias='u')\n")) == [("id", expected)]
+    # and as a pydantic dataclass's `config=`
+    source = f"SOMETHING = {{}}\n@pdc(config=ConfigDict({config}))\nclass T:\n    id: int = Field(alias='u')\n"
+    assert names(pyd(tmp_path, source)) == [("id", expected)]
+
+
+def test_the_alias_equal_to_the_field_name_is_listed_once(tmp_path: Path) -> None:
+    source = "class T(BaseModel, populate_by_name=True):\n    id: int = Field(alias='id')\n"
+    assert names(pyd(tmp_path, source)) == [("id", ("id",))]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("class Config:\n        populate_by_name = True", ("u", "id")),
+        ("class Config:\n        validate_by_name = True\n        validate_by_alias = True", ("u", "id")),
+        ("class Config:\n        validate_by_alias = False", ("id",)),
+        ("class Config:\n        allow_population_by_field_name = True", ("u", "id")),
+        ("class Config:\n        extra = 'forbid'", ("u",)),
+        ("class Config:\n        pass", ("u",)),
+    ],
+)
+def test_a_class_config_is_read(tmp_path: Path, body: str, expected: tuple[str, ...]) -> None:
+    source = f"class T(BaseModel):\n    {body}\n    id: int = Field(alias='u')\n"
+    assert names(pyd(tmp_path, source)) == [("id", expected)]
+
+
+def test_the_class_keywords_win_over_the_config(tmp_path: Path) -> None:
+    source = (
+        "class T(BaseModel, populate_by_name=False):\n    model_config = ConfigDict(populate_by_name=True)\n"
+        "    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("u",))]
+
+
+def test_a_models_config_merges_through_its_bases_and_the_child_wins(tmp_path: Path) -> None:
+    source = (
+        "class A(BaseModel):\n    model_config = ConfigDict(populate_by_name=True)\n    a: int = Field(alias='x')\n"
+        "class B(A, validate_by_alias=False):\n    b: int = Field(alias='y')\n"
+        "class C(B):\n    model_config = ConfigDict(validate_by_alias=True)\n    c: int = Field(alias='z')\n"
+        "class T(C):\n    model_config = ConfigDict(populate_by_name=False)\n    d: int = Field(alias='w')\n"
+    )
+    # A: alias+name; B: alias off, name on; C: alias on again with `populate_by_name` still set; T: name off
+    assert names(pyd(tmp_path, source)) == [("a", ("x",)), ("b", ("y",)), ("c", ("z",)), ("d", ("w",))]
+    source = (
+        "class A(BaseModel):\n    model_config = ConfigDict(populate_by_name=True)\n"
+        "class B(A):\n    id: int = Field(alias='u')\n"
+        "class T(B):\n    n: int = Field(alias='m')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("u", "id")), ("n", ("m", "n"))]
+
+
+def test_the_first_base_wins_when_several_models_set_a_config_key(tmp_path: Path) -> None:
+    source = (
+        "class A(BaseModel, populate_by_name=True): ...\nclass B(BaseModel, populate_by_name=False): ...\n"
+        "class T(A, B):\n    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("u", "id"))]
+    source = source.replace("class T(A, B)", "class T(B, A)")
+    assert names(pyd(tmp_path, source)) == [("id", ("u",))]
+
+
+def test_a_pydantic_dataclass_takes_the_decorators_config_else_the_nearest_bases(tmp_path: Path) -> None:
+    source = (
+        "@pdc(config=ConfigDict(populate_by_name=True))\nclass A:\n    a: int = Field(alias='x')\n"
+        "@pdc\nclass B(A):\n    b: int = Field(alias='y')\n"
+        "@pdc(config=ConfigDict(validate_by_alias=False))\nclass T(B):\n    c: int = Field(alias='z')\n"
+    )
+    # the decorator's config replaces the base's, and doesn't merge with it
+    assert names(pyd(tmp_path, source)) == [("a", ("a",)), ("b", ("b",)), ("c", ("c",))]
+    assert names(
+        pyd(
+            tmp_path,
+            source.replace("class T(B)", "class T(B)").replace(
+                "@pdc(config=ConfigDict(validate_by_alias=False))\nclass T", "@pdc\nclass T"
+            ),
+        )
+    ) == [
+        ("a", ("x", "a")),
+        ("b", ("y", "b")),
+        ("c", ("z", "c")),
+    ]
+
+
+def test_a_pydantic_dataclass_reads_its_pydantic_config_attribute(tmp_path: Path) -> None:
+    source = (
+        "@pdc\nclass T:\n    __pydantic_config__ = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("u", "id"))]
+    source = (
+        "@pdc(config=ConfigDict(populate_by_name=False))\nclass T:\n"
+        "    __pydantic_config__ = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("u",))]
+
+
+@pytest.mark.parametrize(
+    ("source", "reason"),
+    [
+        (
+            "class T(BaseModel):\n    @model_validator(mode='before')\n    @classmethod\n    def pre(cls, data):\n        return data\n    id: int\n",
+            "`T` has a before-validator",
+        ),
+        (
+            "class T(BaseModel):\n    id: int\n    @pd.model_validator(mode='wrap')\n    @classmethod\n    def w(cls, data, handler):\n        return handler(data)\n",
+            "`T` has a wrap-validator",
+        ),
+        (
+            "MODE = 'before'\nclass T(BaseModel):\n    id: int\n    @model_validator(mode=MODE)\n    @classmethod\n    def f(cls, data):\n        return data\n",
+            "`T` has a model validator whose mode isn't a literal",
+        ),
+        (
+            "class Base(BaseModel):\n    @model_validator(mode='before')\n    @classmethod\n    def pre(cls, data):\n        return data\nclass Mid(Base): ...\nclass T(Mid):\n    id: int\n",
+            "`Base` has a before-validator",
+        ),
+        (
+            "class T(BaseModel):\n    model_config = ConfigDict(alias_generator=str.upper)\n    id: int\n",
+            "`T` has an alias_generator",
+        ),
+        (
+            "class Base(BaseModel):\n    model_config = ConfigDict(alias_generator=str.upper)\nclass T(Base):\n    id: int\n",
+            "`Base` has an alias_generator",
+        ),
+        (
+            "class T(BaseModel, alias_generator=str.upper):\n    id: int\n",
+            "`T` has an alias_generator",
+        ),
+        (
+            "class T(BaseModel):\n    model_config = {'populate_by_name': True}\n    id: int\n",
+            "`T` has a config that isn't a literal `ConfigDict(...)`",
+        ),
+        (
+            "CONFIG = ConfigDict()\nclass T(BaseModel):\n    model_config = CONFIG\n    id: int\n",
+            "`T` has a config that isn't a literal `ConfigDict(...)`",
+        ),
+        (
+            "class T(BaseModel):\n    model_config = ConfigDict(**{'populate_by_name': True})\n    id: int\n",
+            "`T` passes `**` to `ConfigDict`",
+        ),
+        (
+            "FLAG = True\nclass T(BaseModel, populate_by_name=FLAG):\n    id: int\n",
+            "the class keyword `populate_by_name` of `T` isn't a literal",
+        ),
+        (
+            "class T(BaseModel):\n    model_config = ConfigDict(populate_by_name=FLAG)\n    id: int\nFLAG = True\n",
+            "the config key `populate_by_name` of `T` isn't a literal",
+        ),
+        (
+            "X = {}\nclass T(BaseModel, json_schema_extra=X):\n    id: int\n",
+            "the class keyword `json_schema_extra` of `T` isn't a literal",
+        ),
+        (
+            "OPTS = {}\nclass T(BaseModel, **OPTS):\n    id: int\n",
+            "`T` takes `**` class keywords",
+        ),
+        (
+            "class T(BaseModel):\n    class Config:\n        populate_by_name = FLAG\n    id: int\nFLAG = True\n",
+            "the config key `populate_by_name` of `T` isn't a literal",
+        ),
+        (
+            "class Cfg: ...\nclass T(BaseModel):\n    class Config(Cfg): ...\n    id: int\n",
+            "the `Config` of `T` has a base class",
+        ),
+        (
+            "CFG = ConfigDict()\n@pdc(config=CFG)\nclass T:\n    id: int\n",
+            "`T` has a config that isn't a literal `ConfigDict(...)`",
+        ),
+        (
+            "@pdc(config=ConfigDict(alias_generator=str.upper))\nclass T:\n    id: int\n",
+            "`T` has an alias_generator",
+        ),
+        (
+            "@pdc\nclass T:\n    id: int\n    @model_validator(mode='before')\n    @classmethod\n    def pre(cls, data):\n        return data\n",
+            "`T` has a before-validator",
+        ),
+    ],
+)
+def test_each_model_level_trigger_makes_every_fields_names_unknown(tmp_path: Path, source: str, reason: str) -> None:
+    resolution = pyd(tmp_path, source)
+    assert [n for _, n in names(resolution)] == [None] * len(names(resolution))
+    assert set(reasons(resolution)) == {reason}
+
+
+def test_a_sticky_unreadable_config_survives_a_childs_own_config(tmp_path: Path) -> None:
+    source = (
+        "class Base(BaseModel):\n    model_config = {'populate_by_name': True}\n"
+        "class T(Base):\n    model_config = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", None)]
+
+
+def test_a_child_can_clear_an_inherited_alias_generator(tmp_path: Path) -> None:
+    source = (
+        "class Base(BaseModel):\n    model_config = ConfigDict(alias_generator=str.upper)\n"
+        "class T(Base):\n    model_config = ConfigDict(alias_generator=None)\n    id: int = Field(alias='u')\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("u",))]
+
+
+@pytest.mark.parametrize(
+    "decorators",
+    [
+        "    @model_validator(mode='after')\n    def check(self):\n        return self\n",
+        "    @pd.field_validator('id', mode='before')\n    @classmethod\n    def f(cls, v):\n        return v\n",
+        "    @pd.field_validator('*', mode='wrap')\n    @classmethod\n    def f(cls, v, handler):\n        return handler(v)\n",
+        "    @pd.computed_field\n    @property\n    def twice(self) -> int:\n        return 2\n",
+        "    @staticmethod\n    def helper():\n        return 1\n",
+    ],
+)
+def test_after_and_field_validators_keep_the_names_known(tmp_path: Path, decorators: str) -> None:
+    resolution = pyd(tmp_path, f"class T(BaseModel):\n    id: int = Field(alias='u')\n{decorators}")
+    assert names(resolution) == [("id", ("u",))]
+    assert reasons(resolution) == [None]
+
+
+def test_a_validator_in_a_plain_mixin_is_not_registered_by_pydantic(tmp_path: Path) -> None:
+    source = (
+        "class Mixin:\n    @model_validator(mode='before')\n    @classmethod\n    def pre(cls, data):\n        return data\n"
+        "class T(Mixin, BaseModel):\n    id: int\n"
+    )
+    assert names(pyd(tmp_path, source)) == [("id", ("id",))]
+
+
+def test_an_unknown_field_next_to_known_ones_keeps_the_known_names(tmp_path: Path) -> None:
+    source = (
+        "class T(BaseModel):\n    a: int = Field(validation_alias=AliasChoices('x', 'y'))\n    b: int = Field(alias='bb')\n"
+        "    c: int = Field(validation_alias=AliasPath('p', 0))\n"
+    )
+    resolution = pyd(tmp_path, source)
+    assert names(resolution) == [("a", None), ("b", ("bb",)), ("c", None)]
+    assert reasons(resolution) == ["field `a` uses AliasChoices", None, "field `c` uses AliasPath"]
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ("class T(RootModel[int]): ...\n", "a pydantic RootModel is not a row type"),
+        ("class T(RootModel): ...\n", "a pydantic RootModel is not a row type"),
+        ("import pydantic.root_model as r\nclass T(r.RootModel[int]): ...\n", "a pydantic RootModel is not a row type"),
+        ("import pydantic.v1\nclass T(pydantic.v1.BaseModel):\n    id: int\n", "a pydantic v1 model is not supported"),
+        (
+            "from pydantic.v1 import BaseModel as V1\nclass T(V1):\n    id: int\n",
+            "a pydantic v1 model is not supported",
+        ),
+        ("import pydantic.v1.main as m\nclass T(m.BaseModel):\n    id: int\n", "a pydantic v1 model is not supported"),
+    ],
+)
+def test_a_root_model_and_pydantic_v1_are_invalid(tmp_path: Path, source: str, message: str) -> None:
+    resolution = pyd(tmp_path, source)
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.diagnostic.message == message  # ty: ignore[unresolved-attribute]
+
+
+def test_another_pydantic_name_as_a_base_or_row_is_invalid(tmp_path: Path) -> None:
+    assert rejected(pyd(tmp_path, "class T(pd.BaseModel, pd.Field): ...\n")) == "invalid-row-type"
+    assert rejected(pyd(tmp_path, "T = BaseModel\n")) == "invalid-row-type"
+    assert rejected(pyd(tmp_path, "@pd.validate_call\nclass T(BaseModel):\n    id: int\n")) == "invalid-row-type"
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "pd.EmailStr",
+        "pd.AnyUrl",
+        "pd.SecretStr",
+        "pd.PositiveInt",
+        "pd.constr(min_length=1)",
+        "pd.Json[list[int]]",
+        "pd.conint(gt=0)",
+        "list[pd.EmailStr]",
+        "pd.EmailStr | None",
+        "Annotated[pd.PositiveInt, 'x']",
+    ],
+)
+def test_pydantic_only_types_and_constraint_aliases_are_invalid_with_the_help(tmp_path: Path, annotation: str) -> None:
+    resolution = pyd(tmp_path, f"class T(BaseModel):\n    id: int\n    x: {annotation}\n")
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.help == (
+        "annotate the column's Python type (for example `str`) and validate with `Annotated[str, AfterValidator(...)]`"
+    )
+    assert resolution.diagnostic.message.endswith('(field "x" of `T`)')  # ty: ignore[unresolved-attribute]
+
+
+def test_a_pydantic_only_type_in_a_pydantic_dataclass_is_invalid(tmp_path: Path) -> None:
+    resolution = pyd(tmp_path, "@pdc\nclass T:\n    x: pd.EmailStr\n")
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.help is not None
+    assert resolution.help.startswith("annotate the column's Python type")
+
+
+def test_a_pydantic_help_is_only_for_pydantic_names(tmp_path: Path) -> None:
+    resolution = pyd(tmp_path, "from fractions import Fraction\nclass T(BaseModel):\n    x: Fraction\n")
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.help is None
+
+
+def test_a_literal_init_false_on_the_pydantic_decorator_is_accepted(tmp_path: Path) -> None:
+    for decorator in ("@pdc(init=False)", "@pd.dataclasses.dataclass(init=False, frozen=True)"):
+        assert fields(pyd(tmp_path, f"{decorator}\nclass T:\n    id: int\n")) == [("id", False, True)]
+
+
+def test_a_non_literal_pydantic_decorator_init_is_unresolved(tmp_path: Path) -> None:
+    assert rejected(pyd(tmp_path, "X = False\n@pdc(init=X)\nclass T:\n    id: int\n")) == "unresolved-row-type"
+
+
+def test_an_initvar_field_on_a_pydantic_dataclass_is_invalid(tmp_path: Path) -> None:
+    resolution = pyd(tmp_path, "@pdc\nclass T:\n    id: int\n    scale: InitVar[int]\n")
+    assert rejected(resolution) == "invalid-row-type"
+    assert "InitVar" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+
+
+def test_field_init_false_excludes_a_field_only_on_a_pydantic_dataclass(tmp_path: Path) -> None:
+    body = "    id: int\n    count: int = Field(init=False, default=0)\n    plain: int = Field(init=False)\n"
+    assert fields(pyd(tmp_path, f"class T(BaseModel):\n{body}")) == [
+        ("id", False, True),
+        ("count", False, False),
+        ("plain", False, True),
+    ]
+    assert fields(pyd(tmp_path, f"@pdc\nclass T:\n{body}")) == [("id", False, True)]
+    source = "import dataclasses\n@pdc\nclass T:\n    id: int\n    n: int = dataclasses.field(init=False, default=0)\n"
+    assert fields(pyd(tmp_path, source)) == [("id", False, True)]
+    source = "@pdc\nclass T:\n    id: int\n    n: Annotated[int, Field(init=False)] = 0\n"
+    assert fields(pyd(tmp_path, source)) == [("id", False, True)]
+
+
+def test_a_redeclared_pydantic_dataclass_field_with_init_false_drops_the_inherited_one(tmp_path: Path) -> None:
+    source = "@pdc\nclass A:\n    a: int\n    b: int\n@pdc\nclass T(A):\n    b: int = Field(init=False, default=0)\n"
+    assert fields(pyd(tmp_path, source)) == [("a", False, True)]
+
+
+def test_a_pydantic_dataclass_inherits_a_default_like_a_dataclass(tmp_path: Path) -> None:
+    source = (
+        "@pdc\nclass A:\n    x: int = Field(default=1)\n@pdc\nclass T(A):\n    x: int\n    y: int = Field(alias='w')\n"
+    )
+    assert fields(pyd(tmp_path, source)) == [("x", False, False), ("y", False, True)]
+    source = "@pdc\nclass A:\n    x: int = Field(alias='a')\n@pdc\nclass T(A):\n    x: int\n"
+    assert fields(pyd(tmp_path, source)) == [("x", False, True)]
+
+
+def test_a_non_literal_field_init_on_a_pydantic_dataclass_is_unresolved(tmp_path: Path) -> None:
+    assert (
+        rejected(pyd(tmp_path, "X = False\n@pdc\nclass T:\n    id: int = Field(init=X, default=1)\n"))
+        == "unresolved-row-type"
+    )
+    assert fields(pyd(tmp_path, "X = False\nclass T(BaseModel):\n    id: int = Field(init=X)\n")) == [
+        ("id", False, True)
+    ]
+
+
+def test_a_field_with_double_star_arguments_is_unresolved(tmp_path: Path) -> None:
+    assert (
+        rejected(pyd(tmp_path, "OPTS = {}\nclass T(BaseModel):\n    id: int = Field(**OPTS)\n"))
+        == "unresolved-row-type"
+    )
+
+
+def test_a_subclass_of_a_pydantic_dataclass_needs_the_decorator(tmp_path: Path) -> None:
+    resolution = pyd(tmp_path, "@pdc\nclass A:\n    id: int\nclass T(A): ...\n")
+    assert rejected(resolution) == "invalid-row-type"
+    assert "without the pydantic decorator" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+
+
 @pytest.mark.parametrize(
     "source",
     [
-        "import pydantic\nclass T(pydantic.BaseModel):\n    a: int\n",
-        "from pydantic import BaseModel\nclass T(BaseModel):\n    a: int\n",
-        "import pydantic.dataclasses\n@pydantic.dataclasses.dataclass\nclass T:\n    a: int\n",
+        "from dataclasses import dataclass\n@dataclass\nclass M:\n    a: int\nclass T(BaseModel, M): ...\n",
+        "from typing import NamedTuple\nclass T(NamedTuple, BaseModel):\n    a: int\n",
+        "from dataclasses import dataclass\n@dataclass\n@pdc\nclass T:\n    a: int\n",
+        "@pdc\nclass T(BaseModel):\n    a: int\n",
+        "class T(BaseModel, metaclass=type):\n    a: int\n",
     ],
 )
-def test_pydantic_row_types_are_not_checked_yet(tmp_path: Path, source: str) -> None:
-    assert rejected(named(tmp_path, source)) == "invalid-row-type"
+def test_mixing_a_model_with_another_form_is_invalid(tmp_path: Path, source: str) -> None:
+    assert rejected(pyd(tmp_path, source)) == "invalid-row-type"
+
+
+def test_a_model_with_no_fields_is_invalid(tmp_path: Path) -> None:
+    resolution = pyd(tmp_path, "class T(BaseModel):\n    _x: int = 0\n    k: ClassVar[int] = 0\n")
+    assert rejected(resolution) == "invalid-row-type"
+    assert "has no fields" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+
+
+def test_a_model_from_another_module_resolves_with_its_field_notes(tmp_path: Path) -> None:
+    extra = {
+        "models.py": "from pydantic import BaseModel, Field\nclass User(BaseModel):\n    id: int = Field(alias='uid')\n"
+    }
+    write(tmp_path, {"main.py": "from models import User\n" + QUERY.format(t="User"), **extra})
+    row = row_type(resolve(tmp_path, "main.py"))
+    assert [(f.key, f.names, f.path.name, f.span.line) for f in row.fields] == [("id", ("uid",), "models.py", 3)]
+
+
+def test_the_model_form_is_a_row_only_at_the_row_level(tmp_path: Path) -> None:
+    source = "class U(BaseModel):\n    id: int\nT = tuple[U, int]\n"
+    assert rejected(pyd(tmp_path, source)) == "invalid-row-type"
+    source = "class U(BaseModel):\n    id: int\nT = U | None\n"
+    assert rejected(pyd(tmp_path, source)) == "invalid-row-type"
+    source = "class U(BaseModel):\n    id: int\nclass T(BaseModel):\n    u: U\n"
+    assert rejected(pyd(tmp_path, source)) == "invalid-row-type"
+
+
+def test_a_quoted_and_future_annotations_work_in_a_model(tmp_path: Path) -> None:
+    source = "class T(BaseModel):\n    a: 'int'\n    b: 'str | None' = None\n"
+    assert [(f.key, f.elem.leaf, f.elem.nullable) for f in row_type(pyd(tmp_path, source)).fields] == [
+        ("a", "int", False),
+        ("b", "str", True),
+    ]
+    source = (
+        "from __future__ import annotations\n"
+        + PYDANTIC
+        + "class T(BaseModel):\n    a: int\n    b: str | None = None\n"
+    )
+    assert fields(named(tmp_path, source)) == [("a", False, True), ("b", True, False)]
+
+
+BLOCKED_PYDANTIC: Final[str] = """\
+import json
+import sys
+from pathlib import Path
+
+sys.modules["pydantic"] = None
+sys.modules["pydantic.dataclasses"] = None
+sys.modules["pydantic.v1"] = None
+from rowx.check.discover import discover_file
+from rowx.check.resolve import ModuleGraph, resolve_row_type
+
+path = Path(sys.argv[1])
+[call] = discover_file(path).calls
+resolution = resolve_row_type(ModuleGraph(), call, (path.parent,))
+if resolution.diagnostic is not None:
+    print(json.dumps(["error", resolution.diagnostic.rule, resolution.diagnostic.message, resolution.help]))
+else:
+    row = resolution.row_type
+    print(json.dumps([[f.key, f.names, f.required, f.reason] for f in row.fields]))
+"""
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "class T(BaseModel):\n    id: int = Field(alias='u')\n    n: str | None = None\n",
+        "class T(BaseModel, populate_by_name=True):\n    id: int = Field(alias='u')\n",
+        "class T(BaseModel):\n    id: int = Field(validation_alias=AliasChoices('a', 'b'))\n",
+        "@pdc(config=ConfigDict(populate_by_name=True))\nclass T:\n    id: int = Field(alias='u')\n",
+        "class T(RootModel[int]): ...\n",
+        "class T(BaseModel):\n    u: pd.AnyUrl\n",
+    ],
+)
+def test_the_result_is_identical_when_pydantic_cannot_be_imported(tmp_path: Path, source: str) -> None:
+    resolution = pyd(tmp_path, source)
+    expected = (
+        ["error", resolution.diagnostic.rule, resolution.diagnostic.message, resolution.help]
+        if resolution.diagnostic is not None
+        else [
+            [f.key, list(f.names) if f.names is not None else None, f.required, f.reason]
+            for f in row_type(resolution).fields
+        ]
+    )
+    done = run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [sys.executable, "-I", "-c", BLOCKED_PYDANTIC, str(tmp_path / "main.py")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(done.stdout) == expected
+
+
+def test_the_resolver_never_touches_a_pydantic_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # a poisoned entry fails any import or attribute access of pydantic
+    for name in ("pydantic", "pydantic.dataclasses", "pydantic.v1"):
+        monkeypatch.setitem(sys.modules, name, None)
+    source = "class T(BaseModel):\n    id: int = Field(alias='u')\n"
+    assert names(pyd(tmp_path, source)) == [("id", ("u",))]
 
 
 def test_a_stdlib_class_is_invalid_and_a_third_party_class_is_unresolved(tmp_path: Path) -> None:

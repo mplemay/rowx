@@ -53,6 +53,7 @@ class Finding:
     reason_detail: str | None = None
     # the indices into a named row's fields that the finding concerns, for the field notes and the JSON `field`
     fields: tuple[int, ...] = ()
+    notes: tuple[str, ...] = ()
 
 
 def _label(column: ColumnDesc, index: int) -> str:
@@ -313,6 +314,13 @@ def _compare_named(columns: Sequence[ColumnDesc], row_type: RowType) -> list[Fin
                     findings.append(finding)
                 else:
                     findings.append(replace(finding, fields=(target,)))
+    # the by-name rules were skipped for fields with unknown names, which the diagnostics say
+    reasons = list(
+        dict.fromkeys(field_.reason for field_ in fields if field_.names is None and field_.reason is not None)
+    )
+    if reasons:
+        note = f"names not checked: {'; '.join(reasons)}"
+        findings = [replace(finding, notes=(*finding.notes, note)) for finding in findings]
     return sorted(findings, key=_order)
 
 

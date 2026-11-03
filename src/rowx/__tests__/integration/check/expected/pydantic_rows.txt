@@ -1,0 +1,70 @@
+error[unexpected-column]: column 1 "id" matches no field of `Aliased`
+ --> queries.py:4:7
+  |
+4 | query[Aliased](t"SELECT id, name FROM users")
+  |       ^^^^^^^ row type
+  |
+  = help: add a field named "id" to `Aliased`, or remove the column from the SELECT
+
+error[missing-column]: field "id" of `Aliased` has no column
+ --> queries.py:4:7
+  |
+4 | query[Aliased](t"SELECT id, name FROM users")
+  |       ^^^^^^^ row type
+  |
+  = note: field defined at <root>/app/models.py:6:5
+  = help: select a column named "id", alias one with AS id, or give the field a default
+
+error[duplicate-column]: columns 1 "id" and 2 "user_id" both map to field "id" of `Either`
+ --> queries.py:8:7
+  |
+8 | query[Either](t"SELECT id, id AS user_id, name FROM users")
+  |       ^^^^^^ row type
+  |
+  = note: field defined at <root>/app/models.py:11:5
+  = help: select only one of "id" and "user_id"
+
+error[ambiguous-column]: column 1 "y" matches fields "x" and "y" of `Overlap`
+ --> queries.py:9:7
+  |
+9 | query[Overlap](t"SELECT id AS y FROM users")
+  |       ^^^^^^^ row type
+  |
+  = note: field defined at <root>/app/models.py:16:5
+  = note: field defined at <root>/app/models.py:17:5
+  = help: give the fields distinct aliases, or remove populate_by_name if it causes the overlap
+
+error[type-mismatch]: column 2 "name" is `str` but field "name" of `Choices` is `int`
+  --> queries.py:10:7
+   |
+10 | query[Choices](t"SELECT id AS a, name FROM users")
+   |       ^^^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:22:5
+   = note: names not checked: field `id` uses AliasChoices
+
+error[type-mismatch]: column 2 "name" is `str` but field "name" of `Choices` is `int`
+  --> queries.py:11:7
+   |
+11 | query[Choices](t"SELECT id AS b, name, 1 AS extra FROM users")
+   |       ^^^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:22:5
+   = note: names not checked: field `id` uses AliasChoices
+
+error[type-mismatch]: column 2 "score" is `decimal.Decimal` but field "score" of `Score` is `int`
+  --> queries.py:13:7
+   |
+13 | query[Score](t"SELECT id, 9.5::numeric AS score FROM users")
+   |       ^^^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:37:5
+
+error[duplicate-column]: columns 1 "id" and 2 "user_id" both map to field "id" of `Row`
+  --> queries.py:14:7
+   |
+14 | query[Row](t"SELECT id, id AS user_id, name FROM users")
+   |       ^^^ row type
+   |
+   = note: field defined at <root>/app/models.py:42:5
+   = help: select only one of "id" and "user_id"

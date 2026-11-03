@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from typing import Final
 
@@ -489,6 +490,10 @@ def field(
     )
 
 
+def unknown(key: str, reason: str, leaf: LeafName = "int") -> NamedField:
+    return replace(field(key, leaf, names=None), reason=reason)
+
+
 def named(*fields: NamedField, form: str = "keyword", matching: str = "by_name") -> RowType:
     return RowType(kind="named", form=form, matching=matching, type_name="M", fields=fields)  # ty: ignore[invalid-argument-type]
 
@@ -633,3 +638,55 @@ def test_a_positional_row_checks_arity_and_names_and_then_stops() -> None:
 def test_a_void_column_faces_a_field_typed_none() -> None:
     row = named(field("v", "none", nullable=True), field("id"))
     assert run(row, column("v", "void"), column("id")) == []
+
+
+def test_unknown_names_skip_the_by_name_rules_and_keep_the_element_rules() -> None:
+    row = named(
+        unknown("a", "field `a` uses AliasChoices"),
+        field("b", "str", names=("bb",), required=True),
+        form="validator",
+    )
+    # `x` and the second `bb` would be unexpected and duplicate, and `a` would be missing, were its names known
+    findings = run(row, column("bb", "int4"), column("x"), column("bb", "text"))
+    assert [(f.rule, f.column) for f in findings] == [("type-mismatch", 0)]
+    assert findings[0].notes == ("names not checked: field `a` uses AliasChoices",)
+    # a clean query has no diagnostic to carry the note, and `b` is still found by its known name
+    assert run(row, column("bb", "text"), column("anything")) == []
+
+
+def test_the_reasons_of_every_unknown_field_are_listed_once() -> None:
+    row = named(
+        unknown("a", "field `a` uses AliasChoices"),
+        unknown("b", "field `b` uses AliasPath"),
+        unknown("c", "field `b` uses AliasPath"),
+        field("d", "str"),
+        form="validator",
+    )
+    [finding] = run(row, column("d", "int4"), column("x", "text"))
+    assert finding.notes == ("names not checked: field `a` uses AliasChoices; field `b` uses AliasPath",)
+    # when every field is unknown no column maps to one, so nothing is reported
+    row = named(unknown("a", "`M` has a before-validator"), form="validator")
+    assert run(row, column("a", "text")) == []
+
+
+def test_known_names_carry_no_note() -> None:
+    row = named(field("id", "str"), form="validator")
+    [finding] = run(row, column("id", "int4"))
+    assert finding.rule == "type-mismatch"
+    assert finding.notes == ()
+
+
+def test_a_pydantic_alias_equal_to_another_fields_name_is_ambiguous() -> None:
+    row = named(field("x", names=("y",)), field("y"), form="validator")
+    findings = run(row, column("y"))
+    assert [(f.rule, f.column, f.fields) for f in findings] == [("ambiguous-column", 0, (0, 1))]
+    assert findings[0].message == 'column 1 "y" matches fields "x" and "y" of `M`'
+
+
+def test_both_names_of_one_pydantic_field_are_a_duplicate() -> None:
+    row = named(field("id", names=("user_id", "id")), form="validator")
+    findings = run(row, column("id"), column("user_id"))
+    assert [(f.rule, f.column) for f in findings] == [("duplicate-column", 1)]
+    assert findings[0].help == 'select only one of "id" and "user_id"'
+    assert rules(run(row, column("user_id"))) == []
+    assert rules(run(row, column("id"))) == []

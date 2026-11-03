@@ -434,6 +434,7 @@ def _finding_report(
     name = columns[finding.column].name if finding.column is not None else None
     if reason := finding.reason:
         notes.append(null_reason_note(reason, finding.reason_detail, column=name))
+    notes.extend(finding.notes)
     # `field` is set only for the rules that concern one field
     field_key = None
     if row_type is not None and len(finding.fields) == 1 and finding.rule != "ambiguous-column":
