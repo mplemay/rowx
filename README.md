@@ -39,6 +39,32 @@ asyncio.run(main())
   `execute` returns a `QueryResult` with `rows_affected`.
 - Type checkers (pyright, mypy, ty) infer all of this with no plugin.
 
+Rows can also be a dataclass, `NamedTuple`, `TypedDict` or pydantic model, matched to the columns by name:
+
+```python test
+import asyncio
+from dataclasses import dataclass
+
+from rowx.postgres import connect
+from rowx import query
+
+
+@dataclass(slots=True)
+class User:
+    id: int
+    name: str
+    email: str | None
+
+
+async def main() -> None:
+    async with await connect(DSN) as conn:
+        user = await query[User](t"SELECT id, name, email FROM users WHERE name = {'alice'}").one(conn)
+        assert user.name == "alice"
+
+
+asyncio.run(main())
+```
+
 Check the queries against your database:
 
 ```sh
@@ -50,8 +76,8 @@ connection error.
 
 ## Documentation
 
-- [User guide](docs/guide.md): row types, pools, transactions, migrations, writing queries, overrides, the checker, CI
-  and poolers.
+- [User guide](docs/guide.md): row types (tuples, scalars and named classes), pools, transactions, migrations, writing
+  queries, overrides, the checker, CI and poolers.
 - [Postgres type mapping](docs/types.md): what each Postgres type decodes to and which Python types can be bound.
 - [Known limits](docs/known-limits.md): where nullability inference is less precise than the database.
 - [Design](docs/design/README.md): the full specification.
