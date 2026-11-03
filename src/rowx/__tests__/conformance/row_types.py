@@ -129,8 +129,9 @@ ROWS: Final[list[Row]] = [
 ]
 
 TYPE_CHECKING_ALIAS: Final[str] = "if typing.TYPE_CHECKING:\n    from fractions import Fraction\ntype D = Fraction\n"
-# a pydantic row is `invalid-row-type` in the checker until #188 accepts it, and then flips to `ok`
-PENDING_188: Final[str] = "invalid-row-type"
+# the checker accepts the row but can't know the column names, so the runtime's names are not compared; every field's
+# names must be unknown
+UNKNOWN_NAMES: Final[str] = "ok-names-unknown"
 # the runtime accepts these and the checker rejects them for good (a checker-only rejection)
 CHECKER_ONLY: Final[str] = "invalid-row-type"
 REJECTED: Final[str] = "invalid-row-type"
@@ -287,17 +288,17 @@ NAMED_ROWS: Final[list[Row]] = [
     (
         "class T(BaseModel):\n    id: int\n    name: str | None\n    tags: list[str] = []",
         validator(f("id"), f("name", nullable=True), f("tags", required=False)),
-        PENDING_188,  # #188 flips to "ok"
+        "ok",
     ),
     (
         "class T(BaseModel):\n    id: int = Field(alias='user_id')\n    n: str = Field(validation_alias='nm', alias='x')",
         validator(("id", ("user_id",), False, True), ("n", ("nm",), False, True)),
-        PENDING_188,  # #188 flips to "ok"
+        "ok",
     ),
     (
         "class T(BaseModel, populate_by_name=True):\n    id: int = Field(alias='user_id')\n    n: str",
         validator(("id", ("user_id", "id"), False, True), f("n")),
-        PENDING_188,  # #188 flips to "ok"
+        "ok",
     ),
     (
         (
@@ -305,12 +306,12 @@ NAMED_ROWS: Final[list[Row]] = [
             "    id: int = Field(alias='user_id')"
         ),
         validator(f("id")),
-        PENDING_188,  # #188 flips to "ok"
+        "ok",
     ),
     (
         "class T(BaseModel):\n    id: int = Field(validation_alias=AliasChoices('a', 'b'))\n    n: str",
         validator(("id", None, False, True), f("n")),
-        PENDING_188,  # #188 flips to "ok", with `note: names not checked` for the field
+        "ok",  # the checker adds `note: names not checked` for the field
     ),
     (
         (
@@ -318,28 +319,332 @@ NAMED_ROWS: Final[list[Row]] = [
             "    def pre(cls, data):\n        return data"
         ),
         validator(("id", None, False, True), ("n", None, False, True)),
-        PENDING_188,  # #188 flips to "ok", with `note: names not checked` for the model
+        "ok",  # the checker adds `note: names not checked` for the model
     ),
     (
         "class T(BaseModel):\n    model_config = ConfigDict(alias_generator=lambda name: name.upper())\n    id: int",
         validator(("id", ("ID",), False, True)),
-        # #188 gives the checker its unknown-names verdict; the runtime sees the generated aliases
-        PENDING_188,
+        # the checker can't run the generator, so its names are unknown; the runtime sees the generated aliases
+        UNKNOWN_NAMES,
     ),
     (
         "@pydantic.dataclasses.dataclass(config=ConfigDict(strict=True))\nclass T:\n    id: int\n    name: str | None",
         validator(f("id"), f("name", nullable=True)),
-        PENDING_188,  # #188 flips to "ok"
+        "ok",
     ),
     (
         "class T(BaseModel):\n    id: int\n    count: int = Field(init=False)",
         validator(f("id"), f("count")),
-        PENDING_188,  # #188 flips to "ok"; `init=False` excludes a field only on a pydantic dataclass
+        "ok",  # `init=False` excludes a field only on a pydantic dataclass
     ),
     (
         "class T(BaseModel, populate_by_name=True, validate_by_name=False):\n    id: int = Field(alias='user_id')",
         validator(("id", ("user_id",), False, True)),
-        PENDING_188,  # #188 flips to "ok"
+        "ok",
+    ),
+    # config merges through a base, and the child wins; the decorator's `config=` is read too (`class Config` is deprecated, so it is unit-tested only)
+    (
+        "class Base(BaseModel, populate_by_name=True):\n    id: int = Field(alias='u')\nclass T(Base):\n    n: str",
+        validator(("id", ("u", "id"), False, True), f("n")),
+        "ok",
+    ),
+    (
+        (
+            "class Base(BaseModel):\n    model_config = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='u')\n"
+            "class T(Base):\n    model_config = ConfigDict(validate_by_name=False)"
+        ),
+        validator(("id", ("u",), False, True)),
+        "ok",
+    ),
+    (
+        "class T(BaseModel):\n    model_config = ConfigDict(validate_by_alias=False)\n    id: int = Field(alias='u')",
+        validator(f("id")),
+        "ok",
+    ),
+    (
+        (
+            "class T(BaseModel):\n    model_config = ConfigDict(populate_by_name=True, validate_by_alias=False)\n"
+            "    id: int = Field(alias='u')"
+        ),
+        validator(("id", ("u", "id"), False, True)),
+        "ok",
+    ),
+    (
+        "@pydantic.dataclasses.dataclass(config=ConfigDict(populate_by_name=True))\nclass T:\n    id: int = Field(alias='u')",
+        validator(("id", ("u", "id"), False, True)),
+        "ok",
+    ),
+    # a before-validator in a base, a plain mixin's annotation, and an after-validator, which doesn't hide the names
+    (
+        (
+            "class Base(BaseModel):\n    @model_validator(mode='before')\n    @classmethod\n"
+            "    def pre(cls, data):\n        return data\nclass T(Base):\n    id: int"
+        ),
+        validator(("id", None, False, True)),
+        "ok",
+    ),
+    (
+        "class T(BaseModel):\n    id: int\n    @model_validator(mode='after')\n    def check(self):\n        return self",
+        validator(f("id")),
+        "ok",
+    ),
+    ("class Mixin:\n    a: int\nclass T(Mixin, BaseModel):\n    b: str", validator(f("a"), f("b")), "ok"),
+    # a literal `init=False` is the only decorator `init` pydantic takes, and excludes nothing
+    ("@pydantic.dataclasses.dataclass(init=False)\nclass T:\n    id: int", validator(f("id")), "ok"),
+    (
+        "@pydantic.dataclasses.dataclass\nclass T:\n    id: int\n    count: int = Field(init=False, default=0)",
+        validator(f("id")),
+        "ok",
+    ),
+    (
+        "class T(BaseModel):\n    id: int\n    count: Annotated[int, Field(default=1, alias='c')]",
+        validator(f("id"), ("count", ("c",), False, False)),
+        "ok",
+    ),
+    # the checker can't read a non-literal class keyword or a config that isn't `ConfigDict(...)`, and the runtime can
+    (
+        "FLAG = True\nclass T(BaseModel, populate_by_name=FLAG):\n    id: int = Field(alias='u')",
+        validator(("id", ("u", "id"), False, True)),
+        UNKNOWN_NAMES,
+    ),
+    (
+        "class T(BaseModel):\n    model_config = {'populate_by_name': True}\n    id: int = Field(alias='u')",
+        validator(("id", ("u", "id"), False, True)),
+        UNKNOWN_NAMES,
+    ),
+    # pydantic marks only the decorated class, so the runtime plans an undecorated subclass as a plain dataclass
+    (
+        ("@pydantic.dataclasses.dataclass\nclass Base:\n    id: int\nclass T(Base): ..."),
+        keyword(f("id")),
+        CHECKER_ONLY,
+    ),
+    # pydantic merges the direct bases' configs from the first to the last, so the last base wins
+    (
+        (
+            "class A(BaseModel, populate_by_name=True): ...\nclass B(BaseModel, populate_by_name=False): ...\n"
+            "class T(A, B):\n    id: int = Field(alias='u')"
+        ),
+        validator(("id", ("u",), False, True)),
+        "ok",
+    ),
+    (
+        (
+            "class A(BaseModel, populate_by_name=True): ...\nclass B(BaseModel, populate_by_name=False): ...\n"
+            "class T(B, A):\n    id: int = Field(alias='u')"
+        ),
+        validator(("id", ("u", "id"), False, True)),
+        "ok",
+    ),
+    (
+        (
+            "class A(BaseModel, populate_by_name=True): ...\nclass B(BaseModel, validate_by_alias=True): ...\n"
+            "class T(A, B, populate_by_name=False):\n    id: int = Field(alias='u')"
+        ),
+        validator(("id", ("u",), False, True)),
+        "ok",
+    ),
+    # `Field(...)` metadata is read through an alias (not through a `type` statement, whose attributes pydantic drops with a warning, so that is unit-tested only)
+    (
+        "Id = Annotated[int, Field(alias='user_id')]\nclass T(BaseModel):\n    id: Id",
+        validator(("id", ("user_id",), False, True)),
+        "ok",
+    ),
+    (
+        "from typing import TypeAlias\nId: TypeAlias = Annotated[int, Field(alias='user_id')]\nclass T(BaseModel):\n    id: Id",
+        validator(("id", ("user_id",), False, True)),
+        "ok",
+    ),
+    (
+        "Id = Annotated[int, Field(alias='user_id')]\nclass T(BaseModel):\n    id: 'Id'",
+        validator(("id", ("user_id",), False, True)),
+        "ok",
+    ),
+    (
+        "Id = Annotated[int, Field(alias='user_id')]\nclass T(BaseModel):\n    id: Annotated[Id, Field(gt=0)]",
+        validator(("id", ("user_id",), False, True)),
+        "ok",
+    ),
+    (
+        "Id = Annotated[int, Field(default=5)]\nclass T(BaseModel):\n    id: Id",
+        validator(("id", ("id",), False, False)),
+        "ok",
+    ),
+    (
+        "Id = Annotated[int, Field(alias='user_id')]\n@pydantic.dataclasses.dataclass\nclass T:\n    id: Id",
+        validator(("id", ("user_id",), False, True)),
+        "ok",
+    ),
+    # a `ClassVar` or `KW_ONLY` behind an alias or `Annotated` is no field of a pydantic class
+    ("CV = ClassVar[int]\nclass T(BaseModel):\n    a: int\n    b: CV", validator(f("a")), "ok"),
+    (
+        "from typing import TypeAlias\nCV: TypeAlias = ClassVar[int]\nclass T(BaseModel):\n    a: int\n    b: CV",
+        validator(f("a")),
+        "ok",
+    ),
+    ("class T(BaseModel):\n    a: int\n    b: Annotated[ClassVar[int], 'm']", validator(f("a")), "ok"),
+    (
+        "CV = ClassVar[int]\n@pydantic.dataclasses.dataclass\nclass T:\n    a: int\n    b: CV",
+        validator(f("a")),
+        "ok",
+    ),
+    (
+        "@pydantic.dataclasses.dataclass\nclass T:\n    a: int\n    b: Annotated[ClassVar[int], 'm']",
+        validator(f("a")),
+        "ok",
+    ),
+    (
+        "K = KW_ONLY\n@pydantic.dataclasses.dataclass\nclass T:\n    a: int\n    _: K\n    b: int",
+        validator(f("a"), f("b")),
+        "ok",
+    ),
+    # pydantic follows an alias of `Annotated` to find a `ClassVar`
+    (
+        "A = Annotated\nclass T(BaseModel):\n    a: int\n    b: A[ClassVar[int], 'm']",
+        validator(f("a")),
+        "ok",
+    ),
+    ("CV = ClassVar[int]\n@dataclass\nclass T:\n    a: int\n    b: CV = 1", keyword(f("a")), "ok"),
+    # pydantic registers a before-validator of a plain mixin, and an assigned one, and runs a conditional block
+    (
+        (
+            "class Mixin:\n    @model_validator(mode='before')\n    @classmethod\n    def pre(cls, data):\n"
+            "        return data\nclass T(BaseModel, Mixin):\n    id: int"
+        ),
+        validator(("id", None, False, True)),
+        UNKNOWN_NAMES,
+    ),
+    (
+        (
+            "class Mixin:\n    @model_validator(mode='before')\n    @classmethod\n    def pre(cls, data):\n"
+            "        return data\nclass T(Mixin, BaseModel):\n    id: int"
+        ),
+        validator(("id", None, False, True)),
+        UNKNOWN_NAMES,
+    ),
+    (
+        (
+            "def g(cls, data):\n    return data\nclass T(BaseModel):\n"
+            "    f = model_validator(mode='before')(classmethod(g))\n    id: int"
+        ),
+        validator(("id", None, False, True)),
+        UNKNOWN_NAMES,
+    ),
+    (
+        (
+            "def g(cls, data, handler):\n    return data\nclass T(BaseModel):\n"
+            "    f = model_validator(mode='wrap')(classmethod(g))\n    id: int"
+        ),
+        validator(("id", None, False, True)),
+        UNKNOWN_NAMES,
+    ),
+    (
+        ("def g(self):\n    return self\nclass T(BaseModel):\n    f = model_validator(mode='after')(g)\n    id: int"),
+        validator(f("id")),
+        "ok",
+    ),
+    (
+        (
+            "class T(BaseModel):\n    if typing.TYPE_CHECKING or True:\n"
+            "        model_config = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='u')"
+        ),
+        validator(("id", ("u", "id"), False, True)),
+        UNKNOWN_NAMES,
+    ),
+    (
+        (
+            "class T(BaseModel):\n    try:\n        @model_validator(mode='before')\n        @classmethod\n"
+            "        def pre(cls, data):\n            return data\n    except Exception:\n        pass\n    id: int"
+        ),
+        validator(("id", None, False, True)),
+        UNKNOWN_NAMES,
+    ),
+    (
+        (
+            "class T(BaseModel):\n    if typing.TYPE_CHECKING:\n        pass\n    else:\n"
+            "        model_config = ConfigDict(populate_by_name=True)\n    id: int = Field(alias='u')"
+        ),
+        validator(("id", ("u", "id"), False, True)),
+        "ok",
+    ),
+    # an `= ...` value clears an `Annotated` default on a model, but not a `default_factory` or a dataclass's default
+    ("class T(BaseModel):\n    a: Annotated[int, Field(default=3)] = ...", validator(f("a")), "ok"),
+    (
+        "class T(BaseModel):\n    a: Annotated[int, Field(default_factory=int)] = ...",
+        validator(f("a", required=False)),
+        "ok",
+    ),
+    (
+        "@pydantic.dataclasses.dataclass\nclass T:\n    a: Annotated[int, Field(default=3)] = ...",
+        validator(f("a", required=False)),
+        "ok",
+    ),
+    # a redeclaration without a value takes the parent's class attribute: a `Field(...)` without a default is kept (its
+    # alias with it), and one with a default is that plain default
+    (
+        (
+            "@pydantic.dataclasses.dataclass\nclass P:\n    b: int = Field(alias='B')\n"
+            "@pydantic.dataclasses.dataclass\nclass T(P):\n    b: int"
+        ),
+        validator(("b", ("B",), False, True)),
+        "ok",
+    ),
+    (
+        (
+            "@pydantic.dataclasses.dataclass\nclass P:\n    b: int = Field(alias='B')\n"
+            "@pydantic.dataclasses.dataclass\nclass T(P):\n    b: Annotated[int, Field(alias='C')]"
+        ),
+        validator(("b", ("B",), False, True)),
+        "ok",
+    ),
+    (
+        (
+            "@pydantic.dataclasses.dataclass\nclass P:\n    b: int = Field(alias='B', default_factory=int)\n"
+            "@pydantic.dataclasses.dataclass\nclass T(P):\n    b: int"
+        ),
+        validator(("b", ("B",), False, False)),
+        "ok",
+    ),
+    (
+        (
+            "@pydantic.dataclasses.dataclass\nclass P:\n    b: int = Field(alias='B', default=1)\n"
+            "@pydantic.dataclasses.dataclass\nclass T(P):\n    b: int"
+        ),
+        validator(("b", ("b",), False, False)),
+        "ok",
+    ),
+    (
+        (
+            "@pydantic.dataclasses.dataclass\nclass P:\n    b: int = Field(alias='B')\n"
+            "@pydantic.dataclasses.dataclass\nclass Q(P):\n    b: int\n"
+            "@pydantic.dataclasses.dataclass\nclass T(Q):\n    b: int"
+        ),
+        validator(("b", ("B",), False, True)),
+        "ok",
+    ),
+    # the last of two `model_config` assignments replaces the first
+    (
+        (
+            "class T(BaseModel):\n    model_config = ConfigDict(populate_by_name=True)\n"
+            "    model_config = ConfigDict(validate_by_alias=True)\n    id: int = Field(alias='u')"
+        ),
+        validator(("id", ("u",), False, True)),
+        "ok",
+    ),
+    # the runtime accepts these mixed forms, and the checker rejects them for good (a design follow-up)
+    (
+        "@dataclass\nclass D:\n    x: int = 1\nclass T(BaseModel, D):\n    id: int",
+        validator(f("x", required=False), f("id")),
+        CHECKER_ONLY,
+    ),
+    (
+        "@pydantic.dataclasses.dataclass\nclass P:\n    x: int\n@dataclass\nclass T(P):\n    id: int",
+        keyword(f("x"), f("id")),
+        CHECKER_ONLY,
+    ),
+    (
+        "@dataclass\nclass S:\n    x: int\n@pydantic.dataclasses.dataclass\nclass T(S):\n    id: int",
+        validator(f("x"), f("id")),
+        CHECKER_ONLY,
     ),
     ("class T(BaseModel):\n    id: PositiveInt", validator(f("id")), CHECKER_ONLY),
     ("class T(BaseModel):\n    j: pydantic.Json[list[int]]", validator(f("j")), CHECKER_ONLY),

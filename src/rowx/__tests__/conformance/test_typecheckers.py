@@ -8,7 +8,7 @@ from typing import Final
 
 import pytest
 
-from rowx.__tests__.conformance.row_types import PRELUDE, ROWS
+from rowx.__tests__.conformance.row_types import PRELUDE, ROWS, UNKNOWN_NAMES
 from rowx.check.discover import discover_file
 from rowx.check.resolve import Elem, ModuleGraph, RowType, resolve_row_type
 
@@ -250,7 +250,7 @@ def test_conformance_row_matches_type_checker(
         # a divergence in the type checker, not in rowx: pinned so that a change on either side shows up
         assert isinstance(resolved, RowType)
         assert key in outcome.errors
-    elif row[2] == "ok":
+    elif row[2] in {"ok", UNKNOWN_NAMES}:
         assert isinstance(resolved, RowType)
         assert key not in outcome.errors
         revealed = outcome.reveals[key]
