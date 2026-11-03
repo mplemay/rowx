@@ -63,6 +63,11 @@ fn spellings(secret: &str, max_len: usize, out: &mut BTreeSet<String>) {
 // the raw value of each `*password` key and of the URL userinfo, with the extent of the value
 fn secret_spans(text: &str) -> Vec<(usize, usize)> {
     let bytes = text.as_bytes();
+    // `&` only delimits in the URL form; in key=value form it is part of the value
+    let url_form = {
+        let head = text.trim_start();
+        head.starts_with("postgres://") || head.starts_with("postgresql://")
+    };
     let lower = text.to_ascii_lowercase();
     let mut spans = Vec::new();
     let mut from = 0;
@@ -92,15 +97,18 @@ fn secret_spans(text: &str) -> Vec<(usize, usize)> {
                     i += 1;
                 }
             }
-            i = i.min(bytes.len());
         } else {
-            while bytes
-                .get(i)
-                .is_some_and(|b| !b.is_ascii_whitespace() && *b != b'&')
-            {
-                i += 1;
+            while let Some(&b) = bytes.get(i) {
+                if b == b'\\' && !url_form {
+                    i += 2;
+                } else if b.is_ascii_whitespace() || (url_form && b == b'&') {
+                    break;
+                } else {
+                    i += 1;
+                }
             }
         }
+        i = i.min(bytes.len());
         if i > start {
             spans.push((start, i));
             from = i;
@@ -180,6 +188,10 @@ pub fn redact(text: &str, dsn: Option<&str>) -> String {
             spellings(&crate::dsn::percent_decode(&raw), max_len, &mut secrets);
             spellings(&plain, max_len, &mut secrets);
             spellings(&crate::dsn::percent_decode(&plain), max_len, &mut secrets);
+        }
+        // the real tokeniser's view, which also sees percent-encoded keys
+        for value in crate::dsn::tokenised_secrets(dsn) {
+            spellings(&value, max_len, &mut secrets);
         }
     }
     replace_all(text, &secrets)
@@ -272,5 +284,17 @@ mod tests {
         assert_eq!(redact_secrets("xx abcdef yy", &secrets), "xx *** yy");
         assert_eq!(redact_secrets("a*b", &["*".to_owned()]), "a***b");
         assert_eq!(redact_secrets("ababa", &["aba".to_owned()]), "***");
+    }
+
+    #[test]
+    fn escapes_and_ampersands_follow_the_dsn_form() {
+        assert_eq!(
+            mask_syntax("host=h password=foo\\ bar&baz user=u"),
+            "host=h password=*** user=u"
+        );
+        let dsn = "postgres://u@h/db?%70assword=Zq9pw";
+        assert_eq!(redact("bad Zq9pw here", Some(dsn)), "bad *** here");
+        let dsn = "host=h password=Zq9\\ pw&x";
+        assert_eq!(redact("bad Zq9 pw&x here", Some(dsn)), "bad *** here");
     }
 }

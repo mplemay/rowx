@@ -60,7 +60,8 @@ def test_unrelated_parse_errors_keep_their_text_after_another_dsn_was_parsed() -
     with pytest.raises(InterfaceError) as mode:
         parse_dsn("host=h sslmode=bogus")
     assert "***" not in str(mode.value)
-    assert "bogus" in str(mode.value)
+    assert "sslmode" in str(mode.value)
+    assert "bogus" not in str(mode.value)
 
 
 def test_long_options_map_dashes_to_underscores() -> None:

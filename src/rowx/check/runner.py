@@ -3,7 +3,7 @@ import asyncio
 from collections import Counter, deque
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
-from re import DOTALL, IGNORECASE, VERBOSE, compile as re_compile, escape as re_escape, sub
+from re import DOTALL, IGNORECASE, VERBOSE, Pattern, compile as re_compile, escape as re_escape, sub
 from typing import TYPE_CHECKING, Final
 from urllib.parse import quote, unquote
 
@@ -60,6 +60,12 @@ PASSWORD_PARAM: Final = re_compile(
     r"(?P<key>password\s*=\s*)(?P<value>'(?:[^'\\]|\\.)*'?|[^\s&]+)",
     flags=IGNORECASE | DOTALL,
 )
+# key=value form: a backslash escapes the next character and `&` is part of the value
+PASSWORD_PARAM_KV: Final = re_compile(
+    r"(?P<key>password\s*=\s*)(?P<value>'(?:[^'\\]|\\.)*'?|(?:\\.|[^\s\\])+)",
+    flags=IGNORECASE | DOTALL,
+)
+URL_SCHEME: Final = re_compile(r"\s*postgres(?:ql)?://")
 USERINFO: Final = re_compile(r"(?P<key>://[^/?#\s:@]*:)(?P<value>[^/?#\s]*)@")
 
 
@@ -140,9 +146,13 @@ def _parsed_secrets(dsn: str) -> set[str]:
     return found
 
 
+def _password_param(text: str) -> Pattern[str]:
+    return PASSWORD_PARAM if URL_SCHEME.match(text) else PASSWORD_PARAM_KV
+
+
 def secrets_in(dsn: str) -> list[str]:
     raws = _parsed_secrets(dsn)
-    for pattern in (PASSWORD_PARAM, USERINFO):
+    for pattern in (_password_param(dsn), USERINFO):
         raws.update(match["value"] for match in pattern.finditer(dsn))
     found: set[str] = set()
     for raw in raws:
@@ -153,7 +163,7 @@ def secrets_in(dsn: str) -> list[str]:
 # URL userinfo and `password=` tokens are masked by syntax, so a DSN that can't be parsed is still covered
 def _mask_syntax(text: str) -> str:
     text = USERINFO.sub(lambda match: f"{match['key']}***@", text)
-    return PASSWORD_PARAM.sub(lambda match: f"{match['key']}***", text)
+    return _password_param(text).sub(lambda match: f"{match['key']}***", text)
 
 
 def redact(text: str, dsn: str) -> str:

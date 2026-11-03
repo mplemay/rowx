@@ -489,6 +489,21 @@ fn split_url(dsn: &str) -> Result<(&str, Pairs), Error> {
     Ok((base, pairs))
 }
 
+// the values of every `*password` key, by the parser's own tokenisation (decoded keys, escapes)
+pub(crate) fn tokenised_secrets(dsn: &str) -> Vec<String> {
+    let pairs = if dsn.starts_with("postgres://") || dsn.starts_with("postgresql://") {
+        split_url(dsn).map(|(_, pairs)| pairs)
+    } else {
+        split_key_value(dsn)
+    };
+    pairs
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(key, _)| key.to_ascii_lowercase().contains("password"))
+        .map(|(_, value)| value)
+        .collect()
+}
+
 pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -947,7 +962,11 @@ mod tests {
                 Err(Error::Interface(message)) => message,
                 other => format!("unexpected {other:?}"),
             };
-            assert!(text.contains("***") && !text.contains("Zq9pw"), "{text}");
+            assert!(
+                text.contains("sslmode") || text.contains("sslrootcert"),
+                "{text}"
+            );
+            assert!(!text.contains("Zq9pw"), "{text}");
         }
     }
 
@@ -979,6 +998,24 @@ mod tests {
                 !text.contains("p@ss") && !text.contains("p%40ss"),
                 "{dsn}: {text}"
             );
+        }
+    }
+
+    #[test]
+    fn option_values_are_never_echoed_in_errors() {
+        for dsn in [
+            "postgres://u@h/db?%70assword=Zq9pw&sslmode=Zq9pw",
+            "host=h password=Zq9\\ pw sslmode='Zq9 pw'",
+            "host=h password=Zq9&pw sslmode=Zq9&pw",
+            "host=h password=Zq9pw sslmode=Zq9pw",
+        ] {
+            let message = match parse(dsn) {
+                Err(Error::Interface(message)) => message,
+                other => format!("unexpected {other:?}"),
+            };
+            assert!(message.contains("unsupported sslmode"), "{dsn}: {message}");
+            assert!(!message.contains("Zq9"), "{dsn}: {message}");
+            assert!(!message.contains("pw"), "{dsn}: {message}");
         }
     }
 }
