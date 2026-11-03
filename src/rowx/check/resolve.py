@@ -1362,7 +1362,7 @@ class _Resolver:
         return expr, module
 
     # `ClassVar`, `InitVar` or `KW_ONLY`, which the dataclass module tells apart by the head of the annotation, found
-    # behind an alias; pydantic also looks through `Annotated`
+    # behind an alias; pydantic also looks through `Annotated` for a `ClassVar`
     def _special(self, annotation: ast.expr, module: _Module, *, pydantic: bool = False) -> str | None:
         specials = {"typing.ClassVar": "ClassVar", "dataclasses.InitVar": "InitVar", "dataclasses.KW_ONLY": "KW_ONLY"}
         expr = annotation
@@ -1374,15 +1374,16 @@ class _Resolver:
                     return None
             if isinstance(expr, ast.Subscript):
                 slice_ = expr.slice
+                head, head_module = self._unalias(expr.value, module)
                 if (
                     pydantic
                     and isinstance(slice_, ast.Tuple)
                     and len(slice_.elts) >= MIN_ANNOTATED
-                    and self._external_name(expr.value, module) == "typing.Annotated"
+                    and self._external_name(head, head_module) == "typing.Annotated"
+                    and self._special(slice_.elts[0], module, pydantic=True) == "ClassVar"
                 ):
-                    expr = slice_.elts[0]
-                    continue
-                head, head_module = self._unalias(expr.value, module)
+                    # pydantic unwraps `Annotated` only to find a `ClassVar`; any other head counts as written
+                    return "ClassVar"
             else:
                 head, head_module = self._unalias(expr, module)
                 if head is not expr and not isinstance(head, ast.Name | ast.Attribute):

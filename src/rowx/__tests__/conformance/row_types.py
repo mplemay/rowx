@@ -497,6 +497,12 @@ NAMED_ROWS: Final[list[Row]] = [
         validator(f("a"), f("b")),
         "ok",
     ),
+    # pydantic follows an alias of `Annotated` to find a `ClassVar`
+    (
+        "A = Annotated\nclass T(BaseModel):\n    a: int\n    b: A[ClassVar[int], 'm']",
+        validator(f("a")),
+        "ok",
+    ),
     ("CV = ClassVar[int]\n@dataclass\nclass T:\n    a: int\n    b: CV = 1", keyword(f("a")), "ok"),
     # pydantic registers a before-validator of a plain mixin, and an assigned one, and runs a conditional block
     (

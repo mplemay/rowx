@@ -1699,7 +1699,27 @@ def test_kw_only_behind_an_alias_is_no_pydantic_dataclass_field(tmp_path: Path) 
     annotated = (
         "from dataclasses import KW_ONLY\n@pdc\nclass T:\n    a: int\n    _: Annotated[KW_ONLY, 1]\n    b: int\n"
     )
-    assert names(pyd(tmp_path, annotated)) == [("a", ("a",)), ("b", ("b",))]
+    # pydantic unwraps `Annotated` only for a `ClassVar`, so this `KW_ONLY` is a field type it can't build a schema for
+    assert rejected(pyd(tmp_path, annotated)) == "invalid-row-type"
+
+
+def test_annotated_unwraps_only_for_a_class_var_in_a_pydantic_dataclass(tmp_path: Path) -> None:
+    # the runtime keeps this as a field, so the checker sees a field type (which it can't model), not an `InitVar`
+    source = "@pdc\nclass T:\n    a: int\n    b: Annotated[InitVar[int], 'm']\n"
+    resolution = pyd(tmp_path, source)
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.diagnostic is not None
+    assert "field" in resolution.diagnostic.message
+    assert "InitVar` field" not in resolution.diagnostic.message
+    nested = "@pdc\nclass T:\n    a: int\n    b: Annotated[Annotated[ClassVar[int], 1], 2]\n"
+    assert names(pyd(tmp_path, nested)) == [("a", ("a",))]
+
+
+def test_an_aliased_annotated_is_followed_to_find_a_class_var(tmp_path: Path) -> None:
+    source = "A = Annotated\nclass T(BaseModel):\n    a: int\n    b: A[ClassVar[int], 'm']\n"
+    assert names(pyd(tmp_path, source)) == [("a", ("a",))]
+    source = "A = Annotated\n@pdc\nclass T:\n    a: int\n    b: A[ClassVar[int], 'm']\n"
+    assert names(pyd(tmp_path, source)) == [("a", ("a",))]
 
 
 def test_a_stdlib_dataclass_reads_a_class_var_alias_but_not_annotated(tmp_path: Path) -> None:
