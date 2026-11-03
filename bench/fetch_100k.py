@@ -2,11 +2,14 @@ import asyncio
 import os
 import statistics
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, TypedDict
 
 import asyncpg
+from pydantic import BaseModel
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 import rowx
 from rowx.postgres import connect
@@ -25,6 +28,38 @@ INSERT INTO rowx_bench_100k
 SELECT i, 'row ' || i, now() + make_interval(secs => i) FROM generate_series(1, 100000) i
 """
 SELECT_SQL: Final[str] = "SELECT id, body, created_at FROM rowx_bench_100k"
+
+
+@dataclass(slots=True)
+class DataclassRow:
+    id: int
+    body: str
+    created_at: datetime
+
+
+class NamedTupleRow(NamedTuple):
+    id: int
+    body: str
+    created_at: datetime
+
+
+class TypedDictRow(TypedDict):
+    id: int
+    body: str
+    created_at: datetime
+
+
+class ModelRow(BaseModel):
+    id: int
+    body: str
+    created_at: datetime
+
+
+@pydantic_dataclass
+class PydanticDataclassRow:
+    id: int
+    body: str
+    created_at: datetime
 
 
 async def median_ms(run: Callable[[], Awaitable[int]]) -> float:
@@ -51,7 +86,22 @@ async def main(dsn: str) -> None:
 
         scalar = rowx.query[int](t"SELECT id FROM rowx_bench_100k")
 
+        named = {
+            "dataclass": rowx.query[DataclassRow](t"SELECT id, body, created_at FROM rowx_bench_100k"),
+            "namedtuple": rowx.query[NamedTupleRow](t"SELECT id, body, created_at FROM rowx_bench_100k"),
+            "typeddict": rowx.query[TypedDictRow](t"SELECT id, body, created_at FROM rowx_bench_100k"),
+            "model": rowx.query[ModelRow](t"SELECT id, body, created_at FROM rowx_bench_100k"),
+            "pydantic_dataclass": rowx.query[PydanticDataclassRow](t"SELECT id, body, created_at FROM rowx_bench_100k"),
+        }
+        named_ms: dict[str, float] = {}
+
         async with await connect(dsn) as conn:
+            for name, statement in named.items():
+
+                async def run_named(statement: rowx.query[Any] = statement) -> int:
+                    return len(await statement.all(conn))
+
+                named_ms[name] = await median_ms(run_named)
 
             async def run_rowx() -> int:
                 return len(await select.all(conn))
@@ -83,10 +133,13 @@ async def main(dsn: str) -> None:
         await setup.execute(DROP_SQL)
         await setup.close()
 
-    print("rowx_ms asyncpg_ms ratio fetch_ms fetch_vs_all scalar_ms scalar_fetch_ms")  # ruff: ignore[print]
+    print(  # ruff: ignore[print]
+        "rowx_ms asyncpg_ms ratio fetch_ms fetch_vs_all scalar_ms scalar_fetch_ms "
+        + " ".join(f"{n}_ms" for n in named_ms),
+    )
     print(  # ruff: ignore[print]
         f"{rowx_ms:.1f} {asyncpg_ms:.1f} {rowx_ms / asyncpg_ms:.2f} {fetch_ms:.1f} {fetch_ms / rowx_ms:.2f}"
-        f" {scalar_ms:.1f} {scalar_fetch_ms:.1f}",
+        f" {scalar_ms:.1f} {scalar_fetch_ms:.1f} " + " ".join(f"{ms:.1f}" for ms in named_ms.values()),
     )
 
 
