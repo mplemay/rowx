@@ -44,7 +44,9 @@ rowx **pre-parses** the DSN, in both URL and key=value forms. It removes `sslmod
 - **Redaction** is by secret value, not by DSN syntax. Every occurrence of the password, and of the value of any `extra`
   key containing `password` (such as `sslpassword`), is redacted in any exception message, `repr`, wrapped cause's
   `repr()` and checker diagnostic, whichever DSN form carried it (URL userinfo, `?password=`, or key=value
-  `password=`). `ConnectOptions.__repr__` shows `extra` values as `'<redacted>'`.
+  `password=`). Redaction replaces the decoded value and every raw spelling of it in the DSN text (percent-encoded,
+  quote- or backslash-escaped), and also masks URL userinfo and `password=` tokens syntactically, so a DSN that fails to
+  parse is still covered. Empty secrets are skipped. `ConnectOptions.__repr__` shows `extra` values as `'<redacted>'`.
 - `ping()` sends an empty simple query. `reset()` runs `RESET_QUERY` ([Release](#release)).
 - `close()` works as follows:
   - If the state is `Busy` or `Settling`, it cancels and settles first ([Cancellation](#cancellation-cancelrs)).
@@ -436,10 +438,10 @@ generated `__init__` with keyword arguments, which validates the same fields.
 ### Session encoding watch
 
 tokio-postgres forces `client_encoding=UTF8` at startup, but it ignores a later `SET client_encoding = 'SJIS'` run by
-application SQL, and rowx would keep sending UTF-8, silently storing text in the wrong encoding. The watch is a
-backstop against that drift. It is not what protects array structure: binary arrays and ranges do
-([Binary arrays and ranges](#binary-arrays-and-ranges)), so a statement that slips through can suffer data drift but
-not element injection.
+application SQL, and rowx would keep sending UTF-8, silently storing text in the wrong encoding. The watch is a backstop
+against that drift. It lands after binary arrays and ranges (#219), so it is never the only protection. It is not what
+protects array structure: binary arrays and ranges do ([Binary arrays and ranges](#binary-arrays-and-ranges)), so a
+statement that slips through can suffer data drift but not element injection.
 
 - **Watching.** `conn.rs` drives the tokio-postgres `Connection` with
   `poll_fn(|cx| { let r = conn.poll_message(cx); check(&conn); r })`, so the check runs on **every** poll, including
@@ -461,8 +463,7 @@ not element injection.
 - **Residual window.** The server sends `ParameterStatus` before the `SET`'s `CommandComplete`, but `poll_read` may
   forward `ReadyForQuery` to a waiting client on another worker before the check runs. Only a statement already queued
   behind the `SET` can slip through. Several `ParameterStatus` messages processed in one poll are observed only as the
-  final value, so `SET client_encoding = 'SJIS'; SET client_encoding = 'UTF8'` in one batch goes unseen. That is
-  drift-only, because arrays and ranges are binary.
+  final value. That is drift-only, because arrays and ranges are binary.
 - **Cost.** A legitimate `SET standard_conforming_strings = off` now costs a connection. This is documented.
 - `DateStyle` and `IntervalStyle` are not watched, because every decoder rowx uses is binary.
 
@@ -621,6 +622,7 @@ There is no round trip on the hot path.
   - **`DEALLOCATE ALL` is not added**, because rowx's own protocol-level prepared statements are cached per connection
     and it would destroy them. SQL-level `PREPARE` is therefore **unsupported across checkouts**: a statement prepared
     with `PREPARE` may survive in the session or not. Use bound parameters.
+  - `RESET ALL` returns custom placeholder GUCs (`app.tenant`) to the empty string, so their values don't carry over.
   - `RESET ALL` restores `client_encoding`, `search_path` and other settings, but not the role or session
     authorization, which `RESET SESSION AUTHORIZATION` covers. The
     [session encoding watch](#session-encoding-watch) catches an encoding change that happens during a checkout.
@@ -633,10 +635,18 @@ There is no round trip on the hot path.
   - a cancelled operation;
   - any 25P02 error;
   - SQL whose first keyword is `BEGIN`, `START` or `SAVEPOINT`.
+- **The flag is a heuristic, so the reset carries an idle guard.** The first-keyword scan ends a `--` comment at `\n` or
+  `\r`. When the flag is clear, rowx prepends `SELECT 1/(pg_catalog.now() = pg_catalog.statement_timestamp())::int;` to
+  the reset batch, whether it is the default or a custom reset query. From idle, `now()` equals `statement_timestamp()`
+  inside the batch. Inside an explicit transaction it doesn't, so the guard fails, the reset fails and the connection is
+  closed. `RESET_QUERY` text is unchanged. With `reset_query=None` there is no reset batch, so no guard runs, and
+  `reset_query=None` remains unsafe (below).
 - When the flag is set, `ROLLBACK` is sent even with a custom `reset_query` or `reset_query=None`. As in asyncpg, an
   open transaction always ends. It takes one round trip, and **MUST** be correct from idle, in-transaction and
   failed-transaction states.
-- `reset_query=None` turns the reset query off, and `reset=` adds an async hook that runs after it.
+- `reset_query=None` turns the reset query off, and `reset=` adds an async hook that runs after it. With
+  `reset_query=None` and a `reset=` hook, any `ROLLBACK` is sent before the hook runs, so the hook sees an idle
+  connection.
 - **Plain-awaited connections:** `await pool.release(conn)`, or `await conn.close()` on the lease.
 - **Early exit from a pooled stream** drains the remaining rows before the reset runs. Pool size stays correct while it
   drains.

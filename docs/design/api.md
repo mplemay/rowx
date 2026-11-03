@@ -279,7 +279,9 @@ class Migrator:
   - **Redaction is by secret value, not by DSN syntax.** Every occurrence of the password, and of the value of any
     `extra` key containing `password` (such as `sslpassword`), is redacted in any exception message, `repr`, wrapped
     cause's `repr()` and checker diagnostic, whichever DSN form carried it (URL userinfo, `?password=`, or key=value
-    `password=`).
+    `password=`). Redaction replaces the decoded value and every raw spelling of it in the DSN text (percent-encoded,
+    quote- or backslash-escaped). It also masks URL userinfo and `password=` tokens syntactically, so a DSN that fails
+    to parse is still covered. Empty secrets are skipped.
   - **`channel_binding`** is a typed key. It is parsed from the DSN (`channel_binding=require`) into the typed field,
     never carried in `extra`, and maps to tokio-postgres's `ChannelBinding`. An `extra` key `channel_binding` and an
     invalid value are each an `InterfaceError`, so there is one source. `None` leaves the driver default (`prefer`).
@@ -825,6 +827,14 @@ override.
   - a non-`str` value or part, an empty name, an empty tuple or an empty part;
   - a part longer than 63 UTF-8 bytes (Postgres would truncate it silently);
   - a part with a C0 or C1 control character (U+0000 to U+001F, and U+007F to U+009F), NUL included.
+- **Placement.** The compiler tracks the lexical state of the static text before each `:ident`: single-quoted strings
+  (including `''`), `E''` strings with backslash escapes, dollar-quoted strings (`$tag$…$tag$`), double-quoted
+  identifiers, `--` line comments (ending at `\n` or `\r`) and nested `/* */` block comments. It carries that state
+  across flattened nested templates. An `:ident` anywhere other than plain code raises
+  `TypeError("an ident interpolation must not be inside a string literal or comment")`.
+- **`conversion` and `format_spec` are untrusted too.** Their types are untrusted like values, so the compiler examines
+  them only after an exact `type(x) is str` check; anything else is `TypeError`. A `str` subclass is never compared,
+  truthiness-tested or otherwise called.
 - **A runtime `ident` spec is not a separate path.** In `{x:{spec}}`, a `spec` that evaluates to `"ident"` turns a bound
   value into a quoted identifier. At runtime that can't be told apart from a literal `:ident`, so it takes the same
   path and gets the same checks. The checker is what flags it: it inspects the interpolations of `query_unchecked`
@@ -837,8 +847,7 @@ override.
 ### Template recognition
 
 `compile_template` recognises a `Template`, both its argument and a nested value, with an exact type check
-(`type(x) is Template`; `Template` can't be subclassed), never `isinstance`, because `isinstance` can be satisfied by
-objects that are not `Template`s.
+(`type(x) is Template`; `Template` can't be subclassed), never `isinstance`, so only an exact `Template` is compiled.
 
 - A nested value that isn't exactly a `Template` is bound as a parameter, so an unsupported object fails in the encoder
   with `EncodeError`.

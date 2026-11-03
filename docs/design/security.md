@@ -46,9 +46,11 @@ Each guarantee below has a test. The sections that follow say how each row of th
   own statements resolve to a shadowing object ([History table](migrations.md#history-table)). A test runs migrations
   under `search_path = evil, pg_catalog`, and a test asserts that rowx's internal SQL constants, `RESET_QUERY`
   included, call no unqualified function.
+- **`:ident` is accepted only in code position;** the compiler enforces it
+  ([`:ident`](api.md#ident-identifiers)).
 - **A `Template` is recognised by exact type.** `compile_template` accepts a `Template`, as its argument and as a
-  nested value, only when `type(x) is Template` (`Template` can't be subclassed), never through `isinstance`, because
-  `isinstance` can be satisfied by objects that are not `Template`s. A nested value that isn't exactly a `Template` is
+  nested value, only when `type(x) is Template` (`Template` can't be subclassed), never through `isinstance`, so only an
+  exact `Template` is compiled. A nested value that isn't exactly a `Template` is
   bound as a parameter, so an unsupported object fails in the encoder with `EncodeError`
   ([t-string compilation](api.md#template-recognition)).
 
@@ -81,8 +83,10 @@ Each guarantee below has a test. The sections that follow say how each row of th
 - Neither diagnostics nor exceptions may include a password. Redaction is by secret **value**, not by DSN syntax: every
   occurrence of the password, and of the value of any `extra` key containing `password` (such as `sslpassword`), is
   redacted in any exception message, `repr`, wrapped cause's `repr()` and checker diagnostic, whichever DSN form carried
-  it (URL userinfo, `?password=`, or key=value `password=`). `ConnectOptions.__repr__` shows `extra` values as
-  `'<redacted>'` ([API](api.md#rowxpostgres)). Parameter values are redacted from Rust debug logs
+  it (URL userinfo, `?password=`, or key=value `password=`). Redaction replaces the decoded value and every raw spelling
+  of it in the DSN text (percent-encoded, escaped), and also masks URL userinfo and `password=` tokens syntactically, so
+  a DSN that fails to parse is still covered; empty secrets are skipped. `ConnectOptions.__repr__` shows `extra` values
+  as `'<redacted>'` ([API](api.md#rowxpostgres)). Parameter values are redacted from Rust debug logs
   ([Codec](driver.md#codec-rowx-postgres-pysrccodec-rowx-postgressrcwire)).
 
 ## TLS and authentication
@@ -130,6 +134,8 @@ Each guarantee below has a test. The sections that follow say how each row of th
   - The batch runs under the previous checkout's session state, so it starts with `RESET SESSION AUTHORIZATION` (which
     `RESET ALL` does not cover) and then `RESET ALL`, and its function is `pg_catalog`-qualified
     ([Release](driver.md#release)).
+  - The reset batch starts with an idle guard when rowx believes no transaction is open, so a reset inside an open
+    transaction fails and the connection is discarded ([Release](driver.md#release)).
   - A temp table matters because `pg_temp` is searched first for relations, so a leftover one would shadow an
     application table for the next checkout.
   - `DEALLOCATE ALL` is not part of the reset, because rowx's protocol-level statements are cached per connection.
