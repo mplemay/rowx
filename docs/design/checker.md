@@ -223,7 +223,11 @@ to query call sites, because a helper can build a template in one place and pass
   ([Parameter type inference](#parameter-type-inference-checkparamspy-sqlty-style)).
 - An indirect use of the class, such as `T = Template` or passing `Template` as a value, fails, because the call can't
   be seen.
-- `Interpolation(...)` is allowed, because its value is always bound (or quoted by `:ident`).
+- `Interpolation(...)` is allowed, because its value is always bound (or quoted by `:ident`), but only when its
+  `conversion` and `format_spec` arguments (the 3rd and 4th positional arguments, or the keywords `conversion=` and
+  `format_spec=`) are absent or literals (`None` or a `str` literal). A non-literal one is `template-construction`, for
+  the same reason a non-literal format spec in `query_unchecked` is `dynamic-query`: at runtime it could evaluate to
+  `"ident"`. A starred or `**` argument to `Interpolation(...)` is also `template-construction`.
 - There are **no ignore comments**. The only escape is to exclude the path in config.
 - **Best-effort.** The rule reads source only. `getattr`, `eval`, code outside the include roots and generated code can
   still build a template. `Template(...)` with a non-literal string is the one raw-SQL path, and the docs name it as
@@ -425,7 +429,7 @@ field add `note: field defined at path:line:col`.
 | `syntax-error` | The file can't be decoded or parsed. |
 | `indirect-query` | A disallowed use of `query`/`query_unchecked` ([Discovery](#discovery-checkdiscoverpy)). |
 | `dynamic-query` | The argument is not one inline t-string, or it has a conversion, format spec, or evident nested Template. In a `query_unchecked` call, a non-literal format spec on an interpolation. |
-| `template-construction` | A call that resolves to `string.templatelib.Template` takes anything other than `str` literals, inline t-strings and `Interpolation(...)` calls; has a starred argument; `t"…" + <operand>` where the operand is neither an inline t-string nor evidently a `Template`; or an indirect use of the class (`T = Template`). Help: "build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL". Applies to every file under the include roots; no ignore comments. |
+| `template-construction` | A call that resolves to `string.templatelib.Template` takes anything other than `str` literals, inline t-strings and `Interpolation(...)` calls; an `Interpolation(...)` call with a non-literal `conversion` or `format_spec`, or a starred or `**` argument; has a starred argument; `t"…" + <operand>` where the operand is neither an inline t-string nor evidently a `Template`; or an indirect use of the class (`T = Template`). Help: "build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL". Applies to every file under the include roots; no ignore comments. |
 | `unresolved-row-type` | `T` can't be resolved statically. |
 | `invalid-row-type` | `T` isn't derivable from the [Row-type grammar and runtime row plan](api.md#row-type-grammar-and-runtime-row-plan) grammar. |
 | `sql-error` | The server rejected the SQL at Parse. The diagnostic carries sqlstate, message, detail and hint. Help text is added for 42P18/42P08 ("cast the parameter: `{x}::int`") and for 42501. |
