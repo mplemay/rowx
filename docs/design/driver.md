@@ -328,6 +328,24 @@ parameter wrapper's `Debug` impl **MUST** redact values.
 build **should** take no longer than asyncpg does on the same machine. The spike measured
 35.7 ms against asyncpg's 46.5 ms. This is tracked by a non-gating benchmark job.
 
+**Named row types.** `bench/fetch_100k.py` times `all()` over the same 100k rows with each named form next to the tuple
+and scalar baselines. The figures are the median of five runs of the script (each the median of seven timed runs) on a
+release build on macOS, with Postgres 18 in Docker. There is no threshold: only the tuple and scalar paths are gated.
+
+| Row type | `all()` (ms) |
+|---|---|
+| scalar `int` | 13.7 |
+| `tuple[int, str, datetime]` | 54.5 |
+| `TypedDict` | 60.1 |
+| `@dataclass(slots=True)` | 69.0 |
+| `NamedTuple` | 68.3 |
+| pydantic `BaseModel` | 112.2 |
+| pydantic dataclass | 143.7 |
+
+asyncpg fetches the same rows in 50.8 ms. A `TypedDict` costs one dict per row, and a dataclass or NamedTuple one
+Python-level constructor call. A `BaseModel` adds validation (`validate_python`), and a pydantic dataclass calls its
+generated `__init__` with keyword arguments, which validates the same fields.
+
 ## Statement cache (`stmt_cache.rs`)
 
 - An LRU per connection, keyed by SQL string, with capacity `statement_cache_size`

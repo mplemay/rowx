@@ -1,9 +1,10 @@
 import asyncio
 import os
 import sys
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from rowx import query
 from rowx.postgres import connect
@@ -13,6 +14,20 @@ if TYPE_CHECKING:
 
 type AuthorRow = tuple[int, str, str | None]
 type BookRow = tuple[int, str, Decimal, date | None, list[str]]
+
+
+# a dataclass is matched by column name, and a field with a default needs no column
+@dataclass(frozen=True, slots=True)
+class Author:
+    id: int
+    name: str
+    bio: str | None = None
+
+
+# a TypedDict row is a plain dict
+class AuthorCount(TypedDict):
+    name: str
+    books: int
 
 
 async def list_authors(conn: Connection) -> list[AuthorRow]:
@@ -27,6 +42,22 @@ async def books_by(conn: Connection, author: str) -> list[BookRow]:
         JOIN authors a ON a.id = b.author_id
         WHERE a.name = {author}
         ORDER BY b.title
+        """,
+    ).all(conn)
+
+
+async def author_named(conn: Connection, name: str) -> Author | None:
+    return await query[Author](t"SELECT id, name, bio FROM authors WHERE name = {name}").optional(conn)
+
+
+async def author_counts(conn: Connection) -> list[AuthorCount]:
+    return await query[AuthorCount](
+        t"""
+        SELECT a.name, count(b.id) AS "books!"
+        FROM authors a
+        LEFT JOIN books b ON b.author_id = a.id
+        GROUP BY a.name
+        ORDER BY a.name
         """,
     ).all(conn)
 
@@ -64,6 +95,12 @@ async def main(dsn: str) -> None:
 
         for _, title, price, published, tags in await books_by(conn, "Ursula Le Guin"):
             print(f"{title} ({published or 'unpublished'}) ${price} [{', '.join(tags)}]")  # ruff: ignore[print]
+
+        if (author := await author_named(conn, "Octavia Butler")) is not None:
+            print(f"{author.name}: {author.bio or 'no bio'}")  # ruff: ignore[print]
+
+        for counts in await author_counts(conn):
+            print(f"{counts['name']} has {counts['books']} books")  # ruff: ignore[print]
 
         print("tagged:", ", ".join(await books_tagged(conn, ["history", "fantasy"])))  # ruff: ignore[print]
 

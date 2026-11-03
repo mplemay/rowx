@@ -39,8 +39,9 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
   `int` field, are reported too.
 - **Models with unknown names are partly checked.** For `AliasChoices`, `AliasPath`, a non-literal alias, a
   `model_validator(mode="before" | "wrap")`, an `alias_generator` or an unreadable `model_config`, the checker skips
-  `missing-column`, `unexpected-column`, `duplicate-column` and `ambiguous-column` for the whole model, and adds a
-  `names not checked` note. Type and nullability checks still run on columns that map to a field with known names. At
+  `missing-column`, `unexpected-column`, `duplicate-column` and `ambiguous-column` for the whole model. A
+  `names not checked` note is attached to any diagnostic the model does emit, and a clean model with unknown names is
+  silent. Type and nullability checks still run on columns that map to a field with known names. At
   runtime a column that matches no known name passes through with the default decoder, so an `interval` column there
   has no `Interval` flag, and two columns with one name collapse to the last one in the dict.
 - **No column rename for dataclasses and TypedDicts.** There is no equivalent of sqlx's `rename`, so a column that
@@ -51,10 +52,10 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
   `rowx check`, because it can't see what they do. The runtime accepts them, and a constructor failure surfaces as
   `RowConstructError`.
 - **Not supported:** attrs, msgspec, `Protocol`, `collections.namedtuple`, `RootModel`, pydantic v1, a dataclass with
-  `init=False` or an `InitVar` (also on a pydantic dataclass), a named row with no fields, a nullable named row
-  (`User | None`, use `.optional()`), named parameters, and row classes from installed packages (the checker resolves
-  classes in the project only). Pydantic needs 2.11 or later. A plan caches `__pydantic_validator__`, so a later
-  `model_rebuild(force=True)` isn't seen by a plan that is already built.
+  `init=False` or an `InitVar` (a pydantic dataclass accepts `init=False` but rejects `InitVar`), a named row with no
+  fields, a nullable named row (`User | None`, use `.optional()`), named parameters, and row classes from installed
+  packages (the checker resolves classes in the project only). Pydantic needs 2.11 or later. A plan caches
+  `__pydantic_validator__`, so a later `model_rebuild(force=True)` isn't seen by a plan that is already built.
 - **Types are not checked at runtime**, except by pydantic. A class whose annotations don't match its columns fails
   only in `rowx check`.
 
