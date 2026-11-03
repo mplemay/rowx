@@ -8,17 +8,17 @@ fn percent_encode(s: &str, lower: bool) -> String {
     } else {
         b"0123456789ABCDEF"
     };
-    let mut out = Vec::with_capacity(s.len());
+    let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b);
+            out.push(char::from(b));
         } else {
-            out.push(b'%');
-            out.push(digits[usize::from(b >> 4)]);
-            out.push(digits[usize::from(b & 15)]);
+            out.push('%');
+            out.push(char::from(digits[usize::from(b >> 4)]));
+            out.push(char::from(digits[usize::from(b & 15)]));
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 // the quote- and backslash-escaped spellings of a key=value DSN
@@ -185,13 +185,44 @@ pub fn redact(text: &str, dsn: Option<&str>) -> String {
     replace_all(text, &secrets)
 }
 
+// every occurrence of every secret is found on the original text (overlapping ones too), then
+// overlapping and adjacent ones are merged and masked once, so no secret can re-match a mask
 fn replace_all(text: &str, secrets: &BTreeSet<String>) -> String {
-    let mut ordered: Vec<&String> = secrets.iter().collect();
-    ordered.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    let mut out = text.to_owned();
-    for secret in ordered {
-        out = out.replace(secret.as_str(), MASK);
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for secret in secrets {
+        let mut from = 0;
+        while let Some(found) = text.get(from..).and_then(|rest| rest.find(secret.as_str())) {
+            let start = from + found;
+            spans.push((start, start + secret.len()));
+            from = start
+                + text
+                    .get(start..)
+                    .and_then(|r| r.chars().next())
+                    .map_or(1, char::len_utf8);
+        }
     }
+    spans.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut current: Option<(usize, usize)> = None;
+    for (start, end) in spans {
+        match current {
+            Some((s, e)) if start <= e => current = Some((s, e.max(end))),
+            Some((s, e)) => {
+                out.push_str(text.get(cursor..s).unwrap_or_default());
+                out.push_str(MASK);
+                cursor = e;
+                current = Some((start, end));
+            }
+            None => current = Some((start, end)),
+        }
+    }
+    if let Some((s, e)) = current {
+        out.push_str(text.get(cursor..s).unwrap_or_default());
+        out.push_str(MASK);
+        cursor = e;
+    }
+    out.push_str(text.get(cursor..).unwrap_or_default());
     mask_syntax(&out)
 }
 
@@ -232,5 +263,14 @@ mod tests {
         assert_eq!(redact_secrets("a zq-secret b", &secrets), "a *** b");
         assert_eq!(redact_secrets("a invalid b", &secrets), "a invalid b");
         assert_eq!(redact("a invalid b", None), "a invalid b");
+    }
+
+    #[test]
+    fn overlapping_secrets_are_merged_before_masking() {
+        let secrets = vec!["abcd".to_owned(), "cdef".to_owned()];
+        assert_eq!(redact_secrets("abcdef", &secrets), "***");
+        assert_eq!(redact_secrets("xx abcdef yy", &secrets), "xx *** yy");
+        assert_eq!(redact_secrets("a*b", &["*".to_owned()]), "a***b");
+        assert_eq!(redact_secrets("ababa", &["aba".to_owned()]), "***");
     }
 }

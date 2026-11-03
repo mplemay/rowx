@@ -15,14 +15,23 @@ pub struct ParsedDsn {
     pub config: Config,
     pub tls: TlsSettings,
     // the password and `*password` extras, which an error on the connect path must not echo
-    secrets: Vec<String>,
+    secrets: Secrets,
+}
+
+// the count only, so a Debug print of the parsed options never shows a secret
+struct Secrets(Vec<String>);
+
+impl fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{} redacted>", self.0.len())
+    }
 }
 
 impl ParsedDsn {
     /// Masks the secrets of these options in an `Interface` message; other errors pass through.
     #[must_use]
     pub fn redact_error(&self, err: Error) -> Error {
-        redact_interface(err, &self.secrets)
+        redact_interface(err, &self.secrets.0)
     }
 }
 
@@ -292,7 +301,12 @@ impl ConnectOptions {
                     let (key, value) = setting
                         .split_once('=')
                         .ok_or_else(|| invalid("malformed options"))?;
-                    upsert(&mut self.server_settings, key, value.to_owned());
+                    // `ParseLongOption` maps `-` to `_` in the name of a `-c` setting as well
+                    upsert(
+                        &mut self.server_settings,
+                        &key.replace('-', "_"),
+                        value.to_owned(),
+                    );
                 }
                 None => leftover.push(escape_option(&token)),
             }
@@ -377,7 +391,7 @@ impl ConnectOptions {
         Ok(ParsedDsn {
             config,
             tls,
-            secrets: self.secrets(),
+            secrets: Secrets(self.secrets()),
         })
     }
 }
@@ -893,6 +907,20 @@ mod tests {
             ]
         );
         assert!(ConnectOptions::from_dsn("host=h options='--1a-b=1'").is_err());
+        let opts = ConnectOptions::from_dsn("host=h options='-c search-path=x'")?;
+        assert_eq!(
+            opts.server_settings,
+            vec![("search_path".to_owned(), "x".to_owned())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn debug_output_never_carries_a_secret() -> Result<(), Error> {
+        let parsed = ConnectOptions::from_dsn("host=h password=Zq9pwSecret")?.build()?;
+        let shown = format!("{parsed:?}");
+        assert!(!shown.contains("Zq9"), "{shown}");
+        assert!(shown.contains("<1 redacted>"), "{shown}");
         Ok(())
     }
 

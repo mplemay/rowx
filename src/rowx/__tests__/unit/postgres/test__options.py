@@ -143,3 +143,8 @@ def test_invalid_options_name_the_key_and_never_the_value(options: ConnectOption
 def test_dashed_extra_keys_are_still_rejected() -> None:
     with pytest.raises(InterfaceError):
         parse_dsn("postgres://u@h/db?bad-key=1")
+
+
+def test_dash_in_a_c_option_name_maps_to_an_underscore() -> None:
+    opts = ConnectOptions.from_dsn("host=h options='-c search-path=x'")
+    assert opts.server_settings == {"search_path": "x"}

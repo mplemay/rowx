@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from json import dumps
-from re import compile as re_compile
 from typing import TYPE_CHECKING, Final, Literal, assert_never
+from unicodedata import category
 
 from rowx.check.sourcemap import LINE_PATTERN
 
@@ -13,14 +13,13 @@ if TYPE_CHECKING:
     from rowx.postgres._vocab import NullReasonName
 
 TAB_WIDTH: Final[int] = 4
-# C0 and C1 controls other than newline and tab, which a terminal would act on, and the format and
-# line or paragraph separator characters (bidi overrides, zero-width marks, U+2028) that can disguise text
-CONTROL_CHARS: Final = re_compile(
-    r"[\x00-\x08\x0b-\x1f\x7f-\x9f"
-    r"\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f"
-    r"\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a"
-    r"\U000e0001\U000e0020-\U000e007f]"
-)
+# kept: newline and tab, the joiners that real text needs (ZWNJ, ZWJ) and the soft hyphen
+KEPT_CHARS: Final = frozenset("\n\t\u200c\u200d\u00ad")
+# C1 bytes decoded with surrogateescape, which a terminal could act on once re-encoded
+ESCAPED_C1: Final = range(0xDC80, 0xDCA0)
+# Cc (controls), Zl and Zp (line and paragraph separators) and Cf (format characters: bidi overrides, isolates,
+# zero-width marks, BOM); built per character, since a compiled class of all of Unicode costs over 100 ms at import
+STRIPPED_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 # `Diagnostic` carries what every rule has; the rest is only known to some rules
@@ -118,8 +117,14 @@ def _source_lines(source: str) -> list[str]:
     return [line.rstrip("\r\n") for line in LINE_PATTERN.findall(source)]
 
 
+def _is_stripped(char: str) -> bool:
+    if char in KEPT_CHARS:
+        return False
+    return ord(char) in ESCAPED_C1 or category(char) in STRIPPED_CATEGORIES
+
+
 def strip_controls(text: str) -> str:
-    return CONTROL_CHARS.sub("", text)
+    return "".join(char for char in text if not _is_stripped(char))
 
 
 def _expand(text: str) -> str:

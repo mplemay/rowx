@@ -3,7 +3,7 @@ import asyncio
 from collections import Counter, deque
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
-from re import DOTALL, IGNORECASE, VERBOSE, compile as re_compile, sub
+from re import DOTALL, IGNORECASE, VERBOSE, compile as re_compile, escape as re_escape, sub
 from typing import TYPE_CHECKING, Final
 from urllib.parse import quote, unquote
 
@@ -156,24 +156,32 @@ def _mask_syntax(text: str) -> str:
     return PASSWORD_PARAM.sub(lambda match: f"{match['key']}***", text)
 
 
-def _split_secret(text: str, secret: str) -> list[tuple[str, bool]]:
-    pieces = text.split(secret)
-    out: list[tuple[str, bool]] = [(pieces[0], False)]
-    for piece in pieces[1:]:
-        out.extend([("", True), (piece, False)])
-    return out
-
-
 def redact(text: str, dsn: str) -> str:
     # the whole URL goes first so a password is never left half-replaced
     text = text.replace(dsn, "<database url>") if dsn else text
-    # longest spelling first; a masked span is kept apart, so it is never scanned again
-    parts: list[tuple[str, bool]] = [(text, False)]
-    for secret in secrets_in(dsn):
-        parts = [
-            piece for chunk, masked in parts for piece in ([(chunk, True)] if masked else _split_secret(chunk, secret))
-        ]
-    return _mask_syntax("".join("***" if masked else chunk for chunk, masked in parts))
+    # a spelling longer than the text can't occur in it
+    if not (secrets := [secret for secret in secrets_in(dsn) if len(secret) <= len(text)]):
+        return _mask_syntax(text)
+    # every occurrence of every spelling is found on the original text (a lookahead, so occurrences may overlap),
+    # then overlapping and adjacent ones are merged and masked once
+    pattern = re_compile("(?=(" + "|".join(re_escape(secret) for secret in secrets) + "))")
+    out: list[str] = []
+    cursor = 0
+    span: list[int] | None = None
+    for match in pattern.finditer(text):
+        start, end = match.start(), match.end(1)
+        if span is not None and start <= span[1]:
+            span[1] = max(span[1], end)
+            continue
+        if span is not None:
+            out.extend((text[cursor : span[0]], "***"))
+            cursor = span[1]
+        span = [start, end]
+    if span is not None:
+        out.extend((text[cursor : span[0]], "***"))
+        cursor = span[1]
+    out.append(text[cursor:])
+    return _mask_syntax("".join(out))
 
 
 async def _connect(dsn: str, timeout_ms: int) -> Connection:

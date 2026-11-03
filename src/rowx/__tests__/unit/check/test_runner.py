@@ -142,3 +142,10 @@ def test_aliases_come_only_from_as_clauses() -> None:
     )
     assert [ident for _, ident in quoted_aliases(sql)] == ["one!", "two?", "three!", 'fo"ur!']
     assert [sql[offset] for offset, _ in quoted_aliases(sql)] == ['"'] * 4
+
+
+def test_redact_merges_overlapping_secrets_before_masking() -> None:
+    assert redact("abcdef", "host=h password=abcd sslpassword=cdef") == "***"
+    assert redact("xx abcdef yy", "host=h password=abcd sslpassword=cdef") == "xx *** yy"
+    assert redact("a*b", "host=h password=*") == "a***b"
+    assert redact("ababa", "host=h password=aba") == "***"

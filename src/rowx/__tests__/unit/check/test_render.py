@@ -384,10 +384,21 @@ def test_strip_controls_removes_format_and_separator_characters() -> None:
     assert strip_controls("p\u00e4 \u4e2d") == "p\u00e4 \u4e2d"
 
 
-def test_strip_controls_covers_every_format_and_separator_codepoint() -> None:
+def test_strip_controls_keeps_joiners_and_soft_hyphen() -> None:
+    kept = "a\u200cb\u200dc\u00add\ne\tf"
+    assert strip_controls(kept) == kept
+
+
+def test_strip_controls_covers_every_other_control_format_and_separator() -> None:
+    kept = {0x0A, 0x09, 0x200C, 0x200D, 0x00AD}
     for code in range(sys.maxunicode + 1):
-        if unicodedata.category(chr(code)) in {"Cf", "Zl", "Zp"}:
+        if code not in kept and unicodedata.category(chr(code)) in {"Cc", "Cf", "Zl", "Zp"}:
             assert not strip_controls(chr(code)), hex(code)
+
+
+def test_strip_controls_removes_escaped_c1_bytes() -> None:
+    assert strip_controls("a\udc85b") == "ab"
+    assert strip_controls("a\udc7fb\udca0") == "a\udc7fb\udca0"
 
 
 def test_text_output_strips_bidi_overrides() -> None:

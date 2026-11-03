@@ -1,3 +1,4 @@
+import asyncio
 import pickle  # ruff: ignore[suspicious-pickle-import]
 from datetime import timedelta
 from pathlib import Path
@@ -27,7 +28,7 @@ from rowx.errors import (
     RowNotFound,
     RowShapeError,
 )
-from rowx.postgres import Migration, MigrationResult
+from rowx.postgres import ConnectOptions, Migration, MigrationResult, connect
 
 ALL_ERRORS: Final[list[type[Error]]] = [
     InterfaceError,
@@ -203,3 +204,27 @@ def test_migration_errors_take_keyword_arguments() -> None:
     assert (order.version, order.latest) == (2, 5)
     failed = MigrationFailedError(message="failed", version=1, path=None, dirty=False, applied=(), error=FAILURE_CAUSE)
     assert (failed.path, failed.dirty, failed.applied) == (None, False, ())
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://u:Zq9p%40ss@h:notaport/db",
+        "host=h port=zz password=Zq9p@ss",
+        "host=h password='Zq9p@ss",
+        "postgresql://u:Zq9p%40ss@[unparseable/db",
+    ],
+)
+def test_dsn_errors_never_carry_the_password(dsn: str) -> None:
+    with pytest.raises(InterfaceError) as caught:
+        ConnectOptions.from_dsn(dsn)
+    for text in (str(caught.value), repr(caught.value), repr(caught.value.__cause__)):
+        assert "Zq9p" not in text
+
+
+def test_connect_path_errors_never_carry_the_password() -> None:
+    options = ConnectOptions(host="h", password="Zq9pw", sslmode="bogus-Zq9pw")  # ruff: ignore[hardcoded-password-func-arg]
+    with pytest.raises(InterfaceError) as caught:
+        asyncio.run(connect(options))
+    for text in (str(caught.value), repr(caught.value), repr(caught.value.__cause__)):
+        assert "Zq9pw" not in text
