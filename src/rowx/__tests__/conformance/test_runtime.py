@@ -2,6 +2,7 @@ import asyncio
 import sys
 import types
 from dataclasses import dataclass, field
+from importlib import import_module
 from string.templatelib import Template
 from typing import TYPE_CHECKING, Final, cast
 
@@ -9,7 +10,15 @@ import pytest
 
 import rowx._core.postgres as core_postgres
 from rowx import query
-from rowx.__tests__.conformance.row_types import NAMED_ROWS, PRELUDE, ROWS, NamedPlan, Plan
+from rowx.__tests__.conformance.row_types import (
+    IMPORTED_TYPE_VARIABLE_CASES,
+    NAMED_ROWS,
+    PRELUDE,
+    ROWS,
+    TYPE_NAME_ROWS,
+    NamedPlan,
+    Plan,
+)
 from rowx._core.postgres import RowShape
 from rowx._rowplan import row_plan
 from rowx.errors import InterfaceError
@@ -17,6 +26,7 @@ from rowx.postgres import Connection, connect
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 type Evaluate = Callable[[str], object]
 
@@ -161,3 +171,29 @@ def test_conformance_ok_row_against_db(schema: str, row: tuple[str, str], expect
             return await query[t](Template(sql)).one(conn)  # ty: ignore[invalid-type-form]
 
     assert asyncio.run(body()) == expected
+
+
+@pytest.mark.parametrize(("source", "type_name"), TYPE_NAME_ROWS)
+def test_the_type_name_of_a_generic_row_is_the_canonical_text(source: str, type_name: str, evaluate: Evaluate) -> None:
+    assert row_plan(evaluate(source)).type_name == type_name
+
+
+@pytest.mark.parametrize(("name", "files", "expected"), IMPORTED_TYPE_VARIABLE_CASES)
+def test_type_variables_imported_from_other_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, files: dict[str, str], expected: NamedPlan | str
+) -> None:
+    for filename, source in files.items():
+        (tmp_path / filename).write_text(source)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for filename in files:
+        monkeypatch.delitem(sys.modules, filename.removesuffix(".py"), raising=False)
+    try:
+        t = import_module("main").T
+        if isinstance(expected, str):
+            with pytest.raises(InterfaceError):
+                fetch_plan(t)
+        else:
+            assert fetch_plan(t) == expected, name
+    finally:
+        for filename in files:
+            sys.modules.pop(filename.removesuffix(".py"), None)

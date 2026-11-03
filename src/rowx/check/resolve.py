@@ -284,7 +284,22 @@ class _Class:
     name: str
 
 
-type _Value = _External | _ModuleRef | _Alias | _Class
+# a module-level `TypeVar(...)`, `TypeVarTuple(...)` or `ParamSpec(...)`: `var` is the name it is bound to and `name` the
+# one it is given, which a `type_name` shows
+@dataclass(slots=True, frozen=True, eq=False)
+class _TypeVar:
+    module: _Module
+    var: str
+    name: str
+    kind: str
+    default: ast.expr | None
+
+    @property
+    def key(self) -> str:
+        return f"{self.module.path}:{self.var}"
+
+
+type _Value = _External | _ModuleRef | _Alias | _Class | _TypeVar
 
 
 @dataclass(slots=True, frozen=True)
@@ -292,13 +307,15 @@ class _Tuple:
     elems: tuple[Elem, ...]
 
 
-# a type parameter of a generic alias or class; `default` is its PEP 696 default, read in `module`
+# a type parameter of a generic alias or class; `default` is its PEP 696 default, read in `module`, and `key` is what an
+# argument is bound under: the name of a PEP 695 parameter, else the identity of the module-level type variable
 @dataclass(slots=True, frozen=True, eq=False)
 class _TParam:
     name: str
     kind: str
     default: ast.expr | None
     module: _Module
+    key: str
 
 
 # a type argument, read where it was written: the module, the names in scope there, and the hop chain
@@ -938,6 +955,9 @@ class _Resolver:
             case "class" if isinstance(binding.node, ast.ClassDef):
                 return _Class(module, binding.node, binding.node.name)
             case "call":
+                if (typevar := self._typevar(module, name, binding)) is not None:
+                    self._free.add((module.path, name))
+                    return typevar
                 return self._functional(module, name, binding)
             case "other":
                 msg = f"`{name}` is not bound by an import or a type alias"
@@ -1049,6 +1069,11 @@ class _Resolver:
                 raise _external_reject(qualname, in_field=self._in_field)
             case _Class():
                 return _Node((_NamedRef(value),), none=False)
+            case _TypeVar():
+                if value.kind == "TypeVar" and value.key in self._env:
+                    return self._eval_arg(self._env[value.key])
+                msg = f"`{value.name}` is a type variable, which isn't a row type"
+                raise _invalid(msg)
             case _ModuleRef():
                 msg = "a module isn't a row type"
                 raise _invalid(msg)
@@ -1071,11 +1096,16 @@ class _Resolver:
             self._in_field, self._in_alias = flags
 
     def _expand_alias(self, alias: _Alias, site: _Site) -> _Node:
+        alias = replace(alias, params=self._alias_params(alias))
+        # Python gives a bare `X = tuple[T, str]` no defaults: it is the generic itself
+        if not alias.type_stmt and alias.params and not site.args:
+            msg = f"the type parameter `{alias.params[0].name}` of `{alias.name}` is not bound"
+            raise _invalid(msg, help_=f"subscript the alias, for example `{alias.name}[int]`")
         env = self._bind(alias.name, alias.params, site)
         if self.alias is None:
             self.alias = AliasSite(path=alias.module.path, span=alias.site)
         if alias.params and self.alias.generic is None:
-            arguments = ", ".join(f"{p.name} = {self._text(env[p.name])}" for p in alias.params)
+            arguments = ", ".join(f"{p.name} = {self._text(env[p.key])}" for p in alias.params)
             where = f"{alias.module.path}:{alias.site.line}:{alias.site.col}"
             generic = f"generic alias `{alias.name}` defined at {where}, with {arguments}"
             self.alias = replace(self.alias, generic=generic)
@@ -1104,32 +1134,94 @@ class _Resolver:
         env: dict[str, _Arg] = {}
         for index, param in enumerate(params):
             if index < len(site.args):
-                env[param.name] = _Arg(
-                    site.args[index], site.module, site.env, site.chain, site.in_field, site.in_alias
-                )
+                env[param.key] = _Arg(site.args[index], site.module, site.env, site.chain, site.in_field, site.in_alias)
             elif param.default is not None:
-                env[param.name] = _Arg(param.default, param.module, dict(env), (), self._in_field, self._in_alias)
+                env[param.key] = _Arg(param.default, param.module, dict(env), (), self._in_field, self._in_alias)
         return env
 
-    # the text of an argument as `type_name` shows it: names bound by an enclosing generic are replaced by their own
-    # arguments, and a dotted name is shortened to its last part, as `__name__` is
+    # the text of an argument as `type_name` shows it, which is the runtime's: names bound by an enclosing generic are
+    # replaced by their own arguments, a plain alias by its target, a dotted name is shortened to its last part as
+    # `__name__` is, `Optional[X]` and `Union[A, B]` are `X | None` and `A | B`, and `Annotated` shows only its type
     def _text(self, arg: _Arg) -> str:
-        return self._render(arg.expr, arg.env)
+        return " | ".join(self._parts(arg.expr, arg.module, arg.env, 0))
 
-    def _render(self, node: ast.expr, env: dict[str, _Arg]) -> str:
+    # the members of a union, flattened and without repeats, or the single text of anything else
+    def _parts(self, node: ast.expr, module: _Module, env: dict[str, _Arg], depth: int) -> list[str]:
+        if depth > MAX_HOPS:
+            return [ast.unparse(node)]
         match node:
-            case ast.Name(id=name):
-                return self._text(env[name]) if name in env else name
-            case ast.Attribute(attr=attr):
-                return attr
-            case ast.Constant(value=None):
-                return "None"
+            case ast.Name(id=name) if name in env:
+                return self._parts(env[name].expr, env[name].module, env[name].env, depth + 1)
+            case ast.Name() | ast.Attribute():
+                return self._ref_parts(node, module, env, depth)
+            case ast.BinOp(op=ast.BitOr(), left=left, right=right):
+                members = [left, right]
+            case ast.Subscript(value=head, slice=inner):
+                parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
+                match self._external_name(head, module):
+                    case "typing.Optional" if len(parts) == 1:
+                        members = [parts[0], ast.Constant(value=None)]
+                    case "typing.Union":
+                        members = parts
+                    case "typing.Annotated" if len(parts) >= MIN_ANNOTATED:
+                        return self._parts(parts[0], module, env, depth)
+                    case _:
+                        members = []
+            case _:
+                members = []
+        if not members:
+            return [self._render(node, module, env, depth)]
+        return list(dict.fromkeys(text for member in members for text in self._parts(member, module, env, depth)))
+
+    def _render(self, node: ast.expr, module: _Module, env: dict[str, _Arg], depth: int) -> str:
+        if depth > MAX_HOPS:
+            return ast.unparse(node)
+        match node:
+            case ast.Name() | ast.Attribute():
+                return " | ".join(self._ref_parts(node, module, env, depth))
             case ast.Subscript(value=value, slice=inner):
                 parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
-                return f"{self._render(value, env)}[{', '.join(self._render(part, env) for part in parts)}]"
-            case ast.BinOp(op=ast.BitOr(), left=left, right=right):
-                return f"{self._render(left, env)} | {self._render(right, env)}"
+                if (plain := self._render_plain_alias(value, parts, module, env, depth)) is not None:
+                    return plain
+                shown = ", ".join(" | ".join(self._parts(part, module, env, depth + 1)) for part in parts)
+                return f"{self._render(value, module, env, depth + 1)}[{shown}]"
+            case ast.BinOp(op=ast.BitOr()):
+                return " | ".join(self._parts(node, module, env, depth + 1))
         return ast.unparse(node)
+
+    def _ref_parts(
+        self, node: ast.Name | ast.Attribute, module: _Module, env: dict[str, _Arg], depth: int
+    ) -> list[str]:
+        fallback = [node.id if isinstance(node, ast.Name) else node.attr]
+        try:
+            value = self._resolve_ref(node, module, ())
+        except RejectError:
+            return fallback
+        match value:
+            case _TypeVar() if value.key in env:
+                arg = env[value.key]
+                return self._parts(arg.expr, arg.module, arg.env, depth + 1)
+            case _TypeVar():
+                return [value.name]
+            case _Class():
+                return [value.name]
+            case _Alias(type_stmt=False) if not self._alias_params(value):
+                return self._parts(value.expr, value.module, {}, depth + 1)
+        return fallback
+
+    # `Row[int]` of a plain `Row = tuple[T, str]` is `tuple[int, str]`
+    def _render_plain_alias(
+        self, head: ast.expr, parts: list[ast.expr], module: _Module, env: dict[str, _Arg], depth: int
+    ) -> str | None:
+        try:
+            value = self._constructor(self._resolve_ref(head, module, ()))
+            if not (isinstance(value, _Alias) and not value.type_stmt and (params := self._alias_params(value))):
+                return None
+            site = _Site(tuple(parts), module, env, ())
+            inner = self._bind(value.name, params, site)
+        except RejectError:
+            return None
+        return " | ".join(self._parts(value.expr, value.module, inner, depth + 1))
 
     @staticmethod
     def _normalize(qualname: str) -> str:
@@ -1146,9 +1238,10 @@ class _Resolver:
             value = self._resolve_ref(value.expr, value.module, value.chain)
         return value
 
-    # a subscripted `type` alias is substituted, and a subscripted class is a named row to be substituted
+    # a subscripted generic alias is substituted (a plain `X = tuple[T, str]` is one when it uses a type variable), and a
+    # subscripted class is a named row to be substituted
     def _eval_generic(self, base: _Value, site: _Site) -> _Node | None:
-        if isinstance(base, _Alias) and base.type_stmt:
+        if isinstance(base, _Alias) and (base.type_stmt or self._alias_params(base)):
             return self._expand_alias(base, site)
         if isinstance(base, _Class):
             return _Node((_NamedRef(base, site),), none=False)
@@ -1401,25 +1494,63 @@ class _Resolver:
         for node in nodes:
             match node:
                 case ast.TypeVar():
-                    found.append(_TParam(node.name, "TypeVar", node.default_value, module))
+                    found.append(_TParam(node.name, "TypeVar", node.default_value, module, node.name))
                 case ast.TypeVarTuple():
-                    found.append(_TParam(node.name, "TypeVarTuple", node.default_value, module))
+                    found.append(_TParam(node.name, "TypeVarTuple", node.default_value, module, node.name))
                 case ast.ParamSpec():
-                    found.append(_TParam(node.name, "ParamSpec", node.default_value, module))
+                    found.append(_TParam(node.name, "ParamSpec", node.default_value, module, node.name))
         return tuple(found)
 
-    # a module-level `T = TypeVar("T")`, `TypeVarTuple("Ts")` or `ParamSpec("P")`
-    def _typevar(self, name: str, module: _Module) -> _TParam | None:
-        match module.bindings.get(name):
-            case [_Binding(kind="call", node=ast.Call() as call)]:
-                kind = (self._external_name(call.func, module) or "").removeprefix("typing.")
-                if kind in {"TypeVar", "TypeVarTuple", "ParamSpec"}:
-                    default = next((kw.value for kw in call.keywords if kw.arg == "default"), None)
-                    return _TParam(name, kind, default, module)
-        return None
+    # `T = TypeVar("T")`, `TypeVarTuple("Ts")` or `ParamSpec("P")`, from `typing` or `typing_extensions`
+    def _typevar(self, module: _Module, var: str, binding: _Binding) -> _TypeVar | None:
+        call = binding.node
+        if not isinstance(call, ast.Call):
+            return None
+        kind = (self._external_name(call.func, module) or "").removeprefix("typing.")
+        if kind not in {"TypeVar", "TypeVarTuple", "ParamSpec"}:
+            return None
+        default = next((kw.value for kw in call.keywords if kw.arg == "default"), None)
+        match call.args:
+            case [ast.Constant(value=str() as name), *_]:
+                return _TypeVar(module, var, name, kind, default)
+        return _TypeVar(module, var, var, kind, default)
+
+    @staticmethod
+    def _tparam(typevar: _TypeVar) -> _TParam:
+        return _TParam(typevar.name, typevar.kind, typevar.default, typevar.module, typevar.key)
+
+    # the type variables in `expr`, depth first in order of first appearance, as `typing` collects a generic's
+    # `__parameters__`: a quoted name and the metadata of an `Annotated` are not collected
+    def _collect(self, expr: ast.AST, module: _Module, found: dict[str, _TypeVar]) -> None:
+        match expr:
+            case ast.Constant():
+                return
+            case ast.Name() | ast.Attribute():
+                try:
+                    value = self._resolve_ref(expr, module, ())
+                except RejectError:
+                    return
+                if isinstance(value, _TypeVar):
+                    found.setdefault(value.key, value)
+                return
+            case ast.Subscript(value=head, slice=ast.Tuple(elts=[first, _, *_])) if (
+                self._external_name(head, module) == "typing.Annotated"
+            ):
+                self._collect(first, module, found)
+                return
+        for child in ast.iter_child_nodes(expr):
+            self._collect(child, module, found)
+
+    # the parameters of a plain `X = tuple[T, str]` alias, which are the type variables it uses
+    def _alias_params(self, alias: _Alias) -> tuple[_TParam, ...]:
+        if alias.type_stmt:
+            return alias.params
+        found: dict[str, _TypeVar] = {}
+        self._collect(alias.expr, alias.module, found)
+        return tuple(self._tparam(typevar) for typevar in found.values())
 
     # the type parameters of a class: its `type_params`, else the `Generic[...]` base, else the type variables its bases
-    # are subscripted with, in order of first appearance
+    # are subscripted with, in the order `typing` collects them
     def _params(self, klass: _Class) -> tuple[_TParam, ...]:
         node = klass.node
         if not isinstance(node, ast.ClassDef):
@@ -1437,16 +1568,10 @@ class _Resolver:
         spans = (
             [generic.slice] if generic is not None else [b.slice for b in node.bases if isinstance(b, ast.Subscript)]
         )
-        found: dict[str, _TParam] = {}
+        found: dict[str, _TypeVar] = {}
         for span in spans:
-            for child in ast.walk(span):
-                if (
-                    isinstance(child, ast.Name)
-                    and child.id not in found
-                    and (p := self._typevar(child.id, klass.module))
-                ):
-                    found[child.id] = p
-        return tuple(found.values())
+            self._collect(span, klass.module, found)
+        return tuple(self._tparam(typevar) for typevar in found.values())
 
     # the steps from `root` to `owner` along the bases that are subscripted or not, so a field's own type parameters can
     # be bound through each base's arguments (`Child[U](Base[U])`)
@@ -1474,9 +1599,6 @@ class _Resolver:
                 if _class_key(value) in seen:
                     continue
                 seen.add(_class_key(value))
-                if isinstance(base, ast.Subscript) and sum(1 for step in path if step.site.args) >= MAX_HOPS:
-                    msg = f"`{root.name}` has generic bases deeper than {MAX_HOPS}"
-                    raise _unresolved(msg)
                 args = ()
                 if isinstance(base, ast.Subscript):
                     args = tuple(base.slice.elts) if isinstance(base.slice, ast.Tuple) else (base.slice,)
@@ -1484,6 +1606,32 @@ class _Resolver:
                 pending.append((value, (*path, step)))
         self._paths[key] = found
         return found
+
+    # the runtime binds every generic base of the row's class, whether a field comes from it or not, so a chain of more
+    # than `MAX_HOPS` subscripted bases fails however deep the fields are
+    def _check_depth(self, root: _Class) -> None:
+        pending = [(root, 0)]
+        seen = {_class_key(root)}
+        while pending:
+            klass, depth = pending.pop(0)
+            if not isinstance(klass.node, ast.ClassDef):
+                continue
+            for base in klass.node.bases:
+                target = base.value if isinstance(base, ast.Subscript) else base
+                if (
+                    not (
+                        isinstance(target, ast.Name | ast.Attribute)
+                        and isinstance(value := self._ref(target, klass.module), _Class)
+                    )
+                    or _class_key(value) in seen
+                ):
+                    continue
+                seen.add(_class_key(value))
+                subscripted = isinstance(base, ast.Subscript)
+                if subscripted and depth >= MAX_HOPS:
+                    msg = f"`{root.name}` has generic bases deeper than {MAX_HOPS}"
+                    raise _invalid(msg)
+                pending.append((value, depth + int(subscripted)))
 
     def _project_bases(self, klass: _Class) -> list[_Class]:
         if not isinstance(klass.node, ast.ClassDef):
@@ -2120,6 +2268,9 @@ class _Resolver:
             msg = f"`{klass.name}` has no fields"
             raise _invalid(msg)
         owner = self._owner(klass, site, typeddict=info.form == "typeddict")
+        # a pydantic model's bases are resolved by pydantic, with no limit
+        if info.form != "model":
+            self._check_depth(klass)
         fields = tuple(
             self._field(source, owner, names=names, reason=reason)
             for source in sources
@@ -2142,8 +2293,8 @@ class _Resolver:
         env = self._bind(klass.name, params, site or _Site((), klass.module, {}, ())) if params else {}
         if not params:
             return _Owner(klass, klass.name, typeddict, env, None)
-        shown = ", ".join(self._text(env[p.name]) for p in params)
-        with_ = ", ".join(f"{p.name} = {self._text(env[p.name])}" for p in params)
+        shown = ", ".join(self._text(env[p.key]) for p in params)
+        with_ = ", ".join(f"{p.name} = {self._text(env[p.key])}" for p in params)
         span = klass.module.span(klass.node)
         generic = f"`{klass.name}` is generic, defined at {klass.module.path}:{span.line}:{span.col}, with {with_}"
         return _Owner(klass, f"{klass.name}[{shown}]", typeddict, env, generic)

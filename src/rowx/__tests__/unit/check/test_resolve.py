@@ -2077,6 +2077,30 @@ def test_a_generic_alias_note_names_the_definition_and_the_arguments(tmp_path: P
     )
 
 
+def test_a_plain_alias_of_type_variables_is_a_generic_alias(tmp_path: Path) -> None:
+    source = "from typing import TypeVar\nA = TypeVar('A')\nB = TypeVar('B')\nPair = tuple[B, A]\nT = Pair[int, str | None]\n"
+    resolution = named(tmp_path, source)
+    assert leaves(resolution) == [("int", False), ("str", True)]
+    alias = row_type(resolution).alias
+    assert alias is not None
+    assert (
+        alias.notes()[-1] == f"generic alias `Pair` defined at {tmp_path / 'main.py'}:4:1, with B = int, A = str | None"
+    )
+
+
+def test_a_plain_assignment_of_a_generic_alias_is_the_same_generic_alias(tmp_path: Path) -> None:
+    source = "from typing import TypeVar\nA = TypeVar('A')\nPair = tuple[A, str]\nOuter = Pair\nT = Outer[int | None]\n"
+    assert leaves(named(tmp_path, source)) == [("int", True), ("str", False)]
+
+
+@pytest.mark.parametrize("subscript", ["", "[int, str]", "[()]"])
+def test_a_plain_generic_alias_is_rejected_for_an_unbound_parameter_or_a_wrong_count(
+    tmp_path: Path, subscript: str
+) -> None:
+    source = f"from typing import TypeVar\nA = TypeVar('A', default=str)\nPair = tuple[A, int]\nT = Pair{subscript}\n"
+    assert rejected(named(tmp_path, source)) == "invalid-row-type"
+
+
 def test_a_rejection_inside_a_substituted_field_names_the_class_and_the_arguments(tmp_path: Path) -> None:
     resolution = named(tmp_path, CRATE + "T = Crate[int | str]\n")
     assert rejected(resolution) == "invalid-row-type"
@@ -2115,7 +2139,23 @@ def test_generic_bases_are_followed_for_16_subscripted_bases_and_rejected_beyond
         return "\n".join(lines) + f"\nT = C{length - 1}[int]\n"
 
     assert len(row_type(named(tmp_path, chain(17))).fields) == 17
-    assert rejected(named(tmp_path / "deep", chain(18))) == "unresolved-row-type"
+    assert rejected(named(tmp_path / "deep", chain(18))) == "invalid-row-type"
+
+
+def test_the_whole_generic_base_chain_is_counted_even_when_only_the_row_class_has_fields(tmp_path: Path) -> None:
+    def chain(length: int) -> str:
+        lines = [DATACLASS, "@dataclass\nclass C0[X]:\n    pass"]
+        lines += [
+            f"@dataclass\nclass C{i}[X](C{i - 1}[X]):\n    {'f: X' if i == length else 'pass'}"
+            for i in range(1, length + 1)
+        ]
+        return "\n".join(lines) + f"\nT = C{length}[int]\n"
+
+    assert len(row_type(named(tmp_path, chain(16))).fields) == 1
+    resolution = named(tmp_path / "deep", chain(20))
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.diagnostic is not None
+    assert "deeper than 16" in resolution.diagnostic.message
 
 
 def test_a_generic_row_type_never_imports_the_user_module(tmp_path: Path) -> None:

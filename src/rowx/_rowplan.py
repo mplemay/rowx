@@ -153,9 +153,11 @@ def _alias_value(t: TypeAliasType) -> object:
 def _type_text(t: object) -> str:
     if t is None or t is type(None):
         return "None"
-    if isinstance(t, type | TypeAliasType):
+    if isinstance(t, type | TypeAliasType | TypeVar):
         return t.__name__
     origin, args = get_origin(t), get_args(t)
+    if origin is Annotated:
+        return _type_text(args[0])
     if origin in {Union, types.UnionType}:
         return " | ".join(_type_text(arg) for arg in args)
     if isinstance(origin, type | TypeAliasType) and args:
@@ -177,23 +179,26 @@ def _subst(t: object, mapping: dict[object, object]) -> object:
         raise _reject(t, f"it can't take {mapping!r}: {err}") from err
 
 
-# each parameter bound to its argument, or else to its PEP 696 default, which may name the parameters before it
+# each parameter bound to its argument, or else to its PEP 696 default; either may name the parameters before it,
+# because Python fills a default in unsubstituted (`C[int].__args__ == (int, list[A])`)
 def _bind(owner: object, name: str, params: tuple[object, ...], args: tuple[object, ...]) -> dict[object, object]:
+    typevars: list[TypeVar] = []
     for param in params:
-        if isinstance(param, TypeVarTuple | ParamSpec):
-            kind = "TypeVarTuple" if isinstance(param, TypeVarTuple) else "ParamSpec"
-            raise _reject(owner, f"`{name}` has the {kind} `{param.__name__}`, which is not supported")
-    required = sum(1 for param in params if not param.has_default())  # ty: ignore[unresolved-attribute]
+        if isinstance(param, TypeVar):
+            typevars.append(param)
+            continue
+        kind = "TypeVarTuple" if isinstance(param, TypeVarTuple) else "ParamSpec"
+        raise _reject(owner, f"`{name}` has the {kind} `{getattr(param, '__name__', param)}`, which is not supported")
+    required = [param for param in typevars if not param.has_default()]
     if not args and required:
-        first = next(param for param in params if not param.has_default())  # ty: ignore[unresolved-attribute]
-        msg = f"the type parameter `{first.__name__}` of `{name}` is not bound; subscript it, for example `{name}[int]`"  # ty: ignore[unresolved-attribute]
+        msg = f"the type parameter `{required[0].__name__}` of `{name}` is not bound; subscript it, for example `{name}[int]`"
         raise _reject(owner, msg)
-    if not required <= len(args) <= len(params):
-        takes = str(len(params)) if required == len(params) else f"{required} to {len(params)}"
+    if not len(required) <= len(args) <= len(typevars):
+        takes = str(len(typevars)) if len(required) == len(typevars) else f"{len(required)} to {len(typevars)}"
         raise _reject(owner, f"`{name}` takes {takes} type arguments, but {len(args)} were given")
     mapping: dict[object, object] = {}
-    for index, param in enumerate(params):
-        mapping[param] = args[index] if index < len(args) else _subst(param.__default__, mapping)  # ty: ignore[unresolved-attribute]
+    for index, param in enumerate(typevars):
+        mapping[param] = _subst(args[index] if index < len(args) else param.__default__, mapping)
     return mapping
 
 

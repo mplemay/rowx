@@ -2,7 +2,16 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from rowx.__tests__.conformance.row_types import PRELUDE, ROWS, UNKNOWN_NAMES, NamedPlan, Plan
+from rowx.__tests__.conformance.row_types import (
+    IMPORTED_TYPE_VARIABLE_CASES,
+    PRELUDE,
+    REJECTED,
+    ROWS,
+    TYPE_NAME_ROWS,
+    UNKNOWN_NAMES,
+    NamedPlan,
+    Plan,
+)
 from rowx.check.discover import discover_file
 from rowx.check.resolve import ModuleGraph, resolve_row_type
 
@@ -48,3 +57,33 @@ def test_conformance_row_checker_verdict(
     else:
         assert resolution.diagnostic is not None
         assert resolution.diagnostic.rule == verdict
+
+
+@pytest.mark.parametrize(("source", "type_name"), TYPE_NAME_ROWS)
+def test_the_type_name_of_a_generic_row_is_the_canonical_text(tmp_path: Path, source: str, type_name: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(f'{PRELUDE}{source}\nfrom rowx import query\nquery[T](t"select 1")\n')
+    [call] = discover_file(path).calls
+    resolution = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert resolution.diagnostic is None
+    assert resolution.row_type is not None
+    assert resolution.row_type.type_name == type_name
+
+
+@pytest.mark.parametrize(("name", "files", "expected"), IMPORTED_TYPE_VARIABLE_CASES)
+def test_type_variables_imported_from_other_modules(
+    tmp_path: Path, name: str, files: dict[str, str], expected: NamedPlan | str
+) -> None:
+    for filename, source in files.items():
+        (tmp_path / filename).write_text(source)
+    main = tmp_path / "main.py"
+    main.write_text(f'{files["main.py"]}\nfrom rowx import query\nquery[T](t"select 1")\n')
+    [call] = discover_file(main).calls
+    resolution = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    if isinstance(expected, str):
+        assert resolution.diagnostic is not None, name
+        assert resolution.diagnostic.rule == REJECTED
+        return
+    assert resolution.diagnostic is None, name
+    assert resolution.row_type is not None
+    assert tuple((f.key, f.names, f.elem.nullable, f.required) for f in resolution.row_type.fields) == expected[3]
