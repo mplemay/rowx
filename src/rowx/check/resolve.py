@@ -1,6 +1,6 @@
 import ast
 import builtins
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
 from sys import stdlib_module_names
@@ -167,6 +167,12 @@ class Elem:
 class AliasSite:
     path: Path
     span: Span
+    # the first generic alias followed, with the call-site arguments it was given, as a note
+    generic: str | None = None
+
+    def notes(self) -> tuple[str, ...]:
+        where = f"alias defined at {self.path}:{self.span.line}:{self.span.col}"
+        return (where,) if self.generic is None else (where, self.generic)
 
 
 # `names` is None when the column names a field accepts can't be known statically; `span` is where the field is defined
@@ -180,6 +186,8 @@ class NamedField:
     span: Span
     # why `names` is None, for the "names not checked" note
     reason: str | None = None
+    # the generic class the field was substituted through and its call-site arguments, for a note
+    generic: str | None = None
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -209,7 +217,7 @@ class _Binding:
     level: int = 0
     name: str = ""
     expr: ast.expr | None = None
-    generic: bool = False
+    params: tuple[ast.type_param, ...] = ()
     type_stmt: bool = False
     node: ast.stmt | ast.expr | None = None
     site: Span | None = None
@@ -262,8 +270,10 @@ class _Alias:
     expr: ast.expr
     site: Span
     chain: tuple[tuple[Path, str], ...]
-    # a `type X = …` statement makes a `TypeAliasType`, which can't be subscripted
+    # a `type X[T] = …` statement makes a `TypeAliasType`, which is subscripted to substitute its parameters
     type_stmt: bool = False
+    name: str = ""
+    params: tuple[_TParam, ...] = ()
 
 
 # a `class` statement, or a functional `NamedTuple(...)` / `TypedDict(...)` call; `name` is its `__name__`
@@ -274,7 +284,22 @@ class _Class:
     name: str
 
 
-type _Value = _External | _ModuleRef | _Alias | _Class
+# a module-level `TypeVar(...)`, `TypeVarTuple(...)` or `ParamSpec(...)`: `var` is the name it is bound to and `name` the
+# one it is given, which a `type_name` shows
+@dataclass(slots=True, frozen=True, eq=False)
+class _TypeVar:
+    module: _Module
+    var: str
+    name: str
+    kind: str
+    default: ast.expr | None
+
+    @property
+    def key(self) -> str:
+        return f"{self.module.path}:{self.var}"
+
+
+type _Value = _External | _ModuleRef | _Alias | _Class | _TypeVar
 
 
 @dataclass(slots=True, frozen=True)
@@ -282,9 +307,64 @@ class _Tuple:
     elems: tuple[Elem, ...]
 
 
-@dataclass(slots=True, frozen=True)
+# a type parameter of a generic alias or class; `default` is its PEP 696 default, read in `module`, and `key` is what an
+# argument is bound under: the name of a PEP 695 parameter, else the identity of the module-level type variable
+@dataclass(slots=True, frozen=True, eq=False)
+class _TParam:
+    name: str
+    kind: str
+    default: ast.expr | None
+    module: _Module
+    key: str
+
+
+# a type argument, read where it was written: the module, the names in scope there, and the hop chain
+@dataclass(slots=True, frozen=True, eq=False)
+class _Arg:
+    expr: ast.expr
+    module: _Module
+    env: dict[str, _Arg]
+    chain: tuple[tuple[Path, str], ...]
+    in_field: bool
+    in_alias: bool
+
+
+# where a generic was subscripted: the arguments and what they are read in
+@dataclass(slots=True, frozen=True, eq=False)
+class _Site:
+    args: tuple[ast.expr, ...]
+    module: _Module
+    env: dict[str, _Arg]
+    chain: tuple[tuple[Path, str], ...]
+    in_field: bool = False
+    in_alias: bool = False
+    # `Alias[()]` names no arguments but is a subscript, unlike a bare `Alias`
+    explicit: bool = False
+
+
+# the named class a row's fields belong to: its `type_name`, the type parameters bound at the call site, and the note
+# that names its definition and arguments
+@dataclass(slots=True, frozen=True, eq=False)
+class _Owner:
+    klass: _Class
+    type_name: str
+    typeddict: bool
+    env: dict[str, _Arg]
+    generic: str | None
+
+
+# one step from a class to a base it subscripts (`Base[U]`); `args` are read in `module`
+@dataclass(slots=True, frozen=True, eq=False)
+class _Rebind:
+    klass: _Class
+    site: _Site
+
+
+@dataclass(slots=True, frozen=True, eq=False)
 class _NamedRef:
     klass: _Class
+    # None for a class that wasn't subscripted
+    site: _Site | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -310,6 +390,8 @@ class _Source:
     default: bool = False
     total: bool = True
     pydantic: _PydField | None = None
+    # the class that declares the field, whose type parameters its annotation names
+    owner: _Class | None = None
 
 
 # the config keys the checker reads. A bool or None is a literal value; a str is why the key can't be read, which makes
@@ -480,7 +562,7 @@ def _collect_definition(module: _Module, stmt: ast.stmt, *, tc: bool) -> None:
         case ast.TypeAlias(name=ast.Name(id=name)):
             module.bind(
                 name,
-                _Binding("alias", expr=stmt.value, generic=bool(stmt.type_params), type_stmt=True, site=site, tc=tc),
+                _Binding("alias", expr=stmt.value, params=tuple(stmt.type_params), type_stmt=True, site=site, tc=tc),
             )
         case ast.AnnAssign(target=ast.Name(id=name), value=value) if value is not None and _is_type_alias_annotation(
             stmt.annotation,
@@ -757,7 +839,11 @@ class _Resolver:
         # set while an alias body is evaluated: a string there stays unsupported, but a `TYPE_CHECKING` name is still
         # rejected, because a `TypeAliasType` evaluates its value when the field is read
         self._in_alias = False
+        # the type parameters in scope while a generic's body is evaluated, each bound to its argument
+        self._env: dict[str, _Arg] = {}
         self._infos: dict[ClassKey, _Info] = {}
+        self._free: set[tuple[Path, str]] = set()
+        self._paths: dict[tuple[ClassKey, ClassKey], tuple[_Rebind, ...]] = {}
         self._mros: dict[ClassKey, list[_Class]] = {}
 
     def _find(self, module: _Module, level: int, dotted: str | None) -> _Module | None:
@@ -792,11 +878,11 @@ class _Resolver:
         if key in chain:
             msg = f"`{name}` is defined in terms of itself"
             raise _unresolved(msg)
-        if len(chain) >= MAX_HOPS:
-            msg = f"`{name}` is more than {MAX_HOPS} hops from its definition"
-            raise _unresolved(msg)
+        # a plain `X = ...` alias is evaluated by Python when the module runs, so it is no hop of a chain
+        over = sum(1 for hop in chain if hop not in self._free) >= MAX_HOPS
         chain = (*chain, key)
         if (bindings := module.bindings.get(name)) is not None:
+            self._check_hops(name, bindings, over=over)
             return self._follow(module, name, bindings, chain)
         providers = [
             target
@@ -807,11 +893,25 @@ class _Resolver:
             msg = f"`{name}` is provided by more than one star import"
             raise _unresolved(msg)
         if providers:
+            self._check_hops(name, [], over=over)
             return self._lookup(providers[0], name, chain, allow_builtin=False)
+        # a builtin ends a chain, so it is not a hop of its own
         if allow_builtin and name in BUILTIN_NAMES:
             return _External(f"builtins.{name}")
         msg = f"`{name}` can't be resolved statically"
         raise _unresolved(msg)
+
+    @staticmethod
+    def _check_hops(name: str, bindings: list[_Binding], *, over: bool) -> None:
+        if not over:
+            return
+        msg = f"`{name}` is more than {MAX_HOPS} hops from its definition"
+        # a substitution that deep is a bad generic; any other chain is just too long to follow
+        generic = any(
+            binding.params or (isinstance(binding.node, ast.ClassDef) and binding.node.type_params)
+            for binding in bindings
+        )
+        raise _invalid(msg) if generic else _unresolved(msg)
 
     def _follow(
         self,
@@ -845,16 +945,21 @@ class _Resolver:
             case "from":
                 return self._from_value(module, binding, chain)
             case "alias":
-                if binding.generic:
-                    msg = f"`{name}` is a generic alias"
-                    raise _invalid(msg)
                 if binding.expr is None or binding.site is None:
                     msg = f"`{name}` has no value"
                     raise _unresolved(msg)
-                return _Alias(module, binding.expr, binding.site, chain, type_stmt=binding.type_stmt)
+                if not binding.type_stmt:
+                    self._free.add((module.path, name))
+                params = self._type_params(binding.params, module)
+                return _Alias(
+                    module, binding.expr, binding.site, chain, type_stmt=binding.type_stmt, name=name, params=params
+                )
             case "class" if isinstance(binding.node, ast.ClassDef):
                 return _Class(module, binding.node, binding.node.name)
             case "call":
+                if (typevar := self._typevar(module, name, binding)) is not None:
+                    self._free.add((module.path, name))
+                    return typevar
                 return self._functional(module, name, binding)
             case "other":
                 msg = f"`{name}` is not bound by an import or a type alias"
@@ -929,6 +1034,8 @@ class _Resolver:
                     msg = "a quoted type isn't supported"
                     raise _invalid(msg)
                 return self._eval(self._parse_quoted(text), module, chain)
+            case ast.Name(id=name) if name in self._env:
+                return self._eval_arg(self._env[name])
             case ast.Name() | ast.Attribute():
                 return self._eval_value(self._resolve_ref(expr, module, chain))
             case ast.Subscript():
@@ -953,13 +1060,8 @@ class _Resolver:
     def _eval_value(self, value: _Value) -> _Node:
         match value:
             case _Alias():
-                if self.alias is None:
-                    self.alias = AliasSite(path=value.module.path, span=value.site)
-                in_alias, self._in_alias = self._in_alias, True
-                try:
-                    return self._eval(value.expr, value.module, value.chain)
-                finally:
-                    self._in_alias = in_alias
+                # a bare generic alias takes its defaults, or is rejected
+                return self._expand_alias(value, _Site((), value.module, {}, value.chain))
             case _External(qualname):
                 normalized = self._normalize(qualname)
                 if (leaf := LEAVES.get(normalized)) is not None:
@@ -969,9 +1071,159 @@ class _Resolver:
                 raise _external_reject(qualname, in_field=self._in_field)
             case _Class():
                 return _Node((_NamedRef(value),), none=False)
+            case _TypeVar():
+                if value.kind == "TypeVar" and value.key in self._env:
+                    return self._eval_arg(self._env[value.key])
+                msg = f"`{value.name}` is a type variable, which isn't a row type"
+                raise _invalid(msg)
             case _ModuleRef():
                 msg = "a module isn't a row type"
                 raise _invalid(msg)
+
+    def _scoped(
+        self, expr: ast.expr, module: _Module, chain: tuple[tuple[Path, str], ...], env: dict[str, _Arg]
+    ) -> _Node:
+        saved, self._env = self._env, env
+        try:
+            return self._eval(expr, module, chain)
+        finally:
+            self._env = saved
+
+    def _eval_arg(self, arg: _Arg) -> _Node:
+        flags = (self._in_field, self._in_alias)
+        self._in_field, self._in_alias = arg.in_field, arg.in_alias
+        try:
+            return self._scoped(arg.expr, arg.module, arg.chain, arg.env)
+        finally:
+            self._in_field, self._in_alias = flags
+
+    def _expand_alias(self, alias: _Alias, site: _Site) -> _Node:
+        alias = replace(alias, params=self._alias_params(alias))
+        # Python gives a bare `X = tuple[T, str]` no defaults: it is the generic itself
+        if not alias.type_stmt and alias.params and not site.args and not site.explicit:
+            msg = f"the type parameter `{alias.params[0].name}` of `{alias.name}` is not bound"
+            raise _invalid(msg, help_=f"subscript the alias, for example `{alias.name}[int]`")
+        env = self._bind(alias.name, alias.params, site)
+        if self.alias is None:
+            self.alias = AliasSite(path=alias.module.path, span=alias.site)
+        if alias.params and self.alias.generic is None:
+            arguments = ", ".join(f"{p.name} = {self._text(env[p.key])}" for p in alias.params)
+            where = f"{alias.module.path}:{alias.site.line}:{alias.site.col}"
+            generic = f"generic alias `{alias.name}` defined at {where}, with {arguments}"
+            self.alias = replace(self.alias, generic=generic)
+        in_alias, self._in_alias = self._in_alias, True
+        try:
+            # the body is read in the module that defines it, with only its own type parameters in scope
+            return self._scoped(alias.expr, alias.module, alias.chain, env)
+        finally:
+            self._in_alias = in_alias
+
+    # each type parameter bound to its argument, or else to its PEP 696 default, which may name the parameters before it
+    def _bind(self, name: str, params: tuple[_TParam, ...], site: _Site) -> dict[str, _Arg]:
+        for param in params:
+            if param.kind != "TypeVar":
+                msg = f"`{name}` has the {param.kind} `{param.name}`, which is not supported"
+                raise _invalid(msg)
+        required = sum(1 for param in params if param.default is None)
+        if not site.args and required:
+            first = next(param for param in params if param.default is None)
+            msg = f"the type parameter `{first.name}` of `{name}` is not bound"
+            raise _invalid(msg, help_=f"subscript the class or alias, for example `{name}[int]`")
+        if not required <= len(site.args) <= len(params):
+            takes = str(len(params)) if required == len(params) else f"{required} to {len(params)}"
+            msg = f"`{name}` takes {takes} type arguments, but {len(site.args)} were given"
+            raise _invalid(msg)
+        env: dict[str, _Arg] = {}
+        for index, param in enumerate(params):
+            if index < len(site.args):
+                env[param.key] = _Arg(site.args[index], site.module, site.env, site.chain, site.in_field, site.in_alias)
+            elif param.default is not None:
+                env[param.key] = _Arg(param.default, param.module, dict(env), (), self._in_field, self._in_alias)
+        return env
+
+    # the text of an argument as `type_name` shows it, which is the runtime's: names bound by an enclosing generic are
+    # replaced by their own arguments, a plain alias by its target, a dotted name is shortened to its last part as
+    # `__name__` is, `Optional[X]` and `Union[A, B]` are `X | None` and `A | B`, and `Annotated` shows only its type
+    def _text(self, arg: _Arg) -> str:
+        return " | ".join(self._parts(arg.expr, arg.module, arg.env, 0))
+
+    # the members of a union, flattened and without repeats, or the single text of anything else
+    def _parts(self, node: ast.expr, module: _Module, env: dict[str, _Arg], depth: int) -> list[str]:
+        if depth > MAX_HOPS:
+            return [ast.unparse(node)]
+        match node:
+            case ast.Name(id=name) if name in env:
+                return self._parts(env[name].expr, env[name].module, env[name].env, depth + 1)
+            case ast.Name() | ast.Attribute():
+                return self._ref_parts(node, module, env, depth)
+            case ast.BinOp(op=ast.BitOr(), left=left, right=right):
+                members = [left, right]
+            case ast.Subscript(value=head, slice=inner):
+                parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
+                match self._external_name(head, module):
+                    case "typing.Optional" if len(parts) == 1:
+                        members = [parts[0], ast.Constant(value=None)]
+                    case "typing.Union":
+                        members = parts
+                    case "typing.Annotated" if len(parts) >= MIN_ANNOTATED:
+                        return self._parts(parts[0], module, env, depth)
+                    case _:
+                        members = []
+            case _:
+                members = []
+        if not members:
+            return [self._render(node, module, env, depth)]
+        return list(dict.fromkeys(text for member in members for text in self._parts(member, module, env, depth)))
+
+    def _render(self, node: ast.expr, module: _Module, env: dict[str, _Arg], depth: int) -> str:
+        if depth > MAX_HOPS:
+            return ast.unparse(node)
+        match node:
+            case ast.Name() | ast.Attribute():
+                return " | ".join(self._ref_parts(node, module, env, depth))
+            case ast.Subscript(value=value, slice=inner):
+                parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
+                if (plain := self._render_plain_alias(value, parts, module, env, depth)) is not None:
+                    return plain
+                shown = ", ".join(" | ".join(self._parts(part, module, env, depth + 1)) for part in parts)
+                return f"{self._render(value, module, env, depth + 1)}[{shown}]"
+            case ast.BinOp(op=ast.BitOr()):
+                return " | ".join(self._parts(node, module, env, depth + 1))
+        return ast.unparse(node)
+
+    def _ref_parts(
+        self, node: ast.Name | ast.Attribute, module: _Module, env: dict[str, _Arg], depth: int
+    ) -> list[str]:
+        fallback = [node.id if isinstance(node, ast.Name) else node.attr]
+        try:
+            value = self._resolve_ref(node, module, ())
+        except RejectError:
+            return fallback
+        match value:
+            case _TypeVar() if value.key in env:
+                arg = env[value.key]
+                return self._parts(arg.expr, arg.module, arg.env, depth + 1)
+            case _TypeVar():
+                return [value.name]
+            case _Class():
+                return [value.name]
+            case _Alias(type_stmt=False) if not self._alias_params(value):
+                return self._parts(value.expr, value.module, {}, depth + 1)
+        return fallback
+
+    # `Row[int]` of a plain `Row = tuple[T, str]` is `tuple[int, str]`
+    def _render_plain_alias(
+        self, head: ast.expr, parts: list[ast.expr], module: _Module, env: dict[str, _Arg], depth: int
+    ) -> str | None:
+        try:
+            value = self._constructor(self._resolve_ref(head, module, ()))
+            if not (isinstance(value, _Alias) and not value.type_stmt and (params := self._alias_params(value))):
+                return None
+            site = _Site(tuple(parts), module, env, ())
+            inner = self._bind(value.name, params, site)
+        except RejectError:
+            return None
+        return " | ".join(self._parts(value.expr, value.module, inner, depth + 1))
 
     @staticmethod
     def _normalize(qualname: str) -> str:
@@ -988,11 +1240,24 @@ class _Resolver:
             value = self._resolve_ref(value.expr, value.module, value.chain)
         return value
 
+    # a subscripted generic alias is substituted (a plain `X = tuple[T, str]` is one when it uses a type variable), and a
+    # subscripted class is a named row to be substituted
+    def _eval_generic(self, base: _Value, site: _Site) -> _Node | None:
+        if isinstance(base, _Alias) and (base.type_stmt or self._alias_params(base)):
+            return self._expand_alias(base, site)
+        if isinstance(base, _Class):
+            return _Node((_NamedRef(base, site),), none=False)
+        return None
+
     def _eval_subscript(self, expr: ast.Subscript, module: _Module, chain: tuple[tuple[Path, str], ...]) -> _Node:
         base = self._constructor(self._resolve_ref(expr.value, module, chain))
-        if isinstance(base, _Class):
-            msg = f"`{base.name}` is subscripted, and generic row types are not supported yet"
-            raise _invalid(msg)
+        slice_ = expr.slice
+        args = tuple(slice_.elts) if isinstance(slice_, ast.Tuple) else (slice_,)
+        site = _Site(
+            args, module, self._env, chain, self._in_field, self._in_alias, explicit=isinstance(slice_, ast.Tuple)
+        )
+        if (generic := self._eval_generic(base, site)) is not None:
+            return generic
         if not isinstance(base, _External):
             msg = "only `tuple`, `list`, `Optional`, `Union` and `Annotated` can be subscripted"
             raise _invalid(msg)
@@ -1070,21 +1335,18 @@ class _Resolver:
             case _External(qualname):
                 return self._external_base(self._normalize(qualname), qualname, subscripted=subscripted)
             case _Class() as base:
-                if subscripted:
-                    msg = f"`{base.name}` is subscripted, and generic row types are not supported yet"
-                    raise _invalid(msg)
                 return self._info(base, (*stack, _class_key(klass)))
         msg = f"a base of `{klass.name}` isn't a class"
         raise _invalid(msg)
 
     @staticmethod
     def _external_base(normalized: str, qualname: str, *, subscripted: bool) -> str:
-        if normalized == "typing.Protocol" and not subscripted:
+        if normalized == "typing.Protocol":
             msg = "a Protocol is not a row type"
             raise _invalid(msg)
-        if normalized in {"typing.Generic", "typing.Protocol"}:
-            msg = "generic row types are not supported yet"
-            raise _invalid(msg)
+        # `Generic[T]` only declares the type parameters, which `_params` reads
+        if normalized == "typing.Generic":
+            return "object"
         if (value := VALUE_CLASSES.get(qualname)) is not None:
             msg = f"a subclass of rowx.postgres.{value} is not a row type"
             raise _invalid(msg)
@@ -1206,9 +1468,6 @@ class _Resolver:
         node = klass.node
         if isinstance(node, ast.Call):
             return self._functional_info(klass, node)
-        if node.type_params:
-            msg = f"`{klass.name}` is generic, and generic row types are not supported yet"
-            raise _invalid(msg)
         infos, direct = self._bases(node, klass, stack)
         decor = self._decorators(node, klass)
         form = self._form(klass, infos, direct, decorated=decor.kind if decor is not None else None)
@@ -1230,6 +1489,153 @@ class _Resolver:
             self._pydantic_info(info, node, klass, decor, infos)
         info.attrs = self._final_attrs(node, klass, raw, decorated=decorated, pydantic=form == "pydantic_dataclass")
         return info
+
+    # ---- generics ----
+
+    @staticmethod
+    def _type_params(nodes: Iterable[ast.type_param], module: _Module) -> tuple[_TParam, ...]:
+        found: list[_TParam] = []
+        for node in nodes:
+            match node:
+                case ast.TypeVar():
+                    found.append(_TParam(node.name, "TypeVar", node.default_value, module, node.name))
+                case ast.TypeVarTuple():
+                    found.append(_TParam(node.name, "TypeVarTuple", node.default_value, module, node.name))
+                case ast.ParamSpec():
+                    found.append(_TParam(node.name, "ParamSpec", node.default_value, module, node.name))
+        return tuple(found)
+
+    # `T = TypeVar("T")`, `TypeVarTuple("Ts")` or `ParamSpec("P")`, from `typing` or `typing_extensions`
+    def _typevar(self, module: _Module, var: str, binding: _Binding) -> _TypeVar | None:
+        call = binding.node
+        if not isinstance(call, ast.Call):
+            return None
+        kind = (self._external_name(call.func, module) or "").removeprefix("typing.")
+        if kind not in {"TypeVar", "TypeVarTuple", "ParamSpec"}:
+            return None
+        default = next((kw.value for kw in call.keywords if kw.arg == "default"), None)
+        match call.args:
+            case [ast.Constant(value=str() as name), *_]:
+                return _TypeVar(module, var, name, kind, default)
+        return _TypeVar(module, var, var, kind, default)
+
+    @staticmethod
+    def _tparam(typevar: _TypeVar) -> _TParam:
+        return _TParam(typevar.name, typevar.kind, typevar.default, typevar.module, typevar.key)
+
+    # the type variables in `expr`, depth first in order of first appearance, as `typing` collects a generic's
+    # `__parameters__`: a quoted name and the metadata of an `Annotated` are not collected
+    def _collect(self, expr: ast.AST, module: _Module, found: dict[str, _TypeVar]) -> None:
+        match expr:
+            case ast.Constant():
+                return
+            case ast.Name() | ast.Attribute():
+                try:
+                    value = self._resolve_ref(expr, module, ())
+                except RejectError:
+                    return
+                if isinstance(value, _TypeVar):
+                    found.setdefault(value.key, value)
+                return
+            case ast.Subscript(value=head, slice=ast.Tuple(elts=[first, _, *_])) if (
+                self._external_name(head, module) == "typing.Annotated"
+            ):
+                self._collect(first, module, found)
+                return
+        for child in ast.iter_child_nodes(expr):
+            self._collect(child, module, found)
+
+    # the parameters of a plain `X = tuple[T, str]` alias, which are the type variables it uses
+    def _alias_params(self, alias: _Alias) -> tuple[_TParam, ...]:
+        if alias.type_stmt:
+            return alias.params
+        found: dict[str, _TypeVar] = {}
+        self._collect(alias.expr, alias.module, found)
+        return tuple(self._tparam(typevar) for typevar in found.values())
+
+    # the type parameters of a class: its `type_params`, else the `Generic[...]` base, else the type variables its bases
+    # are subscripted with, in the order `typing` collects them
+    def _params(self, klass: _Class) -> tuple[_TParam, ...]:
+        node = klass.node
+        if not isinstance(node, ast.ClassDef):
+            return ()
+        if node.type_params:
+            return self._type_params(node.type_params, klass.module)
+        generic = next(
+            (
+                base
+                for base in node.bases
+                if isinstance(base, ast.Subscript) and self._external_name(base.value, klass.module) == "typing.Generic"
+            ),
+            None,
+        )
+        spans = (
+            [generic.slice] if generic is not None else [b.slice for b in node.bases if isinstance(b, ast.Subscript)]
+        )
+        found: dict[str, _TypeVar] = {}
+        for span in spans:
+            self._collect(span, klass.module, found)
+        return tuple(self._tparam(typevar) for typevar in found.values())
+
+    # the steps from `root` to `owner` along the bases that are subscripted or not, so a field's own type parameters can
+    # be bound through each base's arguments (`Child[U](Base[U])`)
+    def _path(self, root: _Class, owner: _Class) -> tuple[_Rebind, ...]:
+        key = (_class_key(root), _class_key(owner))
+        if (cached := self._paths.get(key)) is not None:
+            return cached
+        pending: list[tuple[_Class, tuple[_Rebind, ...]]] = [(root, ())]
+        seen = {_class_key(root)}
+        found: tuple[_Rebind, ...] = ()
+        while pending:
+            klass, path = pending.pop(0)
+            if _class_key(klass) == key[1]:
+                found = path
+                break
+            if not isinstance(klass.node, ast.ClassDef):
+                continue
+            for base in klass.node.bases:
+                target = base.value if isinstance(base, ast.Subscript) else base
+                if not (
+                    isinstance(target, ast.Name | ast.Attribute)
+                    and isinstance(value := self._ref(target, klass.module), _Class)
+                ):
+                    continue
+                if _class_key(value) in seen:
+                    continue
+                seen.add(_class_key(value))
+                args = ()
+                if isinstance(base, ast.Subscript):
+                    args = tuple(base.slice.elts) if isinstance(base.slice, ast.Tuple) else (base.slice,)
+                step = _Rebind(value, _Site(args, klass.module, {}, ()))
+                pending.append((value, (*path, step)))
+        self._paths[key] = found
+        return found
+
+    # the runtime binds every generic base of the row's class, whether a field comes from it or not, so a chain of more
+    # than `MAX_HOPS` subscripted bases fails however deep the fields are
+    def _check_depth(self, root: _Class) -> None:
+        pending = [(root, 0)]
+        seen = {_class_key(root)}
+        while pending:
+            klass, depth = pending.pop(0)
+            if not isinstance(klass.node, ast.ClassDef):
+                continue
+            for base in klass.node.bases:
+                target = base.value if isinstance(base, ast.Subscript) else base
+                if (
+                    not (
+                        isinstance(target, ast.Name | ast.Attribute)
+                        and isinstance(value := self._ref(target, klass.module), _Class)
+                    )
+                    or _class_key(value) in seen
+                ):
+                    continue
+                seen.add(_class_key(value))
+                subscripted = isinstance(base, ast.Subscript)
+                if subscripted and depth >= MAX_HOPS:
+                    msg = f"`{root.name}` has generic bases deeper than {MAX_HOPS}"
+                    raise _invalid(msg)
+                pending.append((value, depth + int(subscripted)))
 
     def _project_bases(self, klass: _Class) -> list[_Class]:
         if not isinstance(klass.node, ast.ClassDef):
@@ -1344,6 +1750,7 @@ class _Resolver:
             node=stmt,
             default=default,
             total=total,
+            owner=klass,
         )
 
     # the expression a name stands for once its `X = ...` and `X: TypeAlias = ...` aliases are followed, and the module
@@ -1847,10 +2254,12 @@ class _Resolver:
         entries = self._namedtuple_entries(klass, spec) if namedtuple else self._typeddict_entries(klass, spec)
         info = _Info(form="namedtuple" if namedtuple else "typeddict")
         for key, annotation, at in entries:
-            info.fields[key] = _Source(key=key, annotation=annotation, module=klass.module, node=at, total=total)
+            info.fields[key] = _Source(
+                key=key, annotation=annotation, module=klass.module, node=at, total=total, owner=klass
+            )
         return info
 
-    def _named_row(self, klass: _Class) -> RowType:
+    def _named_row(self, klass: _Class, site: _Site | None) -> RowType:
         info = self._info(klass, ())
         if info.form is None:
             msg = f"`{klass.name}` isn't a dataclass, NamedTuple or TypedDict"
@@ -1862,8 +2271,12 @@ class _Resolver:
         if not sources:
             msg = f"`{klass.name}` has no fields"
             raise _invalid(msg)
+        owner = self._owner(klass, site, typeddict=info.form == "typeddict")
+        # a pydantic model's bases are resolved by pydantic, with no limit
+        if info.form != "model":
+            self._check_depth(klass)
         fields = tuple(
-            self._field(source, klass.name, typeddict=info.form == "typeddict", names=names, reason=reason)
+            self._field(source, owner, names=names, reason=reason)
             for source in sources
             for names, reason in [
                 self._pydantic_names(info, source) if info.form in PYDANTIC_FORMS else ((source.key,), None)
@@ -1874,27 +2287,51 @@ class _Resolver:
             kind="named",
             form=form,
             matching=matching,
-            type_name=klass.name,
+            type_name=owner.type_name,
             fields=fields,
             alias=self.alias,
         )
 
+    def _owner(self, klass: _Class, site: _Site | None, *, typeddict: bool) -> _Owner:
+        params = self._params(klass)
+        env = self._bind(klass.name, params, site or _Site((), klass.module, {}, ())) if params else {}
+        if not params:
+            return _Owner(klass, klass.name, typeddict, env, None)
+        shown = ", ".join(self._text(env[p.key]) for p in params)
+        with_ = ", ".join(f"{p.name} = {self._text(env[p.key])}" for p in params)
+        span = klass.module.span(klass.node)
+        generic = f"`{klass.name}` is generic, defined at {klass.module.path}:{span.line}:{span.col}, with {with_}"
+        return _Owner(klass, f"{klass.name}[{shown}]", typeddict, env, generic)
+
+    # the type parameters in scope for a field: the root class's, bound through each base on the way to the class that
+    # declares the field
+    def _field_env(self, owner: _Owner, source: _Source) -> dict[str, _Arg]:
+        env = owner.env
+        if source.owner is None:
+            return env
+        for step in self._path(owner.klass, source.owner):
+            site = _Site(step.site.args, step.site.module, env, (), in_field=True)
+            env = self._bind(step.klass.name, self._params(step.klass), site)
+        return env
+
     def _field(
-        self, source: _Source, type_name: str, *, typeddict: bool, names: tuple[str, ...] | None, reason: str | None
+        self, source: _Source, owner: _Owner, *, names: tuple[str, ...] | None, reason: str | None
     ) -> NamedField:
         span = source.module.span(source.node)
         self._in_field = True
         try:
             expr, override = self._strip_field(source.annotation, source.module)
-            elem = _to_elem(self._eval(expr, source.module, ()), allow_none=True)
+            elem = _to_elem(self._scoped(expr, source.module, (), self._field_env(owner, source)), allow_none=True)
         except RejectError as reject:
-            note = f"field defined at {source.module.path}:{span.line}:{span.col}"
-            message = f'{reject.message} (field "{source.key}" of `{type_name}`)'
-            raise RejectError(reject.rule, message, help_=reject.help, notes=(*reject.notes, note)) from None
+            notes = [f"field defined at {source.module.path}:{span.line}:{span.col}"]
+            if owner.generic is not None:
+                notes.append(owner.generic)
+            message = f'{reject.message} (field "{source.key}" of `{owner.type_name}`)'
+            raise RejectError(reject.rule, message, help_=reject.help, notes=(*reject.notes, *notes)) from None
         finally:
             self._in_field = False
         # only a TypedDict is optional by its qualifier or `total`; the others are by their default
-        required = (source.total if override is None else override) if typeddict else not source.default
+        required = (source.total if override is None else override) if owner.typeddict else not source.default
         return NamedField(
             key=source.key,
             names=names,
@@ -1903,6 +2340,7 @@ class _Resolver:
             path=source.module.path,
             span=span,
             reason=reason,
+            generic=owner.generic,
         )
 
     # the layers a field annotation may carry around its element: quotes, `Annotated` and the TypedDict qualifiers,
@@ -1952,7 +2390,7 @@ class _Resolver:
             if node.none:
                 msg = f"`{member.klass.name}` is a named row type, which can't be nullable"
                 raise _invalid(msg, help_="use .optional()")
-            return self._named_row(member.klass)
+            return self._named_row(member.klass, member.site)
         if isinstance(member, _Tuple):
             return self._tuple_row(node, member)
         return RowType(kind="scalar", elements=(_to_elem(node, allow_none=False),), alias=self.alias)
@@ -1971,7 +2409,7 @@ def resolve_row_type(graph: ModuleGraph, call: QueryCall, roots: tuple[Path, ...
     except RejectError as reject:
         notes = ()
         if (alias := resolver.alias) is not None:
-            notes = (f"alias defined at {alias.path}:{alias.span.line}:{alias.span.col}",)
+            notes = alias.notes()
         diagnostic = Diagnostic(
             rule=reject.rule,
             message=reject.message,

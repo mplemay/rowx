@@ -256,7 +256,8 @@ def test_conformance_row_matches_type_checker(
         revealed = outcome.reveals[key]
         # mypy reveals a TypedDict by its keys and a NamedTuple by its elements, and not by their names
         if resolved.form == "dict" and checker == "mypy":
-            assert revealed.startswith(f"TypedDict({_render(resolved)},")
+            # and drops the arguments of a generic one
+            assert revealed.startswith(f"TypedDict({_render(resolved).partition('[')[0]},")
         elif resolved.form == "positional" and checker == "mypy":
             assert revealed.endswith(f"fallback={_render(resolved)}]")
         else:

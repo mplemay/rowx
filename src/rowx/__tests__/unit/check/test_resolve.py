@@ -123,14 +123,6 @@ def test_hop_limit(tmp_path: Path) -> None:
     assert "hops" in diagnostic.message
 
 
-def test_generic_alias_is_invalid(tmp_path: Path) -> None:
-    write(tmp_path, {"main.py": "type Row[X] = tuple[X, str]\n" + QUERY.format(t="Row[int]")})
-    diagnostic = resolve(tmp_path, "main.py").diagnostic
-    assert diagnostic is not None
-    assert diagnostic.rule == "invalid-row-type"
-    assert diagnostic.span.line == 3
-
-
 def test_multiple_bindings_are_unresolved(tmp_path: Path) -> None:
     write(tmp_path, {"main.py": "X = int\nX = str\n" + QUERY.format(t="X")})
     diagnostic = resolve(tmp_path, "main.py").diagnostic
@@ -696,20 +688,6 @@ def test_a_subclass_of_a_value_class_is_rejected(tmp_path: Path, source: str) ->
 def test_value_classes_stay_leaves(tmp_path: Path) -> None:
     source = "from rowx.postgres import Money, Range\nT = tuple[Money, Range[int]]\n"
     assert [leaf for leaf, _ in leaves(named(tmp_path, source))] == ["rowx.postgres.Money", "rowx.postgres.Range[int]"]
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
-        "from dataclasses import dataclass\n@dataclass\nclass T[X]:\n    a: int\n",
-        "from dataclasses import dataclass\nfrom typing import Generic, TypeVar\nX = TypeVar('X')\n@dataclass\nclass T(Generic[X]):\n    a: int\n",
-        "from dataclasses import dataclass\n@dataclass\nclass G[X]:\n    a: int\nT = G[int]\n",
-        "from dataclasses import dataclass\nfrom typing import Generic, TypeVar\nX = TypeVar('X')\n@dataclass\nclass G(Generic[X]):\n    a: X\n@dataclass\nclass T(G[int]):\n    b: int\n",
-        "from dataclasses import dataclass\nfrom typing import Generic\n@dataclass\nclass T(Generic):\n    a: int\n",
-    ],
-)
-def test_generic_row_types_are_rejected_until_they_are_supported(tmp_path: Path, source: str) -> None:
-    assert rejected(named(tmp_path, source)) == "invalid-row-type"
 
 
 PYDANTIC: Final[str] = (
@@ -1863,3 +1841,339 @@ def test_mixed_row_type_forms_are_rejected_with_help(tmp_path: Path, source: str
     assert rejected(resolution) == "invalid-row-type"
     assert "mixes row type forms" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
     assert resolution.help is not None
+
+
+DATACLASS: Final[str] = "from dataclasses import dataclass\n"
+CRATE: Final[str] = DATACLASS + "@dataclass\nclass Crate[X]:\n    a: X\n    b: str\n"
+
+
+def pairs(resolution: Resolution) -> list[tuple[str, bool]]:
+    return [(f.key, f.elem.nullable) for f in row_type(resolution).fields]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("type Row[X] = tuple[X, str]\nT = Row[int]\n", [("int", False), ("str", False)]),
+        ("type Swap[A, B] = tuple[B, A]\nT = Swap[int, str | None]\n", [("str", True), ("int", False)]),
+        ("type Pair[A, B] = tuple[A, B]\nT = Pair[int, str | None]\n", [("int", False), ("str", True)]),
+        ("type Nested[X] = tuple[list[X | None], X | None]\nT = Nested[int]\n", [("list", False), ("int", True)]),
+        (
+            "type Inner[X] = tuple[X, str]\ntype Outer[Y] = Inner[Y | None]\nT = Outer[int]\n",
+            [("int", True), ("str", False)],
+        ),
+        ("type Row[X = int] = tuple[X, str]\nT = Row\n", [("int", False), ("str", False)]),
+        ("type Row[A, B = str | None] = tuple[A, B]\nT = Row[int]\n", [("int", False), ("str", True)]),
+        ("type Row[X] = tuple[X, str]\nSub = Row[int]\nT = Sub\n", [("int", False), ("str", False)]),
+    ],
+)
+def test_a_subscripted_generic_alias_is_substituted_through_its_parameters(
+    tmp_path: Path, source: str, expected: list[tuple[str, bool]]
+) -> None:
+    assert leaves(named(tmp_path, source)) == expected
+
+
+def test_a_scalar_generic_alias(tmp_path: Path) -> None:
+    assert leaves(named(tmp_path, "type Opt[X] = X | None\nT = Opt[int]\n")) == [("int", True)]
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ("type Row[X] = tuple[X, str]\nT = Row\n", "the type parameter `X` of `Row` is not bound"),
+        ("type Row[X] = tuple[X, str]\nT = Row[int, str]\n", "`Row` takes 1 type arguments, but 2 were given"),
+        ("type Two[A, B] = tuple[A, B]\nT = Two[int]\n", "`Two` takes 2 type arguments, but 1 were given"),
+        ("type Two[A, B = int] = tuple[A, B]\nT = Two[int, str, bytes]\n", "`Two` takes 1 to 2 type arguments"),
+        ("type Row[*Ts] = tuple[int, str]\nT = Row[int]\n", "the TypeVarTuple `Ts`"),
+        ("type Row[**P] = tuple[int, str]\nT = Row[[int]]\n", "the ParamSpec `P`"),
+        ("type Row = tuple[int, str]\nT = Row[int]\n", "`Row` takes 0 type arguments, but 1 were given"),
+    ],
+)
+def test_a_generic_alias_is_rejected_for_an_unbound_parameter_a_wrong_count_or_an_unsupported_kind(
+    tmp_path: Path, source: str, message: str
+) -> None:
+    resolution = named(tmp_path, source)
+    assert rejected(resolution) == "invalid-row-type"
+    assert message in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+
+
+def test_an_unbound_parameter_has_a_help(tmp_path: Path) -> None:
+    resolution = named(tmp_path, "type Row[X] = tuple[X, str]\nT = Row\n")
+    assert resolution.help == "subscript the class or alias, for example `Row[int]`"
+
+
+def test_the_arguments_are_read_at_the_call_site_and_the_body_in_the_definition(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        {
+            "defs.py": "import datetime as dt\nfrom decimal import Decimal as X\ntype Row[Y] = tuple[Y, dt.date, X]\n",
+            "main.py": "from defs import Row\nimport uuid as dt\nfrom rowx.postgres import Money as X\n"
+            + QUERY.format(t="Row[dt.UUID | None]"),
+        },
+    )
+    assert leaves(resolve(tmp_path, "main.py")) == [
+        ("uuid.UUID", True),
+        ("datetime.date", False),
+        ("decimal.Decimal", False),
+    ]
+
+
+def test_a_type_parameter_shadows_a_module_name_inside_its_definition(tmp_path: Path) -> None:
+    write(tmp_path, {"main.py": "T = int\ntype Row[T] = tuple[T, str]\n" + QUERY.format(t="Row[bytes]")})
+    assert leaves(resolve(tmp_path, "main.py")) == [("bytes", False), ("str", False)]
+
+
+def test_a_generic_dataclass_is_substituted_and_named_with_its_arguments(tmp_path: Path) -> None:
+    row = row_type(named(tmp_path, CRATE + "T = Crate[int | None]\n"))
+    assert row.type_name == "Crate[int | None]"
+    assert pairs(named(tmp_path, CRATE + "T = Crate[int | None]\n")) == [("a", True), ("b", False)]
+
+
+@pytest.mark.parametrize(
+    ("argument", "name"),
+    [("int", "int"), ("dt.date", "date"), ("list[int]", "list[int]"), ("int | None", "int | None")],
+)
+def test_the_type_name_renders_the_arguments(tmp_path: Path, argument: str, name: str) -> None:
+    source = "import datetime as dt\n" + CRATE + f"T = Crate[{argument}]\n"
+    assert row_type(named(tmp_path, source)).type_name == f"Crate[{name}]"
+
+
+def test_the_type_name_follows_an_alias_to_its_arguments(tmp_path: Path) -> None:
+    source = CRATE + "type B[Y] = Crate[Y | None]\nT = B[int]\n"
+    row = row_type(named(tmp_path, source))
+    assert row.type_name == "Crate[int | None]"
+    assert [f.elem.nullable for f in row.fields] == [True, False]
+
+
+def test_a_parameter_named_like_the_row_alias_still_reads_as_the_parameter(tmp_path: Path) -> None:
+    source = DATACLASS + "@dataclass\nclass Crate[T]:\n    a: T\nT = Crate[int]\n"
+    assert pairs(named(tmp_path, source)) == [("a", False)]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "X = TypeVar('X')\n@dataclass\nclass Crate(Generic[X]):\n    a: X\nT = Crate[int | None]\n",
+            [("a", True)],
+        ),
+        (
+            (
+                "A = TypeVar('A')\nB = TypeVar('B')\n@dataclass\nclass Crate(Generic[A, B]):\n    a: B\n    b: A\n"
+                "T = Crate[int, str | None]\n"
+            ),
+            [("a", True), ("b", False)],
+        ),
+        (
+            "X = TypeVar('X', default=int)\n@dataclass\nclass Crate(Generic[X]):\n    a: X\nT = Crate\n",
+            [("a", False)],
+        ),
+        ("@dataclass\nclass Crate[X = int | None]:\n    a: X\nT = Crate\n", [("a", True)]),
+        (
+            "@dataclass\nclass Crate[A = int, B = list[A]]:\n    a: A\n    b: B\nT = Crate\n",
+            [("a", False), ("b", False)],
+        ),
+    ],
+)
+def test_generic_classes_in_each_spelling_and_with_defaults(
+    tmp_path: Path, source: str, expected: list[tuple[str, bool]]
+) -> None:
+    head = DATACLASS + "from typing import Generic, TypeVar\n"
+    assert pairs(named(tmp_path, head + source)) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "@dataclass\nclass Crate[X]:\n    a: X\nT = Crate\n",
+        "@dataclass\nclass Crate[X]:\n    a: X\nT = Crate[int, str]\n",
+        "@dataclass\nclass Crate[A, B]:\n    a: A\nT = Crate[int]\n",
+        "@dataclass\nclass Crate[*Ts]:\n    a: int\nT = Crate[int]\n",
+        "@dataclass\nclass Crate[**P]:\n    a: int\nT = Crate[[int]]\n",
+        "@dataclass\nclass Base[X]:\n    a: X\n@dataclass\nclass T(Base):\n    b: int\n",
+        "@dataclass\nclass Crate[X]:\n    a: X\ntype B[Y] = Crate[Y]\nT = B\n",
+    ],
+)
+def test_a_generic_class_is_rejected_for_an_unbound_parameter_a_wrong_count_or_an_unsupported_kind(
+    tmp_path: Path, source: str
+) -> None:
+    assert rejected(named(tmp_path, DATACLASS + source)) == "invalid-row-type"
+
+
+def test_inherited_parameters_are_rebound_through_project_bases(tmp_path: Path) -> None:
+    source = (
+        DATACLASS
+        + "@dataclass\nclass Base[A, B]:\n    a: A\n    b: B\n"
+        + "@dataclass\nclass Child[U](Base[U | None, str]):\n    c: U\nT = Child[int]\n"
+    )
+    row = row_type(named(tmp_path, source))
+    assert row.type_name == "Child[int]"
+    assert [(f.key, f.elem.leaf, f.elem.nullable) for f in row.fields] == [
+        ("a", "int", True),
+        ("b", "str", False),
+        ("c", "int", False),
+    ]
+
+
+def test_inherited_parameters_are_rebound_through_a_chain_of_bases_in_other_modules(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        {
+            "base.py": DATACLASS + "@dataclass\nclass Base[X]:\n    a: X\n",
+            "mid.py": DATACLASS + "from base import Base\n@dataclass\nclass Mid[Y](Base[Y | None]):\n    b: Y\n",
+            "main.py": DATACLASS
+            + "from mid import Mid\n@dataclass\nclass Child[U](Mid[U]):\n    c: U\n"
+            + QUERY.format(t="Child[int]"),
+        },
+    )
+    assert pairs(resolve(tmp_path, "main.py")) == [("a", True), ("b", False), ("c", False)]
+
+
+def test_generic_typeddict_namedtuple_and_pydantic_bases(tmp_path: Path) -> None:
+    typeddict = (
+        "from typing import NotRequired, TypedDict\nclass Base[X](TypedDict):\n    a: X\n"
+        "class Child[U](Base[U | None], TypedDict):\n    b: NotRequired[U]\nT = Child[int]\n"
+    )
+    resolution = named(tmp_path, typeddict)
+    assert [(f.key, f.elem.nullable, f.required) for f in row_type(resolution).fields] == [
+        ("a", True, True),
+        ("b", False, False),
+    ]
+    namedtuple = "from typing import NamedTuple\nclass T[X](NamedTuple):\n    a: X\n    b: str\nT = T[int | None]\n"
+    assert pairs(named(tmp_path, namedtuple.replace("class T[", "class P[").replace("T = T[", "T = P["))) == [
+        ("a", True),
+        ("b", False),
+    ]
+
+
+def test_a_generic_pydantic_model_is_substituted(tmp_path: Path) -> None:
+    source = (
+        "from pydantic import BaseModel\nclass Page[X](BaseModel):\n    a: X\n    b: str\n"
+        "class Child[U](Page[U | None]):\n    c: U\nT = Child[int]\nP = Page[int]\n"
+    )
+    resolution = named(tmp_path, source)
+    row = row_type(resolution)
+    assert (row.form, row.type_name) == ("validator", "Child[int]")
+    assert pairs(resolution) == [("a", True), ("b", False), ("c", False)]
+    page = named(tmp_path / "other", source.replace("T = Child[int]", "T = Page[int]"))
+    assert row_type(page).type_name == "Page[int]"
+
+
+def test_a_generic_pydantic_dataclass_and_a_default_are_substituted(tmp_path: Path) -> None:
+    source = "import pydantic\n@pydantic.dataclasses.dataclass\nclass T[X = int]:\n    a: X\n    b: str\n"
+    resolution = named(tmp_path, source)
+    assert pairs(resolution) == [("a", False), ("b", False)]
+    assert row_type(resolution).type_name == "T[int]"
+
+
+def test_a_generic_alias_note_names_the_definition_and_the_arguments(tmp_path: Path) -> None:
+    resolution = named(tmp_path, "type Pair[A, B] = tuple[A, B]\nT = Pair[int, str | None]\n")
+    alias = row_type(resolution).alias
+    assert alias is not None
+    path = tmp_path / "main.py"
+    assert alias.notes() == (
+        f"alias defined at {path}:2:1",
+        f"generic alias `Pair` defined at {path}:1:1, with A = int, B = str | None",
+    )
+
+
+def test_a_plain_alias_of_type_variables_is_a_generic_alias(tmp_path: Path) -> None:
+    source = "from typing import TypeVar\nA = TypeVar('A')\nB = TypeVar('B')\nPair = tuple[B, A]\nT = Pair[int, str | None]\n"
+    resolution = named(tmp_path, source)
+    assert leaves(resolution) == [("int", False), ("str", True)]
+    alias = row_type(resolution).alias
+    assert alias is not None
+    assert (
+        alias.notes()[-1] == f"generic alias `Pair` defined at {tmp_path / 'main.py'}:4:1, with B = int, A = str | None"
+    )
+
+
+def test_a_plain_assignment_of_a_generic_alias_is_the_same_generic_alias(tmp_path: Path) -> None:
+    source = "from typing import TypeVar\nA = TypeVar('A')\nPair = tuple[A, str]\nOuter = Pair\nT = Outer[int | None]\n"
+    assert leaves(named(tmp_path, source)) == [("int", True), ("str", False)]
+
+
+@pytest.mark.parametrize("subscript", ["", "[int, str]"])
+def test_a_plain_generic_alias_is_rejected_for_an_unbound_parameter_or_a_wrong_count(
+    tmp_path: Path, subscript: str
+) -> None:
+    source = f"from typing import TypeVar\nA = TypeVar('A', default=str)\nPair = tuple[A, int]\nT = Pair{subscript}\n"
+    assert rejected(named(tmp_path, source)) == "invalid-row-type"
+
+
+def test_an_empty_subscript_of_a_plain_generic_alias_takes_its_defaults(tmp_path: Path) -> None:
+    source = "from typing import TypeVar\nA = TypeVar('A', default=str)\nPair = tuple[A, int]\nT = Pair[()]\n"
+    assert leaves(named(tmp_path, source)) == [("str", False), ("int", False)]
+
+
+def test_an_empty_subscript_of_a_plain_generic_alias_without_defaults_is_rejected(tmp_path: Path) -> None:
+    source = "from typing import TypeVar\nA = TypeVar('A')\nPair = tuple[A, int]\nT = Pair[()]\n"
+    assert rejected(named(tmp_path, source)) == "invalid-row-type"
+
+
+def test_a_rejection_inside_a_substituted_field_names_the_class_and_the_arguments(tmp_path: Path) -> None:
+    resolution = named(tmp_path, CRATE + "T = Crate[int | str]\n")
+    assert rejected(resolution) == "invalid-row-type"
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert 'field "a" of `Crate[int | str]`' in diagnostic.message
+    assert diagnostic.notes[-1] == f"`Crate` is generic, defined at {tmp_path / 'main.py'}:3:1, with X = int | str"
+
+
+def alias_chain(length: int, body: str, final: str = "int") -> str:
+    lines = [f"type A0[X] = {body}"] + [f"type A{i}[X] = A{i - 1}[X]" for i in range(1, length)]
+    return "\n".join(lines) + f"\nT = A{length - 1}[{final}]\n"
+
+
+def test_a_generic_alias_chain_is_followed_for_16_hops_and_rejected_at_17(tmp_path: Path) -> None:
+    assert leaves(named(tmp_path, alias_chain(16, "tuple[X, str]"))) == [("int", False), ("str", False)]
+    resolution = named(tmp_path / "deep", alias_chain(17, "tuple[X, str]"))
+    assert rejected(resolution) == "invalid-row-type"
+    assert "hops" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+
+
+def test_a_class_at_the_end_of_an_alias_chain_is_one_more_hop(tmp_path: Path) -> None:
+    assert pairs(named(tmp_path, CRATE + alias_chain(15, "Crate[X]"))) == [("a", False), ("b", False)]
+    assert rejected(named(tmp_path / "deep", CRATE + alias_chain(16, "Crate[X]"))) == "invalid-row-type"
+
+
+def test_a_plain_assignment_is_not_a_hop(tmp_path: Path) -> None:
+    source = alias_chain(16, "tuple[X, str]").replace("T = A15[int]", "S = A15[int]\nT = S")
+    assert len(leaves(named(tmp_path, source))) == 2
+
+
+def test_generic_bases_are_followed_for_16_subscripted_bases_and_rejected_beyond(tmp_path: Path) -> None:
+    def chain(length: int) -> str:
+        lines = [DATACLASS, "@dataclass\nclass C0[X]:\n    a: X"]
+        lines += [f"@dataclass\nclass C{i}[X](C{i - 1}[X]):\n    f{i}: X" for i in range(1, length)]
+        return "\n".join(lines) + f"\nT = C{length - 1}[int]\n"
+
+    assert len(row_type(named(tmp_path, chain(17))).fields) == 17
+    assert rejected(named(tmp_path / "deep", chain(18))) == "invalid-row-type"
+
+
+def test_the_whole_generic_base_chain_is_counted_even_when_only_the_row_class_has_fields(tmp_path: Path) -> None:
+    def chain(length: int) -> str:
+        lines = [DATACLASS, "@dataclass\nclass C0[X]:\n    pass"]
+        lines += [
+            f"@dataclass\nclass C{i}[X](C{i - 1}[X]):\n    {'f: X' if i == length else 'pass'}"
+            for i in range(1, length + 1)
+        ]
+        return "\n".join(lines) + f"\nT = C{length}[int]\n"
+
+    assert len(row_type(named(tmp_path, chain(16))).fields) == 1
+    resolution = named(tmp_path / "deep", chain(20))
+    assert rejected(resolution) == "invalid-row-type"
+    assert resolution.diagnostic is not None
+    assert "deeper than 16" in resolution.diagnostic.message
+
+
+def test_a_generic_row_type_never_imports_the_user_module(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        {
+            "boom.py": "raise RuntimeError('imported')\n",
+            "main.py": "from boom import X\ntype Row[Y] = tuple[Y, str]\n" + QUERY.format(t="Row[int]"),
+        },
+    )
+    assert len(leaves(resolve(tmp_path, "main.py"))) == 2
