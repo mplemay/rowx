@@ -17,6 +17,8 @@ from rowx.postgres import connect
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from rowx.postgres import Connection
+
 ROWS: Final[int] = 100_000
 RUNS: Final[int] = 7
 DROP_SQL: Final[str] = "DROP TABLE IF EXISTS rowx_bench_100k"
@@ -76,6 +78,13 @@ async def median_ms(run: Callable[[], Awaitable[int]]) -> float:
     return statistics.median(samples)
 
 
+def count_all(statement: rowx.query[Any], conn: Connection) -> Callable[[], Awaitable[int]]:
+    async def run() -> int:
+        return len(await statement.all(conn))
+
+    return run
+
+
 async def main(dsn: str) -> None:
     setup = await asyncpg.connect(dsn)
     await setup.execute(DROP_SQL)
@@ -96,12 +105,6 @@ async def main(dsn: str) -> None:
         named_ms: dict[str, float] = {}
 
         async with await connect(dsn) as conn:
-            for name, statement in named.items():
-
-                async def run_named(statement: rowx.query[Any] = statement) -> int:
-                    return len(await statement.all(conn))
-
-                named_ms[name] = await median_ms(run_named)
 
             async def run_rowx() -> int:
                 return len(await select.all(conn))
@@ -122,6 +125,9 @@ async def main(dsn: str) -> None:
                 return len([row async for row in scalar.fetch(conn)])
 
             scalar_fetch_ms = await median_ms(run_scalar_fetch)
+
+            for name, statement in named.items():
+                named_ms[name] = await median_ms(count_all(statement, conn))
 
         async with asyncpg.create_pool(dsn, min_size=1, max_size=1) as pool:
 
