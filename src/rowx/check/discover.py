@@ -309,6 +309,7 @@ class _Finder(ast.NodeVisitor):
         row_type_span = self._lines.span(row_type) if row_type is not None else None
         if ref.kind == "query_unchecked":
             self.result.unchecked_count += 1
+            self._inspect_unchecked(node)
             template = None
         elif (template := self._template(node)) is None:
             return
@@ -322,6 +323,23 @@ class _Finder(ast.NodeVisitor):
                 template=template,
             ),
         )
+
+    def _inspect_unchecked(self, node: ast.Call) -> None:
+        # the SQL of a query_unchecked call is not checked, but a format spec that is not a literal could evaluate
+        # to "ident" at runtime
+        if len(node.args) != 1 or not isinstance(template := node.args[0], ast.TemplateStr):
+            return
+        for part in template.values:
+            if (
+                isinstance(part, ast.Interpolation)
+                and isinstance(part.format_spec, ast.JoinedStr)
+                and not all(isinstance(value, ast.Constant) for value in part.format_spec.values)
+            ):
+                self._report(
+                    "dynamic-query",
+                    "a format spec in a `query_unchecked` interpolation must be a literal",
+                    part,
+                )
 
     def _template(self, node: ast.Call) -> ast.TemplateStr | None:
         if len(node.args) != 1 or node.keywords or isinstance(node.args[0], ast.Starred):

@@ -1,7 +1,7 @@
 import asyncio
 import datetime as dt
 from dataclasses import dataclass
-from string.templatelib import Template
+from string.templatelib import Interpolation, Template
 from typing import TYPE_CHECKING, Final, NamedTuple, NotRequired, TypedDict
 
 import pytest
@@ -35,6 +35,18 @@ SQL: Final[str] = "SELECT 1::int4 AS id, 'a'::text AS name"
 class User:
     id: int
     name: str
+
+
+EqualStr = type(
+    "EqualStr",
+    (str,),
+    {
+        "__slots__": (),
+        "__eq__": lambda *_, **__: True,
+        "__hash__": lambda *_, **__: 0,
+        "__bool__": lambda *_, **__: False,
+    },
+)
 
 
 class UserRow(NamedTuple):
@@ -621,3 +633,62 @@ def test_a_construct_error_names_the_pydantic_model_with_its_arguments(schema: s
     assert caught.value.type_name == "ModelPage[int]"
     assert "ModelPage[int]" in str(caught.value)
     assert isinstance(caught.value.__cause__, ValidationError)
+
+
+def run_failures(dsn: str, templates: list[Template], *, unchecked: bool = True) -> None:
+    async def body(conn: Executor) -> None:
+        for template in templates:
+            build = query_unchecked if unchecked else query
+            with pytest.raises(TypeError):
+                await build[int](template).one(conn)
+            assert await query[int](t"SELECT 1::int4").one(conn) == 1
+
+    run_on(dsn, "connection", body)
+
+
+def test_compile_time_failures_leave_the_connection_usable(schema: str) -> None:
+    nested = Template("SELECT $1", *[Interpolation(i, "i") for i in range(65536)])
+    many = Template(*[Interpolation(i, "i") for i in range(65536)])
+    run_failures(
+        schema,
+        [
+            t"SELECT 1 FROM {'a\x00b':ident}",
+            t"SELECT 1 FROM {'\x85':ident}",
+            t"SELECT 1 FROM {'a\ud800':ident}",
+            t"SELECT '{'n':ident}'",
+            t"SELECT /* {'n':ident} */ 1",
+            Template("SELECT '\x00'"),
+            many,
+            nested,
+            Template(Interpolation("ident", "x", None, EqualStr("ident"))),
+        ],
+    )
+
+
+def test_a_runtime_ident_spec_takes_the_ident_path(schema: str) -> None:
+    spec = "ident"
+    table = "users"
+
+    async def body(conn: Executor) -> int:
+        return await query_unchecked[int](t"SELECT count(*)::int4 FROM {table:{spec}}").one(conn)
+
+    assert run_on(schema, "connection", body) >= 1
+    run_failures(schema, [t"SELECT '{table:{spec}}'"])
+
+
+def test_a_query_template_with_nul_or_too_many_parameters_leaves_the_connection_usable(schema: str) -> None:
+    run_failures(
+        schema, [Template("SELECT '\x00'"), Template(*[Interpolation(i, "i") for i in range(65536)])], unchecked=False
+    )
+
+
+def test_query_unchecked_round_trips_a_quoted_identifier(schema: str) -> None:
+    table = 'odd "table" é'
+    column = "col; DROP"
+
+    async def body(conn: Executor) -> tuple[int, ...]:
+        await query_unchecked(t"CREATE TABLE {table:ident} ({column:ident} int4)").execute(conn)
+        await query_unchecked(t"INSERT INTO {table:ident} ({column:ident}) VALUES ({7})").execute(conn)
+        return await query_unchecked[tuple[int]](t"SELECT {column:ident} FROM {table:ident}").one(conn)
+
+    assert run_on(schema, "connection", body) == (7,)
