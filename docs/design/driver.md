@@ -636,11 +636,12 @@ There is no round trip on the hot path.
   - any 25P02 error;
   - SQL whose first keyword is `BEGIN`, `START` or `SAVEPOINT`.
 - **The flag is a heuristic, so the reset carries an idle guard.** The first-keyword scan ends a `--` comment at `\n` or
-  `\r`. When the flag is clear, rowx prepends `SELECT 1/(pg_catalog.now() = pg_catalog.statement_timestamp())::int;` to
-  the reset batch, whether it is the default or a custom reset query. From idle, `now()` equals `statement_timestamp()`
-  inside the batch. Inside an explicit transaction it doesn't, so the guard fails, the reset fails and the connection is
-  closed. `RESET_QUERY` text is unchanged. With `reset_query=None` there is no reset batch, so no guard runs, and
-  `reset_query=None` remains unsafe (below).
+  `\r`. When the flag is clear, rowx prepends
+  `SELECT 1 OPERATOR(pg_catalog./) (pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp())::pg_catalog.int4;`
+  to the reset batch, whether it is the default or a custom reset query. From idle, `now()` equals
+  `statement_timestamp()` inside the batch. Inside an explicit transaction it doesn't, so the guard fails, the reset
+  fails and the connection is closed. `RESET_QUERY` text is unchanged. With `reset_query=None` there is no reset batch,
+  so no guard runs, and `reset_query=None` remains unsafe (below).
 - When the flag is set, `ROLLBACK` is sent even with a custom `reset_query` or `reset_query=None`. As in asyncpg, an
   open transaction always ends. It takes one round trip, and **MUST** be correct from idle, in-transaction and
   failed-transaction states.

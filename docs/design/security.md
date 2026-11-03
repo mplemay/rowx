@@ -42,10 +42,11 @@ Each guarantee below has a test. The sections that follow say how each row of th
   table name is built into SQL by rowx, and it is parsed into quoted identifiers
   ([History table](migrations.md#history-table)); so are database names in `rowx database` and `--scratch`.
 - **Internal SQL names `pg_catalog` objects explicitly** (`pg_catalog.now()` in the history DDL,
-  `pg_catalog.pg_advisory_unlock_all()` in `RESET_QUERY`, and so on), so a role or DSN `search_path` can't make rowx's
-  own statements resolve to a shadowing object ([History table](migrations.md#history-table)). A test runs migrations
-  under `search_path = evil, pg_catalog`, and a test asserts that rowx's internal SQL constants, `RESET_QUERY`
-  included, call no unqualified function.
+  `pg_catalog.pg_advisory_unlock_all()` in `RESET_QUERY`, and so on). Operators are qualified as
+  `OPERATOR(pg_catalog.…)` too, because operators resolve through `search_path` like functions. So a role or DSN
+  `search_path` can't make rowx's own statements resolve to a shadowing object
+  ([History table](migrations.md#history-table)). A test runs migrations under `search_path = evil, pg_catalog`, and a
+  test asserts that rowx's internal SQL constants, `RESET_QUERY` included, call no unqualified function.
 - **`:ident` is accepted only in code position;** the compiler enforces it
   ([`:ident`](api.md#ident-identifiers)).
 - **A `Template` is recognised by exact type.** `compile_template` accepts a `Template`, as its argument and as a

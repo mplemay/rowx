@@ -237,15 +237,18 @@
     mode. A live test negotiates SCRAM-SHA-256-PLUS against the TLS container.
   - *Pool reset and internal SQL:* after release, `current_user = session_user =` the startup role (the login role, or
     the role set at startup through `server_settings={"role": …}` or `ALTER ROLE … SET role`) after `SET ROLE` and after
-    `SET SESSION AUTHORIZATION`, including a case with `server_settings={"role": …}`; a custom placeholder GUC
-    (`app.tenant`) is empty after release; a statement whose transaction keyword follows a `--` comment ended by `\r`
-    leaves no transaction in the next checkout; with the flag clear and a transaction open, the reset fails and the
-    connection is discarded, for the default and a custom reset query (with `reset_query=None` no guard runs, because
-    there is no reset batch, and it remains unsafe as documented); a `reset=` hook after an aborted transaction sees an
-    idle connection and its `SET` survives into the next checkout; with `search_path` set to a schema holding a
-    same-named `pg_advisory_unlock_all()` and an advisory lock held, no advisory lock survives release; a temp table is
-    gone. Migrations under `search_path = evil, pg_catalog` record the real time, and a test asserts that rowx's
-    internal SQL constants call no unqualified function.
+    `SET SESSION AUTHORIZATION`, including a case with `server_settings={"role": …}` (`RESET SESSION AUTHORIZATION`
+    restores the role in effect at connection start, so a startup `-c role=…` setting survives, verified on Postgres 18,
+    and the expected value is the startup role); a custom placeholder GUC (`app.tenant`) is empty after release; a
+    statement whose transaction keyword follows a `--` comment ended by `\r` leaves no transaction in the next checkout;
+    with the flag clear and a transaction open, the reset fails and the connection is discarded, for the default and a
+    custom reset query (with `reset_query=None` no guard runs, because there is no reset batch, and it remains unsafe as
+    documented); a `reset=` hook after an aborted transaction sees an idle connection and its `SET` survives into the
+    next checkout; with `search_path` set to a schema holding a same-named `pg_advisory_unlock_all()` and an advisory
+    lock held, no advisory lock survives release; with `search_path` set to a schema holding a same-named `=` operator
+    for `timestamptz` that always returns true, the guard still fails inside an open transaction; a temp table is gone.
+    Migrations under `search_path = evil, pg_catalog` record the real time, and a test asserts that rowx's internal SQL
+    constants call no unqualified function.
   - *Fuzzing:* a `cargo-fuzz` target for every `wire/` decoder, arrays of each element family, `explain` plan JSON and
     `dsn::parse`, each run with `-rss_limit_mb` so an over-allocation fails, plus `decode(encode(x)) == x` targets for
     the encoders. They run in the scheduled fuzz workflow. A panic-boundary test checks that a malformed value of every
