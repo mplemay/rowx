@@ -338,6 +338,8 @@ class _Site:
     chain: tuple[tuple[Path, str], ...]
     in_field: bool = False
     in_alias: bool = False
+    # `Alias[()]` names no arguments but is a subscript, unlike a bare `Alias`
+    explicit: bool = False
 
 
 # the named class a row's fields belong to: its `type_name`, the type parameters bound at the call site, and the note
@@ -1098,7 +1100,7 @@ class _Resolver:
     def _expand_alias(self, alias: _Alias, site: _Site) -> _Node:
         alias = replace(alias, params=self._alias_params(alias))
         # Python gives a bare `X = tuple[T, str]` no defaults: it is the generic itself
-        if not alias.type_stmt and alias.params and not site.args:
+        if not alias.type_stmt and alias.params and not site.args and not site.explicit:
             msg = f"the type parameter `{alias.params[0].name}` of `{alias.name}` is not bound"
             raise _invalid(msg, help_=f"subscript the alias, for example `{alias.name}[int]`")
         env = self._bind(alias.name, alias.params, site)
@@ -1251,7 +1253,9 @@ class _Resolver:
         base = self._constructor(self._resolve_ref(expr.value, module, chain))
         slice_ = expr.slice
         args = tuple(slice_.elts) if isinstance(slice_, ast.Tuple) else (slice_,)
-        site = _Site(args, module, self._env, chain, self._in_field, self._in_alias)
+        site = _Site(
+            args, module, self._env, chain, self._in_field, self._in_alias, explicit=isinstance(slice_, ast.Tuple)
+        )
         if (generic := self._eval_generic(base, site)) is not None:
             return generic
         if not isinstance(base, _External):

@@ -2093,11 +2093,21 @@ def test_a_plain_assignment_of_a_generic_alias_is_the_same_generic_alias(tmp_pat
     assert leaves(named(tmp_path, source)) == [("int", True), ("str", False)]
 
 
-@pytest.mark.parametrize("subscript", ["", "[int, str]", "[()]"])
+@pytest.mark.parametrize("subscript", ["", "[int, str]"])
 def test_a_plain_generic_alias_is_rejected_for_an_unbound_parameter_or_a_wrong_count(
     tmp_path: Path, subscript: str
 ) -> None:
     source = f"from typing import TypeVar\nA = TypeVar('A', default=str)\nPair = tuple[A, int]\nT = Pair{subscript}\n"
+    assert rejected(named(tmp_path, source)) == "invalid-row-type"
+
+
+def test_an_empty_subscript_of_a_plain_generic_alias_takes_its_defaults(tmp_path: Path) -> None:
+    source = "from typing import TypeVar\nA = TypeVar('A', default=str)\nPair = tuple[A, int]\nT = Pair[()]\n"
+    assert leaves(named(tmp_path, source)) == [("str", False), ("int", False)]
+
+
+def test_an_empty_subscript_of_a_plain_generic_alias_without_defaults_is_rejected(tmp_path: Path) -> None:
+    source = "from typing import TypeVar\nA = TypeVar('A')\nPair = tuple[A, int]\nT = Pair[()]\n"
     assert rejected(named(tmp_path, source)) == "invalid-row-type"
 
 

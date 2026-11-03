@@ -986,6 +986,15 @@ def class_chain(length: int, *, fields_everywhere: bool) -> str:
     return "\n".join(lines) + f"\nT = K{length}[int]"
 
 
+def legacy_chain(length: int, *, restate: bool) -> str:
+    # the same chain written with `typing.Generic`: `Generic[X]` is a base that adds no hop, restated or not
+    lines = ["X = TypeVar('X')\n@dataclass\nclass K0(typing.Generic[X]):\n    a0: X"]
+    for index in range(1, length + 1):
+        bases = f"K{index - 1}[X], typing.Generic[X]" if restate else f"K{index - 1}[X]"
+        lines.append(f"@dataclass\nclass K{index}({bases}):\n    a{index}: X")
+    return "\n".join(lines) + f"\nT = K{length}[int]"
+
+
 def chain_fields(length: int, *, fields_everywhere: bool) -> NamedPlan:
     keys = [f"a{index}" for index in range(length + 1)] if fields_everywhere else ["a0", f"a{length}"]
     return keyword(*(f(key) for key in keys))
@@ -1129,6 +1138,10 @@ TYPE_VARIABLE_ROWS: Final[list[Row]] = [
     (class_chain(16, fields_everywhere=False), chain_fields(16, fields_everywhere=False), "ok"),
     (class_chain(17, fields_everywhere=False), "InterfaceError", REJECTED),
     (class_chain(20, fields_everywhere=False), "InterfaceError", REJECTED),
+    (legacy_chain(16, restate=False), chain_fields(16, fields_everywhere=True), "ok"),
+    (legacy_chain(17, restate=False), "InterfaceError", REJECTED),
+    (legacy_chain(16, restate=True), chain_fields(16, fields_everywhere=True), "ok"),
+    (legacy_chain(17, restate=True), "InterfaceError", REJECTED),
 ]
 ROWS.extend(TYPE_VARIABLE_ROWS)
 

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Final, TypeVar
 import pytest
 
 from rowx.__tests__.conformance.row_types import PRELUDE, ROWS, NamedPlan, Plan
-from rowx._rowplan import MAX_ALIAS_DEPTH, NO_ROWS, RowPlan, row_plan
+from rowx._rowplan import MAX_ALIAS_DEPTH, NO_ROWS, RowPlan, _type_text, row_plan
 from rowx.errors import InterfaceError
 
 if TYPE_CHECKING:
@@ -1067,6 +1067,27 @@ def test_a_bare_generic_alias_takes_its_defaults() -> None:
 def test_a_bare_generic_alias_without_defaults_is_unbound() -> None:
     with pytest.raises(InterfaceError, match=r"the type parameter `X` of `Wrap` is not bound; subscript it"):
         row_plan(Wrap)
+
+
+def test_an_empty_subscript_of_a_plain_generic_alias_takes_its_defaults() -> None:
+    A = TypeVar("A", default=str)
+    plain = tuple[A, int]
+    assert row_plan(plain[()]).arity == 2
+    with pytest.raises(InterfaceError, match="the type parameter `A` is not bound"):
+        row_plan(plain)
+
+
+def test_a_plain_assignment_of_a_generic_alias_is_the_same_generic_alias() -> None:
+    A = TypeVar("A")
+    pair = tuple[A, str]
+    outer = pair
+    assert row_plan(outer[int | None]).nullable_mask == (True, False)
+    with pytest.raises(InterfaceError, match="the type parameter `A` is not bound"):
+        row_plan(outer)
+
+
+def test_an_ellipsis_argument_is_shown_as_dots() -> None:
+    assert _type_text(tuple[int, ...]) == "tuple[int, ...]"
 
 
 @pytest.mark.parametrize(

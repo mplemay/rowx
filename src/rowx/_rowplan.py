@@ -14,9 +14,11 @@ from typing import (
     ClassVar,
     Final,
     ForwardRef,
+    Generic,
     Literal,
     NotRequired,
     ParamSpec,
+    Protocol,
     ReadOnly,
     Required,
     TypeAliasType,
@@ -151,8 +153,8 @@ def _alias_value(t: TypeAliasType) -> object:
 
 # the text a type argument is shown as in a `type_name`, such as the `int | None` of `Box[int | None]`
 def _type_text(t: object) -> str:
-    if t is None or t is type(None):
-        return "None"
+    if t is None or t is type(None) or t is Ellipsis:
+        return "..." if t is Ellipsis else "None"
     if isinstance(t, type | TypeAliasType | TypeVar):
         return t.__name__
     origin, args = get_origin(t), get_args(t)
@@ -487,6 +489,9 @@ def _class_bindings(root: type, mapping: dict[object, object]) -> Bindings:
         klass, depth = pending.pop(0)
         for base in klass.__dict__.get("__orig_bases__", klass.__bases__):
             origin = get_origin(base) or base
+            # `Generic[T]` and `Protocol[T]` add no bindings and are not classes the checker follows
+            if origin is Generic or origin is Protocol:
+                continue
             if not isinstance(origin, type) or origin in out:
                 continue
             # only a subscripted base is a hop; a plain base adds no depth
