@@ -243,7 +243,11 @@ def generated_sql(source: str) -> str:
     call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and n.args)
     code = compile(ast.Expression(call.args[0]), "<case>", "eval")
     namespace = {"x": 1, "y": 2, "f": lambda *_: 3}
-    compiled, _ = compile_template(eval(code, namespace), dynamic=False)  # ruff: ignore[suspicious-eval-usage]
+    template = eval(code, namespace)  # ruff: ignore[suspicious-eval-usage]
+    # the runtime rejects a NUL in the SQL text, which the generator emits on purpose to exercise escapes
+    if any("\x00" in text for text in template.strings):
+        return compile_parts(template.strings).sql
+    compiled, _ = compile_template(template, dynamic=False)
     return compiled.sql
 
 
