@@ -4,9 +4,7 @@ import sys
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING, Annotated, TypedDict
-
-from pydantic import BaseModel, Field
+from typing import TYPE_CHECKING, TypedDict
 
 from rowx import query
 from rowx.postgres import connect
@@ -30,15 +28,6 @@ class Author:
 class AuthorCount(TypedDict):
     name: str
     books: int
-
-
-# a pydantic model is validated as `Book.model_validate` would
-class Book(BaseModel):
-    id: int
-    title: str
-    price: Annotated[Decimal, Field(ge=0)]
-    published: date | None
-    tags: list[str]
 
 
 async def list_authors(conn: Connection) -> list[AuthorRow]:
@@ -70,12 +59,6 @@ async def author_counts(conn: Connection) -> list[AuthorCount]:
         GROUP BY a.name
         ORDER BY a.name
         """,
-    ).all(conn)
-
-
-async def cheap_books(conn: Connection, limit: Decimal) -> list[Book]:
-    return await query[Book](
-        t"SELECT id, title, price, published, tags FROM books WHERE price < {limit} ORDER BY title",
     ).all(conn)
 
 
@@ -118,9 +101,6 @@ async def main(dsn: str) -> None:
 
         for counts in await author_counts(conn):
             print(f"{counts['name']} has {counts['books']} books")  # ruff: ignore[print]
-
-        for book in await cheap_books(conn, Decimal(12)):
-            print(f"cheap: {book.title} ${book.price}")  # ruff: ignore[print]
 
         print("tagged:", ", ".join(await books_tagged(conn, ["history", "fantasy"])))  # ruff: ignore[print]
 
