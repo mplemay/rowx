@@ -2,7 +2,7 @@ use std::fmt;
 use std::time::Duration;
 
 use tokio_postgres::Config;
-use tokio_postgres::config::Host;
+use tokio_postgres::config::{ChannelBinding, Host};
 
 use crate::error::Error;
 use crate::redact;
@@ -57,6 +57,8 @@ pub struct ConnectOptions {
     pub database: Option<String>,
     pub sslmode: Option<String>,
     pub sslrootcert: Option<String>,
+    // `disable`, `prefer` or `require`; unset leaves tokio-postgres's default (`prefer`)
+    pub channel_binding: Option<String>,
     pub connect_timeout: Option<Duration>,
     pub statement_cache_size: usize,
     pub application_name: Option<String>,
@@ -76,6 +78,7 @@ impl Default for ConnectOptions {
             database: None,
             sslmode: None,
             sslrootcert: None,
+            channel_binding: None,
             connect_timeout: None,
             statement_cache_size: DEFAULT_STATEMENT_CACHE_SIZE,
             application_name: None,
@@ -96,6 +99,7 @@ impl fmt::Debug for ConnectOptions {
             .field("database", &self.database)
             .field("sslmode", &self.sslmode)
             .field("sslrootcert", &self.sslrootcert)
+            .field("channel_binding", &self.channel_binding)
             .field("connect_timeout", &self.connect_timeout)
             .field("statement_cache_size", &self.statement_cache_size)
             .field("application_name", &self.application_name)
@@ -173,6 +177,7 @@ impl ConnectOptions {
             ("database", &self.database),
             ("sslmode", &self.sslmode),
             ("sslrootcert", &self.sslrootcert),
+            ("channel_binding", &self.channel_binding),
             ("application_name", &self.application_name),
         ];
         for (name, value) in typed {
@@ -189,7 +194,27 @@ impl ConnectOptions {
             }
             check_value(key, value)?;
         }
+        let binding = self
+            .channel_binding
+            .as_deref()
+            .map(parse_channel_binding)
+            .transpose()?;
+        if binding == Some(ChannelBinding::Require)
+            && self
+                .sslmode
+                .as_deref()
+                .is_some_and(|mode| matches!(Mode::parse(mode), Ok(Mode::Disable)))
+        {
+            return Err(invalid(
+                "channel_binding=require needs TLS, not sslmode=disable",
+            ));
+        }
         for (key, value) in &self.extra {
+            if key == "channel_binding" {
+                return Err(invalid(
+                    "channel_binding is a typed option, not an extra key",
+                ));
+            }
             if key.is_empty() || !key.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
                 return Err(invalid(&format!("malformed key {}", shown(key))));
             }
@@ -271,6 +296,10 @@ impl ConnectOptions {
                 self.sslmode = Some(value);
             }
             "sslrootcert" => self.sslrootcert = Some(value),
+            "channel_binding" => {
+                parse_channel_binding(&value)?;
+                self.channel_binding = Some(value);
+            }
             // client certificates and CRLs are out of scope for v1
             "sslcert" | "sslkey" | "sslcrl" => {
                 return Err(Error::Interface(format!("{key} is not supported in v1")));
@@ -385,6 +414,14 @@ impl ConnectOptions {
             root_cert: self.sslrootcert.clone().map(Into::into),
         };
         config.ssl_mode(tls.mode.transport());
+        if let Some(binding) = self
+            .channel_binding
+            .as_deref()
+            .map(parse_channel_binding)
+            .transpose()?
+        {
+            config.channel_binding(binding);
+        }
         if let Some(timeout) = self.connect_timeout.filter(|t| !t.is_zero()) {
             config.connect_timeout(timeout);
         }
@@ -393,6 +430,18 @@ impl ConnectOptions {
             tls,
             secrets: Secrets(self.secrets()),
         })
+    }
+}
+
+fn parse_channel_binding(value: &str) -> Result<ChannelBinding, Error> {
+    match value {
+        "disable" => Ok(ChannelBinding::Disable),
+        "prefer" => Ok(ChannelBinding::Prefer),
+        "require" => Ok(ChannelBinding::Require),
+        // the value is never echoed, since it may be a misplaced secret
+        _ => Err(invalid(
+            "unsupported channel_binding; expected disable, prefer or require",
+        )),
     }
 }
 
@@ -709,6 +758,101 @@ mod tests {
         assert!(!config.get_keepalives());
         assert_eq!(config.get_connect_timeout(), Some(&Duration::from_secs(3)));
         Ok(())
+    }
+
+    #[test]
+    fn channel_binding_is_typed_from_either_dsn_form_and_maps_to_the_driver() -> Result<(), Error> {
+        for (value, expected) in [
+            ("disable", ChannelBinding::Disable),
+            ("prefer", ChannelBinding::Prefer),
+            ("require", ChannelBinding::Require),
+        ] {
+            for dsn in [
+                format!("postgres://u@h/db?channel_binding={value}"),
+                format!("host=h channel_binding={value}"),
+            ] {
+                let opts = ConnectOptions::from_dsn(&dsn)?;
+                assert_eq!(opts.channel_binding.as_deref(), Some(value), "{dsn}");
+                assert!(opts.extra.is_empty(), "{dsn}");
+                assert_eq!(
+                    opts.build()?.config.get_channel_binding(),
+                    expected,
+                    "{dsn}"
+                );
+            }
+        }
+        let unset = ConnectOptions::from_dsn("host=h")?.build()?;
+        assert_eq!(unset.config.get_channel_binding(), ChannelBinding::Prefer);
+        Ok(())
+    }
+
+    #[test]
+    fn a_duplicate_channel_binding_resolves_last_wins() -> Result<(), Error> {
+        for dsn in [
+            "postgres://u@h/db?channel_binding=require&channel_binding=disable",
+            "host=h channel_binding=require channel_binding=disable",
+        ] {
+            let opts = ConnectOptions::from_dsn(dsn)?;
+            assert_eq!(opts.channel_binding.as_deref(), Some("disable"), "{dsn}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_channel_binding_names_the_key_and_never_the_value() {
+        for dsn in [
+            "host=h channel_binding=Zq9bogus",
+            "postgres://u@h/db?channel_binding=Zq9bogus",
+        ] {
+            let message = match ConnectOptions::from_dsn(dsn) {
+                Err(Error::Interface(message)) => message,
+                _ => String::new(),
+            };
+            assert!(message.contains("channel_binding"), "{message}");
+            assert!(!message.contains("Zq9"), "{message}");
+        }
+        let opts = ConnectOptions {
+            channel_binding: Some("Zq9bogus".to_owned()),
+            ..ConnectOptions::default()
+        };
+        assert!(matches!(opts.build(), Err(Error::Interface(m)) if !m.contains("Zq9")));
+    }
+
+    #[test]
+    fn channel_binding_in_extra_is_rejected() {
+        let opts = with_extra("channel_binding", "require");
+        assert!(
+            matches!(opts.validate(), Err(Error::Interface(m)) if m.contains("channel_binding"))
+        );
+        assert!(opts.build().is_err());
+    }
+
+    #[test]
+    fn require_with_sslmode_disable_is_a_parse_time_error() {
+        for dsn in [
+            "host=h sslmode=disable channel_binding=require",
+            "host=h channel_binding=require sslmode=disable",
+            "postgres://u@h/db?sslmode=disable&channel_binding=require",
+        ] {
+            let result = ConnectOptions::from_dsn(dsn);
+            assert!(
+                matches!(&result, Err(Error::Interface(m)) if m.contains("channel_binding")),
+                "{dsn}: {result:?}"
+            );
+        }
+        let field = ConnectOptions {
+            sslmode: Some("disable".to_owned()),
+            channel_binding: Some("require".to_owned()),
+            ..ConnectOptions::default()
+        };
+        assert!(matches!(field.validate(), Err(Error::Interface(_))));
+        assert!(matches!(field.build(), Err(Error::Interface(_))));
+        for ok in ["prefer", "disable"] {
+            assert!(
+                ConnectOptions::from_dsn(&format!("host=h sslmode=disable channel_binding={ok}"))
+                    .is_ok()
+            );
+        }
     }
 
     #[test]

@@ -72,7 +72,15 @@ impl From<tokio_postgres::Error> for Error {
         if err.is_closed() {
             return Self::Core(CoreError::Closed);
         }
-        Self::Interface(err.to_string())
+        let text = err.to_string();
+        // the kind is private; its text is fixed, and its cause says why the client refused (for example
+        // that the server did not use channel binding). `connect_parsed` redacts the whole message.
+        if text == "authentication error"
+            && let Some(cause) = std::error::Error::source(&err)
+        {
+            return Self::Interface(format!("{text}: {cause}"));
+        }
+        Self::Interface(text)
     }
 }
 

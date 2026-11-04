@@ -149,3 +149,54 @@ def test_dashed_extra_keys_are_still_rejected() -> None:
 def test_dash_in_a_c_option_name_maps_to_an_underscore() -> None:
     opts = ConnectOptions.from_dsn("host=h options='-c search-path=x'")
     assert opts.server_settings == {"search_path": "x"}
+
+
+@pytest.mark.parametrize("value", ["disable", "prefer", "require"])
+@pytest.mark.parametrize("form", ["postgresql://u@h/db?channel_binding={}", "host=h channel_binding={}"])
+def test_channel_binding_is_parsed_into_the_typed_field(form: str, value: str) -> None:
+    opts = ConnectOptions.from_dsn(form.format(value))
+    assert opts.channel_binding == value
+    assert "channel_binding" not in opts.extra
+
+
+def test_channel_binding_defaults_to_none_and_shows_in_the_repr() -> None:
+    assert ConnectOptions.from_dsn("host=h").channel_binding is None
+    assert "channel_binding='require'" in repr(ConnectOptions(host="h", channel_binding="require"))
+    assert "channel_binding=None" in repr(ConnectOptions(host="h"))
+
+
+@pytest.mark.parametrize("dsn", ["host=h channel_binding=Zq9bogus", "postgresql://u@h/db?channel_binding=Zq9bogus"])
+def test_an_invalid_channel_binding_in_a_dsn_names_the_key_not_the_value(dsn: str) -> None:
+    with pytest.raises(InterfaceError, match="channel_binding") as caught:
+        ConnectOptions.from_dsn(dsn)
+    assert "Zq9" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "host=h sslmode=disable channel_binding=require",
+        "postgresql://u@h/db?channel_binding=require&sslmode=disable",
+    ],
+)
+def test_require_with_sslmode_disable_fails_at_parse_time_from_a_dsn(dsn: str) -> None:
+    with pytest.raises(InterfaceError, match="channel_binding"):
+        ConnectOptions.from_dsn(dsn)
+
+
+def test_connect_rejects_the_field_forms_of_the_channel_binding_errors() -> None:
+    cases = [
+        ConnectOptions(host="h", sslmode="disable", channel_binding="require"),
+        ConnectOptions(host="h", extra={"channel_binding": "require"}),
+        ConnectOptions(host="h", channel_binding=cast("Any", "Zq9bogus")),
+    ]
+    for options in cases:
+        with pytest.raises(InterfaceError, match="channel_binding") as caught:
+            asyncio.run(connect(options))
+        assert "Zq9" not in str(caught.value)
+
+
+def test_require_with_sslmode_disable_is_accepted_for_the_other_values() -> None:
+    for value in ("disable", "prefer"):
+        opts = ConnectOptions.from_dsn(f"host=h sslmode=disable channel_binding={value}")
+        assert (opts.sslmode, opts.channel_binding) == ("disable", value)

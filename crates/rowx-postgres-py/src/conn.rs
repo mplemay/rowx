@@ -336,6 +336,7 @@ pub(crate) fn options_from_py(py: Python<'_>, opts: &Bound<'_, PyAny>) -> PyResu
         database: opts.getattr("database")?.extract()?,
         sslmode: opts.getattr("sslmode")?.extract()?,
         sslrootcert: opts.getattr("sslrootcert")?.extract()?,
+        channel_binding: opts.getattr("channel_binding")?.extract()?,
         connect_timeout,
         statement_cache_size: opts.getattr("statement_cache_size")?.extract()?,
         application_name: opts.getattr("application_name")?.extract()?,
@@ -357,6 +358,7 @@ pub fn parse_dsn<'py>(py: Python<'py>, dsn: &str) -> PyResult<Bound<'py, PyDict>
     out.set_item("database", opts.database)?;
     out.set_item("sslmode", opts.sslmode)?;
     out.set_item("sslrootcert", opts.sslrootcert)?;
+    out.set_item("channel_binding", opts.channel_binding)?;
     out.set_item(
         "connect_timeout",
         opts.connect_timeout.map(|t| t.as_secs_f64()),
