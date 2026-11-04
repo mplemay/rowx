@@ -335,22 +335,22 @@ pub fn encode_timetz(micros: i64, west_seconds: i32) -> Result<Vec<u8>, Temporal
 }
 
 /// `micros` is the time of day; `offset_micros` is the UTC offset, zero for a naive timestamp.
-#[must_use]
+///
+/// # Errors
+/// `OutOfRange` when the instant does not fit the 8-byte wire form.
 pub fn encode_timestamp(
     year: i32,
     month: u32,
     day: u32,
     micros: i64,
     offset_micros: i64,
-) -> Vec<u8> {
-    // an out-of-range input wraps, as the release profile always has; the Python caller passes a datetime
-    // (years 1..=9999, a sub-day offset), which never gets near the bounds
+) -> Result<Vec<u8>, TemporalError> {
     pg_days(year, month, day)
-        .wrapping_mul(MICROS_PER_DAY)
-        .wrapping_add(micros)
-        .wrapping_sub(offset_micros)
-        .to_be_bytes()
-        .to_vec()
+        .checked_mul(MICROS_PER_DAY)
+        .and_then(|day_start| day_start.checked_add(micros))
+        .and_then(|local| local.checked_sub(offset_micros))
+        .map(|instant| instant.to_be_bytes().to_vec())
+        .ok_or(TemporalError::OutOfRange("timestamp"))
 }
 
 /// The months component is always zero.
@@ -673,17 +673,32 @@ mod tests {
 
     #[test]
     fn encode_timestamp_at_the_year_bounds() {
-        let last = encode_timestamp(9999, 12, 31, MICROS_PER_DAY - 1, 0);
+        let last = encode_timestamp(9999, 12, 31, MICROS_PER_DAY - 1, 0).unwrap_or_default();
         assert_eq!(
             last,
             (2_921_939 * MICROS_PER_DAY + MICROS_PER_DAY - 1).to_be_bytes()
         );
-        let first = encode_timestamp(1, 1, 1, 0, 0);
+        let first = encode_timestamp(1, 1, 1, 0, 0).unwrap_or_default();
         assert_eq!(first, (-730_119 * MICROS_PER_DAY).to_be_bytes());
-        let shifted = encode_timestamp(2000, 1, 1, 0, 57_599 * MICROS_PER_SECOND);
+        let shifted =
+            encode_timestamp(2000, 1, 1, 0, 57_599 * MICROS_PER_SECOND).unwrap_or_default();
         assert_eq!(shifted, (-57_599 * MICROS_PER_SECOND).to_be_bytes());
-        let negative = encode_timestamp(2000, 1, 1, 5, -7);
+        let negative = encode_timestamp(2000, 1, 1, 5, -7).unwrap_or_default();
         assert_eq!(negative, 12_i64.to_be_bytes());
+    }
+
+    #[test]
+    fn encode_timestamp_rejects_an_overflowing_instant() {
+        let out = Err(TemporalError::OutOfRange("timestamp"));
+        assert_eq!(encode_timestamp(i32::MAX, 12, 31, 0, 0), out);
+        assert_eq!(encode_timestamp(i32::MIN, 1, 1, 0, 0), out);
+        assert_eq!(encode_timestamp(2000, 1, 1, i64::MAX, -1), out);
+        assert_eq!(encode_timestamp(2000, 1, 1, i64::MIN, 1), out);
+        assert_eq!(encode_timestamp(2000, 1, 1, 0, i64::MIN), out);
+        assert_eq!(
+            encode_timestamp(2000, 1, 1, i64::MAX, 0),
+            Ok(i64::MAX.to_be_bytes().to_vec())
+        );
     }
 
     #[test]
@@ -850,7 +865,7 @@ mod proptests {
             ymd in civil_date(),
             micros in 0..MICROS_PER_DAY,
         ) {
-            let raw = encode_timestamp(ymd.0, ymd.1, ymd.2, micros, 0);
+            let raw = encode_timestamp(ymd.0, ymd.1, ymd.2, micros, 0).unwrap_or_default();
             let decoded = decode_timestamp("timestamp", &raw);
             prop_assert_eq!(decoded.as_ref().map(|d| d.date), Ok(as_date(ymd)));
             let time = decoded.map_or(TimeOfDay { hour: 0, minute: 0, second: 0, microsecond: 0 }, |d| d.time);
@@ -867,8 +882,8 @@ mod proptests {
             offset in -57_599i64..=57_599,
         ) {
             let offset_micros = offset.saturating_mul(MICROS_PER_SECOND);
-            let local = encode_timestamp(ymd.0, ymd.1, ymd.2, micros, 0);
-            let zoned = encode_timestamp(ymd.0, ymd.1, ymd.2, micros, offset_micros);
+            let local = encode_timestamp(ymd.0, ymd.1, ymd.2, micros, 0).unwrap_or_default();
+            let zoned = encode_timestamp(ymd.0, ymd.1, ymd.2, micros, offset_micros).unwrap_or_default();
             let local = i64::from_be_bytes(<[u8; 8]>::try_from(local.as_slice()).unwrap_or([0; 8]));
             let zoned = i64::from_be_bytes(<[u8; 8]>::try_from(zoned.as_slice()).unwrap_or([0; 8]));
             prop_assert_eq!(local.saturating_sub(zoned), offset_micros);

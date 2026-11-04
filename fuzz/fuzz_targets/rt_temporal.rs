@@ -90,7 +90,10 @@ fn check(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     // a timestamp with an offset is the instant in UTC; a naive one has none
     let offset = u.int_in_range(-57_599..=57_599_i64)? * 1_000_000;
     for (ty, shift) in [("timestamp", 0), ("timestamptz", offset)] {
-        let raw = temporal::encode_timestamp(year, month, day, micros, shift);
+        let raw = must(
+            temporal::encode_timestamp(year, month, day, micros, shift),
+            "encode_timestamp",
+        );
         let decoded = temporal::decode_timestamp(ty, &raw);
         let total = pg_days(year, month, day) * MICROS_PER_DAY + micros - shift;
         let back = decoded.map(|t| {
@@ -102,6 +105,10 @@ fn check(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         });
         assert_eq!(back, Ok(total));
     }
+
+    // an instant past the 8-byte wire form is refused, not wrapped
+    assert!(temporal::encode_timestamp(i32::MAX, 12, 31, 0, 0).is_err());
+    assert!(temporal::encode_timestamp(2001, 1, 1, i64::MAX, 0).is_err());
 
     let days = u.arbitrary::<i32>()?;
     let months = u.arbitrary::<i32>()?;
