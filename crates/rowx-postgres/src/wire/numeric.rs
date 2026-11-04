@@ -215,7 +215,8 @@ impl Numeric {
         };
         let mut groups = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
         for k in (bottom..=top).rev() {
-            // the group index is bounded by the checked weight and group count, and a group holds at most 9999, so nothing saturates
+            // the group index is bounded by the checked weight and group count,
+            // and a group holds at most 9999, so nothing saturates
             let base = k.saturating_mul(4);
             // most significant decimal place of the group first
             let group = [3_i64, 2, 1, 0].into_iter().fold(0u16, |acc, plus| {
@@ -259,6 +260,7 @@ impl Numeric {
         };
         let count =
             u16::try_from(digits.len()).map_err(|_| NumericError::TooManyDigits(digits.len()))?;
+        // capacity hint only; digits.len() is already checked to fit in u16 above
         let mut out = Vec::with_capacity(digits.len().saturating_mul(2).saturating_add(HEADER_LEN));
         out.extend_from_slice(&count.to_be_bytes());
         out.extend_from_slice(&weight.to_be_bytes());
@@ -318,6 +320,7 @@ impl Numeric {
         if scale > 0 {
             out.push('.');
             let frac_start = out.len();
+            // ends after at most ceil(scale / 4) groups
             for index in after_int.. {
                 if out.len().saturating_sub(frac_start) >= scale {
                     break;
@@ -362,6 +365,7 @@ pub fn parse_decimal_str(text: &str) -> Result<(bool, Vec<u8>, DecimalExponent),
         None => (rest, 0),
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    // capacity hint only; the input length is already bounded
     let mut digits = Vec::with_capacity(whole.len().saturating_add(fraction.len()));
     for byte in whole.bytes().chain(fraction.bytes()) {
         if !byte.is_ascii_digit() {
