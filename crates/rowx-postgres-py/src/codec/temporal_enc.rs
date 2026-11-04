@@ -97,9 +97,8 @@ pub fn encode_timestamp(param: &PyParam) -> Result<Vec<u8>, String> {
             date,
             micros,
             offset: None,
-        } => Ok(temporal::encode_timestamp(
-            date.year, date.month, date.day, *micros, 0,
-        )),
+        } => temporal::encode_timestamp(date.year, date.month, date.day, *micros, 0)
+            .map_err(|e| failed(&e)),
         PyParam::DateTime { .. } => Err(
             "a timezone-aware datetime cannot be encoded as timestamp; pass a naive datetime"
                 .to_owned(),
@@ -116,9 +115,8 @@ pub fn encode_timestamptz(param: &PyParam) -> Result<Vec<u8>, String> {
             date,
             micros,
             offset: Some(offset),
-        } => Ok(temporal::encode_timestamp(
-            date.year, date.month, date.day, *micros, *offset,
-        )),
+        } => temporal::encode_timestamp(date.year, date.month, date.day, *micros, *offset)
+            .map_err(|e| failed(&e)),
         PyParam::DateTime { .. } => Err(
             "a naive datetime cannot be encoded as timestamptz; pass an aware datetime".to_owned(),
         ),

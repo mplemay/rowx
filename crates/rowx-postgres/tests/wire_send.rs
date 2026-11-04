@@ -296,7 +296,7 @@ async fn timestamp_matches_timestamp_send() -> TestResult {
     for (ymd, micros) in samples((civil_date(), micros_of_day()), CASES) {
         let text = format!("{} {}", date_text(ymd), time_text(micros));
         let sent = send(&client, "timestamp_send", "timestamp", &text).await?;
-        let ours = temporal::encode_timestamp(ymd.0, ymd.1, ymd.2, micros, 0);
+        let ours = temporal::encode_timestamp(ymd.0, ymd.1, ymd.2, micros, 0)?;
         assert_eq!(ours, sent, "{text}");
         let decoded = temporal::decode_timestamp("timestamp", &sent)?;
         assert_eq!(
@@ -323,7 +323,7 @@ async fn timestamptz_matches_timestamptz_send() -> TestResult {
         );
         let sent = send(&client, "timestamptz_send", "timestamptz", &text).await?;
         let ours =
-            temporal::encode_timestamp(ymd.0, ymd.1, ymd.2, micros, offset * MICROS_PER_SECOND);
+            temporal::encode_timestamp(ymd.0, ymd.1, ymd.2, micros, offset * MICROS_PER_SECOND)?;
         assert_eq!(ours, sent, "{text}");
     }
     // at UTC the decoded fields are the literal's own
@@ -989,7 +989,7 @@ async fn date_and_timestamp_ranges_use_the_subtype_bounds() -> TestResult {
         let low_text = format!("2000-01-01 {}", time_text(micros));
         let text = format!("[{low_text},infinity)");
         let sent = send(&client, "range_send", "tsrange", &text).await?;
-        let low = temporal::encode_timestamp(2000, 1, 1, micros, 0);
+        let low = temporal::encode_timestamp(2000, 1, 1, micros, 0)?;
         let ours = Range::Bounds {
             lower: Bound::Inclusive(&low),
             upper: Bound::Unbounded,

@@ -37,6 +37,11 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    // `at` only moves through `take`, which stays inside `raw`
+    const fn remaining(&self) -> usize {
+        self.raw.len().saturating_sub(self.at)
+    }
+
     fn take(&mut self, len: usize) -> Option<&'a [u8]> {
         let end = self.at.checked_add(len)?;
         let slice = self.raw.get(self.at..end)?;
@@ -79,8 +84,8 @@ pub fn decode(raw: &[u8]) -> Result<Array<'_>, ArrayError> {
     }
     if empty {
         // Postgres sends this shape for an empty oidvector or int2vector; there are no elements to read
-        if reader.at != raw.len() {
-            return Err(ArrayError::Trailing(raw.len() - reader.at));
+        if reader.remaining() != 0 {
+            return Err(ArrayError::Trailing(reader.remaining()));
         }
         return Ok(Array {
             element_oid,
@@ -106,8 +111,8 @@ pub fn decode(raw: &[u8]) -> Result<Array<'_>, ArrayError> {
             .ok_or(ArrayError::ElementTruncated(index))?;
         elements.push(Some(bytes));
     }
-    if reader.at != raw.len() {
-        return Err(ArrayError::Trailing(raw.len() - reader.at));
+    if reader.remaining() != 0 {
+        return Err(ArrayError::Trailing(reader.remaining()));
     }
     Ok(Array {
         element_oid,
@@ -305,6 +310,48 @@ mod tests {
         raw.extend(dim(i32::MAX, 1));
         assert!(decode(&raw).is_err());
     }
+
+    #[test]
+    fn trailing_bytes_are_counted_after_each_shape() {
+        let mut empty = header(0, 0, 23);
+        empty.extend([1, 2, 3]);
+        assert_eq!(decode(&empty), Err(ArrayError::Trailing(3)));
+
+        let mut one = header(1, 0, 23);
+        one.extend(dim(1, 1));
+        one.extend(elem(Some(&[7])));
+        one.extend([9, 9]);
+        assert_eq!(decode(&one), Err(ArrayError::Trailing(2)));
+    }
+
+    #[test]
+    fn element_lengths_at_the_limits() {
+        let mut min = header(1, 0, 23);
+        min.extend(dim(1, 1));
+        min.extend(i32::MIN.to_be_bytes());
+        assert_eq!(decode(&min), Err(ArrayError::ElementLength(0, i32::MIN)));
+
+        let mut max = header(1, 0, 23);
+        max.extend(dim(1, 1));
+        max.extend(i32::MAX.to_be_bytes());
+        assert_eq!(decode(&max), Err(ArrayError::ElementTruncated(0)));
+
+        let mut cut = header(1, 0, 23);
+        cut.extend(dim(2, 1));
+        assert_eq!(decode(&cut), Err(ArrayError::ElementTruncated(0)));
+        let mut half = header(1, 0, 23);
+        half.extend(2_i32.to_be_bytes());
+        assert_eq!(decode(&half), Err(ArrayError::Truncated(16)));
+    }
+
+    #[test]
+    fn dimension_products_that_overflow_are_too_large() {
+        let mut raw = header(3, 0, 23);
+        for _ in 0..3 {
+            raw.extend(dim(i32::MAX, 1));
+        }
+        assert_eq!(decode(&raw), Err(ArrayError::TooLarge));
+    }
 }
 
 #[cfg(test)]
@@ -354,7 +401,11 @@ mod proptests {
         #[test]
         fn the_null_flag_follows_the_elements((dims, elements) in shaped()) {
             let raw = encode(23, &dims, &borrowed(&elements)).unwrap_or_default();
-            let flag = i32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]);
+            // -1 when the header is missing, which no flag equals
+            let flag = raw
+                .get(4..)
+                .and_then(<[u8]>::first_chunk::<4>)
+                .map_or(-1, |b| i32::from_be_bytes(*b));
             prop_assert_eq!(flag, i32::from(elements.iter().any(Option::is_none)));
         }
 
@@ -365,8 +416,9 @@ mod proptests {
         ) {
             let mut raw = encode(23, &dims, &borrowed(&elements)).unwrap_or_default();
             for index in 0..dims.len() {
-                let at = HEADER_LEN + index * 8 + 4;
-                raw.splice(at..at + 4, lower.to_be_bytes());
+                // at most three dimensions, so nothing saturates
+                let at = index.saturating_mul(8).saturating_add(HEADER_LEN + 4);
+                raw.splice(at..at.saturating_add(4), lower.to_be_bytes());
             }
             let decoded = decode(&raw);
             prop_assert_eq!(decoded.map(|a| (a.dims, a.elements.len())), Ok((dims, elements.len())));
@@ -378,8 +430,11 @@ mod proptests {
             cut in 0usize..256,
         ) {
             let raw = encode(23, &dims, &borrowed(&elements)).unwrap_or_default();
-            let cut = cut % raw.len().max(1);
-            prop_assert!(decode(&raw[..cut]).is_err());
+            let cut = cut.checked_rem(raw.len().max(1)).unwrap_or(0);
+            let Some(prefix) = raw.get(..cut) else {
+                return Err(TestCaseError::fail("the cut is past the encoding"));
+            };
+            prop_assert!(decode(prefix).is_err());
         }
 
         #[test]
@@ -390,7 +445,9 @@ mod proptests {
             // claim more elements than the body carries
             prop_assume!(!dims.is_empty() && dims.iter().all(|&d| d > 0));
             let mut bigger = dims;
-            bigger[0] += extra;
+            if let Some(first) = bigger.first_mut() {
+                *first = first.saturating_add(extra);
+            }
             let raw = encode(23, &bigger, &borrowed(&elements)).unwrap_or_default();
             prop_assert!(decode(&raw).is_err());
         }
