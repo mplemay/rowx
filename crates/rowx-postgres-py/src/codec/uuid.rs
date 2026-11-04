@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyType};
 use rowx_postgres::exec::Param;
+use rowx_postgres::wire::uuid;
 
 use crate::codec::extract::PyParam;
 use crate::errors::decode_error;
@@ -36,29 +37,17 @@ pub fn decode<'py>(py: Python<'py>, raw: &[u8]) -> PyResult<Bound<'py, PyAny>> {
     uuid_class(py)?.call((), Some(&kwargs))
 }
 
-/// The canonical hyphenated form, as the server prints it.
-#[must_use]
-pub fn to_text(bytes: &[u8; 16]) -> String {
-    let mut out = String::with_capacity(36);
-    for (index, byte) in bytes.iter().enumerate() {
-        if matches!(index, 4 | 6 | 8 | 10) {
-            out.push('-');
-        }
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
-const HEX: &[u8; 16] = b"0123456789abcdef";
-
-/// A `UUID` goes out as 16 binary bytes, a `str` as text for the server to parse.
+/// A scalar `UUID` goes out as 16 binary bytes and a scalar `str` as text for the server to parse; as an
+/// array element a `str` is parsed here, so the element is always 16 bytes.
 ///
 /// # Errors
 /// A description of why the value cannot be encoded as `uuid`.
-pub fn encode(param: &PyParam) -> Result<Param, String> {
+pub fn encode(param: &PyParam, element: bool) -> Result<Param, String> {
     match param {
         PyParam::Uuid(bytes) => Ok(Param::binary(bytes.to_vec())),
+        PyParam::Str(s) if element => uuid::parse(s)
+            .map(|bytes| Param::binary(bytes.to_vec()))
+            .map_err(|e| e.to_string()),
         PyParam::Str(s) => Ok(Param::text(s.clone().into_bytes())),
         _ => Err(format!(
             "a Python {} cannot be encoded as uuid",

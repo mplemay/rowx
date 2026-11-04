@@ -18,6 +18,7 @@ use crate::codec::uuid::uuid_class;
 use crate::errors::encode_error;
 use rowx_postgres::wire::geometric::{Kind, Point, Shape};
 use rowx_postgres::wire::network::Addr;
+use rowx_postgres::wire::numeric::DecimalExponent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpKind {
@@ -34,8 +35,12 @@ pub enum PyParam {
     // an int outside i64, kept as its decimal text
     BigInt(String),
     Float(f64),
-    // the `str()` of a `decimal.Decimal`
-    Decimal(String),
+    // a `decimal.Decimal` as `Decimal.as_tuple()` reports it
+    Decimal {
+        negative: bool,
+        digits: Vec<u8>,
+        exponent: DecimalExponent,
+    },
     Str(String),
     // bytes, bytearray or memoryview contents, with the Python type name
     Bytes(Vec<u8>, String),
@@ -106,7 +111,7 @@ impl PyParam {
             Self::Bool(_) => "bool",
             Self::Int(_) | Self::BigInt(_) => "int",
             Self::Float(_) => "float",
-            Self::Decimal(_) => "Decimal",
+            Self::Decimal { .. } => "Decimal",
             Self::Str(_) => "str",
             Self::Uuid(_) => "UUID",
             Self::Ip { kind, addr, .. } => match (kind, addr) {
@@ -315,6 +320,65 @@ fn value_class(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult
     Ok(None)
 }
 
+// the digits of an int outside i64, through `Decimal` because `str(int)` is capped at 4300 digits by default
+// and golden/test_numeric.py pins that a numeric takes more; the `Decimal` constructor reads the int's value, so
+// a subclass cannot substitute other digits
+fn big_int_digits(py: Python<'_>, index: usize, int: &Bound<'_, PyInt>) -> PyResult<String> {
+    decimal_class(py)?
+        .call1((int,))
+        .and_then(|d| d.str())
+        .map(|s| s.to_string())
+        .map_err(|e| {
+            encode_error(
+                py,
+                &format!("${}: the int cannot be converted: {e}", index + 1),
+            )
+        })
+}
+
+// the parts come from the unbound `Decimal.as_tuple`, so a subclass cannot override what is read, and each
+// digit is validated rather than trusted
+fn decimal_param(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<PyParam> {
+    let bad = |what: &str| encode_error(py, &format!("${}: the Decimal {what}", index + 1));
+    let tuple = decimal_class(py)?
+        .getattr("as_tuple")
+        .and_then(|as_tuple| as_tuple.call1((obj,)))
+        .map_err(|e| bad(&format!("cannot be read: {e}")))?;
+    let tuple = tuple
+        .cast::<PyTuple>()
+        .map_err(|_| bad("has an unexpected as_tuple result"))?;
+    let (sign, digits, exponent) = (tuple.get_item(0)?, tuple.get_item(1)?, tuple.get_item(2)?);
+    let negative = match sign.extract::<u8>() {
+        Ok(0) => false,
+        Ok(1) => true,
+        _ => return Err(bad("has an invalid sign")),
+    };
+    let digits = digits
+        .cast::<PyTuple>()
+        .map_err(|_| bad("has an unexpected digit sequence"))?
+        .iter()
+        .map(|digit| digit.extract::<u8>().ok().filter(|d| *d <= 9))
+        .collect::<Option<Vec<u8>>>()
+        .ok_or_else(|| bad("has a digit outside 0 to 9"))?;
+    let exponent = if let Ok(exponent) = exponent.extract::<i64>() {
+        DecimalExponent::Finite(exponent)
+    } else if let Ok(marker) = exponent.extract::<String>() {
+        match marker.as_str() {
+            "F" => DecimalExponent::Infinity,
+            "n" => DecimalExponent::NaN,
+            "N" => DecimalExponent::SignalingNaN,
+            _ => return Err(bad("has an unknown exponent marker")),
+        }
+    } else {
+        return Err(bad("has an exponent outside the supported range"));
+    };
+    Ok(PyParam::Decimal {
+        negative,
+        digits,
+        exponent,
+    })
+}
+
 fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> PyResult<PyParam> {
     if obj.is_none() {
         return Ok(PyParam::Null);
@@ -326,15 +390,14 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
     if let Ok(int) = obj.cast::<PyInt>() {
         return Ok(match int.extract::<i64>() {
             Ok(value) => PyParam::Int(value),
-            // str() of an int is capped at 4300 digits by default; Decimal's conversion is not
-            Err(_) => PyParam::BigInt(decimal_class(py)?.call1((int,))?.str()?.to_string()),
+            Err(_) => PyParam::BigInt(big_int_digits(py, index, int)?),
         });
     }
     if let Ok(float) = obj.cast::<PyFloat>() {
         return Ok(PyParam::Float(float.value()));
     }
     if obj.is_instance(decimal_class(py)?)? {
-        return Ok(PyParam::Decimal(obj.str()?.to_string()));
+        return decimal_param(py, index, obj);
     }
     if obj.is_instance_of::<PyBytes>()
         || obj.is_instance_of::<PyByteArray>()

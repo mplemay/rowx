@@ -10,3 +10,4 @@ pub mod network;
 pub mod numeric;
 pub mod range;
 pub mod temporal;
+pub mod uuid;

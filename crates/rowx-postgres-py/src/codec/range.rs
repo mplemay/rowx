@@ -7,7 +7,7 @@ use rowx_postgres::wire::range::{self, Bound as RangeBound, Range};
 use rowx_postgres::{Kind, Type};
 
 use crate::codec::extract::PyParam;
-use crate::codec::{decode as decode_value, encode_one};
+use crate::codec::{decode as decode_value, encode_element, encode_one};
 use crate::errors::decode_error;
 
 static RANGE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -79,11 +79,17 @@ fn side(
     value: Option<&PyParam>,
     inclusive: bool,
     which: &str,
+    binary: bool,
 ) -> Result<(Side, Option<Param>), String> {
     let Some(param) = value.filter(|p| !matches!(p, PyParam::Null)) else {
         return Ok((Side::Unbounded, None));
     };
-    let encoded = encode_one(subtype, param).map_err(|msg| format!("{which} bound: {msg}"))?;
+    let encoded = if binary {
+        encode_element(subtype, param)
+    } else {
+        encode_one(subtype, param)
+    }
+    .map_err(|msg| format!("{which} bound: {msg}"))?;
     Ok((
         if inclusive {
             Side::Inclusive
@@ -114,6 +120,18 @@ fn bound_of(side: Side, param: Option<&Param>) -> RangeBound<'_> {
 /// # Errors
 /// A description of why the value cannot be encoded as `ty`.
 pub fn encode(ty: &Type, param: &PyParam) -> Result<Param, String> {
+    build(ty, param, false)
+}
+
+/// The binary form of a range that is an array element, whatever the subtype's scalar form is.
+///
+/// # Errors
+/// A description of why the value cannot be encoded as `ty`.
+pub fn encode_binary(ty: &Type, param: &PyParam) -> Result<Param, String> {
+    build(ty, param, true)
+}
+
+fn build(ty: &Type, param: &PyParam, binary: bool) -> Result<Param, String> {
     let Kind::Range(subtype) = ty.kind() else {
         return Err(format!("{} is not a range type", ty.name()));
     };
@@ -133,9 +151,10 @@ pub fn encode(ty: &Type, param: &PyParam) -> Result<Param, String> {
     };
     // the form follows the subtype, not the bounds, so an array of ranges never mixes binary and text
     // elements, which is what an unbounded or empty range would otherwise do
-    let as_text = TYPE_TABLE.iter().any(|info| {
-        info.matcher == Matcher::RangeKind(subtype.oid()) && info.encode_format == Format::Text
-    });
+    let as_text = !binary
+        && TYPE_TABLE.iter().any(|info| {
+            info.matcher == Matcher::RangeKind(subtype.oid()) && info.encode_format == Format::Text
+        });
     if *empty {
         return if as_text {
             Ok(Param::text(
@@ -147,8 +166,8 @@ pub fn encode(ty: &Type, param: &PyParam) -> Result<Param, String> {
                 .map_err(|e| e.to_string())
         };
     }
-    let (lower_side, lower_param) = side(subtype, lower.as_deref(), *lower_inc, "lower")?;
-    let (upper_side, upper_param) = side(subtype, upper.as_deref(), *upper_inc, "upper")?;
+    let (lower_side, lower_param) = side(subtype, lower.as_deref(), *lower_inc, "lower", binary)?;
+    let (upper_side, upper_param) = side(subtype, upper.as_deref(), *upper_inc, "upper", binary)?;
     let value = Range::Bounds {
         lower: bound_of(lower_side, lower_param.as_ref()),
         upper: bound_of(upper_side, upper_param.as_ref()),

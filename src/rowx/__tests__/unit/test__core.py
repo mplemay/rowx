@@ -1,9 +1,14 @@
+import datetime as dt
 import importlib
 import sys
+from decimal import Decimal
+from ipaddress import ip_address, ip_network
+from typing import Final
 
 import pytest
 
-from rowx._core.postgres import Connection, map_columns
+from rowx._core.postgres import Connection, _param_formats, map_columns
+from rowx.postgres import Box, Circle, Line, LineSegment, Money, Path, Point, Polygon, Range
 
 
 def test_postgres_submodule_imports_with_from_import() -> None:
@@ -196,3 +201,67 @@ def test_shape_issue_is_frozen() -> None:
     _, issues = map_columns(["x"], [req("a")], positional=False)
     with pytest.raises(AttributeError):
         issues[0].kind = "other"  # ty: ignore[invalid-assignment]
+
+
+def point(x: float = 1.0) -> Point:
+    return Point(x, 2.0)
+
+
+# the built-in array type OID of every element family a parameter can name, with a value and a NULL
+ARRAY_SAMPLES: Final[dict[str, tuple[int, object]]] = {
+    "bool[]": (1000, True),
+    "bytea[]": (1001, b"\x00\xff"),
+    '"char"[]': (1002, "a"),
+    "name[]": (1003, 'a"b'),
+    "int2[]": (1005, 7),
+    "int4[]": (1007, 7),
+    "text[]": (1009, 'a"b\\c,{}NULL ā'),
+    "bpchar[]": (1014, "a"),
+    "varchar[]": (1015, "a"),
+    "int8[]": (1016, 2**62),
+    "point[]": (1017, point()),
+    "lseg[]": (1018, LineSegment(point(), point(3.0))),
+    "path[]": (1019, Path((point(), point(3.0)), closed=False)),
+    "box[]": (1020, Box(point(3.0), point())),
+    "float4[]": (1021, 1.5),
+    "float8[]": (1022, float("nan")),
+    "polygon[]": (1027, Polygon((point(), point(3.0), point(5.0)))),
+    "oid[]": (1028, 4_000_000_000),
+    "macaddr[]": (1040, "08:00:2b:01:02:03"),
+    "inet[]": (1041, ip_address("10.0.0.1")),
+    "cidr[]": (651, ip_network("10.0.0.0/8")),
+    "timestamp[]": (1115, dt.datetime(2024, 1, 2, 3, 4, 5)),  # ruff: ignore[call-datetime-without-tzinfo]
+    "date[]": (1182, dt.date(2024, 1, 2)),
+    "time[]": (1183, dt.time(1, 2, 3)),
+    "timestamptz[]": (1185, dt.datetime(2024, 1, 2, tzinfo=dt.UTC)),
+    "interval[]": (1187, dt.timedelta(days=1)),
+    "numeric[]": (1231, Decimal("1E+100")),
+    "timetz[]": (1270, dt.time(1, 2, 3, tzinfo=dt.UTC)),
+    "bit[]": (1561, "101"),
+    "varbit[]": (1563, "101"),
+    "uuid[]": (2951, "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"),
+    "json[]": (199, {"k": "ā"}),
+    "jsonb[]": (3807, {"k": "ā"}),
+    "money[]": (791, Money(150)),
+    "macaddr8[]": (775, "08:00:2b:01:02:03:04:05"),
+    "line[]": (629, Line(1.0, 2.0, 3.0)),
+    "circle[]": (719, Circle(1.0, 2.0, 3.0)),
+    "int4range[]": (3905, Range(1, 5)),
+    "numrange[]": (3907, Range(Decimal("1.5"), Decimal("2.5"))),
+    "daterange[]": (3913, Range(dt.date(2024, 1, 1), dt.date(2024, 2, 1))),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ARRAY_SAMPLES))
+def test_an_array_parameter_is_never_sent_in_text_format(name: str) -> None:
+    oid, value = ARRAY_SAMPLES[name]
+    # a vector, a NULL-holding vector, a two-dimensional array and an empty one
+    arrays: list[object] = [[value], [value, None], [[value, None], [None, value]], []]
+    assert _param_formats([oid] * len(arrays), arrays) == ["binary"] * len(arrays)
+
+
+def test_only_scalar_numeric_timetz_and_json_stay_text() -> None:
+    zoned = dt.time(1, tzinfo=dt.UTC)
+    # numeric and timetz carry text-format scalars; json and jsonb too
+    assert _param_formats([1700, 1266, 114, 3802], [Decimal("1.5"), zoned, {"a": 1}, {"a": 1}]) == ["text"] * 4
+    assert _param_formats([1700, 1266, 114, 3802], [None] * 4) == ["binary"] * 4

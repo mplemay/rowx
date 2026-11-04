@@ -1,8 +1,9 @@
 import asyncio
 import datetime as dt
-from decimal import Decimal
+import sys
+from decimal import Decimal, DecimalTuple
 from math import isnan
-from typing import Any, Final
+from typing import Any, Final, override
 
 import pytest
 
@@ -140,3 +141,180 @@ def test_bytes_over_one_mebibyte_round_trip(schema: str) -> None:
     value: Any = bytes(range(256)) * (4 * MIB // 256 + 1)
     assert len(value) > MIB
     assert fetch_scalar(schema, "SELECT $1::bytea", [value]) == value
+
+
+ADVERSARIAL: Final[list[str]] = [
+    "",
+    "plain",
+    'has "quote"',
+    "back\\slash",
+    "a,b",
+    "{braces}",
+    "{}",
+    "NULL",
+    "null",
+    " padded ",
+    "empty",
+    "ā",
+    "表ア",
+    "😀́",
+    "line\nbreak\ttab",
+    '\\"\\\\',
+]
+
+
+def shaped(values: list[Any]) -> list[list[Any]]:
+    # a NULL-holding vector, a two-dimensional array and a three-dimensional one, all from the same values
+    pool = [values[i % len(values)] for i in range(8)]
+    return [
+        [*values, None],
+        [pool[:4], [pool[4], None, pool[5], pool[6]]],
+        [[pool[:2], [pool[2], None]], [[pool[3], pool[4]], [pool[5], pool[6]]]],
+    ]
+
+
+@pytest.mark.parametrize("sql_type", ["text", "varchar", "name", "public.citext"])
+def test_text_arrays_keep_adversarial_strings(schema: str, sql_type: str) -> None:
+    values = [value for value in ADVERSARIAL if not (sql_type == "name" and "\n" in value)]
+    for array in shaped(values):
+        assert fetch_scalar(schema, f"SELECT $1::{sql_type}[]", [array]) == array
+
+
+def test_bpchar_arrays_keep_adversarial_strings(schema: str) -> None:
+    for array in shaped(ADVERSARIAL):
+        assert fetch_scalar(schema, "SELECT $1::bpchar[]", [array]) == array
+
+
+@pytest.mark.parametrize("sql_type", ["json", "jsonb"])
+def test_json_arrays_round_trip_adversarial_documents(schema: str, sql_type: str) -> None:
+    documents: list[Any] = [{"k": value, value: [value, None, 1.5]} for value in ADVERSARIAL]
+    # a bare list would read as another array dimension, so lists only appear inside documents
+    documents += ["just a string", 7, {}, True, {"l": []}]
+    for array in shaped(documents):
+        assert fetch_scalar(schema, f"SELECT $1::{sql_type}[]", [array]) == array
+
+
+def test_json_parameters_are_sent_as_ascii(schema: str) -> None:
+    # json.dumps runs with ensure_ascii=True, so a non-ASCII character is a \uXXXX escape and never raw UTF-8
+    assert fetch_scalar(schema, "SELECT $1::json::text", ["ā表😀"]) == '"\\u0101\\u8868\\ud83d\\ude00"'
+    assert fetch_scalar(schema, "SELECT $1::json::text", [{"ā": ["é"]}]) == '{"\\u0101": ["\\u00e9"]}'
+    assert fetch_scalar(schema, "SELECT $1::json[]::text", [["ā", None]]) == '{"\\"\\\\u0101\\"",NULL}'
+    assert fetch_scalar(schema, "SELECT $1::jsonb::text", ["ā"]) == '"ā"'
+
+
+def test_enum_and_domain_arrays_keep_their_element_types(schema: str) -> None:
+    moods = ["sad", "ok", "happy"]
+    for array in shaped(moods):
+        assert fetch_scalar(schema, "SELECT $1::mood[]", [array]) == array
+    for array in shaped([1, 5, 2147483647]):
+        assert fetch_scalar(schema, "SELECT $1::positive_int[]", [array]) == array
+    assert fetch_scalar(schema, "SELECT $1::positive_ints", [[1, 2]]) == [1, 2]
+    with pytest.raises(DatabaseError, match="positive_int"):
+        fetch_scalar(schema, "SELECT $1::positive_int[]", [[1, -1]])
+    with pytest.raises(DatabaseError):
+        fetch_scalar(schema, "SELECT $1::mood[]", [["nope"]])
+
+
+def test_uuid_str_elements_are_parsed_on_the_client(schema: str) -> None:
+    from uuid import UUID  # ruff: ignore[import-outside-top-level]
+
+    text = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+    expected = UUID(text)
+    for spelling in [text, text.upper(), text.replace("-", ""), f"{{{text}}}", "a0eebc99-9c0b4ef8-bb6d6bb9-bd380a11"]:
+        assert fetch_scalar(schema, "SELECT $1::uuid[]", [[spelling, None, expected]]) == [expected, None, expected]
+    for bad in ["", "not a uuid", text + "0", text[:-1], f"{text}}}", "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a1g", "'}"]:
+        with pytest.raises(EncodeError, match="uuid"):
+            fetch_scalar(schema, "SELECT $1::uuid[]", [[bad]])
+    # a scalar uuid str is still handed to the server as text
+    assert fetch_scalar(schema, "SELECT $1::uuid", [text]) == expected
+
+
+def test_timetz_array_elements_carry_the_zone(schema: str) -> None:
+    zone = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    values = [
+        dt.time(12, 0, tzinfo=zone),
+        None,
+        dt.time(23, 59, 59, 999999, tzinfo=dt.timezone(-dt.timedelta(hours=7))),
+    ]
+    assert fetch_scalar(schema, "SELECT $1::timetz[]", [values]) == values
+    assert fetch_scalar(schema, "SELECT $1::timetz[]::text", [values[:1]]) == "{12:00:00+05:30}"
+    with pytest.raises(EncodeError, match="naive"):
+        fetch_scalar(schema, "SELECT $1::timetz[]", [[dt.time(1)]])
+    over = dt.time(0, tzinfo=dt.timezone(dt.timedelta(hours=16)))
+    with pytest.raises(EncodeError, match="out of range"):
+        fetch_scalar(schema, "SELECT $1::timetz[]", [[over]])
+
+
+class ShiftedDecimal(Decimal):
+    @override
+    def as_tuple(self) -> DecimalTuple:
+        return Decimal(999).as_tuple()
+
+    @override
+    def __str__(self) -> str:
+        return "999"
+
+
+def test_numeric_arrays_round_trip_decimal_edge_cases(schema: str) -> None:
+    values: list[Any] = [
+        Decimal(0),
+        Decimal("-0.00"),
+        Decimal("1.500"),
+        Decimal("-12345.6700"),
+        Decimal("1E+1000"),
+        Decimal("1E+100000"),
+        Decimal("123E-30"),
+        Decimal("9" * 200),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+        0,
+        -(2**63),
+        2**63,
+        -(2**63) - 1,
+        2**200,
+        None,
+    ]
+    got = fetch_scalar(schema, "SELECT $1::numeric[]", [values])
+    assert isinstance(got, list)
+    for sent, back in zip(values, got, strict=True):
+        assert back == sent
+    # the display scale survives as well as the value
+    assert (
+        fetch_scalar(schema, "SELECT $1::numeric[]::text", [[Decimal("1.500"), Decimal("-0.00"), 7]])
+        == "{1.500,0.00,7}"
+    )
+    nan = fetch_scalar(schema, "SELECT $1::numeric[]", [[Decimal("NaN"), Decimal("-NaN123")]])
+    assert isinstance(nan, list)
+    assert all(isinstance(item, Decimal) and item.is_nan() for item in nan)
+    for array in shaped([Decimal("1.5"), 2, Decimal(-3)]):
+        assert fetch_scalar(schema, "SELECT $1::numeric[]", [array]) == array
+
+
+def test_numeric_array_decimals_that_cannot_be_encoded_are_encode_errors(schema: str) -> None:
+    with pytest.raises(EncodeError, match="sNaN"):
+        fetch_scalar(schema, "SELECT $1::numeric[]", [[Decimal(1), Decimal("sNaN")]])
+    with pytest.raises(EncodeError, match="element 1"):
+        fetch_scalar(schema, "SELECT $1::numeric[]", [[Decimal(1), Decimal("1E+131072")]])
+    with pytest.raises(EncodeError, match="scale"):
+        fetch_scalar(schema, "SELECT $1::numeric[]", [[Decimal("1E-16384")]])
+    with pytest.raises(EncodeError, match="range"):
+        fetch_scalar(schema, "SELECT $1::numeric[]", [[Decimal("1E+999999999999999999")]])
+    with pytest.raises(EncodeError, match="not accepted for numeric"):
+        fetch_scalar(schema, "SELECT $1::numeric[]", [["1.5"]])
+
+
+def test_a_decimal_subclass_cannot_choose_what_is_encoded(schema: str) -> None:
+    # as_tuple and __str__ are read through the unbound Decimal methods, so the subclass overrides are ignored
+    value = ShiftedDecimal("12.5")
+    assert fetch_scalar(schema, "SELECT $1::numeric[]", [[value]]) == [Decimal("12.5")]
+    assert fetch_scalar(schema, "SELECT $1::numeric", [value]) == Decimal("12.5")
+
+
+def test_an_int_past_the_str_digit_limit_does_not_crash_the_array_encoder(schema: str) -> None:
+    # str(int) is capped, so the digits are read through Decimal; golden/test_numeric.py pins the same for scalars
+    limit = sys.get_int_max_str_digits()
+    assert limit > 0
+    for value in (10**limit + 7, -(10**limit), 10 ** (limit - 1)):
+        assert fetch_scalar(schema, "SELECT $1::numeric[]", [[value]]) == [Decimal(value)]
+    with pytest.raises(EncodeError, match="int8"):
+        fetch_scalar(schema, "SELECT $1::int8[]", [[10**limit]])

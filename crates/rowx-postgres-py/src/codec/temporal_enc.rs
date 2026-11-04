@@ -9,6 +9,8 @@ pub struct Ymd {
     pub day: u32,
 }
 
+const MICROS_PER_SECOND: i64 = 1_000_000;
+
 fn mismatch(param: &PyParam, ty: &str) -> String {
     format!("a Python {} cannot be encoded as {ty}", param.type_name())
 }
@@ -53,6 +55,33 @@ pub fn encode_timetz(param: &PyParam) -> Result<Vec<u8>, String> {
         } => temporal::encode_timetz_text(*micros, *offset)
             .map(String::into_bytes)
             .map_err(|e| failed(&e)),
+        PyParam::Time { .. } => {
+            Err("a naive time cannot be encoded as timetz; pass an aware time".to_owned())
+        }
+        _ => Err(mismatch(param, "timetz")),
+    }
+}
+
+/// Binary `timetz`, for an array element.
+///
+/// # Errors
+/// A description of why the value cannot be encoded as `timetz`.
+pub fn encode_timetz_binary(param: &PyParam) -> Result<Vec<u8>, String> {
+    match param {
+        PyParam::Time {
+            micros,
+            offset: Some(offset),
+        } => {
+            if offset % MICROS_PER_SECOND != 0 {
+                return Err(TemporalError::OffsetFraction.to_string());
+            }
+            // the zone is stored west of UTC, the opposite sign of Python's utcoffset
+            let west = (offset / MICROS_PER_SECOND)
+                .checked_neg()
+                .and_then(|seconds| i32::try_from(seconds).ok())
+                .ok_or_else(|| TemporalError::OffsetRange.to_string())?;
+            temporal::encode_timetz(*micros, west).map_err(|e| failed(&e))
+        }
         PyParam::Time { .. } => {
             Err("a naive time cannot be encoded as timetz; pass an aware time".to_owned())
         }

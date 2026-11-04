@@ -23,6 +23,31 @@ fn _catalog_queries() -> u64 {
     rowx_postgres::describe::catalog_queries()
 }
 
+// test hook: the wire format ("binary" or "text") each parameter is sent in once encoded against the
+// built-in types with these OIDs
+#[pyfunction]
+fn _param_formats(
+    py: Python<'_>,
+    oids: &Bound<'_, pyo3::types::PyList>,
+    params: &Bound<'_, pyo3::types::PyList>,
+) -> PyResult<Vec<&'static str>> {
+    let types = oids
+        .extract::<Vec<u32>>()?
+        .into_iter()
+        .map(|oid| {
+            rowx_postgres::Type::from_oid(oid).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!("{oid} is not a built-in type"))
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let values = codec::extract(py, params)?;
+    let encoded = codec::encode_all(&values, &types).map_err(|e| errors::to_py_err(py, &e))?;
+    Ok(encoded
+        .iter()
+        .map(|param| if param.is_text() { "text" } else { "binary" })
+        .collect())
+}
+
 /// Builds the `rowx._core.postgres` submodule.
 ///
 /// # Errors
@@ -51,5 +76,6 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_function(wrap_pyfunction!(types::type_table, &m)?)?;
     m.add_function(wrap_pyfunction!(_cancel_requests_sent, &m)?)?;
     m.add_function(wrap_pyfunction!(_catalog_queries, &m)?)?;
+    m.add_function(wrap_pyfunction!(_param_formats, &m)?)?;
     Ok(m)
 }

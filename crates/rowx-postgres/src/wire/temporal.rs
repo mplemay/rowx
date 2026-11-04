@@ -283,6 +283,24 @@ pub fn encode_timetz_text(micros: i64, offset_micros: i64) -> Result<String, Tem
     ))
 }
 
+/// Binary `timetz`: microseconds since midnight, then the zone in seconds *west* of UTC, which is the
+/// opposite sign of Python's `utcoffset()`.
+///
+/// # Errors
+/// `TimeOfDay` for a time outside `00:00:00..=24:00:00`, `OffsetRange` for a zone beyond ±15:59:59.
+pub fn encode_timetz(micros: i64, west_seconds: i32) -> Result<Vec<u8>, TemporalError> {
+    if !(0..=MICROS_PER_DAY).contains(&micros) {
+        return Err(TemporalError::TimeOfDay { ty: "timetz" });
+    }
+    if i64::from(west_seconds).abs() > MAX_TIMETZ_OFFSET_SECONDS {
+        return Err(TemporalError::OffsetRange);
+    }
+    let mut out = Vec::with_capacity(12);
+    out.extend_from_slice(&micros.to_be_bytes());
+    out.extend_from_slice(&west_seconds.to_be_bytes());
+    Ok(out)
+}
+
 /// `micros` is the time of day; `offset_micros` is the UTC offset, zero for a naive timestamp.
 #[must_use]
 pub fn encode_timestamp(
@@ -401,6 +419,31 @@ mod tests {
         let mut out = micros.to_be_bytes().to_vec();
         out.extend_from_slice(&west.to_be_bytes());
         out
+    }
+
+    #[test]
+    fn encode_timetz_writes_the_zone_west_of_utc() {
+        let raw = encode_timetz(12 * 3600 * MICROS_PER_SECOND, 18_000).unwrap_or_default();
+        assert_eq!(raw, timetz(12 * 3600 * MICROS_PER_SECOND, 18_000));
+        let back = decode_timetz(&raw).map(|t| t.utc_offset);
+        assert_eq!(back, Ok(-18_000));
+    }
+
+    #[test]
+    fn encode_timetz_validates_both_fields() {
+        assert!(encode_timetz(0, 0).is_ok());
+        assert!(encode_timetz(MICROS_PER_DAY, 57_599).is_ok());
+        assert!(encode_timetz(0, -57_599).is_ok());
+        assert_eq!(
+            encode_timetz(-1, 0),
+            Err(TemporalError::TimeOfDay { ty: "timetz" })
+        );
+        assert_eq!(
+            encode_timetz(MICROS_PER_DAY + 1, 0),
+            Err(TemporalError::TimeOfDay { ty: "timetz" })
+        );
+        assert_eq!(encode_timetz(0, 57_600), Err(TemporalError::OffsetRange));
+        assert_eq!(encode_timetz(0, i32::MIN), Err(TemporalError::OffsetRange));
     }
 
     #[test]
