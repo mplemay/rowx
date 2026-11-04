@@ -27,6 +27,8 @@ pub enum NumericError {
     SignalingNan,
     #[error("numeric has {0} digit groups, more than the wire format can count")]
     TooManyDigits(usize),
+    #[error("the Decimal text is malformed")]
+    DecimalSyntax,
     #[error("a Decimal digit {0} is outside 0..=9")]
     DecimalDigit(u8),
     #[error("a Decimal with scale {0} exceeds the numeric maximum of {MAX_SCALE}")]
@@ -296,6 +298,53 @@ impl Numeric {
         }
         out
     }
+}
+
+/// Reads the canonical `str(Decimal)` form (`-1.50`, `1E+3`, `-Infinity`, `NaN12`, `sNaN`) into the parts
+/// `Decimal.as_tuple()` would report. Every digit is validated, so the result never depends on trust.
+///
+/// # Errors
+/// `DecimalSyntax` for anything that is not that form.
+pub fn parse_decimal_str(text: &str) -> Result<(bool, Vec<u8>, DecimalExponent), NumericError> {
+    let (negative, rest) = text
+        .strip_prefix('-')
+        .map_or((false, text), |rest| (true, rest));
+    if rest == "Infinity" {
+        return Ok((negative, vec![0], DecimalExponent::Infinity));
+    }
+    let payload = |prefix: &str| {
+        rest.strip_prefix(prefix)
+            .filter(|tail| tail.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if payload("NaN").is_some() {
+        return Ok((negative, Vec::new(), DecimalExponent::NaN));
+    }
+    if payload("sNaN").is_some() {
+        return Ok((negative, Vec::new(), DecimalExponent::SignalingNaN));
+    }
+    let (mantissa, exponent) = match rest.split_once('E') {
+        Some((mantissa, exponent)) => (
+            mantissa,
+            exponent
+                .parse::<i64>()
+                .map_err(|_| NumericError::DecimalSyntax)?,
+        ),
+        None => (rest, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mut digits = Vec::with_capacity(whole.len() + fraction.len());
+    for byte in whole.bytes().chain(fraction.bytes()) {
+        if !byte.is_ascii_digit() {
+            return Err(NumericError::DecimalSyntax);
+        }
+        digits.push(byte - b'0');
+    }
+    if digits.is_empty() {
+        return Err(NumericError::DecimalSyntax);
+    }
+    let scale = i64::try_from(fraction.len()).map_err(|_| NumericError::Magnitude)?;
+    let exponent = exponent.checked_sub(scale).ok_or(NumericError::Magnitude)?;
+    Ok((negative, digits, DecimalExponent::Finite(exponent)))
 }
 
 /// The text Postgres reads for a scalar parameter: the digits with an exponent, as `str(Decimal)` spells
@@ -762,6 +811,57 @@ mod decimal_text_tests {
         assert_eq!(
             decimal_text(false, &[10], DecimalExponent::Finite(0)),
             Err(NumericError::DecimalDigit(10))
+        );
+    }
+}
+
+#[cfg(test)]
+mod decimal_str_tests {
+    use super::*;
+
+    fn parsed(text: &str) -> Result<(bool, Vec<u8>, DecimalExponent), NumericError> {
+        parse_decimal_str(text)
+    }
+
+    #[test]
+    fn reads_every_form_str_decimal_produces() {
+        let finite = DecimalExponent::Finite;
+        assert_eq!(parsed("0"), Ok((false, vec![0], finite(0))));
+        assert_eq!(parsed("-1.50"), Ok((true, vec![1, 5, 0], finite(-2))));
+        assert_eq!(parsed("1E+3"), Ok((false, vec![1], finite(3))));
+        assert_eq!(parsed("1.5E-7"), Ok((false, vec![1, 5], finite(-8))));
+        assert_eq!(
+            parsed("0.000123"),
+            Ok((false, vec![0, 0, 0, 0, 1, 2, 3], finite(-6)))
+        );
+        assert_eq!(parsed("1E+100000"), Ok((false, vec![1], finite(100_000))));
+        assert_eq!(
+            parsed("-Infinity"),
+            Ok((true, vec![0], DecimalExponent::Infinity))
+        );
+        assert_eq!(parsed("NaN"), Ok((false, vec![], DecimalExponent::NaN)));
+        assert_eq!(parsed("-NaN123"), Ok((true, vec![], DecimalExponent::NaN)));
+        assert_eq!(
+            parsed("sNaN7"),
+            Ok((false, vec![], DecimalExponent::SignalingNaN))
+        );
+    }
+
+    #[test]
+    fn rejects_everything_else() {
+        for text in [
+            "", "-", "E5", "1E", "1E+x", "1.2.3", "1 ", "+1", "١٢", "nan", "Inf", "NaNx", "1e5",
+            ".", "-.",
+        ] {
+            assert_eq!(parsed(text), Err(NumericError::DecimalSyntax), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn an_exponent_that_cannot_hold_the_scale_is_refused() {
+        assert_eq!(
+            parsed(&format!("1.5E{}", i64::MIN)),
+            Err(NumericError::Magnitude)
         );
     }
 }

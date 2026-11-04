@@ -1,5 +1,6 @@
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
 };
@@ -18,7 +19,7 @@ use crate::codec::uuid::uuid_class;
 use crate::errors::encode_error;
 use rowx_postgres::wire::geometric::{Kind, Point, Shape};
 use rowx_postgres::wire::network::Addr;
-use rowx_postgres::wire::numeric::DecimalExponent;
+use rowx_postgres::wire::numeric::{DecimalExponent, parse_decimal_str};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpKind {
@@ -338,40 +339,26 @@ fn big_int_digits(py: Python<'_>, index: usize, int: &Bound<'_, PyInt>) -> PyRes
 
 // the parts come from the unbound `Decimal.as_tuple`, so a subclass cannot override what is read, and each
 // digit is validated rather than trusted
+// the unbound `Decimal.__str__`, looked up once
+fn decimal_str_fn(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static DECIMAL_STR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    let func = DECIMAL_STR.get_or_try_init(py, || {
+        Ok::<_, PyErr>(decimal_class(py)?.getattr("__str__")?.unbind())
+    })?;
+    Ok(func.bind(py))
+}
+
+// The value is read through the unbound base-class method, so a `Decimal` subclass cannot override what is
+// read; the canonical text is then parsed in Rust with every digit validated. `as_tuple` allocates a
+// namedtuple and a digit tuple per value, which doubles the cost of a 100k-element array.
 fn decimal_param(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<PyParam> {
     let bad = |what: &str| encode_error(py, &format!("${}: the Decimal {what}", index + 1));
-    let tuple = decimal_class(py)?
-        .getattr("as_tuple")
-        .and_then(|as_tuple| as_tuple.call1((obj,)))
+    let text = decimal_str_fn(py)
+        .and_then(|func| func.call1((obj,)))
+        .and_then(|text| text.extract::<String>())
         .map_err(|e| bad(&format!("cannot be read: {e}")))?;
-    let tuple = tuple
-        .cast::<PyTuple>()
-        .map_err(|_| bad("has an unexpected as_tuple result"))?;
-    let (sign, digits, exponent) = (tuple.get_item(0)?, tuple.get_item(1)?, tuple.get_item(2)?);
-    let negative = match sign.extract::<u8>() {
-        Ok(0) => false,
-        Ok(1) => true,
-        _ => return Err(bad("has an invalid sign")),
-    };
-    let digits = digits
-        .cast::<PyTuple>()
-        .map_err(|_| bad("has an unexpected digit sequence"))?
-        .iter()
-        .map(|digit| digit.extract::<u8>().ok().filter(|d| *d <= 9))
-        .collect::<Option<Vec<u8>>>()
-        .ok_or_else(|| bad("has a digit outside 0 to 9"))?;
-    let exponent = if let Ok(exponent) = exponent.extract::<i64>() {
-        DecimalExponent::Finite(exponent)
-    } else if let Ok(marker) = exponent.extract::<String>() {
-        match marker.as_str() {
-            "F" => DecimalExponent::Infinity,
-            "n" => DecimalExponent::NaN,
-            "N" => DecimalExponent::SignalingNaN,
-            _ => return Err(bad("has an unknown exponent marker")),
-        }
-    } else {
-        return Err(bad("has an exponent outside the supported range"));
-    };
+    let (negative, digits, exponent) =
+        parse_decimal_str(&text).map_err(|e| bad(&format!("is malformed: {e}")))?;
     Ok(PyParam::Decimal {
         negative,
         digits,

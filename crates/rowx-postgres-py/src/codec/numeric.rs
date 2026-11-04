@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyType;
@@ -63,11 +65,12 @@ fn digits_of(mut magnitude: u128) -> Vec<u8> {
     digits
 }
 
-fn parts_of(param: &PyParam) -> Result<(bool, Vec<u8>, DecimalExponent), String> {
+// the sign, digits and exponent of a numeric-capable value; a Decimal's digits are borrowed
+fn parts_of(param: &PyParam) -> Result<(bool, Cow<'_, [u8]>, DecimalExponent), String> {
     Ok(match param {
         PyParam::Int(i) => (
             *i < 0,
-            digits_of(u128::from(i.unsigned_abs())),
+            Cow::Owned(digits_of(u128::from(i.unsigned_abs()))),
             DecimalExponent::Finite(0),
         ),
         PyParam::BigInt(text) => {
@@ -79,13 +82,13 @@ fn parts_of(param: &PyParam) -> Result<(bool, Vec<u8>, DecimalExponent), String>
                 .map(|b| b.is_ascii_digit().then_some(b - b'0'))
                 .collect::<Option<Vec<u8>>>()
                 .ok_or_else(|| "the int is not a decimal number".to_owned())?;
-            (negative, digits, DecimalExponent::Finite(0))
+            (negative, Cow::Owned(digits), DecimalExponent::Finite(0))
         }
         PyParam::Decimal {
             negative,
             digits,
             exponent,
-        } => (*negative, digits.clone(), *exponent),
+        } => (*negative, Cow::Borrowed(digits.as_slice()), *exponent),
         _ => {
             return Err(format!(
                 "a Python {} cannot be encoded as numeric",
@@ -93,12 +96,6 @@ fn parts_of(param: &PyParam) -> Result<(bool, Vec<u8>, DecimalExponent), String>
             ));
         }
     })
-}
-
-fn numeric_of(param: &PyParam) -> Result<Numeric, String> {
-    let (negative, digits, exponent) = parts_of(param)?;
-    Numeric::from_decimal_parts(negative, &digits, exponent)
-        .map_err(|e: NumericError| e.to_string())
 }
 
 /// Text form of the value, since a scalar numeric is sent in text format.
@@ -117,5 +114,8 @@ pub fn encode(param: &PyParam) -> Result<Vec<u8>, String> {
 /// # Errors
 /// A description of why the value cannot be encoded as `numeric`.
 pub fn encode_binary(param: &PyParam) -> Result<Vec<u8>, String> {
-    numeric_of(param)?.encode().map_err(|e| e.to_string())
+    let (negative, digits, exponent) = parts_of(param)?;
+    Numeric::from_decimal_parts(negative, &digits, exponent)
+        .and_then(|value| value.encode())
+        .map_err(|e: NumericError| e.to_string())
 }
