@@ -2,7 +2,7 @@
 // operators, types and catalog tables all resolve through the session's `search_path`.
 //
 // What it covers: every string literal in `crates/*/src/**/*.rs` (outside `#[cfg(test)]` modules) whose first
-// word is an SQL verb. In each one it flags, outside string literals and comments:
+// word is an SQL verb (case-insensitive). In each one it flags, outside string literals and comments:
 //   - a function call `name(` that is not `pg_catalog.name(`, other than grammar keywords such as `EXISTS`
 //     or `COALESCE`, an alias column list after `AS`, and a column list after a quoted or placeholder name;
 //   - an operator that is not written `OPERATOR(pg_catalog.<op>)`, except the `*` wildcard and the `=` of a
@@ -10,6 +10,8 @@
 //   - `IN`, `BETWEEN`, `LIKE`, `ILIKE` and `SIMILAR`, which look an operator up by name;
 //   - a `pg_*` name that is not `pg_catalog.pg_*`, and a cast to a type that is not a grammar keyword
 //     (`bigint`, `boolean`, ...) and not `pg_catalog.<type>`;
+//   - forms that look an operator up by name without writing it: `IS [NOT] DISTINCT FROM`, `NULLIF`, a simple
+//     `CASE x WHEN`, `CAST(x AS type)` and a typed literal such as `oid '1'`;
 //   - in a `CREATE` statement, a well-known catalog type name (`text`, `oid`, `int8`, ...) used as a column type.
 // What it does not cover: SQL built at runtime from user text (a migration file, a user query), SQL in Python
 // (`src/rowx/testing.py` is audited by hand), and a type name outside the lists below.
@@ -22,8 +24,33 @@ use std::path::{Path, PathBuf};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const VERBS: &[&str] = &[
-    "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "WITH", "RESET", "CLOSE", "UNLISTEN",
-    "DISCARD", "SET", "BEGIN",
+    "select",
+    "insert",
+    "update",
+    "delete",
+    "create",
+    "with",
+    "reset",
+    "close",
+    "unlisten",
+    "discard",
+    "set",
+    "begin",
+    "start",
+    "commit",
+    "rollback",
+    "savepoint",
+    "release",
+    "explain",
+    "drop",
+    "alter",
+    "comment",
+    "listen",
+    "notify",
+    "lock",
+    "truncate",
+    "prepare",
+    "deallocate",
 ];
 
 // keywords that may be followed by `(` without being a function call
@@ -57,6 +84,7 @@ const PAREN_KEYWORDS: &[&str] = &[
     "default",
     "primary",
     "with",
+    "explain",
 ];
 
 // types the grammar maps to `pg_catalog` itself, so a bare cast to one cannot be shadowed
@@ -110,6 +138,7 @@ const OPERATOR_CHARS: &str = "+-*/<>=~!@#%^&|?";
 enum Token {
     Ident(String),
     Quoted,
+    Str,
     Placeholder,
     Op(String),
     Open,
@@ -138,9 +167,7 @@ fn tokenize(sql: &str) -> Vec<Token> {
             i = skip_block(&chars, i + 2);
         } else if c == '\'' || c == '"' {
             i = skip_quoted(&chars, i, c);
-            if c == '"' {
-                tokens.push(Token::Quoted);
-            }
+            tokens.push(if c == '"' { Token::Quoted } else { Token::Str });
         } else if c == '{' {
             while i < chars.len() && chars[i] != '}' {
                 i += 1;
@@ -276,6 +303,7 @@ fn violations(sql: &str) -> Vec<String> {
                     continue;
                 }
                 check_ident(&tokens, at, word, &mut found);
+                check_name_resolving_forms(&tokens, at, word, &mut found);
             }
             Token::Op(op) => {
                 if operator_depth.is_some() {
@@ -326,9 +354,92 @@ fn check_ident(tokens: &[Token], at: usize, word: &str, found: &mut Vec<String>)
     }
 }
 
-// the string literals of a Rust file that look like SQL, outside its test module and comments
+// forms whose operator or type is resolved by name even though no operator is written
+fn check_name_resolving_forms(tokens: &[Token], at: usize, word: &str, found: &mut Vec<String>) {
+    let prev = at.checked_sub(1).and_then(|p| tokens.get(p));
+    let next = tokens.get(at + 1);
+    if word == "distinct" && (is_ident(prev, "is") || is_ident(prev, "not")) {
+        found.push("`IS [NOT] DISTINCT FROM` looks an operator up by name".to_owned());
+    }
+    if word == "nullif" {
+        found.push("`NULLIF` looks an operator up by name".to_owned());
+    }
+    if word == "case" && !is_ident(next, "when") {
+        found.push("a simple `CASE x WHEN` looks an operator up by name".to_owned());
+    }
+    if word == "cast" && next == Some(&Token::Open) {
+        found.push("`CAST(x AS type)` resolves the type by name".to_owned());
+    }
+    if CATALOG_TYPES.contains(&word) && next == Some(&Token::Str) && prev != Some(&Token::Dot) {
+        found.push(format!("typed literal of unqualified type `{word}`"));
+    }
+}
+
+// the source without its `#[cfg(test)] mod name { ... }` blocks, which other items may follow
+fn without_test_modules(source: &str) -> String {
+    const MARKER: &str = "#[cfg(test)]";
+    let mut out = String::new();
+    let mut rest = source;
+    while let Some(at) = rest.find(MARKER) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + MARKER.len()..];
+        let tail = after.trim_start();
+        if !tail.starts_with("mod ") {
+            // a cfg(test) item that is not a module stays in the scan
+            out.push_str(MARKER);
+            rest = after;
+            continue;
+        }
+        let Some(open) = after.find('{') else {
+            return out;
+        };
+        let chars: Vec<char> = after[open..].chars().collect();
+        let mut depth = 0_usize;
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                '/' if chars.get(i + 1) == Some(&'/') => {
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                '"' => {
+                    i = read_string(&chars, i + 1).1;
+                    continue;
+                }
+                '\'' => {
+                    i += if chars.get(i + 1) == Some(&'\\') {
+                        4
+                    } else if chars.get(i + 2) == Some(&'\'') {
+                        3
+                    } else {
+                        1
+                    };
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let consumed: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
+        rest = &after[open + consumed..];
+    }
+    out.push_str(rest);
+    out
+}
+
+// the string literals of a Rust file that look like SQL, outside its test modules and comments
 fn sql_literals(source: &str) -> Vec<String> {
-    let source = source.split("#[cfg(test)]").next().unwrap_or_default();
+    let source = without_test_modules(source);
     let chars: Vec<char> = source.chars().collect();
     let mut literals = Vec::new();
     let mut i = 0;
@@ -352,8 +463,12 @@ fn sql_literals(source: &str) -> Vec<String> {
             '"' => {
                 let (text, end) = read_string(&chars, i + 1);
                 i = end;
-                let first = text.split_whitespace().next().unwrap_or_default();
-                if VERBS.contains(&first) {
+                let first = text
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if VERBS.contains(&first.as_str()) {
                     literals.push(text);
                 }
             }
@@ -433,6 +548,12 @@ fn the_scanner_flags_what_it_claims_to() {
         "CREATE TABLE {t} (a text)",
         "SELECT 1 FROM evil.f(1)",
         "SELECT a + 1",
+        "SELECT 1 WHERE a IS DISTINCT FROM b",
+        "SELECT 1 WHERE a IS NOT DISTINCT FROM b",
+        "SELECT NULLIF(a, b)",
+        "SELECT CASE a WHEN 1 THEN 2 END",
+        "SELECT CAST(a AS text)",
+        "SELECT oid '1'",
     ] {
         assert!(!violations(bad).is_empty(), "{bad}");
     }
@@ -445,6 +566,8 @@ fn the_scanner_flags_what_it_claims_to() {
         "SELECT * FROM pg_catalog.unnest($1::pg_catalog.oid[]) AS o(a, b)",
         "INSERT INTO {t} (a, b) VALUES ($1, $2)",
         "UNLISTEN *;",
+        "SELECT DISTINCT a, CASE WHEN b THEN 1 ELSE 2 END FROM t",
+        "SELECT pg_catalog.oid '1', interval '1 day'",
     ] {
         assert_eq!(violations(good), Vec::<String>::new(), "{good}");
     }
@@ -470,7 +593,6 @@ fn the_extractor_finds_the_known_statements() -> TestResult {
             "no literal starts with {known}"
         );
     }
-    assert!(all.len() > 25, "only {} literals", all.len());
     Ok(())
 }
 

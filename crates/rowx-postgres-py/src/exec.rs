@@ -10,8 +10,7 @@ use rowx_postgres::cancel::{self, Cancel, Hook};
 use rowx_postgres::conn::opens_transaction;
 use rowx_postgres::error::Error;
 use rowx_postgres::exec::{self, Raw, Shape};
-use rowx_postgres::pool::reset_sql;
-use rowx_postgres::pool::{Pool as PgPool, is_stale_plan};
+use rowx_postgres::pool::{Pool as PgPool, is_stale_plan, reset_batches};
 use rowx_postgres::{Row, Type};
 
 use crate::codec::{self, PyParam};
@@ -347,15 +346,18 @@ pub fn simple<'py>(
         let pending = cancel::spawn(&cancel, claim, &hook, async move {
             let conn = inner.lock().await;
             // an unconditional ROLLBACK would log a server WARNING on every idle reset
-            let sql = if reset {
-                let Some(batch) = reset_sql(sql.as_deref(), state.maybe_in_txn()) else {
-                    return Ok(());
-                };
-                batch
+            let batches = if reset {
+                reset_batches(sql.as_deref(), state.maybe_in_txn())
             } else {
-                sql.unwrap_or_default()
+                vec![sql.unwrap_or_default()]
             };
-            let result = conn.simple(&sql).await;
+            let mut result = Ok(());
+            for batch in &batches {
+                result = conn.simple(batch).await;
+                if result.is_err() {
+                    break;
+                }
+            }
             drop(conn);
             result?;
             if reset {

@@ -6,6 +6,7 @@ import random
 import secrets
 import warnings
 from collections import Counter
+from string.templatelib import Template
 from typing import TYPE_CHECKING, Final
 
 import psycopg
@@ -791,6 +792,69 @@ def test_the_idle_guard_discards_a_connection_left_in_a_transaction(
     during, after, pid, new_pid = asyncio.run(run())
     assert during == "idle in transaction"
     assert after == "idle"
+    assert pid != new_pid
+
+
+@pytest.mark.parametrize("opener", [";BEGIN", ";;START TRANSACTION", "/**/;BEGIN", "; -- x\nBEGIN"])
+@pytest.mark.parametrize("hooked", [False, True])
+def test_a_transaction_opened_after_leading_semicolons_does_not_survive_a_release(
+    schema: str, opener: str, *, hooked: bool
+) -> None:
+    seen: list[str | None] = []
+
+    async def hook(conn: Connection) -> None:
+        # a transaction-local setting is still visible when the hook runs inside the transaction
+        seen.append(await query_unchecked[str | None](t"SELECT current_setting('app.secret', true)").one(conn))
+
+    async def run() -> tuple[str, str | None, int, int]:
+        async with (
+            await connect(schema) as observer,
+            Pool(schema, max_size=1, reset_query=None, reset=hook if hooked else None) as pool,
+        ):
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                await query_unchecked[tuple[()]](Template(opener)).execute(conn)
+                await query_unchecked[tuple[()]](t"SELECT set_config('app.secret', 'x', true)").execute(conn)
+            async with pool.acquire() as conn:
+                value = await query_unchecked[str | None](t"SELECT current_setting('app.secret', true)").one(conn)
+                return await session_state(observer, pid), value, pid, await backend_pid(conn)
+
+    state, value, pid, after_pid = asyncio.run(run())
+    assert state == "idle"
+    assert value in {None, ""}
+    assert pid == after_pid
+    assert all(item in {None, ""} for item in seen)
+    assert len(seen) == (2 if hooked else 0)
+
+
+@pytest.mark.parametrize("reset_query", ["DISCARD ALL", "VACUUM"])
+@pytest.mark.parametrize("open_transaction", [False, True])
+def test_a_custom_reset_query_that_cannot_run_in_a_transaction_keeps_the_connection(
+    schema: str, reset_query: str, *, open_transaction: bool
+) -> None:
+    async def run() -> list[int]:
+        pids = []
+        async with Pool(schema, max_size=1, reset_query=reset_query) as pool:
+            for _ in range(3):
+                async with pool.acquire() as conn:
+                    pids.append(await backend_pid(conn))
+                    if open_transaction:
+                        await query_unchecked[tuple[()]](t"BEGIN").execute(conn)
+        return pids
+
+    assert len(set(asyncio.run(run()))) == 1
+
+
+def test_a_custom_reset_query_still_discards_a_connection_left_in_a_transaction(schema: str) -> None:
+    async def run() -> tuple[int, int]:
+        async with Pool(schema, max_size=1, reset_query="DISCARD ALL") as pool:
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                await conn._impl.reset("BEGIN;")
+            async with pool.acquire() as conn:
+                return pid, await backend_pid(conn)
+
+    pid, new_pid = asyncio.run(run())
     assert pid != new_pid
 
 
