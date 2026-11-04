@@ -59,6 +59,11 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    // `at` only moves through `take`, which stays inside `raw`
+    const fn remaining(&self) -> usize {
+        self.raw.len().saturating_sub(self.at)
+    }
+
     fn take(&mut self, len: usize) -> Option<&'a [u8]> {
         let end = self.at.checked_add(len)?;
         let slice = self.raw.get(self.at..end)?;
@@ -116,8 +121,8 @@ pub fn decode(raw: &[u8]) -> Result<Range<'_>, RangeError> {
             Bound::Exclusive(value)
         }
     };
-    if reader.at != body.len() {
-        return Err(RangeError::Trailing(body.len() - reader.at));
+    if reader.remaining() != 0 {
+        return Err(RangeError::Trailing(reader.remaining()));
     }
     Ok(Range::Bounds { lower, upper })
 }
@@ -251,6 +256,31 @@ mod tests {
         trailing.push(9);
         assert_eq!(decode(&trailing), Err(RangeError::Trailing(1)));
     }
+
+    #[test]
+    fn bound_lengths_and_trailing_counts_at_the_limits() {
+        let mut min = vec![0];
+        min.extend(i32::MIN.to_be_bytes());
+        assert_eq!(
+            decode(&min),
+            Err(RangeError::BoundLength("lower", i32::MIN))
+        );
+
+        let mut max = vec![0];
+        max.extend(i32::MAX.to_be_bytes());
+        assert_eq!(decode(&max), Err(RangeError::BoundTruncated("lower")));
+
+        let mut upper = vec![LOWER_INFINITE];
+        upper.extend(i32::MAX.to_be_bytes());
+        assert_eq!(decode(&upper), Err(RangeError::BoundTruncated("upper")));
+
+        let mut trailing = vec![LOWER_INFINITE];
+        trailing.extend(bound(&[1, 2]));
+        trailing.extend([5, 5, 5]);
+        assert_eq!(decode(&trailing), Err(RangeError::Trailing(3)));
+
+        assert_eq!(decode(&[EMPTY, 1, 2, 3]), Err(RangeError::Trailing(3)));
+    }
 }
 
 #[cfg(test)]
@@ -298,8 +328,11 @@ mod proptests {
         ) {
             let range = Range::Bounds { lower: as_bound(&lower), upper: as_bound(&upper) };
             let raw = encode(&range).unwrap_or_default();
-            let cut = cut % raw.len();
-            prop_assert!(decode(&raw[..cut]).is_err());
+            let cut = cut.checked_rem(raw.len()).unwrap_or(0);
+            let Some(prefix) = raw.get(..cut) else {
+                return Err(TestCaseError::fail("the cut is past the encoding"));
+            };
+            prop_assert!(decode(prefix).is_err());
         }
 
         #[test]
