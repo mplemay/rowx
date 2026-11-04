@@ -11,8 +11,6 @@ pub enum ArrayError {
     Dimensions(i32),
     #[error("array declares a negative length {0}")]
     NegativeLength(i32),
-    #[error("array declares a zero-length dimension")]
-    EmptyDimension,
     #[error("array declares more elements than fit in memory")]
     TooLarge,
     #[error("array ends in the middle of element {0}")]
@@ -68,17 +66,30 @@ pub fn decode(raw: &[u8]) -> Result<Array<'_>, ArrayError> {
 
     let mut dims = Vec::new();
     let mut total: usize = usize::from(ndim != 0);
+    let mut empty = false;
     for _ in 0..ndim {
         let (Some(len), Some(_lower_bound)) = (reader.i32(), reader.i32()) else {
             return Err(ArrayError::Truncated(raw.len()));
         };
         let len = usize::try_from(len).map_err(|_| ArrayError::NegativeLength(len))?;
-        // an empty array has no dimensions at all, so a dimension of length 0 is malformed
-        if len == 0 {
-            return Err(ArrayError::EmptyDimension);
-        }
-        total = total.checked_mul(len).ok_or(ArrayError::TooLarge)?;
+        // a zero-length dimension makes the array empty whatever the others declare
+        empty |= len == 0;
+        total = total.saturating_mul(len);
         dims.push(len);
+    }
+    if empty {
+        // Postgres sends this shape for an empty oidvector or int2vector; there are no elements to read
+        if reader.at != raw.len() {
+            return Err(ArrayError::Trailing(raw.len() - reader.at));
+        }
+        return Ok(Array {
+            element_oid,
+            dims: Vec::new(),
+            elements: Vec::new(),
+        });
+    }
+    if total == usize::MAX {
+        return Err(ArrayError::TooLarge);
     }
 
     // every element takes at least 4 bytes, which bounds the allocation by the input size
@@ -162,14 +173,39 @@ mod tests {
         )
     }
 
+    fn zero_length_shapes() -> [&'static [i32]; 4] {
+        [&[0], &[i32::MAX, 0], &[3, 2, 0], &[0, i32::MAX]]
+    }
+
+    fn zero_length_header(lens: &[i32]) -> Vec<u8> {
+        let mut raw = header(i32::try_from(lens.len()).unwrap_or(0), 0, 23);
+        for &len in lens {
+            raw.extend(dim(len, 1));
+        }
+        raw
+    }
+
     #[test]
-    fn a_zero_length_dimension_is_malformed() {
-        for lens in [&[0][..], &[i32::MAX, 0], &[3, 2, 0], &[0, i32::MAX]] {
-            let mut raw = header(i32::try_from(lens.len()).unwrap_or(0), 0, 23);
-            for &len in lens {
-                raw.extend(dim(len, 1));
-            }
-            assert_eq!(decode(&raw), Err(ArrayError::EmptyDimension), "{lens:?}");
+    fn a_zero_length_dimension_is_an_empty_array() {
+        for lens in zero_length_shapes() {
+            assert_eq!(
+                decode(&zero_length_header(lens)),
+                Ok(Array {
+                    element_oid: 23,
+                    dims: vec![],
+                    elements: vec![]
+                }),
+                "{lens:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_length_dimension_with_element_bytes_is_malformed() {
+        for lens in zero_length_shapes() {
+            let mut raw = zero_length_header(lens);
+            raw.extend(elem(Some(&[0, 0, 0, 1])));
+            assert_eq!(decode(&raw), Err(ArrayError::Trailing(8)), "{lens:?}");
         }
     }
 

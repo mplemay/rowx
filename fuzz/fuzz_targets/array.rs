@@ -33,9 +33,13 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(decoded) = array::decode(data) {
         let _ = decoded.elements.iter().flatten().map(|e| e.len()).sum::<usize>();
     }
-    // Postgres never sends a dimension of length 0, so it must be refused however the rest looks
+    // a zero-length dimension is an empty array when nothing follows the header, and malformed otherwise
     if let Some((raw, zero)) = shaped(data) {
         let decoded = array::decode(&raw);
-        assert!(!zero || decoded.is_err());
+        if zero {
+            if let Ok(array) = decoded {
+                assert!(array.dims.is_empty() && array.elements.is_empty());
+            }
+        }
     }
 });

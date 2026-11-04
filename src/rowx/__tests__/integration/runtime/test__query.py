@@ -692,3 +692,13 @@ def test_query_unchecked_round_trips_a_quoted_identifier(schema: str) -> None:
         return await query_unchecked[tuple[int]](t"SELECT {column:ident} FROM {table:ident}").one(conn)
 
     assert run_on(schema, "connection", body) == (7,)
+
+
+def test_an_empty_oidvector_or_int2vector_decodes_as_an_empty_list(schema: str) -> None:
+    async def body(conn: Executor) -> tuple[list[int], list[int], list[int], list[int]]:
+        return await query_unchecked[tuple[list[int], list[int], list[int], list[int]]](
+            t"SELECT ''::oidvector, ''::int2vector, "
+            t"(SELECT proargtypes FROM pg_catalog.pg_proc WHERE proname = 'now' LIMIT 1), '1 2'::oidvector"
+        ).one(conn)
+
+    assert run_on(schema, "connection", body) == ([], [], [], [1, 2])

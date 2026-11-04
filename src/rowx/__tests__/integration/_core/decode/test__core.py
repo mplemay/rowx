@@ -1,5 +1,6 @@
 import struct
 import time
+import tracemalloc
 from contextlib import suppress
 from itertools import starmap
 from random import Random
@@ -233,9 +234,9 @@ def array_bad(oid: int) -> list[bytes]:
         array(oid, [(1, 1)], b"\x00\x00\x00\x01") + b"\x00",
         array(oid, [(2, 1)], b"\x00\x00\x00\x01"),
         be32(0, 0, oid) + b"\x00",
-        be32(1, 0, oid) + be32(0, 1),
-        be32(2, 0, oid) + be32(HUGE, 1) + be32(0, 1),
-        be32(3, 0, oid) + be32(65_536, 1) + be32(65_536, 1) + be32(0, 1),
+        be32(1, 0, oid) + be32(0, 1) + be32(1),
+        be32(2, 0, oid) + be32(HUGE, 1) + be32(0, 1) + sized(b"\x00"),
+        be32(3, 0, oid) + be32(65_536, 1) + be32(65_536, 1) + be32(0, 1) + sized(b"\x00" * 4),
     ]
 
 
@@ -334,14 +335,18 @@ def test_a_declared_count_larger_than_the_input_does_not_allocate() -> None:
         _decode(604, be32(HUGE))
 
 
-def test_a_zero_length_dimension_is_refused_quickly_without_allocating() -> None:
+def test_a_zero_length_dimension_is_an_empty_array_decoded_quickly_without_allocating() -> None:
     shapes = [[(HUGE, 1), (0, 1)], [(10_000_000, 1), (0, 1)], [(65_536, 1), (65_536, 1), (0, 1)], [(0, 1)]]
+    tracemalloc.start()
     started = time.perf_counter()
     for dims in shapes:
         raw = be32(len(dims), 0, ARRAY_OID) + b"".join(starmap(be32, dims))
-        with pytest.raises(DecodeError):
-            _decode(("array", 25), raw)
-    assert time.perf_counter() - started < 1
+        assert _decode(("array", 25), raw) == []
+    elapsed = time.perf_counter() - started
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert elapsed < 1
+    assert peak < 1_000_000
 
 
 def test_a_spec_nested_past_the_depth_cap_is_refused() -> None:
