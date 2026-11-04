@@ -63,7 +63,6 @@ jobs:
   protocol-limits:
     name: Protocol limits (2 GiB parameter)
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 20
 
     services:
@@ -100,4 +99,8 @@ jobs:
 
       # the 2^31-byte parameter test is ignored locally because it needs about 2 GiB of memory
       - name: Run the 2 GiB parameter regression
-        run: cargo test -p rowx-postgres --test exec -- --ignored parameter_of_2_pow_31_bytes_errors_and_keeps_connection
+        run: |
+          set -o pipefail
+          cargo test -p rowx-postgres --test exec -- --ignored --exact parameter_of_2_pow_31_bytes_errors_and_keeps_connection 2>&1 | tee protocol-limits.log
+          # --ignored exits 0 when the name matches nothing, so require exactly one passing test
+          grep -q "test result: ok. 1 passed" protocol-limits.log
