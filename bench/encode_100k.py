@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any, Final
 
 import rowx
-from rowx.postgres import connect
+from rowx.postgres import Range, connect
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,6 +27,7 @@ CASES: Final[dict[str, list[Any]]] = {
     "interval[]": [timedelta(days=i % 30, seconds=i, microseconds=i % 1000) for i in range(ELEMENTS)],
     "inet[]": [IPv4Address(i) for i in range(ELEMENTS)],
     "bytea[]": [i.to_bytes(4) * 4 for i in range(ELEMENTS)],
+    "numrange[]": [Range(Decimal(i), Decimal(f"{i}.5")) if i % 7 else Range(empty=True) for i in range(ELEMENTS)],
 }
 
 QUERIES: Final[dict[str, Callable[[list[Any]], rowx.query[int]]]] = {
@@ -37,6 +38,7 @@ QUERIES: Final[dict[str, Callable[[list[Any]], rowx.query[int]]]] = {
     "interval[]": lambda values: rowx.query[int](t"SELECT cardinality({values}::interval[])"),
     "inet[]": lambda values: rowx.query[int](t"SELECT cardinality({values}::inet[])"),
     "bytea[]": lambda values: rowx.query[int](t"SELECT cardinality({values}::bytea[])"),
+    "numrange[]": lambda values: rowx.query[int](t"SELECT cardinality({values}::numrange[])"),
 }
 
 

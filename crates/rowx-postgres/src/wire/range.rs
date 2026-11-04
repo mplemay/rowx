@@ -157,46 +157,6 @@ pub fn encode(range: &Range<'_>) -> Result<Vec<u8>, RangeError> {
     Ok(out)
 }
 
-fn push_quoted(out: &mut String, raw: &[u8]) {
-    let text = String::from_utf8_lossy(raw);
-    let plain = !text.is_empty()
-        && !text
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\\' | ',' | '(' | ')' | '[' | ']'))
-        && !text.eq_ignore_ascii_case("empty");
-    if plain {
-        out.push_str(&text);
-        return;
-    }
-    out.push('"');
-    for ch in text.chars() {
-        if matches!(ch, '"' | '\\') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out.push('"');
-}
-
-/// Text literal of a range whose bounds are the subtype's text values, such as `[1.5,2.5)`.
-#[must_use]
-pub fn encode_literal(range: &Range<'_>) -> String {
-    let Range::Bounds { lower, upper } = range else {
-        return "empty".to_owned();
-    };
-    let mut out = String::new();
-    out.push(if lower.is_inclusive() { '[' } else { '(' });
-    if let Some(raw) = lower.value() {
-        push_quoted(&mut out, raw);
-    }
-    out.push(',');
-    if let Some(raw) = upper.value() {
-        push_quoted(&mut out, raw);
-    }
-    out.push(if upper.is_inclusive() { ']' } else { ')' });
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,31 +251,6 @@ mod tests {
         trailing.push(9);
         assert_eq!(decode(&trailing), Err(RangeError::Trailing(1)));
     }
-
-    #[test]
-    fn literals_quote_only_what_needs_it() {
-        let range = Range::Bounds {
-            lower: Bound::Inclusive(b"1.5"),
-            upper: Bound::Exclusive(b"2.5"),
-        };
-        assert_eq!(encode_literal(&range), "[1.5,2.5)");
-        let odd = Range::Bounds {
-            lower: Bound::Exclusive(b"a b"),
-            upper: Bound::Inclusive(b"q\"\\"),
-        };
-        assert_eq!(encode_literal(&odd), "(\"a b\",\"q\\\"\\\\\"]");
-        let open = Range::Bounds {
-            lower: Bound::Unbounded,
-            upper: Bound::Unbounded,
-        };
-        assert_eq!(encode_literal(&open), "(,)");
-        assert_eq!(encode_literal(&Range::Empty), "empty");
-        let word = Range::Bounds {
-            lower: Bound::Inclusive(b"empty"),
-            upper: Bound::Unbounded,
-        };
-        assert_eq!(encode_literal(&word), "[\"empty\",)");
-    }
 }
 
 #[cfg(test)]
@@ -370,14 +305,6 @@ mod proptests {
         #[test]
         fn decoding_random_bytes_never_panics(raw in prop::collection::vec(any::<u8>(), 0..64)) {
             let _ = decode(&raw);
-        }
-
-        #[test]
-        fn a_literal_is_bracketed(lower in side(), upper in side()) {
-            let range = Range::Bounds { lower: as_bound(&lower), upper: as_bound(&upper) };
-            let text = encode_literal(&range);
-            prop_assert!(text.starts_with(['[', '(']));
-            prop_assert!(text.ends_with([']', ')']));
         }
     }
 }
