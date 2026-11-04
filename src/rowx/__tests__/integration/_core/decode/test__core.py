@@ -1,5 +1,7 @@
 import struct
+import time
 from contextlib import suppress
+from itertools import starmap
 from random import Random
 from typing import Final
 
@@ -231,6 +233,9 @@ def array_bad(oid: int) -> list[bytes]:
         array(oid, [(1, 1)], b"\x00\x00\x00\x01") + b"\x00",
         array(oid, [(2, 1)], b"\x00\x00\x00\x01"),
         be32(0, 0, oid) + b"\x00",
+        be32(1, 0, oid) + be32(0, 1),
+        be32(2, 0, oid) + be32(HUGE, 1) + be32(0, 1),
+        be32(3, 0, oid) + be32(65_536, 1) + be32(65_536, 1) + be32(0, 1),
     ]
 
 
@@ -327,6 +332,36 @@ def test_a_declared_count_larger_than_the_input_does_not_allocate() -> None:
         _decode(("name", "hstore"), be32(HUGE))
     with pytest.raises(DecodeError):
         _decode(604, be32(HUGE))
+
+
+def test_a_zero_length_dimension_is_refused_quickly_without_allocating() -> None:
+    shapes = [[(HUGE, 1), (0, 1)], [(10_000_000, 1), (0, 1)], [(65_536, 1), (65_536, 1), (0, 1)], [(0, 1)]]
+    started = time.perf_counter()
+    for dims in shapes:
+        raw = be32(len(dims), 0, ARRAY_OID) + b"".join(starmap(be32, dims))
+        with pytest.raises(DecodeError):
+            _decode(("array", 25), raw)
+    assert time.perf_counter() - started < 1
+
+
+def test_a_spec_nested_past_the_depth_cap_is_refused() -> None:
+    spec: Spec = 23
+    for _ in range(17):
+        spec = ("array", spec)
+    with pytest.raises(ValueError, match="nests deeper"):
+        _decode(spec, b"")
+    deep: Spec = 23
+    for _ in range(100_000):
+        deep = ("array", deep)
+    with pytest.raises(ValueError, match="nests deeper"):
+        _decode(deep, b"")
+
+
+@pytest.mark.parametrize("oid", [114, 3802])
+def test_json_nested_past_the_recursion_limit_is_a_decode_error(oid: int) -> None:
+    body = b"[" * 200_000 + b"]" * 200_000
+    with pytest.raises(DecodeError):
+        _decode(oid, (b"\x01" if oid == 3802 else b"") + body)
 
 
 def test_a_well_formed_container_still_decodes() -> None:

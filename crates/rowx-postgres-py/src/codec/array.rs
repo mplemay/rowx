@@ -22,6 +22,13 @@ fn build<'py>(
     };
     let list = PyList::empty(py);
     for _ in 0..len {
+        // a well-formed array never runs out, but a short one must not spin through its dimensions
+        if *cursor >= elements.len() {
+            return Err(decode_error(
+                py,
+                "array has fewer elements than its dimensions",
+            ));
+        }
         list.append(build(py, elem_ty, rest, elements, cursor, as_span)?)?;
     }
     Ok(list.into_any())

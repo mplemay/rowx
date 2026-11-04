@@ -17,6 +17,34 @@ fn time_parts(micros: i64) -> TimeOfDay {
     }
 }
 
+// an encoder must accept every value this target builds, so a refusal is a finding
+fn must<T, E: std::fmt::Debug>(result: Result<T, E>, what: &str) -> T {
+    match result {
+        Ok(value) => value,
+        Err(err) => unreachable!("{what} failed: {err:?}"),
+    }
+}
+
+// reads `HH:MM:SS.ffffff+HH:MM:SS` back into (micros since midnight, seconds east of UTC)
+fn parse_timetz_text(text: &str) -> Option<(i64, i64)> {
+    let (time, zone) = (text.get(..15)?, text.get(15..)?);
+    let sign = match zone.get(..1)? {
+        "+" => 1,
+        "-" => -1,
+        _ => return None,
+    };
+    let field = |s: &str| s.parse::<i64>().ok();
+    let (secs, frac) = time.split_once('.')?;
+    let mut hms = secs.split(':').map(field);
+    let (h, m, s) = (hms.next()??, hms.next()??, hms.next()??);
+    let mut z = zone.get(1..)?.split(':').map(field);
+    let (zh, zm, zs) = (z.next()??, z.next()??, z.next()??);
+    Some((
+        ((h * 60 + m) * 60 + s) * 1_000_000 + field(frac)?,
+        sign * ((zh * 60 + zm) * 60 + zs),
+    ))
+}
+
 fn date(u: &mut Unstructured<'_>) -> arbitrary::Result<(i32, u32, u32)> {
     let year = u.int_in_range(2..=9998_i32)?;
     let month = u.int_in_range(1..=12_u32)?;
@@ -36,7 +64,7 @@ fn check(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         month: u8::try_from(month).unwrap_or(0),
         day: u8::try_from(day).unwrap_or(0),
     };
-    let raw = temporal::encode_date(year, month, day).unwrap_or_default();
+    let raw = must(temporal::encode_date(year, month, day), "encode_date");
     assert_eq!(temporal::decode_date(&raw), Ok(want));
 
     let micros = u.int_in_range(0..=MICROS_PER_DAY - 1)?;
@@ -44,13 +72,18 @@ fn check(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
 
     // timetz takes the zone in seconds west of UTC and reads it back as seconds east
     let west = u.int_in_range(-57_599..=57_599_i32)?;
-    let raw = temporal::encode_timetz(micros, west).unwrap_or_default();
+    let raw = must(temporal::encode_timetz(micros, west), "encode_timetz");
     let decoded = temporal::decode_timetz(&raw);
     assert_eq!(decoded.as_ref().map(|t| t.utc_offset), Ok(-west));
     assert_eq!(decoded.map(|t| t.time), Ok(time_parts(micros)));
+    // the text form (a scalar timetz travels as text) names the same time and the same zone, east of UTC
+    let text = must(temporal::encode_timetz_text(micros, -i64::from(west) * 1_000_000), "encode_timetz_text");
+    assert_eq!(parse_timetz_text(&text), Some((micros, -i64::from(west))));
+    assert!(temporal::encode_timetz_text(micros, 57_600 * 1_000_000).is_err());
+    assert!(temporal::encode_timetz_text(micros, 1).is_err());
     // 24:00:00 encodes but is not a Python time
     assert!(temporal::encode_timetz(MICROS_PER_DAY, west).is_ok());
-    assert!(temporal::decode_timetz(&temporal::encode_timetz(MICROS_PER_DAY, west).unwrap_or_default()).is_err());
+    assert!(temporal::decode_timetz(&must(temporal::encode_timetz(MICROS_PER_DAY, west), "encode_timetz")).is_err());
     assert!(temporal::encode_timetz(-1, west).is_err());
     assert!(temporal::encode_timetz(micros, 57_600).is_err());
 
@@ -73,9 +106,9 @@ fn check(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let days = u.arbitrary::<i32>()?;
     let months = u.arbitrary::<i32>()?;
     let micros = u.arbitrary::<i64>()?;
-    let raw = temporal::encode_interval(i64::from(days), micros).unwrap_or_default();
+    let raw = must(temporal::encode_interval(i64::from(days), micros), "encode_interval");
     assert_eq!(temporal::decode_interval(&raw), Ok(Interval { days, microseconds: micros }));
-    let raw = temporal::encode_span(i64::from(months), i64::from(days), micros).unwrap_or_default();
+    let raw = must(temporal::encode_span(i64::from(months), i64::from(days), micros), "encode_span");
     assert_eq!(temporal::decode_span(&raw), Ok(Span { months, days, microseconds: micros }));
     assert!(temporal::encode_span(i64::from(months) + (1 << 32), 0, 0).is_err());
     assert!(temporal::encode_interval(i64::from(days) + (1 << 32), 0).is_err());

@@ -10,7 +10,7 @@ fn check(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let ndim = u.int_in_range(0..=6_usize)?;
     let mut dims = Vec::new();
     for _ in 0..ndim {
-        dims.push(u.int_in_range(0..=3_usize)?);
+        dims.push(u.int_in_range(1..=3_usize)?);
     }
     let total = if dims.is_empty() { 0 } else { dims.iter().product() };
     let mut owned = Vec::new();

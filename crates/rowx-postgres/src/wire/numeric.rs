@@ -120,12 +120,13 @@ pub fn decode(raw: &[u8]) -> Result<Numeric, NumericError> {
     })
 }
 
-// four decimal digits of a base-10000 group, zero padded
-fn padded(group: u16) -> impl Iterator<Item = char> {
-    format!("{group:04}")
-        .chars()
-        .collect::<Vec<_>>()
-        .into_iter()
+// appends the four decimal digits of a base-10000 group, zero padded
+fn push_padded(out: &mut String, group: u16) {
+    for divisor in [1000_u16, 100, 10, 1] {
+        out.push(char::from(
+            b'0' + u8::try_from(group / divisor % 10).unwrap_or(0),
+        ));
+    }
 }
 
 impl Numeric {
@@ -275,26 +276,30 @@ impl Numeric {
                 .copied()
                 .unwrap_or(0)
         };
-        let mut int_part = String::new();
-        for index in 0..=weight {
-            int_part.extend(padded(group(index)));
-        }
-        let int_part = int_part.trim_start_matches('0');
-        let mut out = String::new();
+        let int_groups = usize::try_from(weight + 1).unwrap_or(0);
+        let mut out = String::with_capacity(int_groups * 4 + scale + 6);
         if negative {
             out.push('-');
         }
-        out.push_str(if int_part.is_empty() { "0" } else { int_part });
+        let start = out.len();
+        for index in 0..=weight {
+            push_padded(&mut out, group(index));
+        }
+        // drop the leading zeros of the integer part, keeping one digit
+        let zeros = out[start..].bytes().take_while(|&b| b == b'0').count();
+        out.replace_range(start..start + zeros, "");
+        if out.len() == start {
+            out.push('0');
+        }
         if scale > 0 {
-            let mut frac = String::new();
+            out.push('.');
+            let frac_start = out.len();
             let mut index = weight + 1;
-            while frac.len() < scale {
-                frac.extend(padded(group(index)));
+            while out.len() - frac_start < scale {
+                push_padded(&mut out, group(index));
                 index += 1;
             }
-            frac.truncate(scale);
-            out.push('.');
-            out.push_str(&frac);
+            out.truncate(frac_start + scale);
         }
         out
     }

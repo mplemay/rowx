@@ -23,8 +23,14 @@ fn check(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     assert_eq!(mac::encode(&text.to_uppercase(), width).as_deref(), Ok(bytes.as_slice()));
     if wide {
         // six bytes widen with ff:fe in the middle
-        let six = mac::decode(bytes.get(..MAC_LEN).unwrap_or_default(), MAC_LEN).unwrap_or_default();
-        let widened = mac::encode(&six, MAC8_LEN).unwrap_or_default();
+        let six = match mac::decode(bytes.get(..MAC_LEN).unwrap_or_default(), MAC_LEN) {
+            Ok(six) => six,
+            Err(err) => unreachable!("decode of the first six bytes failed: {err}"),
+        };
+        let widened = match mac::encode(&six, MAC8_LEN) {
+            Ok(widened) => widened,
+            Err(err) => unreachable!("widening to eight bytes failed: {err}"),
+        };
         assert_eq!(widened.get(3..5), Some(&[0xff, 0xfe][..]));
     }
     Ok(())

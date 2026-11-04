@@ -11,6 +11,8 @@ pub enum ArrayError {
     Dimensions(i32),
     #[error("array declares a negative length {0}")]
     NegativeLength(i32),
+    #[error("array declares a zero-length dimension")]
+    EmptyDimension,
     #[error("array declares more elements than fit in memory")]
     TooLarge,
     #[error("array ends in the middle of element {0}")]
@@ -71,6 +73,10 @@ pub fn decode(raw: &[u8]) -> Result<Array<'_>, ArrayError> {
             return Err(ArrayError::Truncated(raw.len()));
         };
         let len = usize::try_from(len).map_err(|_| ArrayError::NegativeLength(len))?;
+        // an empty array has no dimensions at all, so a dimension of length 0 is malformed
+        if len == 0 {
+            return Err(ArrayError::EmptyDimension);
+        }
         total = total.checked_mul(len).ok_or(ArrayError::TooLarge)?;
         dims.push(len);
     }
@@ -157,6 +163,17 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_length_dimension_is_malformed() {
+        for lens in [&[0][..], &[i32::MAX, 0], &[3, 2, 0], &[0, i32::MAX]] {
+            let mut raw = header(i32::try_from(lens.len()).unwrap_or(0), 0, 23);
+            for &len in lens {
+                raw.extend(dim(len, 1));
+            }
+            assert_eq!(decode(&raw), Err(ArrayError::EmptyDimension), "{lens:?}");
+        }
+    }
+
+    #[test]
     fn empty_array_has_no_dims() {
         let raw = header(0, 0, 25);
         let array = decode(&raw);
@@ -215,16 +232,6 @@ mod tests {
     }
 
     #[test]
-    fn zero_length_dimension_has_no_elements() {
-        let mut raw = header(1, 0, 25);
-        raw.extend(dim(0, 1));
-        assert_eq!(
-            decode(&raw).map(|a| (a.dims, a.elements.len())),
-            Ok((vec![0], 0))
-        );
-    }
-
-    #[test]
     fn rejects_malformed_input() {
         assert_eq!(decode(&[0; 4]), Err(ArrayError::Truncated(4)));
         assert_eq!(decode(&header(7, 0, 23)), Err(ArrayError::Dimensions(7)));
@@ -271,9 +278,9 @@ mod proptests {
 
     type Elements = Vec<Option<Vec<u8>>>;
 
-    // rectangular shapes of up to three dimensions, each length 0..=3, with a matching flat element list
+    // rectangular shapes of up to three dimensions, each length 1..=3 (an empty array has no dimensions), with a matching flat element list
     fn shaped() -> impl Strategy<Value = (Vec<usize>, Elements)> {
-        prop::collection::vec(0usize..4, 0..=3).prop_flat_map(|dims| {
+        prop::collection::vec(1usize..4, 0..=3).prop_flat_map(|dims| {
             let total = if dims.is_empty() {
                 0
             } else {

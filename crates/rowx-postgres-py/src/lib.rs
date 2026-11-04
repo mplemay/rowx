@@ -52,7 +52,14 @@ fn _param_formats(
 
 // a type for the `_decode` hook: an int is a built-in oid, and a tuple names the rest, such as
 // `("name", "hstore")`, `("enum",)`, `("array", spec)`, `("range", subtype_spec)` or `("domain", spec)`
-fn hook_type(spec: &Bound<'_, PyAny>) -> PyResult<Type> {
+const HOOK_MAX_DEPTH: usize = 16;
+
+fn hook_type(spec: &Bound<'_, PyAny>, depth: usize) -> PyResult<Type> {
+    if depth > HOOK_MAX_DEPTH {
+        return Err(PyValueError::new_err(format!(
+            "type spec nests deeper than {HOOK_MAX_DEPTH} levels"
+        )));
+    }
     if let Ok(oid) = spec.extract::<u32>() {
         return Type::from_oid(oid)
             .ok_or_else(|| PyValueError::new_err(format!("{oid} is not a built-in type")));
@@ -63,11 +70,17 @@ fn hook_type(spec: &Bound<'_, PyAny>) -> PyResult<Type> {
     match kind.as_str() {
         "name" => Ok(new(&tuple.get_item(1)?.extract::<String>()?, Kind::Simple)),
         "enum" => Ok(new("mood", Kind::Enum(vec!["ok".to_owned()]))),
-        "array" => Ok(new("_array", Kind::Array(hook_type(&tuple.get_item(1)?)?))),
-        "range" => Ok(new("_range", Kind::Range(hook_type(&tuple.get_item(1)?)?))),
+        "array" => Ok(new(
+            "_array",
+            Kind::Array(hook_type(&tuple.get_item(1)?, depth + 1)?),
+        )),
+        "range" => Ok(new(
+            "_range",
+            Kind::Range(hook_type(&tuple.get_item(1)?, depth + 1)?),
+        )),
         "domain" => Ok(new(
             "_domain",
-            Kind::Domain(hook_type(&tuple.get_item(1)?)?),
+            Kind::Domain(hook_type(&tuple.get_item(1)?, depth + 1)?),
         )),
         other => Err(PyValueError::new_err(format!("unknown type spec {other}"))),
     }
@@ -80,7 +93,7 @@ fn _decode<'py>(
     spec: &Bound<'py, PyAny>,
     raw: &Bound<'py, PyBytes>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    codec::decode(py, &hook_type(spec)?, Some(raw.as_bytes()))
+    codec::decode(py, &hook_type(spec, 0)?, Some(raw.as_bytes()))
 }
 
 /// Builds the `rowx._core.postgres` submodule.
