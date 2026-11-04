@@ -88,8 +88,12 @@ class _Lines:
 class _Scope:
     kind: Literal["module", "function", "class", "comprehension", "annotation"]
     bindings: dict[str, list[Tag]] = field(default_factory=dict)
-    # what makes a name evidently a `Template`: the annotation it was declared with, or "literal" for a t-string
+    # how a name was declared evidently as a `Template`: the annotation it was declared with, or "literal" for a
+    # t-string; annotations of parameters are evaluated in the enclosing scope, the others in this one
     hints: dict[str, ast.expr | Literal["literal"]] = field(default_factory=dict)
+    arg_hints: dict[str, ast.expr] = field(default_factory=dict)
+    # the names whose declaration is evidently a `Template`, resolved in the scope that evaluates the annotation
+    templates: set[str] = field(default_factory=set)
 
     def bind(self, name: str, tag: Tag = "other") -> None:
         self.bindings.setdefault(name, []).append(tag)
@@ -126,7 +130,7 @@ def _bind_arguments(scope: _Scope, arguments: ast.arguments) -> None:
     for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
         scope.bind(arg.arg)
         if arg.annotation is not None:
-            scope.hints[arg.arg] = arg.annotation
+            scope.arg_hints[arg.arg] = arg.annotation
     for arg in (arguments.vararg, arguments.kwarg):
         if arg is not None:
             scope.bind(arg.arg)
@@ -293,6 +297,7 @@ class _Finder(ast.NodeVisitor):
         self._path = path
         self._lines = lines
         self._scopes = [_Scope.build(tree)]
+        self._resolve_hints(self._scopes[0], [])
         self._annotating = 0
         self.result = FileResult(path=path, tree=tree)
         self._template_calls: list[TemplateCall] = []
@@ -404,12 +409,22 @@ class _Finder(ast.NodeVisitor):
             case ast.Call(func=func):
                 return (ref := self._templatelib_ref(func)) is not None and ref.name == "Template" and not ref.ambiguous
             case ast.Name(id=name) if (scope := self._lookup_scope(name)) is not None:
-                if len(scope.bindings[name]) != 1 or (hint := scope.hints.get(name)) is None:
-                    return False
-                if hint == "literal":
-                    return True
-                return (ref := self._templatelib_ref(hint)) is not None and ref.name == "Template" and not ref.ambiguous
+                return len(scope.bindings[name]) == 1 and name in scope.templates
         return False
+
+    def _is_template_annotation(self, annotation: ast.expr) -> bool:
+        return (ref := self._templatelib_ref(annotation)) is not None and ref.name == "Template" and not ref.ambiguous
+
+    # resolve the hints of a scope where their annotations are evaluated: `enclosing` is the scope stack around it
+    def _resolve_hints(self, scope: _Scope, enclosing: list[_Scope]) -> None:
+        own = [*enclosing, scope]
+        stack, self._scopes = self._scopes, enclosing
+        scope.templates.update(name for name, hint in scope.arg_hints.items() if self._is_template_annotation(hint))
+        self._scopes = own
+        scope.templates.update(
+            name for name, hint in scope.hints.items() if hint == "literal" or self._is_template_annotation(hint)
+        )
+        self._scopes = stack
 
     # `type(<template>)`
     def _is_type_of_template(self, node: ast.expr) -> bool:
@@ -478,7 +493,9 @@ class _Finder(ast.NodeVisitor):
         return 1
 
     def _scoped(self, node: Scoped | Comprehension, body: Iterable[ast.AST | None]) -> None:
-        self._scopes.append(_Scope.build(node))
+        scope = _Scope.build(node)
+        self._resolve_hints(scope, self._scopes)
+        self._scopes.append(scope)
         self._visit_all(body)
         self._scopes.pop()
 

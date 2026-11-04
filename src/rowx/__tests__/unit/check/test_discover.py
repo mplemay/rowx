@@ -1048,3 +1048,53 @@ def test_templatelib_type_of_annotated_parameter_and_decorator() -> None:
         """,
     )
     assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("value", 3), ("type-call", 5)]
+
+
+def test_templatelib_parameter_annotation_resolves_in_the_enclosing_scope() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+        def f(q: Template, sql):
+            Template = str
+            return type(q)(sql)
+        """,
+    )
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("type-call", 5)]
+
+
+def test_templatelib_import_in_a_body_does_not_type_an_outer_annotation() -> None:
+    result = run(
+        """
+        class Template: ...
+        def f(q: Template, sql):
+            from string.templatelib import Template
+            return type(q)(sql)
+        """,
+    )
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_annotation_in_a_nested_function_uses_the_enclosing_function() -> None:
+    result = run(
+        """
+        def outer(sql):
+            from string.templatelib import Template
+            def inner(q: Template):
+                return type(q)(sql)
+            return inner
+        """,
+    )
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("type-call", 5)]
+
+
+def test_templatelib_method_annotation_sees_a_shadowing_class_body() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+        class C:
+            Template = str
+            def m(self, q: Template, sql):
+                return type(q)(sql)
+        """,
+    )
+    assert not result.templates.indirect_uses
