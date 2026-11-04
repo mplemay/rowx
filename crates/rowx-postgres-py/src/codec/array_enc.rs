@@ -2,9 +2,8 @@ use rowx_postgres::exec::Param;
 use rowx_postgres::wire::array;
 use rowx_postgres::{Kind, Type};
 
-use crate::codec::encode_one;
+use crate::codec::encode_element;
 use crate::codec::extract::PyParam;
-use crate::codec::uuid;
 
 const MAX_DIMS: usize = 6;
 
@@ -47,7 +46,7 @@ fn raw_elements(elements: &[Param]) -> Vec<Option<&[u8]>> {
     elements.iter().map(Param::value).collect()
 }
 
-/// Binary when every element encodes as binary, otherwise a text literal.
+/// Always the binary array form, with every element in its binary form.
 ///
 /// # Errors
 /// A description of why the value cannot be encoded as an array of `ty`'s element.
@@ -73,24 +72,21 @@ pub fn encode(ty: &Type, param: &PyParam) -> Result<Param, String> {
         let empty = array::encode(elem_ty.oid(), &[], &[]).map_err(|e| e.to_string())?;
         return Ok(Param::binary(empty));
     }
-    let mut elements = leaves
+    let elements = leaves
         .iter()
         .enumerate()
         .map(|(index, leaf)| {
-            encode_one(elem_ty, leaf).map_err(|msg| format!("element {index}: {msg}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if elements.iter().any(Param::is_text) {
-        // uuid is the only element type that mixes forms (`UUID` binary, `str` text), and the
-        // literal needs every element as text; other binary elements are already their text bytes
-        for (element, leaf) in elements.iter_mut().zip(&leaves) {
-            if let PyParam::Uuid(bytes) = leaf {
-                *element = Param::text(uuid::to_text(bytes).into_bytes());
+            let element =
+                encode_element(elem_ty, leaf).map_err(|msg| format!("element {index}: {msg}"))?;
+            // an element is never text, since the array has no literal form to put it in
+            if element.is_text() {
+                return Err(format!(
+                    "element {index}: encoded as text, which an array cannot hold"
+                ));
             }
-        }
-        let literal = array::encode_literal(&dims, &raw_elements(&elements));
-        return Ok(Param::text(literal.into_bytes()));
-    }
+            Ok(element)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     array::encode(elem_ty.oid(), &dims, &raw_elements(&elements))
         .map(Param::binary)
         .map_err(|e| e.to_string())

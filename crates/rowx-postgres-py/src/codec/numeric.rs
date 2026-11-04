@@ -1,7 +1,9 @@
+use std::borrow::Cow;
+
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyType;
-use rowx_postgres::wire::numeric::{self, NumericError};
+use rowx_postgres::wire::numeric::{self, DecimalExponent, Numeric, NumericError};
 
 use crate::codec::extract::PyParam;
 use crate::errors::decode_error;
@@ -53,23 +55,67 @@ pub fn encode_oid(param: &PyParam) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Text form of the value, since numeric is sent in text format.
-///
-/// # Errors
-/// A description of why the value cannot be encoded as `numeric`.
-pub fn encode(param: &PyParam) -> Result<Vec<u8>, String> {
-    let text = match param {
-        PyParam::Int(i) => i.to_string(),
-        PyParam::BigInt(digits) => digits.clone(),
-        PyParam::Decimal(text) => {
-            numeric::normalize_decimal_text(text).map_err(|e: NumericError| e.to_string())?
+fn digits_of(mut magnitude: u128) -> Vec<u8> {
+    let mut digits = Vec::new();
+    while magnitude > 0 {
+        digits.push(u8::try_from(magnitude % 10).unwrap_or(0));
+        magnitude /= 10;
+    }
+    digits.reverse();
+    digits
+}
+
+// the sign, digits and exponent of a numeric-capable value; a Decimal's digits are borrowed
+fn parts_of(param: &PyParam) -> Result<(bool, Cow<'_, [u8]>, DecimalExponent), String> {
+    Ok(match param {
+        PyParam::Int(i) => (
+            *i < 0,
+            Cow::Owned(digits_of(u128::from(i.unsigned_abs()))),
+            DecimalExponent::Finite(0),
+        ),
+        PyParam::BigInt(text) => {
+            let (negative, magnitude) = text
+                .strip_prefix('-')
+                .map_or((false, text.as_str()), |rest| (true, rest));
+            let digits = magnitude
+                .bytes()
+                .map(|b| b.is_ascii_digit().then_some(b - b'0'))
+                .collect::<Option<Vec<u8>>>()
+                .ok_or_else(|| "the int is not a decimal number".to_owned())?;
+            (negative, Cow::Owned(digits), DecimalExponent::Finite(0))
         }
+        PyParam::Decimal {
+            negative,
+            digits,
+            exponent,
+        } => (*negative, Cow::Borrowed(digits.as_slice()), *exponent),
         _ => {
             return Err(format!(
                 "a Python {} cannot be encoded as numeric",
                 param.type_name()
             ));
         }
-    };
-    Ok(text.into_bytes())
+    })
+}
+
+/// Text form of the value, since a scalar numeric is sent in text format.
+///
+/// # Errors
+/// A description of why the value cannot be encoded as `numeric`.
+pub fn encode(param: &PyParam) -> Result<Vec<u8>, String> {
+    let (negative, digits, exponent) = parts_of(param)?;
+    numeric::decimal_text(negative, &digits, exponent)
+        .map(String::into_bytes)
+        .map_err(|e: NumericError| e.to_string())
+}
+
+/// Binary form, for an array element or a range bound.
+///
+/// # Errors
+/// A description of why the value cannot be encoded as `numeric`.
+pub fn encode_binary(param: &PyParam) -> Result<Vec<u8>, String> {
+    let (negative, digits, exponent) = parts_of(param)?;
+    Numeric::from_decimal_parts(negative, &digits, exponent)
+        .and_then(|value| value.encode())
+        .map_err(|e: NumericError| e.to_string())
 }

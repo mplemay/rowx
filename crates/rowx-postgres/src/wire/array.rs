@@ -130,43 +130,6 @@ pub fn encode(
     Ok(out)
 }
 
-/// Text literal of a row-major element list, every element quoted; `None` is `NULL`.
-#[must_use]
-pub fn encode_literal(dims: &[usize], elements: &[Option<&[u8]>]) -> String {
-    fn level(out: &mut String, elements: &mut std::slice::Iter<'_, Option<&[u8]>>, dims: &[usize]) {
-        let Some((&len, rest)) = dims.split_first() else {
-            return;
-        };
-        out.push('{');
-        for index in 0..len {
-            if index > 0 {
-                out.push(',');
-            }
-            if rest.is_empty() {
-                match elements.next().copied().flatten() {
-                    None => out.push_str("NULL"),
-                    Some(raw) => {
-                        out.push('"');
-                        for ch in String::from_utf8_lossy(raw).chars() {
-                            if matches!(ch, '"' | '\\') {
-                                out.push('\\');
-                            }
-                            out.push(ch);
-                        }
-                        out.push('"');
-                    }
-                }
-            } else {
-                level(out, elements, rest);
-            }
-        }
-        out.push('}');
-    }
-    let mut out = String::new();
-    level(&mut out, &mut elements.iter(), dims);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,24 +369,6 @@ mod proptests {
             raw.extend_from_slice(&body);
             let _ = decode(&raw);
         }
-
-        #[test]
-        fn the_literal_has_one_brace_pair_per_level((dims, _) in shaped()) {
-            prop_assume!(!dims.is_empty());
-            // NULL elements keep braces in the payload out of the count
-            let total = dims.iter().product();
-            let nulls: Vec<Option<&[u8]>> = vec![None; total];
-            let text = encode_literal(&dims, &nulls);
-            let mut groups = 1;
-            let mut level = 1;
-            for &d in &dims[..dims.len() - 1] {
-                level *= d;
-                groups += level;
-            }
-            prop_assert_eq!(text.matches('{').count(), groups);
-            prop_assert_eq!(text.matches('}').count(), groups);
-            prop_assert_eq!(text.matches("NULL").count(), total);
-        }
     }
 
     #[test]
@@ -431,15 +376,6 @@ mod proptests {
         assert_eq!(
             encode(25, &[], &[]).map(|raw| decode(&raw).map(|a| a.dims)),
             Ok(Ok(vec![]))
-        );
-    }
-
-    #[test]
-    fn a_literal_quotes_and_escapes_elements() {
-        let elements: Vec<Option<&[u8]>> = vec![Some(b"a\"b\\c"), None, Some(b"NULL"), Some(b"")];
-        assert_eq!(
-            encode_literal(&[4], &elements),
-            "{\"a\\\"b\\\\c\",NULL,\"NULL\",\"\"}"
         );
     }
 }

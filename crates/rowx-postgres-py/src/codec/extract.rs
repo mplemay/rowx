@@ -1,11 +1,13 @@
-use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyAttributeError, PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple,
+    PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple, PyType,
 };
 
+use crate::codec::exact::{field, is_a, items};
 use crate::codec::extension::cube_class;
-use crate::codec::geometric::{class_name, kind_of_object, point_class};
+use crate::codec::geometric::{class as geo_class, class_name, kind_of_object, point_class};
 use crate::codec::money::money_class;
 use crate::codec::network::read as read_ip;
 use crate::codec::numeric::decimal_class;
@@ -18,6 +20,7 @@ use crate::codec::uuid::uuid_class;
 use crate::errors::encode_error;
 use rowx_postgres::wire::geometric::{Kind, Point, Shape};
 use rowx_postgres::wire::network::Addr;
+use rowx_postgres::wire::numeric::{DecimalExponent, parse_decimal_str};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpKind {
@@ -34,8 +37,12 @@ pub enum PyParam {
     // an int outside i64, kept as its decimal text
     BigInt(String),
     Float(f64),
-    // the `str()` of a `decimal.Decimal`
-    Decimal(String),
+    // a `decimal.Decimal` read through the unbound `Decimal.__str__`
+    Decimal {
+        negative: bool,
+        digits: Vec<u8>,
+        exponent: DecimalExponent,
+    },
     Str(String),
     // bytes, bytearray or memoryview contents, with the Python type name
     Bytes(Vec<u8>, String),
@@ -106,7 +113,7 @@ impl PyParam {
             Self::Bool(_) => "bool",
             Self::Int(_) | Self::BigInt(_) => "int",
             Self::Float(_) => "float",
-            Self::Decimal(_) => "Decimal",
+            Self::Decimal { .. } => "Decimal",
             Self::Str(_) => "str",
             Self::Uuid(_) => "UUID",
             Self::Ip { kind, addr, .. } => match (kind, addr) {
@@ -132,38 +139,76 @@ impl PyParam {
 }
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
+const SECONDS_PER_DAY: i64 = 86_400;
 
-fn delta_micros(delta: &Bound<'_, PyAny>) -> PyResult<(i64, i64)> {
-    let days = delta.getattr("days")?.extract::<i64>()?;
-    let seconds = delta.getattr("seconds")?.extract::<i64>()?;
-    let micros = delta.getattr("microseconds")?.extract::<i64>()?;
-    Ok((days, seconds * MICROS_PER_SECOND + micros))
+fn overflow(py: Python<'_>, what: &str) -> PyErr {
+    encode_error(py, &format!("the {what} is out of range"))
 }
 
-// `None` when the value is naive, including a tzinfo whose utcoffset() is None
-fn utc_offset(obj: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
-    let offset = obj.call_method0("utcoffset")?;
+fn int_field(obj: &Bound<'_, PyAny>, cls: &Bound<'_, PyType>, name: &str) -> PyResult<i64> {
+    field(obj, cls, name)?.extract::<i64>()
+}
+
+// whole days, and the microseconds of the remaining seconds
+fn delta_micros(py: Python<'_>, delta: &Bound<'_, PyAny>) -> PyResult<(i64, i64)> {
+    let cls = timedelta_class(py)?;
+    let days = int_field(delta, cls, "days")?;
+    let seconds = int_field(delta, cls, "seconds")?;
+    let micros = int_field(delta, cls, "microseconds")?;
+    seconds
+        .checked_mul(MICROS_PER_SECOND)
+        .and_then(|total| total.checked_add(micros))
+        .map(|total| (days, total))
+        .ok_or_else(|| overflow(py, "timedelta"))
+}
+
+// `None` when the value is naive, including a tzinfo whose utcoffset() is None. The tzinfo is user code, so its
+// `utcoffset` is called; the base class's own `utcoffset` is the caller, so a subclass of the value cannot
+// replace it, and the returned timedelta is read exactly.
+fn utc_offset(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    cls: &Bound<'_, PyType>,
+) -> PyResult<Option<i64>> {
+    let offset = if obj.get_type().is(cls) {
+        obj.call_method0("utcoffset")?
+    } else {
+        cls.getattr("utcoffset")?.call1((obj,))?
+    };
     if offset.is_none() {
         return Ok(None);
     }
-    let (days, micros) = delta_micros(&offset)?;
-    Ok(Some(days * 86_400 * MICROS_PER_SECOND + micros))
+    let (days, micros) = delta_micros(py, &offset)?;
+    days.checked_mul(SECONDS_PER_DAY * MICROS_PER_SECOND)
+        .and_then(|total| total.checked_add(micros))
+        .map(Some)
+        .ok_or_else(|| overflow(py, "UTC offset"))
 }
 
-fn ymd(obj: &Bound<'_, PyAny>) -> PyResult<Ymd> {
+fn ymd(py: Python<'_>, obj: &Bound<'_, PyAny>, cls: &Bound<'_, PyType>) -> PyResult<Ymd> {
+    let part = |name: &str| {
+        int_field(obj, cls, name)
+            .and_then(|value| u32::try_from(value).map_err(|_| overflow(py, "date")))
+    };
     Ok(Ymd {
-        year: obj.getattr("year")?.extract()?,
-        month: obj.getattr("month")?.extract()?,
-        day: obj.getattr("day")?.extract()?,
+        year: i32::try_from(int_field(obj, cls, "year")?).map_err(|_| overflow(py, "date"))?,
+        month: part("month")?,
+        day: part("day")?,
     })
 }
 
-fn time_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
-    let hour = obj.getattr("hour")?.extract::<i64>()?;
-    let minute = obj.getattr("minute")?.extract::<i64>()?;
-    let second = obj.getattr("second")?.extract::<i64>()?;
-    let micro = obj.getattr("microsecond")?.extract::<i64>()?;
-    Ok(((hour * 60 + minute) * 60 + second) * MICROS_PER_SECOND + micro)
+fn time_micros(py: Python<'_>, obj: &Bound<'_, PyAny>, cls: &Bound<'_, PyType>) -> PyResult<i64> {
+    let hour = int_field(obj, cls, "hour")?;
+    let minute = int_field(obj, cls, "minute")?;
+    let second = int_field(obj, cls, "second")?;
+    let micro = int_field(obj, cls, "microsecond")?;
+    hour.checked_mul(60)
+        .and_then(|v| v.checked_add(minute))
+        .and_then(|v| v.checked_mul(60))
+        .and_then(|v| v.checked_add(second))
+        .and_then(|v| v.checked_mul(MICROS_PER_SECOND))
+        .and_then(|v| v.checked_add(micro))
+        .ok_or_else(|| overflow(py, "time"))
 }
 
 // postgres arrays have at most 6 dimensions; deeper nesting is left opaque, which also bounds
@@ -176,8 +221,9 @@ fn range_param(
     obj: &Bound<'_, PyAny>,
     depth: usize,
 ) -> PyResult<PyParam> {
+    let cls = range_class(py)?;
     let bound = |name: &str| -> PyResult<Option<Box<PyParam>>> {
-        let value = obj.getattr(name)?;
+        let value = field(obj, cls, name)?;
         if value.is_none() {
             return Ok(None);
         }
@@ -186,21 +232,27 @@ fn range_param(
     Ok(PyParam::Range {
         lower: bound("lower")?,
         upper: bound("upper")?,
-        lower_inc: obj.getattr("lower_inc")?.extract()?,
-        upper_inc: obj.getattr("upper_inc")?.extract()?,
-        empty: obj.getattr("empty")?.extract()?,
+        lower_inc: field(obj, cls, "lower_inc")?.extract()?,
+        upper_inc: field(obj, cls, "upper_inc")?.extract()?,
+        empty: field(obj, cls, "empty")?.extract()?,
     })
 }
 
-fn geo_float(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, name: &str) -> PyResult<f64> {
-    obj.getattr(name)
+fn geo_float(
+    py: Python<'_>,
+    index: usize,
+    obj: &Bound<'_, PyAny>,
+    cls: &Bound<'_, PyType>,
+    name: &str,
+) -> PyResult<f64> {
+    field(obj, cls, name)
         .and_then(|value| value.extract::<f64>())
         .map_err(|_| encode_error(py, &format!("${}: the {name} is not a number", index + 1)))
 }
 
 fn geo_point(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<Point> {
     let cls = point_class(py)?;
-    if !obj.is_instance(&cls)? {
+    if !is_a(obj, &cls)? {
         return Err(encode_error(
             py,
             &format!(
@@ -211,19 +263,30 @@ fn geo_point(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<P
         ));
     }
     Ok(Point {
-        x: geo_float(py, index, obj, "x")?,
-        y: geo_float(py, index, obj, "y")?,
+        x: geo_float(py, index, obj, &cls, "x")?,
+        y: geo_float(py, index, obj, &cls, "y")?,
     })
 }
 
-fn geo_field(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Point> {
-    geo_point(py, index, &obj.getattr(name)?)
+fn geo_field(
+    py: Python<'_>,
+    index: usize,
+    obj: &Bound<'_, PyAny>,
+    cls: &Bound<'_, PyType>,
+    name: &str,
+) -> PyResult<Point> {
+    geo_point(py, index, &field(obj, cls, name)?)
 }
 
-fn geo_points(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<Vec<Point>> {
-    obj.getattr("points")?
-        .try_iter()?
-        .map(|item| geo_point(py, index, &item?))
+fn geo_points(
+    py: Python<'_>,
+    index: usize,
+    obj: &Bound<'_, PyAny>,
+    cls: &Bound<'_, PyType>,
+) -> PyResult<Vec<Point>> {
+    items(&field(obj, cls, "points")?)?
+        .iter()
+        .map(|item| geo_point(py, index, item))
         .collect()
 }
 
@@ -233,32 +296,33 @@ fn geometric_param(
     kind: Kind,
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<PyParam> {
+    let cls = geo_class(py, kind)?;
     let shape = match kind {
         Kind::Point => Shape::Point(geo_point(py, index, obj)?),
         Kind::Line => Shape::Line {
-            a: geo_float(py, index, obj, "a")?,
-            b: geo_float(py, index, obj, "b")?,
-            c: geo_float(py, index, obj, "c")?,
+            a: geo_float(py, index, obj, &cls, "a")?,
+            b: geo_float(py, index, obj, &cls, "b")?,
+            c: geo_float(py, index, obj, &cls, "c")?,
         },
         Kind::LineSegment => Shape::LineSegment(
-            geo_field(py, index, obj, "start")?,
-            geo_field(py, index, obj, "end")?,
+            geo_field(py, index, obj, &cls, "start")?,
+            geo_field(py, index, obj, &cls, "end")?,
         ),
         Kind::Box => Shape::Box {
-            upper_right: geo_field(py, index, obj, "upper_right")?,
-            lower_left: geo_field(py, index, obj, "lower_left")?,
+            upper_right: geo_field(py, index, obj, &cls, "upper_right")?,
+            lower_left: geo_field(py, index, obj, &cls, "lower_left")?,
         },
         Kind::Path => Shape::Path {
-            points: geo_points(py, index, obj)?,
-            closed: obj.getattr("closed")?.extract()?,
+            points: geo_points(py, index, obj, &cls)?,
+            closed: field(obj, &cls, "closed")?.extract()?,
         },
-        Kind::Polygon => Shape::Polygon(geo_points(py, index, obj)?),
+        Kind::Polygon => Shape::Polygon(geo_points(py, index, obj, &cls)?),
         Kind::Circle => Shape::Circle {
             center: Point {
-                x: geo_float(py, index, obj, "x")?,
-                y: geo_float(py, index, obj, "y")?,
+                x: geo_float(py, index, obj, &cls, "x")?,
+                y: geo_float(py, index, obj, &cls, "y")?,
             },
-            radius: geo_float(py, index, obj, "radius")?,
+            radius: geo_float(py, index, obj, &cls, "radius")?,
         },
     };
     Ok(PyParam::Geometric(shape))
@@ -272,30 +336,29 @@ fn value_class(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult
             &format!("${}: {what} is outside the int8 range", index + 1),
         )
     };
-    if obj.is_instance(interval_class(py)?)? {
-        let field = |name: &str| {
-            obj.getattr(name)?
-                .extract::<i64>()
-                .map_err(|_| overflow(&format!("the interval {name}")))
+    if is_a(obj, interval_class(py)?)? {
+        let cls = interval_class(py)?;
+        let read = |name: &str| {
+            int_field(obj, cls, name).map_err(|_| overflow(&format!("the interval {name}")))
         };
         return Ok(Some(PyParam::Interval {
-            months: field("months")?,
-            days: field("days")?,
-            micros: field("microseconds")?,
+            months: read("months")?,
+            days: read("days")?,
+            micros: read("microseconds")?,
         }));
     }
-    if obj.is_instance(money_class(py)?)? {
-        return obj
-            .getattr("minor_units")?
+    if is_a(obj, money_class(py)?)? {
+        return field(obj, money_class(py)?, "minor_units")?
             .extract::<i64>()
             .map(|minor| Some(PyParam::Money(minor)))
             .map_err(|_| overflow("the money amount"));
     }
-    if obj.is_instance(cube_class(py)?)? {
+    if is_a(obj, cube_class(py)?)? {
+        let cls = cube_class(py)?;
         let corner = |name: &str| -> PyResult<Vec<f64>> {
-            obj.getattr(name)?
-                .try_iter()?
-                .map(|item| item?.extract::<f64>())
+            items(&field(obj, cls, name)?)?
+                .iter()
+                .map(PyAnyMethods::extract::<f64>)
                 .collect::<PyResult<Vec<_>>>()
                 .map_err(|_| {
                     encode_error(
@@ -315,6 +378,97 @@ fn value_class(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult
     Ok(None)
 }
 
+// the digits of an int outside i64, through `Decimal` because `str(int)` is capped at 4300 digits by default
+// and golden/test_numeric.py pins that a numeric takes more; the `Decimal` constructor reads the int's value, so
+// a subclass cannot substitute other digits
+fn big_int_digits(py: Python<'_>, index: usize, int: &Bound<'_, PyInt>) -> PyResult<String> {
+    decimal_class(py)?
+        .call1((int,))
+        .and_then(|d| d.str())
+        .map(|s| s.to_string())
+        .map_err(|e| {
+            encode_error(
+                py,
+                &format!("${}: the int cannot be converted: {e}", index + 1),
+            )
+        })
+}
+
+// the unbound `Decimal.__str__`, looked up once
+fn decimal_str_fn(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static DECIMAL_STR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    let func = DECIMAL_STR.get_or_try_init(py, || {
+        Ok::<_, PyErr>(decimal_class(py)?.getattr("__str__")?.unbind())
+    })?;
+    Ok(func.bind(py))
+}
+
+// The value is read through the unbound base-class method, so a `Decimal` subclass cannot override what is
+// read; the canonical text is then parsed in Rust with every digit validated. `as_tuple` allocates a
+// namedtuple and a digit tuple per value, which doubles the cost of a 100k-element array.
+fn decimal_param(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<PyParam> {
+    let bad = |what: &str| encode_error(py, &format!("${}: the Decimal {what}", index + 1));
+    let text = decimal_str_fn(py)
+        .and_then(|func| func.call1((obj,)))
+        .and_then(|text| text.extract::<String>())
+        .map_err(|e| bad(&format!("cannot be read: {e}")))?;
+    let (negative, digits, exponent) =
+        parse_decimal_str(&text).map_err(|e| bad(&format!("is malformed: {e}")))?;
+    Ok(PyParam::Decimal {
+        negative,
+        digits,
+        exponent,
+    })
+}
+
+// Content is read from the real storage, never through a subclass's `__buffer__`.
+fn bytes_param(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> Option<PyResult<PyParam>> {
+    let (name, data) = if let Ok(bytes) = obj.cast::<PyBytes>() {
+        ("bytes", Ok(bytes.as_bytes().to_vec()))
+    } else if let Ok(array) = obj.cast::<PyByteArray>() {
+        ("bytearray", Ok(array.to_vec()))
+    } else if obj.is_instance_of::<PyMemoryView>() {
+        // a memoryview of any element format or layout is copied as its raw bytes
+        (
+            "memoryview",
+            obj.call_method0("tobytes")
+                .and_then(|raw| Ok(raw.cast_into::<PyBytes>()?.as_bytes().to_vec())),
+        )
+    } else {
+        return None;
+    };
+    Some(
+        data.map(|data| PyParam::Bytes(data, name.to_owned()))
+            .map_err(|e| encode_error(py, &format!("${}: the buffer is unusable: {e}", index + 1))),
+    )
+}
+
+// A list or tuple is recognised by its real type and read by index, so a subclass's `__iter__`, `__len__` and
+// `__getitem__` decide nothing.
+fn seq_param(
+    py: Python<'_>,
+    index: usize,
+    obj: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<Option<PyParam>> {
+    let kind = if obj.cast::<PyList>().is_ok() {
+        "list"
+    } else if obj.cast::<PyTuple>().is_ok() {
+        "tuple"
+    } else {
+        return Ok(None);
+    };
+    let items = items(obj)?
+        .iter()
+        .map(|item| one(py, index, item, depth + 1))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Some(PyParam::Seq(
+        items,
+        obj.clone().unbind(),
+        kind.to_owned(),
+    )))
+}
+
 fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> PyResult<PyParam> {
     if obj.is_none() {
         return Ok(PyParam::Null);
@@ -326,37 +480,22 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
     if let Ok(int) = obj.cast::<PyInt>() {
         return Ok(match int.extract::<i64>() {
             Ok(value) => PyParam::Int(value),
-            // str() of an int is capped at 4300 digits by default; Decimal's conversion is not
-            Err(_) => PyParam::BigInt(decimal_class(py)?.call1((int,))?.str()?.to_string()),
+            Err(_) => PyParam::BigInt(big_int_digits(py, index, int)?),
         });
     }
     if let Ok(float) = obj.cast::<PyFloat>() {
         return Ok(PyParam::Float(float.value()));
     }
-    if obj.is_instance(decimal_class(py)?)? {
-        return Ok(PyParam::Decimal(obj.str()?.to_string()));
+    if is_a(obj, decimal_class(py)?)? {
+        return decimal_param(py, index, obj);
     }
-    if obj.is_instance_of::<PyBytes>()
-        || obj.is_instance_of::<PyByteArray>()
-        || obj.is_instance_of::<PyMemoryView>()
-    {
-        let name = obj.get_type().name()?.to_string();
-        let data = if obj.is_instance_of::<PyMemoryView>() {
-            // a memoryview of any element format or layout is copied as its raw bytes
-            obj.call_method0("tobytes")
-                .and_then(|raw| Ok(raw.cast_into::<PyBytes>()?.as_bytes().to_vec()))
-        } else {
-            PyBuffer::<u8>::get(obj).and_then(|buf| buf.to_vec(py))
-        };
-        return data.map(|data| PyParam::Bytes(data, name)).map_err(|e| {
-            encode_error(py, &format!("${}: the buffer is unusable: {e}", index + 1))
-        });
+    if let Some(param) = bytes_param(py, index, obj) {
+        return param;
     }
-    if obj.is_instance(uuid_class(py)?)? {
-        let raw = obj.getattr("bytes")?.extract::<Vec<u8>>()?;
-        if let Ok(bytes) = <[u8; 16]>::try_from(raw) {
-            return Ok(PyParam::Uuid(bytes));
-        }
+    if is_a(obj, uuid_class(py)?)? {
+        // the `int` slot, because `bytes` is a property a subclass can override
+        let value = field(obj, uuid_class(py)?, "int")?.extract::<u128>()?;
+        return Ok(PyParam::Uuid(value.to_be_bytes()));
     }
     if let Some((kind, addr, bits)) =
         read_ip(py, obj).map_err(|e| encode_error(py, &format!("${}: {e}", index + 1)))?
@@ -364,24 +503,26 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
         return Ok(PyParam::Ip { kind, addr, bits });
     }
     // datetime subclasses date, so it has to be checked first
-    if obj.is_instance(datetime_class(py)?)? {
+    if is_a(obj, datetime_class(py)?)? {
+        let cls = datetime_class(py)?;
         return Ok(PyParam::DateTime {
-            date: ymd(obj)?,
-            micros: time_micros(obj)?,
-            offset: utc_offset(obj)?,
+            date: ymd(py, obj, cls)?,
+            micros: time_micros(py, obj, cls)?,
+            offset: utc_offset(py, obj, cls)?,
         });
     }
-    if obj.is_instance(date_class(py)?)? {
-        return Ok(PyParam::Date(ymd(obj)?));
+    if is_a(obj, date_class(py)?)? {
+        return Ok(PyParam::Date(ymd(py, obj, date_class(py)?)?));
     }
-    if obj.is_instance(time_class(py)?)? {
+    if is_a(obj, time_class(py)?)? {
+        let cls = time_class(py)?;
         return Ok(PyParam::Time {
-            micros: time_micros(obj)?,
-            offset: utc_offset(obj)?,
+            micros: time_micros(py, obj, cls)?,
+            offset: utc_offset(py, obj, cls)?,
         });
     }
-    if obj.is_instance(timedelta_class(py)?)? {
-        let (days, micros) = delta_micros(obj)?;
+    if is_a(obj, timedelta_class(py)?)? {
+        let (days, micros) = delta_micros(py, obj)?;
         return Ok(PyParam::Timedelta { days, micros });
     }
     if let Some(param) = value_class(py, index, obj)? {
@@ -401,18 +542,15 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
     if let Some(kind) = kind_of_object(py, obj)? {
         return geometric_param(py, index, kind, obj);
     }
-    if depth < MAX_SEQ_DEPTH && obj.is_instance(range_class(py)?)? {
+    if depth < MAX_SEQ_DEPTH && is_a(obj, range_class(py)?)? {
         return range_param(py, index, obj, depth);
     }
-    let name = obj.get_type().name()?.to_string();
-    if depth < MAX_SEQ_DEPTH && (obj.is_instance_of::<PyList>() || obj.is_instance_of::<PyTuple>())
+    if depth < MAX_SEQ_DEPTH
+        && let Some(param) = seq_param(py, index, obj, depth)?
     {
-        let items = obj
-            .try_iter()?
-            .map(|item| one(py, index, &item?, depth + 1))
-            .collect::<PyResult<Vec<_>>>()?;
-        return Ok(PyParam::Seq(items, obj.clone().unbind(), name));
+        return Ok(param);
     }
+    let name = obj.get_type().name()?.to_string();
     Ok(PyParam::Other(obj.clone().unbind(), name))
 }
 
@@ -422,6 +560,20 @@ pub fn extract(py: Python<'_>, params: &Bound<'_, PyList>) -> PyResult<Vec<PyPar
     params
         .iter()
         .enumerate()
-        .map(|(index, obj)| one(py, index, &obj, 0))
+        .map(|(index, obj)| {
+            one(py, index, &obj, 0).map_err(|e| {
+                // a failed descriptor call or extraction is a bad parameter like any other
+                if e.is_instance_of::<PyTypeError>(py)
+                    || e.is_instance_of::<PyValueError>(py)
+                    || e.is_instance_of::<PyAttributeError>(py)
+                    || e.is_instance_of::<PyKeyError>(py)
+                    || e.is_instance_of::<PyOverflowError>(py)
+                {
+                    encode_error(py, &format!("${}: {e}", index + 1))
+                } else {
+                    e
+                }
+            })
+        })
         .collect()
 }

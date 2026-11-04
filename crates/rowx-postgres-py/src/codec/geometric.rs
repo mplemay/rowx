@@ -5,6 +5,7 @@ use rowx_postgres::Type;
 use rowx_postgres::exec::Param;
 use rowx_postgres::wire::geometric::{self, Kind, Point, Shape};
 
+use crate::codec::exact::is_a;
 use crate::codec::extract::PyParam;
 use crate::errors::decode_error;
 
@@ -86,7 +87,7 @@ pub fn class(py: Python<'_>, kind: Kind) -> PyResult<Bound<'_, PyType>> {
 /// An import failure of `rowx.postgres`.
 pub fn kind_of_object(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<Kind>> {
     for (kind, cls) in KINDS.iter().zip(classes(py)?) {
-        if obj.is_instance(cls.bind(py))? {
+        if is_a(obj, cls.bind(py))? {
             return Ok(Some(*kind));
         }
     }

@@ -1,10 +1,10 @@
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyString};
 use rowx_postgres::Type;
 
 use crate::codec::extract::PyParam;
-use crate::codec::numeric::decimal_class;
+use crate::codec::numeric::{self, decimal_class};
 use crate::errors::decode_error;
 
 static LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -53,7 +53,10 @@ fn to_object<'py>(py: Python<'py>, param: &PyParam) -> Result<Bound<'py, PyAny>,
             .map_err(PyErr::from),
         PyParam::BigInt(digits) => py.get_type::<PyInt>().call1((digits.as_str(),)),
         PyParam::Float(f) => Ok(PyFloat::new(py, *f).into_any()),
-        PyParam::Decimal(text) => decimal_class(py).and_then(|cls| cls.call1((text.as_str(),))),
+        PyParam::Decimal { .. } => {
+            let text = numeric::encode(param)?;
+            decimal_class(py).and_then(|cls| cls.call1((String::from_utf8_lossy(&text).as_ref(),)))
+        }
         PyParam::Str(s) => Ok(PyString::new(py, s).into_any()),
         PyParam::Seq(_, obj, _) | PyParam::Other(obj, _) => Ok(obj.bind(py).clone()),
         PyParam::Null
@@ -86,10 +89,30 @@ pub fn encode(param: &PyParam) -> Result<Vec<u8>, String> {
     Python::attach(|py| {
         let obj = to_object(py, param)?;
         let dumps = json_fn(py, &DUMPS, "dumps").map_err(|e| e.to_string())?;
+        // ASCII-only output: any other character travels as a `\uXXXX` escape
+        let kwargs = PyDict::new(py);
+        kwargs
+            .set_item("ensure_ascii", true)
+            .map_err(|e| e.to_string())?;
         let text = dumps
-            .call1((obj,))
+            .call((obj,), Some(&kwargs))
             .and_then(|out| out.extract::<String>())
             .map_err(|e| format!("the value is not JSON serialisable: {e}"))?;
         Ok(text.into_bytes())
     })
+}
+
+/// The binary form for an array element: UTF-8 for `json`, a version byte then UTF-8 for `jsonb`.
+///
+/// # Errors
+/// A description of why the value is not JSON serialisable.
+pub fn encode_binary(ty: &Type, param: &PyParam) -> Result<Vec<u8>, String> {
+    let text = encode(param)?;
+    if *ty != Type::JSONB {
+        return Ok(text);
+    }
+    let mut out = Vec::with_capacity(text.len() + 1);
+    out.push(1);
+    out.extend_from_slice(&text);
+    Ok(out)
 }

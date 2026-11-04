@@ -2,6 +2,7 @@ pub mod array;
 pub mod array_enc;
 pub mod bits;
 pub mod bytes;
+pub mod exact;
 pub mod extension;
 pub mod extract;
 pub mod float;
@@ -116,7 +117,25 @@ pub fn decode_with<'py>(
     }
 }
 
+// where a value goes: a scalar parameter keeps each type's own format, while an array element or a range
+// bound is always binary
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Scalar,
+    Element,
+}
+
 pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
+    encode_in(ty, param, Slot::Scalar)
+}
+
+/// Binary form of an array element or range bound; never a text-format value.
+pub(crate) fn encode_element(ty: &Type, param: &PyParam) -> Result<Param, String> {
+    encode_in(ty, param, Slot::Element)
+}
+
+fn encode_in(ty: &Type, param: &PyParam, slot: Slot) -> Result<Param, String> {
+    let element = slot == Slot::Element;
     if matches!(param, PyParam::Null) {
         return Ok(Param::null());
     }
@@ -153,20 +172,24 @@ pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         }
         Type::OID => numeric::encode_oid(param).map(Param::binary),
         Type::FLOAT4 | Type::FLOAT8 => float::encode(ty, param).map(Param::binary),
-        // numeric travels as text so any Decimal or int keeps full precision
+        // a scalar numeric travels as text so any Decimal or int keeps full precision
+        Type::NUMERIC if element => numeric::encode_binary(param).map(Param::binary),
         Type::NUMERIC => numeric::encode(param).map(Param::text),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => {
             text::encode(ty, param).map(Param::binary)
         }
         Type::CHAR => text::encode_char(param).map(Param::binary),
         Type::BYTEA => bytes::encode(param).map(Param::binary),
+        Type::UUID if element => uuid::encode_binary(param),
         Type::UUID => uuid::encode(param),
         Type::INET | Type::CIDR => network::encode(ty, param),
         Type::MACADDR | Type::MACADDR8 => mac::encode(ty, param),
+        Type::JSON | Type::JSONB if element => json::encode_binary(ty, param).map(Param::binary),
         Type::JSON | Type::JSONB => json::encode(param).map(Param::text),
         Type::DATE => temporal_enc::encode_date(param).map(Param::binary),
         Type::TIME => temporal_enc::encode_time(param).map(Param::binary),
-        // timetz travels as text so the offset needs no sign flip
+        Type::TIMETZ if element => temporal_enc::encode_timetz_binary(param).map(Param::binary),
+        // a scalar timetz travels as text so the offset needs no sign flip
         Type::TIMETZ => temporal_enc::encode_timetz(param).map(Param::text),
         Type::TIMESTAMP => temporal_enc::encode_timestamp(param).map(Param::binary),
         Type::TIMESTAMPTZ => temporal_enc::encode_timestamptz(param).map(Param::binary),
@@ -180,11 +203,13 @@ pub(crate) fn encode_one(ty: &Type, param: &PyParam) -> Result<Param, String> {
         | Type::PATH
         | Type::POLYGON
         | Type::CIRCLE => geometric::encode(ty, param),
-        // an enum label is sent as text so the server resolves it
+        _ if is_enum && element => text::encode(ty, param).map(Param::binary),
+        // a scalar enum label is sent as text so the server resolves it
         _ if is_enum => text::encode(ty, param).map(Param::text),
         _ if is_citext(ty) => text::encode(ty, param).map(Param::binary),
         _ if is_extension(ty) => extension::encode(ty, param),
         _ if is_array => array_enc::encode(ty, param),
+        _ if is_supported_range(ty) && element => range::encode_binary(ty, param),
         _ if is_supported_range(ty) => range::encode(ty, param),
         _ => Err(format!("no encoder for the postgres type {}", ty.name())),
     }

@@ -533,6 +533,8 @@ RUNTIME_ONLY: Final[frozenset[tuple[str, str]]] = frozenset(
         # a `str` is accepted by type, but only a parseable address or MAC encodes
         *((decl, source) for decl in ("inet", "cidr", "macaddr", "macaddr8") for source in ('"ok"', f'"{UUID_TEXT}"')),
         *((f"{decl}[]", '["ok"]') for decl in ("inet", "cidr", "macaddr", "macaddr8")),
+        # a uuid array element is parsed on the client, where a scalar `str` is left to the server
+        ("uuid[]", '["ok"]'),
         # a `str` is accepted by type, but only the digits `0` and `1` encode
         *((decl, source) for decl in ("bit(9)", "varbit") for source in ('"ok"', f'"{UUID_TEXT}"')),
         *((f"{decl}[]", '["ok"]') for decl in ("bit(9)", "varbit")),

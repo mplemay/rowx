@@ -15,7 +15,7 @@ use rowx_postgres::wire::geometric::{self, Kind, Point, Shape};
 use rowx_postgres::wire::mac::{self, MAC_LEN, MAC8_LEN};
 use rowx_postgres::wire::money;
 use rowx_postgres::wire::network::{self, Addr, Network};
-use rowx_postgres::wire::numeric::{self, Numeric};
+use rowx_postgres::wire::numeric::{self, DecimalExponent, Numeric};
 use rowx_postgres::wire::range::{self, Bound, Range};
 use rowx_postgres::wire::temporal::{self, Date, TimeOfDay};
 use tokio_postgres::Client;
@@ -43,6 +43,11 @@ fn samples<S: Strategy>(strategy: S, count: usize) -> Vec<S::Value> {
 async fn send(client: &Client, func: &str, ty: &str, literal: &str) -> TestResult<Vec<u8>> {
     let sql = format!("SELECT {func}($1::text::{ty})");
     Ok(client.query_one(&sql, &[&literal]).await?.get(0))
+}
+
+// `array_send` of the array a text literal denotes
+async fn send_array(client: &Client, ty: &str, literal: &str) -> TestResult<Vec<u8>> {
+    send(client, "array_send", ty, literal).await
 }
 
 // the server's text rendering of a parameter that rowx encoded
@@ -523,35 +528,37 @@ async fn numeric_matches_numeric_send() -> TestResult {
 #[tokio::test]
 async fn numeric_text_parameters_are_read_back_by_the_server() -> TestResult {
     let (schema, client) = connect!();
-    // what Python's str(Decimal) can produce, mapped by the encoder before it reaches the server
-    let inputs = [
-        "1E+2",
-        "-1E-7",
-        "0E-10",
-        "NaN",
-        "-NaN",
-        "NaN123",
-        "Infinity",
-        "-Infinity",
-        "0.000",
-        "123456789012345678901234567890.123456789",
-        "-0",
-        "1E+30",
+    // what the parts of a Python Decimal become as a scalar parameter
+    let finite = DecimalExponent::Finite;
+    let inputs: [(&str, bool, Vec<u8>, DecimalExponent); 11] = [
+        ("1E+2", false, vec![1], finite(2)),
+        ("-1E-7", true, vec![1], finite(-7)),
+        ("0E-10", false, vec![0], finite(-10)),
+        ("NaN", false, vec![], DecimalExponent::NaN),
+        ("-NaN123", true, vec![1, 2, 3], DecimalExponent::NaN),
+        ("Infinity", false, vec![0], DecimalExponent::Infinity),
+        ("-Infinity", true, vec![0], DecimalExponent::Infinity),
+        ("0.000", false, vec![0], finite(-3)),
+        (
+            "123456789012345678901234567890.123456789",
+            false,
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+                9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+            ],
+            finite(-9),
+        ),
+        ("-0", true, vec![0], finite(0)),
+        ("1E+30", false, vec![1], finite(30)),
     ];
-    for input in inputs {
-        let text = numeric::normalize_decimal_text(input)?;
+    for (name, negative, digits, exponent) in inputs {
+        let text = numeric::decimal_text(negative, &digits, exponent)?;
         let shown = read_back(&client, "numeric", Param::text(text.clone().into_bytes())).await?;
         let expected = literal_text(&client, "numeric", &text).await?;
-        assert_eq!(shown, expected, "{input}");
-        let sent = send(&client, "numeric_send", "numeric", &text).await?;
-        assert_eq!(
-            numeric::decode(&sent)?.to_decimal_string(),
-            expected,
-            "{input}"
-        );
+        assert_eq!(shown, expected, "{name}");
     }
     // a signaling NaN never reaches the server
-    assert!(numeric::normalize_decimal_text("sNaN").is_err());
+    assert!(numeric::decimal_text(false, &[], DecimalExponent::SignalingNaN).is_err());
     // binary Numeric values built by hand are accepted by numeric_recv
     let value = Numeric::Finite {
         negative: true,
@@ -624,6 +631,54 @@ fn shaped(
     })
 }
 
+// The server-side oracle for an array: a text literal with every element quoted. It only ever goes to the
+// server as an ordinary text parameter, so the expected bytes never come from a rowx encoder. rowx itself
+// has no array literal writer.
+fn oracle_literal(dims: &[usize], elements: &[Option<&[u8]>]) -> String {
+    oracle_literal_with(dims, elements, ',')
+}
+
+// `box` is the one built-in type whose array delimiter is not a comma
+fn oracle_literal_with(dims: &[usize], elements: &[Option<&[u8]>], delimiter: char) -> String {
+    fn level(
+        out: &mut String,
+        elements: &mut std::slice::Iter<'_, Option<&[u8]>>,
+        dims: &[usize],
+        delimiter: char,
+    ) {
+        let Some((&len, rest)) = dims.split_first() else {
+            return;
+        };
+        out.push('{');
+        for index in 0..len {
+            if index > 0 {
+                out.push(delimiter);
+            }
+            if rest.is_empty() {
+                match elements.next().copied().flatten() {
+                    None => out.push_str("NULL"),
+                    Some(raw) => {
+                        out.push('"');
+                        for ch in String::from_utf8_lossy(raw).chars() {
+                            if matches!(ch, '"' | '\\') {
+                                out.push('\\');
+                            }
+                            out.push(ch);
+                        }
+                        out.push('"');
+                    }
+                }
+            } else {
+                level(out, elements, rest, delimiter);
+            }
+        }
+        out.push('}');
+    }
+    let mut out = String::new();
+    level(&mut out, &mut elements.iter(), dims, delimiter);
+    out
+}
+
 fn borrowed(elements: &[Option<Vec<u8>>]) -> Vec<Option<&[u8]>> {
     elements.iter().map(Option::as_deref).collect()
 }
@@ -638,11 +693,11 @@ async fn int_arrays_match_array_send() -> TestResult {
             .map(|e| e.as_ref().map(|s| s.clone().into_bytes()))
             .collect();
         let empty = dims.is_empty() || dims.contains(&0);
-        // encode_literal is only for non-empty shapes
+        // the oracle literal is only for non-empty shapes
         let literal = if empty {
             "{}".to_owned()
         } else {
-            array::encode_literal(&dims, &borrowed(&texts))
+            oracle_literal(&dims, &borrowed(&texts))
         };
         let sent = send(&client, "array_send", "int4[]", &literal).await?;
         let binary: Vec<Option<Vec<u8>>> = elements
@@ -698,7 +753,7 @@ async fn arrays_with_odd_bounds_decode_to_their_dimensions() -> TestResult {
 }
 
 #[tokio::test]
-async fn text_array_literals_are_read_back_by_the_server() -> TestResult {
+async fn text_arrays_are_read_back_by_the_server() -> TestResult {
     let (schema, client) = connect!();
     // quotes, backslashes, separators, braces, the word NULL, blanks and non-ASCII must all survive
     let element = prop_oneof![
@@ -713,20 +768,19 @@ async fn text_array_literals_are_read_back_by_the_server() -> TestResult {
             .iter()
             .map(|e| e.as_ref().map(|s| s.clone().into_bytes()))
             .collect();
-        let literal = array::encode_literal(&dims, &borrowed(&texts));
         if dims.is_empty() || dims.contains(&0) {
             continue;
         }
-        let sent = client
-            .query_one("SELECT array_send($1::text::text[])", &[&literal])
-            .await?;
-        let raw: Vec<u8> = sent.get(0);
-        let decoded = array::decode(&raw)?;
+        let literal = oracle_literal(&dims, &borrowed(&texts));
+        let oracle = send_array(&client, "text[]", &literal).await?;
+        let decoded = array::decode(&oracle)?;
         assert_eq!(decoded.element_oid, 25, "{literal}");
         assert_eq!(decoded.dims, dims, "{literal}");
         assert_eq!(decoded.elements, borrowed(&texts), "{literal}");
-        // the same literal sent as a text-format parameter, as rowx does when an element is text
-        let shown = read_back(&client, "text[]", Param::text(literal.clone().into_bytes())).await?;
+        // the binary array rowx sends is the same bytes, and the server reads it back as the literal does
+        let ours = array::encode(25, &dims, &borrowed(&texts))?;
+        assert_eq!(ours, oracle, "{literal}");
+        let shown = read_back(&client, "text[]", Param::binary(ours)).await?;
         let canonical = literal_text(&client, "text[]", &literal).await?;
         assert_eq!(shown, canonical, "{literal}");
     }
@@ -981,14 +1035,26 @@ async fn numrange_text_literals_are_read_back_by_the_server() -> TestResult {
             "{literal}"
         );
     }
-    // a literal inside a text array survives the array quoting
-    let inner = range::encode_literal(&Range::Bounds {
-        lower: Bound::Inclusive(b"1"),
-        upper: Bound::Exclusive(b"2"),
-    });
-    let elements: Vec<Option<&[u8]>> = vec![Some(inner.as_bytes()), None, Some(b"empty")];
-    let literal = array::encode_literal(&[3], &elements);
-    let shown = read_back(&client, "numrange[]", Param::text(literal.into_bytes())).await?;
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn numrange_arrays_are_binary_and_read_back_by_the_server() -> TestResult {
+    let (schema, client) = connect!();
+    let one = Numeric::from_decimal_parts(false, &[1], DecimalExponent::Finite(0))?.encode()?;
+    let two = Numeric::from_decimal_parts(false, &[2], DecimalExponent::Finite(0))?.encode()?;
+    let elements = [
+        Some(range::encode(&Range::Bounds {
+            lower: Bound::Inclusive(&one),
+            upper: Bound::Exclusive(&two),
+        })?),
+        None,
+        Some(range::encode(&Range::Empty)?),
+    ];
+    let borrowed: Vec<Option<&[u8]>> = elements.iter().map(Option::as_deref).collect();
+    // 3906 is the numrange OID
+    let raw = array::encode(3_906, &[3], &borrowed)?;
+    let shown = read_back(&client, "numrange[]", Param::binary(raw)).await?;
     assert_eq!(shown, "{\"[1,2)\",NULL,empty}");
     schema.drop().await
 }
@@ -1169,6 +1235,402 @@ async fn the_server_rejects_what_rowx_refuses_to_send() -> TestResult {
                 .await
                 .is_err()
         );
+    }
+    schema.drop().await
+}
+
+// the plain (no exponent) text of `digits * 10^exponent`, which the server reads with the display scale
+// `max(0, -exponent)`
+fn plain_decimal(negative: bool, digits: &[u8], exponent: i64) -> String {
+    let mut text: String = digits.iter().map(|d| char::from(b'0' + d)).collect();
+    if text.is_empty() {
+        text.push('0');
+    }
+    if exponent >= 0 {
+        text.push_str(&"0".repeat(usize::try_from(exponent).unwrap_or(0)));
+    } else {
+        let scale = usize::try_from(-exponent).unwrap_or(0);
+        if text.len() <= scale {
+            text = format!("{}{text}", "0".repeat(scale - text.len() + 1));
+        }
+        text.insert(text.len() - scale, '.');
+    }
+    if negative { format!("-{text}") } else { text }
+}
+
+fn decimal_parts() -> impl Strategy<Value = (bool, Vec<u8>, i64)> {
+    let digits = prop::collection::vec(0u8..=9, 0..40);
+    let exponent = prop_oneof![-60i64..=60, Just(0), -2000i64..=2000];
+    (any::<bool>(), digits, exponent)
+}
+
+#[tokio::test]
+async fn decimal_parts_match_numeric_send() -> TestResult {
+    let (schema, client) = connect!();
+    let mut cases = samples(decimal_parts(), CASES * 4);
+    cases.extend([
+        (false, vec![1, 5, 0, 0], -3),
+        (true, vec![0], -3),
+        (true, vec![0], 0),
+        (false, vec![0, 0, 0], 4),
+        (false, vec![1], 4),
+        (false, vec![1], 100_000),
+        (false, vec![1, 2, 3], 9),
+        // the highest weight and the lowest scale the format has
+        (false, vec![1], 131_071),
+        (false, vec![9; 40], 131_032),
+        (false, vec![1], -1000),
+        (false, vec![1], -i64::from(1000u16)),
+    ]);
+    for (negative, digits, exponent) in cases {
+        let text = plain_decimal(negative, &digits, exponent);
+        let shown = if text.len() > 40 {
+            format!("{}... ({} chars)", &text[..20], text.len())
+        } else {
+            text.clone()
+        };
+        let ours =
+            Numeric::from_decimal_parts(negative, &digits, DecimalExponent::Finite(exponent))?
+                .encode()?;
+        let sent = send(&client, "numeric_send", "numeric", &text).await?;
+        // a negative zero is a positive zero on the server, and so is ours
+        assert_eq!(ours, sent, "{shown}");
+        let back = read_back(&client, "numeric", Param::binary(ours)).await?;
+        assert_eq!(
+            back,
+            literal_text(&client, "numeric", &text).await?,
+            "{shown}"
+        );
+    }
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn decimal_special_values_match_numeric_send() -> TestResult {
+    let (schema, client) = connect!();
+    let cases = [
+        ("NaN", false, DecimalExponent::NaN),
+        ("NaN", true, DecimalExponent::NaN),
+        ("Infinity", false, DecimalExponent::Infinity),
+        ("-Infinity", true, DecimalExponent::Infinity),
+    ];
+    for (text, negative, exponent) in cases {
+        let ours = Numeric::from_decimal_parts(negative, &[], exponent)?.encode()?;
+        let sent = send(&client, "numeric_send", "numeric", text).await?;
+        // the server fills the display scale of a special value with a stray number
+        assert_eq!(ours[..6], sent[..6], "{text}");
+        let back = read_back(&client, "numeric", Param::binary(ours)).await?;
+        assert_eq!(back, text);
+    }
+    assert!(Numeric::from_decimal_parts(false, &[], DecimalExponent::SignalingNaN).is_err());
+    // one past the largest weight, and a scale past the format's, are refused before the server sees them
+    assert!(Numeric::from_decimal_parts(false, &[1], DecimalExponent::Finite(131_072)).is_err());
+    assert!(Numeric::from_decimal_parts(false, &[1], DecimalExponent::Finite(-16_384)).is_err());
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn timetz_matches_timetz_send() -> TestResult {
+    let (schema, client) = connect!();
+    let cases = samples((micros_of_day(), -57_599i32..=57_599), CASES);
+    for (micros, west) in cases {
+        // the text sign is east of UTC, so the binary zone west of it is the negation
+        let text = format!("{}{}", time_text(micros), offset_text(-i64::from(west)));
+        let ours = temporal::encode_timetz(micros, west)?;
+        let sent = send(&client, "timetz_send", "timetz", &text).await?;
+        assert_eq!(ours, sent, "{text}");
+        let shown = read_back(&client, "timetz", Param::binary(ours)).await?;
+        assert_eq!(
+            shown,
+            literal_text(&client, "timetz", &text).await?,
+            "{text}"
+        );
+    }
+    // the largest zone either way
+    for west in [57_599, -57_599] {
+        let ours = temporal::encode_timetz(0, west)?;
+        read_back(&client, "timetz", Param::binary(ours)).await?;
+    }
+    schema.drop().await
+}
+
+// strings that a text array literal could mishandle, and that Python's encodings can disagree on
+const ADVERSARIAL: [&str; 16] = [
+    "plain",
+    "",
+    "has \"quote\"",
+    "back\\slash",
+    "a,b",
+    "{braces}",
+    "{}",
+    "NULL",
+    "null",
+    " padded ",
+    "empty",
+    "\u{0101}",
+    "\u{3042}\u{30a2}\u{8868}",
+    "\u{1F600}\u{0301}",
+    "line\nbreak\ttab",
+    "\\\"\\\\",
+];
+
+#[derive(Clone)]
+struct Family {
+    // the element type as SQL spells it, and the type whose `*_send` gives the element bytes
+    ty: &'static str,
+    base: &'static str,
+    elements: Vec<String>,
+}
+
+fn family(ty: &'static str, elements: &[&str]) -> Family {
+    Family {
+        ty,
+        base: ty,
+        elements: elements.iter().map(|e| (*e).to_owned()).collect(),
+    }
+}
+
+fn string_families() -> Vec<Family> {
+    let adversarial = ADVERSARIAL.map(str::to_owned).to_vec();
+    let text_like = |ty| Family {
+        ty,
+        base: ty,
+        elements: adversarial.clone(),
+    };
+    let json_documents: Vec<String> = ADVERSARIAL
+        .iter()
+        .map(|s| serde_json::Value::String((*s).to_owned()).to_string())
+        .collect();
+    let bytea: Vec<String> = ADVERSARIAL
+        .iter()
+        .map(|s| format!("\\x{}", hex(s.as_bytes())))
+        .collect();
+    vec![
+        text_like("text"),
+        text_like("varchar"),
+        text_like("bpchar"),
+        Family {
+            ty: "name",
+            base: "name",
+            elements: adversarial.iter().map(|s| s.replace('\n', " ")).collect(),
+        },
+        text_like("public.citext"),
+        family("\"char\"", &["a", "\"", "\\", ",", "{", "}", " ", "N"]),
+        Family {
+            ty: "bytea",
+            base: "bytea",
+            elements: bytea,
+        },
+        Family {
+            ty: "json",
+            base: "json",
+            elements: json_documents.clone(),
+        },
+        Family {
+            ty: "jsonb",
+            base: "jsonb",
+            elements: json_documents,
+        },
+    ]
+}
+
+fn number_families() -> Vec<Family> {
+    vec![
+        family("bool", &["t", "f"]),
+        family("int2", &["-32768", "0", "32767"]),
+        family("int4", &["-2147483648", "0", "2147483647"]),
+        family(
+            "int8",
+            &["-9223372036854775808", "0", "9223372036854775807"],
+        ),
+        family("oid", &["0", "4294967295"]),
+        family("float4", &["1.5", "NaN", "-Infinity", "-0", "3.4028235e38"]),
+        family("float8", &["1.5", "NaN", "Infinity", "-0", "1e308"]),
+        family(
+            "numeric",
+            &[
+                "0",
+                "-0.00",
+                "1.500",
+                "12345.6700",
+                "NaN",
+                "Infinity",
+                "-Infinity",
+                "0.0000001",
+                "99999999999999999999999999999999999999",
+                "10000",
+            ],
+        ),
+    ]
+}
+
+fn structured_families() -> Vec<Family> {
+    vec![
+        family(
+            "date",
+            &["2000-01-01", "infinity", "-infinity", "4713-01-01 BC"],
+        ),
+        family("time", &["00:00:00", "23:59:59.999999", "12:34:56.789"]),
+        family(
+            "timetz",
+            &["12:00:00+05:30", "00:00:00-15:59:59", "23:59:59.999999+00"],
+        ),
+        family(
+            "timestamp",
+            &[
+                "2000-01-01 00:00:00",
+                "infinity",
+                "1999-12-31 23:59:59.999999",
+            ],
+        ),
+        family(
+            "timestamptz",
+            &[
+                "2000-01-01 00:00:00+00",
+                "-infinity",
+                "2024-02-29 12:00:00+09:30",
+            ],
+        ),
+        family(
+            "interval",
+            &[
+                "1 year 2 mons 3 days 04:05:06.789",
+                "-1 days",
+                "infinity",
+                "0",
+            ],
+        ),
+        family(
+            "inet",
+            &["10.0.0.1/8", "::1", "192.168.1.1/32", "2001:db8::/32"],
+        ),
+        family("cidr", &["10.0.0.0/8", "::/0", "2001:db8::/32"]),
+        family("macaddr", &["08:00:2b:01:02:03", "ff:ff:ff:ff:ff:ff"]),
+        family(
+            "macaddr8",
+            &["08:00:2b:01:02:03:04:05", "00:00:00:00:00:00:00:00"],
+        ),
+        family("money", &["$1.50", "$0.00", "-$92.25"]),
+        family("bit", &["101", "0", "1"]),
+        family("varbit", &["", "1", "10110010101"]),
+        family("point", &["(1,2)", "(-0.5,1e10)"]),
+        family("line", &["{1,2,3}", "{0,1,-5}"]),
+        family("lseg", &["[(0,0),(1,1)]", "[(1.5,2),(3,4)]"]),
+        family("box", &["(1,1),(0,0)", "(2.5,3),(-1,-1)"]),
+        family("path", &["[(0,0),(1,1),(2,0)]", "((0,0),(1,1),(2,0))"]),
+        family(
+            "polygon",
+            &["((0,0),(1,1),(2,0))", "((0,0),(0,1),(1,1),(1,0))"],
+        ),
+        family("circle", &["<(0,0),1>", "<(1.5,2),0.25>"]),
+        family(
+            "uuid",
+            &[
+                "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+                "00000000-0000-0000-0000-000000000000",
+                "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            ],
+        ),
+        family("mood", &["sad", "ok", "happy"]),
+        // a domain keeps its own OID in the array, and the elements are those of its base
+        Family {
+            ty: "positive_int",
+            base: "int4",
+            elements: vec!["1".to_owned(), "2147483647".to_owned()],
+        },
+        family(
+            "public.hstore",
+            &["\"a\"=>\"b\"", "\"k\\\"ey\"=>NULL, \"x\"=>\"{,}\"", ""],
+        ),
+        family("public.ltree", &["a.b.c", "Top.Science", "x"]),
+        family("public.cube", &["(1,2),(3,4)", "(0)", "(1.5,-2,3)"]),
+    ]
+}
+
+fn families() -> Vec<Family> {
+    [string_families(), number_families(), structured_families()].concat()
+}
+
+// the element bytes the server itself sends for a text literal of `base`
+async fn element_bytes(client: &Client, base: &str, literal: &str) -> TestResult<Vec<u8>> {
+    let func: String = client
+        .query_one(
+            "SELECT typsend::text FROM pg_type WHERE oid = $1::text::regtype",
+            &[&base],
+        )
+        .await?
+        .get(0);
+    send(client, &func, base, literal).await
+}
+
+async fn element_oid(client: &Client, ty: &str) -> TestResult<u32> {
+    let oid: u32 = client
+        .query_one("SELECT $1::text::regtype::oid", &[&ty])
+        .await?
+        .get(0);
+    Ok(oid)
+}
+
+// 1, 2 and 3 dimensions over a pool of elements, each with a NULL in it
+fn array_shapes(pool: &[String]) -> Vec<(Vec<usize>, Vec<Option<&str>>)> {
+    let pick = |count: usize| -> Vec<Option<&str>> {
+        (0..count)
+            .map(|i| {
+                if i == count / 2 {
+                    None
+                } else {
+                    pool.get(i % pool.len().max(1)).map(String::as_str)
+                }
+            })
+            .collect()
+    };
+    vec![
+        (vec![1], vec![pool.first().map(String::as_str)]),
+        (vec![5], pick(5)),
+        (vec![2, 3], pick(6)),
+        (vec![2, 2, 2], pick(8)),
+        (vec![3, 1], pick(3)),
+    ]
+}
+
+#[tokio::test]
+async fn arrays_of_every_element_family_round_trip_through_the_server() -> TestResult {
+    let (schema, client) = connect!();
+    for family in families() {
+        let Family { ty, base, elements } = &family;
+        let oid = element_oid(&client, ty).await?;
+        // the empty array is the same bytes whatever the element type
+        let empty = array::encode(oid, &[], &[])?;
+        assert_eq!(
+            read_back(&client, &format!("{ty}[]"), Param::binary(empty)).await?,
+            "{}",
+            "{ty}"
+        );
+        for (dims, shaped) in array_shapes(elements) {
+            let mut bytes: Vec<Option<Vec<u8>>> = Vec::new();
+            for element in &shaped {
+                bytes.push(match element {
+                    Some(text) => Some(element_bytes(&client, base, text).await?),
+                    None => None,
+                });
+            }
+            let texts: Vec<Option<&[u8]>> = shaped.iter().map(|e| e.map(str::as_bytes)).collect();
+            let delimiter = if *ty == "box" { ';' } else { ',' };
+            let literal = oracle_literal_with(&dims, &texts, delimiter);
+            let ours = array::encode(oid, &dims, &borrowed(&bytes))?;
+            // the bytes are what the server itself builds from the same elements
+            let oracle = send_array(&client, &format!("{ty}[]"), &literal).await?;
+            assert_eq!(ours, oracle, "{ty} {literal}");
+            // and the server reads them back as the value the literal denotes, element by element
+            let param = Param::binary(ours);
+            let shown = read_back(&client, &format!("{ty}[]"), param).await?;
+            let canonical = literal_text(&client, &format!("{ty}[]"), &literal).await?;
+            assert_eq!(shown, canonical, "{ty} {literal}");
+            let decoded = array::decode(&oracle)?;
+            assert_eq!(decoded.element_oid, oid, "{ty}");
+            assert_eq!(decoded.dims, dims, "{ty} {literal}");
+            assert_eq!(decoded.elements, borrowed(&bytes), "{ty} {literal}");
+        }
     }
     schema.drop().await
 }
