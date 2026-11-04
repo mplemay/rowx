@@ -345,10 +345,13 @@ pub fn encode_timestamp(
     micros: i64,
     offset_micros: i64,
 ) -> Result<Vec<u8>, TemporalError> {
-    pg_days(year, month, day)
-        .checked_mul(MICROS_PER_DAY)
-        .and_then(|day_start| day_start.checked_add(micros))
-        .and_then(|local| local.checked_sub(offset_micros))
+    // exact in i128 (the checked ops cannot fail at these magnitudes), so an intermediate that
+    // leaves i64 does not reject a final instant that fits
+    i128::from(pg_days(year, month, day))
+        .checked_mul(i128::from(MICROS_PER_DAY))
+        .and_then(|day_start| day_start.checked_add(i128::from(micros)))
+        .and_then(|local| local.checked_sub(i128::from(offset_micros)))
+        .and_then(|instant| i64::try_from(instant).ok())
         .map(|instant| instant.to_be_bytes().to_vec())
         .ok_or(TemporalError::OutOfRange("timestamp"))
 }
@@ -685,6 +688,28 @@ mod tests {
         assert_eq!(shifted, (-57_599 * MICROS_PER_SECOND).to_be_bytes());
         let negative = encode_timestamp(2000, 1, 1, 5, -7).unwrap_or_default();
         assert_eq!(negative, 12_i64.to_be_bytes());
+    }
+
+    #[test]
+    fn encode_timestamp_allows_an_intermediate_beyond_i64() {
+        // year 400000 starts past i64::MAX micros, so only the exact sum fits
+        let day_start = i128::from(pg_days(400_000, 1, 1)) * i128::from(MICROS_PER_DAY);
+        assert!(day_start > i128::from(i64::MAX));
+        let shift = 5_000_000_000_000_000_000_i64;
+        let expected = i64::try_from(day_start - i128::from(shift)).unwrap_or_default();
+        assert_ne!(expected, 0);
+        assert_eq!(
+            encode_timestamp(400_000, 1, 1, -shift, 0),
+            Ok(expected.to_be_bytes().to_vec())
+        );
+        assert_eq!(
+            encode_timestamp(400_000, 1, 1, 0, shift),
+            Ok(expected.to_be_bytes().to_vec())
+        );
+        assert_eq!(
+            encode_timestamp(400_000, 1, 1, 0, 0),
+            Err(TemporalError::OutOfRange("timestamp"))
+        );
     }
 
     #[test]
