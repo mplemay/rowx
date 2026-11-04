@@ -279,6 +279,28 @@ def _is_dunder(name: str) -> bool:
     return len(name) > len(DUNDER) * 2 and name.startswith(DUNDER) and name.endswith(DUNDER)
 
 
+# `X | None`, `Optional[X]` and `"X | None"` are `X`; a union of several non-None types is unknown
+def _without_none(annotation: ast.expr) -> ast.expr | None:
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value.strip(), mode="eval").body
+        except SyntaxError:
+            return None
+    members: list[ast.expr] = []
+    pending = [annotation]
+    while pending:
+        match pending.pop():
+            case ast.BinOp(left=left, op=ast.BitOr(), right=right):
+                pending.extend([right, left])
+            case ast.Constant(value=None):
+                pass
+            case ast.Subscript(value=ast.Name(id="Optional") | ast.Attribute(attr="Optional"), slice=inner):
+                pending.append(inner)
+            case other:
+                members.append(other)
+    return members[0] if len(members) == 1 else None
+
+
 def _is_type_alias(annotation: ast.expr) -> bool:
     match annotation:
         case ast.Name(id="TypeAlias") | ast.Attribute(attr="TypeAlias"):
@@ -413,7 +435,9 @@ class _Finder(ast.NodeVisitor):
         return False
 
     def _is_template_annotation(self, annotation: ast.expr) -> bool:
-        return (ref := self._templatelib_ref(annotation)) is not None and ref.name == "Template" and not ref.ambiguous
+        if (inner := _without_none(annotation)) is None:
+            return False
+        return (ref := self._templatelib_ref(inner)) is not None and ref.name == "Template" and not ref.ambiguous
 
     # resolve the hints of a scope where their annotations are evaluated: `enclosing` is the scope stack around it
     def _resolve_hints(self, scope: _Scope, enclosing: list[_Scope]) -> None:
@@ -642,10 +666,18 @@ class _Finder(ast.NodeVisitor):
         self._annotating = annotating
         self._type_level = type_level
 
+    def _class_operands(self, node: ast.expr) -> list[ast.expr]:
+        if isinstance(node, ast.Tuple):
+            return [operand for elt in node.elts for operand in self._class_operands(elt)]
+        return [node]
+
     def _visit_type_check(self, node: ast.Call) -> None:
         self.visit(node.func)
         # `issubclass(type(q), ...)` only inspects the class
-        self._skip.update(id(arg) for arg in node.args if self._is_type_of_template(arg))
+        if len(node.args) > 1:
+            self._skip.update(id(arg) for arg in self._class_operands(node.args[1]) if self._is_type_of_template(arg))
+        if node.args and self._is_type_of_template(node.args[0]):
+            self._skip.add(id(node.args[0]))
         self._visit_all(node.args[:1])
         self._annotating += 1
         self._visit_all(node.args[1:])

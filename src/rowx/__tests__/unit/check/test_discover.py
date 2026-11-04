@@ -927,6 +927,70 @@ def test_templatelib_type_of_evident_template(use: str, kind: str, name: str | N
     assert [(u.kind, u.name) for u in result.templates.indirect_uses if u.span.line == 6] == [(kind, name)]
 
 
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "Template | None",
+        "None | Template",
+        "Optional[Template]",
+        "typing.Optional[Template]",
+        "'Template | None'",
+        "Template | None | None",
+    ],
+)
+def test_templatelib_optional_template_annotation_is_a_template(annotation: str) -> None:
+    result = run(
+        f"""
+        import typing
+        from typing import Optional
+        from string.templatelib import Template
+        def f(q: {annotation}, sql):
+            return type(q)(sql), q.__class__(sql)
+        """,
+    )
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("type-call", 6), ("type-call", 6)]
+
+
+@pytest.mark.parametrize("annotation", ["Template | str", "Template | str | None", "None", "Optional[str]"])
+def test_templatelib_non_template_union_annotation_is_unknown(annotation: str) -> None:
+    result = run(
+        f"""
+        from typing import Optional
+        from string.templatelib import Template
+        def f(q: {annotation}, sql):
+            return type(q)(sql)
+        """,
+    )
+    assert not result.templates.indirect_uses
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        "isinstance(x, (type(t''),))",
+        "isinstance(x, (int, (type(t''), str)))",
+        "issubclass(type(x), ((type(t''),),))",
+    ],
+)
+def test_templatelib_class_tuples_are_not_indirect(check: str) -> None:
+    result = run(f"t = t'a'\nx = 1\n{check}\n")
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_call_inside_a_class_tuple_is_still_recorded() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+        t = t'a'
+        def f(x, q: Template):
+            isinstance(x, (Template(x),))
+            isinstance(x, (int, (type(q)(x),)))
+        """,
+    )
+    assert [(c.name, c.span.line) for c in result.templates.calls] == [("Template", 5)]
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("type-call", 6)]
+
+
 def test_templatelib_type_of_unknown_receiver_is_not_recorded() -> None:
     result = run(
         """
