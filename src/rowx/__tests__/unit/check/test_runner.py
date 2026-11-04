@@ -1,12 +1,16 @@
 import asyncio
 from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from rowx.check import runner
+from rowx.check.cli import main
 from rowx.check.runner import CheckError, describe_all, quoted_aliases, redact
 from rowx.errors import DatabaseError, InterfaceError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class FakeConnection:
@@ -149,3 +153,14 @@ def test_redact_merges_overlapping_secrets_before_masking() -> None:
     assert redact("xx abcdef yy", "host=h password=abcd sslpassword=cdef") == "xx *** yy"
     assert redact("a*b", "host=h password=*") == "a***b"
     assert redact("ababa", "host=h password=aba") == "***"
+
+
+def test_a_file_nested_too_deeply_does_not_hide_the_others(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (tmp_path / "deep.py").write_text("y = " + " + ".join(["1"] * 3000) + "\n", encoding="utf-8")
+    (tmp_path / "bad.py").write_text("from string.templatelib import Template\nTemplate(x)\n", encoding="utf-8")
+    code = main(["check", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "internal error" not in out
+    assert "the file is nested too deeply to analyse" in out
+    assert "template-construction" in out

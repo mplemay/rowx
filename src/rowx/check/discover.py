@@ -44,6 +44,7 @@ type Tag = Literal[
     "private",
     "string",
     "templatelib",
+    "rowxpriv",
     "cast",
     "typing",
     "optional",
@@ -60,7 +61,9 @@ TYPING_TAG: Final[frozenset[Tag]] = frozenset({"typing"})
 OPTIONAL_TAG: Final[frozenset[Tag]] = frozenset({"optional"})
 QUERY_TAGS: Final[frozenset[Tag]] = frozenset({"query", "query_unchecked"})
 CLASS_TAGS: Final[frozenset[Tag]] = frozenset({"template", "interpolation", "private"})
-MODULE_VALUE_TAGS: Final[frozenset[Tag]] = frozenset({"string", "templatelib"})
+PRIVATE_MODULE_TAG: Final[frozenset[Tag]] = frozenset({"rowxpriv"})
+MODULE_VALUE_TAGS: Final[frozenset[Tag]] = frozenset({"string", "templatelib", "rowxpriv"})
+RE_EXPORTED: Final[frozenset[str]] = frozenset({"Template", "Interpolation"})
 EXPORT_TAGS: Final[frozenset[Tag]] = frozenset({*CLASS_TAGS, *MODULE_VALUE_TAGS})
 type Scoped = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef | ast.Module
 type Comprehension = ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp
@@ -94,6 +97,8 @@ class _Scope:
     # t-string; annotations of parameters are evaluated in the enclosing scope, the others in this one
     hints: dict[str, ast.expr | Literal["literal"]] = field(default_factory=dict)
     arg_hints: dict[str, ast.expr] = field(default_factory=dict)
+    # the value of each plain assignment to a name, which is evidently a `Template` when that value is
+    aliases: dict[str, ast.expr] = field(default_factory=dict)
     # the names whose declaration is evidently a `Template`, resolved in the scope that evaluates the annotation
     templates: set[str] = field(default_factory=set)
 
@@ -158,6 +163,24 @@ def _templatelib_tag(name: str) -> Tag:
     return "private"
 
 
+def _is_private_name(name: str) -> bool:
+    return name.startswith("_") and not _is_dunder(name)
+
+
+# `rowx._template`, `rowx.postgres._types`: a private module of this package, which may re-export `string.templatelib`
+def _is_private_rowx_module(module: str) -> bool:
+    root, *rest = module.split(".")
+    return root == ROWX_MODULE and any(_is_private_name(part) for part in rest)
+
+
+def _rowx_private_tag(module: str, name: str) -> Tag:
+    if module.split(".", maxsplit=1)[0] != ROWX_MODULE:
+        return "other"
+    if _is_private_name(name):
+        return "rowxpriv"
+    return _templatelib_tag(name) if _is_private_rowx_module(module) and name in RE_EXPORTED else "other"
+
+
 def _import_tag(module: str, name: str) -> Tag:
     if module == ROWX_MODULE and name in QUERY_KINDS:
         return "query" if name == "query" else "query_unchecked"
@@ -169,7 +192,7 @@ def _import_tag(module: str, name: str) -> Tag:
         return _templatelib_tag(name)
     if module == STRING_MODULE and name == TEMPLATELIB_ATTR:
         return "templatelib"
-    return "other"
+    return _rowx_private_tag(module, name)
 
 
 def _module_tag(alias: ast.alias) -> Tag:
@@ -183,6 +206,8 @@ def _module_tag(alias: ast.alias) -> Tag:
         return "typing"
     if alias.name == TEMPLATELIB_MODULE and alias.asname is not None:
         return "templatelib"
+    if alias.asname is not None and _is_private_rowx_module(alias.name):
+        return "rowxpriv"
     return "other"
 
 
@@ -227,10 +252,14 @@ def _record_hints(scope: _Scope, node: ast.Assign | ast.AnnAssign) -> None:
     if isinstance(node, ast.AnnAssign):
         if isinstance(node.target, ast.Name):
             scope.hints[node.target.id] = node.annotation
-    elif isinstance(node.value, ast.TemplateStr):
+    else:
         for target in node.targets:
-            if isinstance(target, ast.Name):
+            if not isinstance(target, ast.Name):
+                continue
+            if isinstance(node.value, ast.TemplateStr):
                 scope.hints[target.id] = "literal"
+            else:
+                scope.aliases[target.id] = node.value
 
 
 def _collect(scope: _Scope, nodes: Iterable[ast.AST], *, in_comprehension: bool = False) -> None:
@@ -283,6 +312,12 @@ def _is_dunder(name: str) -> bool:
     return len(name) > len(DUNDER) * 2 and name.startswith(DUNDER) and name.endswith(DUNDER)
 
 
+def _is_name_chain(node: ast.expr) -> bool:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return isinstance(node, ast.Name)
+
+
 def _is_type_alias(annotation: ast.expr) -> bool:
     match annotation:
         case ast.Name(id="TypeAlias") | ast.Attribute(attr="TypeAlias"):
@@ -300,6 +335,10 @@ class _Finder(ast.NodeVisitor):
     def __init__(self, path: Path, tree: ast.Module, lines: _Lines) -> None:
         self._path = path
         self._lines = lines
+        # a name declared `global` or `nonlocal` anywhere can be rebound from another scope
+        self._declared = {
+            name for node in ast.walk(tree) if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names
+        }
         self._scopes = [_Scope.build(tree)]
         self._resolve_hints(self._scopes[0], [])
         self._annotating = 0
@@ -392,6 +431,33 @@ class _Finder(ast.NodeVisitor):
                 return None
         return ambiguous if tag == want else None
 
+    # whether `node` is a private module of this package, which may re-export `string.templatelib` names
+    def _private_module(self, node: ast.expr) -> bool | None:
+        match node:
+            case ast.Name():
+                tag, ambiguous = self._tags(node.id, PRIVATE_MODULE_TAG)
+                return ambiguous if tag == "rowxpriv" else None
+            case ast.Attribute(value=base, attr=attr):
+                if not _is_private_name(attr):
+                    return None
+                package = self._rowx_package(base)
+                return package if package is not None else self._private_module(base)
+        return None
+
+    # whether `node` is `rowx` or one of its submodules, and whether that is ambiguous
+    def _rowx_package(self, node: ast.expr) -> bool | None:
+        match node:
+            case ast.Name():
+                tag, ambiguous = self._tags(node.id, MODULE_TAG)
+                return ambiguous if tag == "module" else None
+            case ast.Attribute(value=base):
+                return self._rowx_package(base)
+        return None
+
+    def _any_module(self, node: ast.expr) -> bool | None:
+        found = self._templatelib_module(node)
+        return found if found is not None else self._private_module(node)
+
     def _templatelib_ref(self, node: ast.expr) -> _TemplatelibRef | None:
         match node:
             case ast.Name():
@@ -406,6 +472,8 @@ class _Finder(ast.NodeVisitor):
             case ast.Attribute(value=base, attr=attr) if attr != "convert":
                 if (ambiguous := self._templatelib_module(base)) is not None:
                     return _TemplatelibRef(attr, ambiguous, private=attr not in TEMPLATELIB_PUBLIC)
+                if attr in RE_EXPORTED and (ambiguous := self._private_module(base)) is not None:
+                    return _TemplatelibRef(attr, ambiguous)
         return None
 
     # `X | None`, `Optional[X]` and `"X | None"` are `X`; a union of several non-None types is unknown
@@ -447,7 +515,7 @@ class _Finder(ast.NodeVisitor):
             case ast.Call(func=func):
                 return (ref := self._templatelib_ref(func)) is not None and ref.name == "Template" and not ref.ambiguous
             case ast.Name(id=name) if (scope := self._lookup_scope(name)) is not None:
-                return len(scope.bindings[name]) == 1 and name in scope.templates
+                return name not in self._declared and len(scope.bindings[name]) == 1 and name in scope.templates
         return False
 
     def _is_template_annotation(self, annotation: ast.expr) -> bool:
@@ -464,6 +532,11 @@ class _Finder(ast.NodeVisitor):
         scope.templates.update(
             name for name, hint in scope.hints.items() if hint == "literal" or self._is_template_annotation(hint)
         )
+        # `y = x` where `x` is evidently a `Template`; each pass can settle a name that depends on a later one
+        pending = {name: value for name, value in scope.aliases.items() if name not in scope.templates}
+        while settled := [name for name, value in pending.items() if self._is_template_value(value)]:
+            scope.templates.update(settled)
+            pending = {name: value for name, value in pending.items() if name not in settled}
         self._scopes = stack
 
     # `type(<template>)`
@@ -486,10 +559,39 @@ class _Finder(ast.NodeVisitor):
                 return tag == "typing" and not ambiguous
         return False
 
-    def _type_level_visit(self, node: ast.AST) -> None:
-        self._type_level += 1
-        self.visit(node)
-        self._type_level -= 1
+    # a position that names a type: a name, attribute chain, subscript of those, `|` union, string, `None` or a
+    # tuple (or list, as in `Callable[[X], Y]`) of those. Anything else is a runtime value even inside a subscript.
+    def _is_type_expr(self, node: ast.expr) -> bool:
+        match node:
+            case ast.Name() | ast.Constant():
+                return True
+            case ast.Attribute():
+                return _is_name_chain(node)
+            case ast.Subscript(value=value, slice=item):
+                return _is_name_chain(value) and self._is_type_expr(item)
+            case ast.BinOp(left=left, op=ast.BitOr(), right=right):
+                parts = [left, right]
+            case ast.Tuple(elts=parts) | ast.List(elts=parts):
+                pass
+            case ast.Starred(value=value):
+                parts = [value]
+            case _:
+                return False
+        return all(self._is_type_expr(part) for part in parts)
+
+    # visit `node` where a type is expected: the parts that are types are type-level, the rest are runtime values
+    def _type_level_visit(self, node: ast.expr) -> None:
+        if isinstance(node, ast.Tuple):
+            for item in node.elts:
+                self._type_level_visit(item)
+        elif self._is_type_expr(node):
+            self._type_level += 1
+            self.visit(node)
+            self._type_level -= 1
+        else:
+            type_level, self._type_level = self._type_level, 0
+            self.visit(node)
+            self._type_level = type_level
 
     def _exports(self, target: ast.expr, value: ast.expr | None) -> None:
         if len(self._scopes) != 1 or not isinstance(target, ast.Name) or target.id != "__all__":
@@ -586,7 +688,7 @@ class _Finder(ast.NodeVisitor):
         elif (base_ref := self._templatelib_ref(node.value)) is not None:
             if recording:
                 self._template_use(base_ref, node, "attribute")
-        elif (ambiguous := self._templatelib_module(node)) is not None:
+        elif (ambiguous := self._any_module(node)) is not None:
             if recording and id(node) not in self._bases:
                 self._template_use(_TemplatelibRef(TEMPLATELIB_ATTR, ambiguous), node, "module-value")
         else:
@@ -600,9 +702,15 @@ class _Finder(ast.NodeVisitor):
 
     @override
     def visit_Subscript(self, node: ast.Subscript) -> None:
-        self._type_level += 1
-        self.generic_visit(node)
-        self._type_level -= 1
+        if self._type_level:
+            self.generic_visit(node)
+            return
+        # only the subscript of a name is a generic alias; the value of any other subscript is a runtime value
+        self.visit(node.value)
+        if _is_name_chain(node.value):
+            self._type_level_visit(node.slice)
+        else:
+            self.visit(node.slice)
 
     @override
     def visit_Assign(self, node: ast.Assign) -> None:
@@ -617,19 +725,25 @@ class _Finder(ast.NodeVisitor):
 
     @override
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.level == 0 and node.module in {ROWX_MODULE, TEMPLATELIB_MODULE}:
-            for alias in node.names:
-                if node.module == TEMPLATELIB_MODULE:
-                    if alias.name == "*":
-                        self._indirect_uses.append(
-                            IndirectUse(kind="star-import", name=None, span=self._lines.span(node)),
-                        )
-                    elif alias.name not in TEMPLATELIB_PUBLIC:
-                        self._indirect_uses.append(
-                            IndirectUse(kind="private", name=alias.name, span=self._lines.span(alias)),
-                        )
-                elif alias.name == "*":
-                    self._indirect(node, "`from rowx import *`")
+        if node.level != 0 or node.module is None:
+            return
+        module = node.module
+        for alias in node.names:
+            if module == TEMPLATELIB_MODULE or _is_private_rowx_module(module):
+                if alias.name == "*":
+                    self._indirect_uses.append(IndirectUse(kind="star-import", name=None, span=self._lines.span(node)))
+                elif module == TEMPLATELIB_MODULE and alias.name not in TEMPLATELIB_PUBLIC:
+                    self._indirect_uses.append(
+                        IndirectUse(kind="private", name=alias.name, span=self._lines.span(alias)),
+                    )
+            elif module == ROWX_MODULE and alias.name == "*":
+                self._indirect(node, "`from rowx import *`")
+
+    @override
+    def visit_MatchClass(self, node: ast.MatchClass) -> None:
+        # a class pattern only inspects the class
+        self._query_only_visit(node.cls)
+        self._visit_all((*node.patterns, *node.kwd_patterns))
 
     @override
     def visit_Interpolation(self, node: ast.Interpolation) -> None:
@@ -710,9 +824,15 @@ class _Finder(ast.NodeVisitor):
         if node.args and self._is_type_of_template(node.args[0]):
             self._skip.add(id(node.args[0]))
         self._visit_all(node.args[:1])
-        self._annotating += 1
-        self._visit_all(node.args[1:])
-        self._annotating -= 1
+        for operand in (operand for arg in node.args[1:] for operand in self._class_operands(arg)):
+            if self._is_type_expr(operand):
+                self._annotating += 1
+                self.visit(operand)
+                self._annotating -= 1
+            else:
+                annotating, self._annotating = self._annotating, 0
+                self.visit(operand)
+                self._annotating = annotating
         self._visit_all(node.keywords)
 
     def _visit_cast(self, node: ast.Call) -> None:
@@ -720,7 +840,7 @@ class _Finder(ast.NodeVisitor):
         for index, arg in enumerate(node.args):
             self._type_level_visit(arg) if index == 0 else self.visit(arg)
         for keyword in node.keywords:
-            self._type_level_visit(keyword) if keyword.arg == "typ" else self.visit(keyword)
+            self._type_level_visit(keyword.value) if keyword.arg == "typ" else self.visit(keyword)
 
     def _record_type_of_template(self, node: ast.Call) -> None:
         if self._is_class_of_template(node.func) or self._is_type_of_template(node.func):
@@ -887,6 +1007,10 @@ def _syntax_error(path: Path, message: str, span: Span) -> FileResult:
     return FileResult(path=path, diagnostics=[Diagnostic(rule="syntax-error", message=message, path=path, span=span)])
 
 
+def too_deep(path: Path) -> FileResult:
+    return _syntax_error(path, "the file is nested too deeply to analyse", Span(line=1, col=1, end_line=1, end_col=2))
+
+
 def _decode(path: Path, data: bytes) -> str | FileResult:
     try:
         encoding, _ = detect_encoding(BytesIO(data).readline)
@@ -921,8 +1045,11 @@ def discover_source(path: Path, data: bytes) -> FileResult:
         return _syntax_error(path, error.msg, Span(line=line, col=col, end_line=end_line, end_col=end_col))
     except (ValueError, RecursionError, MemoryError) as error:
         return _syntax_error(path, f"cannot parse file: {error}", Span(line=1, col=1, end_line=1, end_col=2))
-    finder = _Finder(path, tree, lines)
-    finder.visit(tree)
+    try:
+        finder = _Finder(path, tree, lines)
+        finder.visit(tree)
+    except RecursionError:
+        return too_deep(path)
     finder.result.templates = finder.facts()
     finder.result.source = source
     return finder.result

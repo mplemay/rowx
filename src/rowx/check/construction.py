@@ -21,7 +21,7 @@ INDIRECT_MESSAGES: Final[dict[IndirectKind, str]] = {
     "private": "`string.templatelib.{name}` is private and may build a template",
     "star-import": "`from string.templatelib import *` hides the uses of `Template`",
     "type-call": "`type(<t-string>)` or `<t-string>.__class__` used as a callable builds a template unseen",
-    "module-value": "`string` or `string.templatelib` used as a value, so `Template` can be reached unseen",
+    "module-value": "`string`, `string.templatelib` or a private `rowx` module used as a value, so `Template` can be reached unseen",
     "alias": "an alias of `Template`, so the calls to it can't be seen",
     "re-export": "`{name}` re-exports a `string.templatelib` name",
     "ambiguous": "`{name}` is also bound another way in its scope, so it may be `Template`",

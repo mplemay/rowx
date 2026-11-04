@@ -154,3 +154,79 @@ def test_templatelib_class_imported_as_isinstance_is_a_template_use() -> None:
     source = "from string.templatelib import Template as isinstance\nisinstance('a', x)\n"
     assert lines(source) == [2]
     assert not reports("from string.templatelib import Template\nisinstance(x, Template)\n")
+
+
+def test_alias_of_an_evident_template_is_evident() -> None:
+    assert not reports(
+        """
+        from string.templatelib import Template
+        def f(x: Template):
+            y = x
+            z = y
+            return t"a" + z
+        """,
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "y = x\n            y = 'b'\n            return t'a' + y",
+        "y = x\n            y += 'b'\n            return t'a' + y",
+        "y = x\n            def g():\n                nonlocal y\n                y = 'b'\n            return t'a' + y",
+        "y = (x := 'b')\n            return t'a' + y",
+        "y = x\n            del y\n            y = 'b'\n            return t'a' + y",
+    ],
+)
+def test_alias_with_another_binding_is_not_evident(body: str) -> None:
+    source = f"""
+        from string.templatelib import Template
+        def f(x: Template):
+            {body}
+        """
+    assert lines(source)
+
+
+def test_class_pattern_is_an_inspection() -> None:
+    assert not reports(
+        """
+        from string.templatelib import Template
+        import string.templatelib
+        def f(q):
+            match q:
+                case Template(strings=s):
+                    return s
+                case string.templatelib.Template():
+                    return None
+        """,
+    )
+    assert lines("from string.templatelib import Template\nmatch q:\n    case x:\n        y = Template\n") == [4]
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        "from rowx._template import Template as T\nT(x)",
+        "import rowx._template as m\nm.Template(x)",
+        "from rowx._template import Interpolation\nInterpolation(1, 'a', None, s)",
+        "import rowx._template\nrowx._template.Template(x)",
+        "from rowx import _template\n_template.Template(x)",
+        "from rowx import _template\ny = _template",
+        "from rowx.postgres import _types\nT = _types.Template",
+        "from rowx._template import *",
+    ],
+)
+def test_private_rowx_modules_are_templatelib_reexports(use: str) -> None:
+    assert lines(use)
+
+
+def test_private_rowx_names_that_are_not_templatelib_are_fine() -> None:
+    assert not reports("from rowx._query import helper\nfrom rowx import _core\nhelper(_core.foo)\n")
+
+
+def test_deeply_nested_file_is_a_syntax_error_not_a_crash() -> None:
+    for source in ("y = " + " + ".join(["1"] * 3000) + "\n", "a" + ".b" * 5000 + "\n"):
+        result = discover_source(PATH, source.encode())
+        assert [(d.rule, d.message) for d in result.diagnostics] == [
+            ("syntax-error", "the file is nested too deeply to analyse"),
+        ]

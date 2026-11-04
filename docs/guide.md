@@ -1410,11 +1410,21 @@ include roots**, not only on files with queries, because a helper can build a te
 - a format spec that is not a literal in any t-string (`t"{x:{spec}}"`). The t-string that is the direct argument of
   `query_unchecked` reports it as `dynamic-query` instead, so one interpolation is never reported twice.
 
-Aliased imports (`from string.templatelib import Template as T`) are followed. Build dynamic SQL by nesting t-string
-literals instead (`t"WHERE {cond}"`), which keeps every value a parameter.
+Aliased imports (`from string.templatelib import Template as T`) are followed, and so are the `Template` and
+`Interpolation` that private modules of this package re-export (`from rowx._template import Template`). A subscript is
+type-level only when it subscripts a name (`list[Template]`), so `[Template][0](x)` is reported. A class pattern
+(`case Template(strings=s)`) and a name assigned once from an evident `Template` are accepted. Build dynamic SQL by
+nesting t-string literals instead (`t"WHERE {cond}"`), which keeps every value a parameter.
 
 The rule is **best-effort**. It reads source only, so `getattr`, `eval`, dynamic imports, generated code and code
-outside the include roots can still build a template. There are no ignore comments: the only escape is to exclude the
+outside the include roots can still build a template. So can reflection: `type(x)(...)` on a value that is not evidently
+a `Template`, `__reduce__` and pickle, `__annotations__`, `typing.get_type_hints` and `inspect.signature`, `globals()`,
+`locals()` and `vars()`, `sys.modules[...]` and `operator.attrgetter`.
+
+Only tracked `*.py` files under the include roots are checked. `.pyi` stubs, extensionless scripts, and gitignored or
+untracked files are not. `exclude` entries are matched relative to the project, so an absolute path matches nothing.
+A file nested too deeply to analyse (thousands of chained operators or attributes) is reported as a `syntax-error`
+and fails the run, without hiding the other files. There are no ignore comments: the only escape is to exclude the
 path in `[tool.rowx]`, such as `exclude = ["**/raw_sql.py"]`.
 
 ### Safety

@@ -5,9 +5,12 @@ from string.templatelib import (
     Template as T,  # ruff: ignore[camelcase-imported-as-acronym]
     convert,
 )
-from typing import Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 from rowx import query, query_unchecked
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 value = 1
 spec = ">5"
@@ -47,3 +50,28 @@ def direct_argument_specs() -> None:
     value_spec = f"{spec}"
     t"{value:>5}" + t"{value}"
     _ = value_spec
+
+
+def types_and_inspection(x: object, parts: dict[str, Template], call: Callable[[Template], int]) -> int:
+    cast(Template, x)  # ruff: ignore[runtime-cast-value]
+    cast(list[Template], x)  # ruff: ignore[runtime-cast-value]
+    cast(dict[str, Template], x)  # ruff: ignore[runtime-cast-value]
+    isinstance(x, Template | int)
+    isinstance(x, (Template, list[Template]))
+    match x:
+        case Template(strings=strings):
+            return len(strings)
+        case Interpolation(value=_):
+            return 0
+        case string.templatelib.Template():
+            return 1
+    return len(parts) + call(Template("a"))
+
+
+def evident_through_assignment(first: Template) -> None:
+    second = first
+    third = second
+    fourth = Template("a")
+    t"a" + second
+    third + t"a"
+    t"a" + fourth

@@ -17,7 +17,7 @@ from rowx._core.postgres import (
 )
 from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
 from rowx.check.construction import template_reports
-from rowx.check.discover import discover_source
+from rowx.check.discover import discover_source, too_deep
 from rowx.check.model import Diagnostic, Rule, Span
 from rowx.check.params import ParamInference
 from rowx.check.render import Report, null_reason_note
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from rowx.check.config import Config
-    from rowx.check.model import QueryCall
+    from rowx.check.model import FileResult, QueryCall
 
 type Outcome = Describe | DatabaseError
 
@@ -538,6 +538,35 @@ def _evaluate(site: _Site, outcome: Outcome) -> list[Report]:
     return [*_param_reports(site, outcome), *_row_reports(site, outcome), *_override_reports(site, outcome)]
 
 
+def _file_sites(
+    graph: ModuleGraph,
+    roots: tuple[Path, ...],
+    path: Path,
+    result: FileResult,
+) -> tuple[list[Report], list[_Site]]:
+    reports: list[Report] = []
+    sites: list[_Site] = []
+    inference = ParamInference(result.tree) if result.tree is not None else None
+    mapper = SourceMapper(result.source or "")
+    reports.extend(template_reports(path, result.templates, mapper, inference))
+    for call in result.calls:
+        if call.template is None:
+            continue
+        resolution = resolve_row_type(graph, call, roots)
+        if resolution.diagnostic is not None:
+            reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
+        sites.append(
+            _Site(
+                call=call,
+                mapper=mapper,
+                sourcemap=mapper.build(call.template),
+                row_type=resolution.row_type,
+                inference=inference,
+            ),
+        )
+    return reports, sites
+
+
 def _collect(
     config: Config,
     files: Iterable[Path],
@@ -555,27 +584,17 @@ def _collect(
         roots = roots_for(config, path)
         if result.source is None:
             continue
-        inference = ParamInference(result.tree) if result.tree is not None else None
+        try:
+            file_reports, file_sites = _file_sites(graph, roots, path, result)
+        except RecursionError:
+            # fail closed for this file only: nothing else it produced is trusted
+            reports.extend(Report(diagnostic=diagnostic) for diagnostic in too_deep(path).diagnostics)
+            continue
         sources[path] = result.source
-        mapper = SourceMapper(result.source)
-        reports.extend(template_reports(path, result.templates, mapper, inference))
-        for call in result.calls:
-            stats.call_sites += 1
-            if call.template is None:
-                continue
-            stats.checked += 1
-            resolution = resolve_row_type(graph, call, roots)
-            if resolution.diagnostic is not None:
-                reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
-            sites.append(
-                _Site(
-                    call=call,
-                    mapper=mapper,
-                    sourcemap=mapper.build(call.template),
-                    row_type=resolution.row_type,
-                    inference=inference,
-                ),
-            )
+        stats.call_sites += len(result.calls)
+        stats.checked += len(file_sites)
+        reports.extend(file_reports)
+        sites.extend(file_sites)
     return sites, reports, sources
 
 
