@@ -3,8 +3,19 @@ use rowx_core::row_shape::ShapeErrors;
 use thiserror::Error;
 use tokio_postgres::error::ErrorPosition;
 
+/// What the session changed that rowx cannot encode for.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum Drift {
+    #[error("the session changed client_encoding to {0}; rowx requires UTF8")]
+    ClientEncoding(Box<str>),
+    #[error("the session turned standard_conforming_strings off; rowx requires on")]
+    StandardConformingStrings,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum Error {
+    #[error(transparent)]
+    Drift(#[from] Drift),
     #[error("{0}")]
     Interface(String),
     #[error("{sqlstate}: {message}")]

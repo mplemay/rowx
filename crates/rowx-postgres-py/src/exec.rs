@@ -182,7 +182,7 @@ pub async fn run_fetch(
             args.limit_one,
             args.arity,
         );
-        match conn.parts() {
+        let result = match conn.parts() {
             Ok((client, cache)) => {
                 exec::fetch(client, cache, &args.sql, &shape, |types: &[Type]| {
                     codec::encode_all(&params, types)
@@ -190,7 +190,9 @@ pub async fn run_fetch(
                 .await
             }
             Err(e) => Err(e),
-        }
+        };
+        // the response is consumed, so a drift it caused is seen; its rows may be mis-decoded
+        conn.settled(result)
     });
     let (rows, mapping) = pending
         .wait()
@@ -299,7 +301,7 @@ pub async fn run_execute(
     let inner = Arc::clone(&cancel.backend.conn);
     let pending = cancel::spawn(&cancel, claim, &hook, async move {
         let mut conn = inner.lock().await;
-        match conn.parts() {
+        let result = match conn.parts() {
             Ok((client, cache)) => {
                 exec::execute(client, cache, &sql, |types: &[Type]| {
                     codec::encode_all(&params, types)
@@ -307,7 +309,8 @@ pub async fn run_execute(
                 .await
             }
             Err(e) => Err(e),
-        }
+        };
+        conn.settled(result)
     });
     let count = pending
         .wait()

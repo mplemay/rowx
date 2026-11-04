@@ -515,6 +515,8 @@ async fn run(
         // after a cancel nobody reads the stream any more: it is read to its end (the server answers
         // the CancelRequest with an error) and the rows are discarded
         let discard = shared.is_cancelled();
+        // a drift the statement caused is reported before the rows that may be mis-decoded
+        let batch = conn.settled(batch);
         match batch {
             Ok(rows @ Batch::Rows(_)) => {
                 if !discard
