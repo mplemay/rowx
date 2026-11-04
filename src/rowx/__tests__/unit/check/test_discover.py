@@ -445,3 +445,757 @@ def test_query_unchecked_dynamic_format_spec_is_anchored_at_the_interpolation() 
     result = run('from rowx import query_unchecked\nquery_unchecked(t"select {a} {x:{spec}}")\n')
     (diagnostic,) = result.diagnostics
     assert (diagnostic.span.line, diagnostic.span.col, diagnostic.span.end_col) == (2, 30, 40)
+
+
+def template_calls(result: FileResult) -> list[tuple[str, int]]:
+    return [(c.name, c.span.line) for c in result.templates.calls]
+
+
+def indirect_kinds(result: FileResult) -> list[tuple[str, str | None]]:
+    return [(u.kind, u.name) for u in result.templates.indirect_uses]
+
+
+@pytest.mark.parametrize(
+    ("imports", "template", "interpolation"),
+    [
+        ("from string.templatelib import Template, Interpolation", "Template", "Interpolation"),
+        ("from string.templatelib import Template as X, Interpolation as Y", "X", "Y"),
+        ("import string.templatelib", "string.templatelib.Template", "string.templatelib.Interpolation"),
+        ("import string.templatelib as m", "m.Template", "m.Interpolation"),
+        ("from string import templatelib", "templatelib.Template", "templatelib.Interpolation"),
+        ("from string import templatelib as m", "m.Template", "m.Interpolation"),
+        ("import string", "string.templatelib.Template", "string.templatelib.Interpolation"),
+        ("import string as s", "s.templatelib.Template", "s.templatelib.Interpolation"),
+    ],
+)
+def test_templatelib_import_forms(imports: str, template: str, interpolation: str) -> None:
+    result = run(f'{imports}\nt = {template}("a", {interpolation}(1, "x"))\n')
+    assert not result.diagnostics
+    assert template_calls(result) == [("Template", 2), ("Interpolation", 2)]
+    assert not result.templates.indirect_uses
+    template_call, interpolation_call = result.templates.calls
+    assert len(template_call.node.args) == 2
+    assert [type(a).__name__ for a in interpolation_call.node.args] == ["Constant", "Constant"]
+
+
+def test_templatelib_unrelated_modules_not_resolved() -> None:
+    result = run(
+        """
+        from other.templatelib import Template
+        from string import Template as Legacy
+        import string.other
+        import string.templatelib.extra as e
+        from . import templatelib
+        Template("x")
+        Legacy("x")
+        string.other.Template("x")
+        e.Template("x")
+        templatelib.Template("x")
+        """,
+    )
+    assert not result.templates.calls
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_shadowed_by_inner_scope() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+
+        def f(Template):
+            return Template("x")
+
+        def g():
+            Template = str
+            return Template("x")
+
+        def h():
+            return Template("x")
+
+        class C:
+            Template = str
+            x = Template("x")
+            def m(self):
+                return Template("y")
+
+        lambda Template: Template("z")
+        """,
+    )
+    assert template_calls(result) == [("Template", 12), ("Template", 18)]
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_ambiguous_name() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+        Template = str
+        Template("x")
+        print(Template)
+        """,
+    )
+    assert not result.templates.calls
+    assert indirect_kinds(result) == [("ambiguous", "Template"), ("ambiguous", "Template")]
+
+
+def test_templatelib_ambiguous_module() -> None:
+    result = run(
+        """
+        import string
+        string = 1
+        string.templatelib.Template("x")
+        """,
+    )
+    assert not result.templates.calls
+    assert indirect_kinds(result) == [("ambiguous", "Template")]
+
+
+def test_templatelib_try_except_import_is_ambiguous() -> None:
+    result = run(
+        """
+        try:
+            from string.templatelib import Template
+        except ImportError:
+            Template = None
+        Template("x")
+        """,
+    )
+    assert indirect_kinds(result) == [("ambiguous", "Template")]
+
+
+def test_templatelib_type_checking_import() -> None:
+    result = run(
+        """
+        from typing import TYPE_CHECKING
+
+        if TYPE_CHECKING:
+            from string.templatelib import Template
+
+        def f(t: Template) -> Template:
+            return Template("x")
+        """,
+    )
+    assert template_calls(result) == [("Template", 8)]
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_annotation_and_isinstance_are_not_indirect() -> None:
+    result = run(
+        """
+        import string.templatelib as m
+        from string.templatelib import Template
+
+        x: Template = f()
+        y: m.Template = f()
+        def g(a: "Template", b: m.Interpolation) -> m.Template: ...
+        isinstance(x, Template)
+        issubclass(type(y), (m.Template,))
+        """,
+    )
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_star_import() -> None:
+    result = run("from string.templatelib import *\nTemplate('x')\n")
+    assert not result.templates.calls
+    [use] = result.templates.indirect_uses
+    assert (use.kind, use.name, use.span.line) == ("star-import", None, 1)
+    assert not run("from string import *\n").templates.indirect_uses
+
+
+@pytest.mark.parametrize(
+    ("use", "kind"),
+    [
+        ("T = Template", "value"),
+        ("print(Template)", "value"),
+        ("xs = [Template]", "value"),
+        ("T = m.Template", "value"),
+        ("T = string.templatelib.Template", "value"),
+        ("class C(Template): ...", "value"),
+        ("Template.__new__(Template)", "attribute"),
+        ("m.Template.__new__", "attribute"),
+        ("string.templatelib.Template.__call__", "attribute"),
+        ("Template.__name__", "attribute"),
+    ],
+)
+def test_templatelib_indirect_uses(use: str, kind: str) -> None:
+    result = run(
+        f"""
+        import string
+        import string.templatelib as m
+        from string.templatelib import Template
+        {use}
+        """,
+    )
+    assert not result.diagnostics
+    assert kind in {u.kind for u in result.templates.indirect_uses}
+    assert {u.name for u in result.templates.indirect_uses} == {"Template"}
+    assert all(u.span.line == 5 for u in result.templates.indirect_uses)
+
+
+def test_templatelib_interpolation_indirect_use() -> None:
+    result = run("from string.templatelib import Interpolation as I\nf = I\n")
+    assert indirect_kinds(result) == [("value", "Interpolation")]
+
+
+def test_templatelib_class_of_template_string() -> None:
+    result = run(
+        """
+        a = type(t"x")("y")
+        b = t"x".__class__("y")
+        c = type(t"x")
+        d = type("x")("y")
+        """,
+    )
+    assert [(u.kind, u.name, u.span.line) for u in result.templates.indirect_uses] == [
+        ("type-call", None, 2),
+        ("type-call", None, 3),
+        ("value", "Template", 4),
+    ]
+
+
+def test_templatelib_type_shadowed_is_not_class_of_template() -> None:
+    result = run("def f(type):\n    return type(t'x')('y')\n")
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_call_arguments_recorded() -> None:
+    result = run(
+        """
+        from string.templatelib import Template, Interpolation
+
+        def build(parts, v):
+            return Template(*parts), Template("a", t"b{v}", Interpolation(v, "v", None, "")), Template(v, k=1)
+        """,
+    )
+    template_a, template_b, interp, template_c = result.templates.calls
+    assert [c.name for c in (template_a, template_b, interp, template_c)] == [
+        "Template",
+        "Template",
+        "Interpolation",
+        "Template",
+    ]
+    assert [type(a).__name__ for a in template_a.node.args] == ["Starred"]
+    assert [type(a).__name__ for a in template_b.node.args] == ["Constant", "TemplateStr", "Call"]
+    assert len(interp.node.args) == 4
+    assert [k.arg for k in template_c.node.keywords] == ["k"]
+    assert (template_a.span.line, template_a.span.col) == (5, 12)
+
+
+def test_templatelib_nested_call_in_query_argument_recorded() -> None:
+    result = run(
+        """
+        from rowx import query_unchecked
+        from string.templatelib import Template
+
+        q = query_unchecked(Template("select 1"))
+        """,
+    )
+    assert template_calls(result) == [("Template", 5)]
+    assert not result.diagnostics
+
+
+def test_templatelib_analysed_without_query_sites() -> None:
+    result = run(
+        """
+        import string.templatelib as tl
+
+        def helper(x):
+            return tl.Template(x)
+        """,
+    )
+    assert not result.calls
+    assert not result.diagnostics
+    assert template_calls(result) == [("Template", 5)]
+
+
+def test_templatelib_analysed_in_function_default_and_decorator() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+
+        @deco(Template("a"))
+        def f(x=Template("b"), *, y=Template):
+            pass
+        """,
+    )
+    assert template_calls(result) == [("Template", 4), ("Template", 5)]
+    assert indirect_kinds(result) == [("value", "Template")]
+
+
+def test_templatelib_nothing_reported_as_diagnostic() -> None:
+    result = run(
+        """
+        from string.templatelib import *
+        import string.templatelib as m
+        T = m.Template
+        m.Template(1)
+        t"a" + 1
+        t"{x:{s}}"
+        """,
+    )
+    assert not result.diagnostics
+    assert result.templates.calls
+    assert result.templates.indirect_uses
+    assert result.templates.concats
+    assert result.templates.dynamic_specs
+
+
+def test_templatelib_concat_facts() -> None:
+    result = run(
+        """
+        a = t"a" + t"b"
+        b = t"a" + x
+        c = x + t"a"
+        d = t"a" + t"b" + y
+        e = 1 + 2
+        f = x + y
+        g = t"a" - x
+        h = (x + y) + z
+        """,
+    )
+    assert [(type(c.operand).__name__, c.span.line) for c in result.templates.concats] == [
+        ("TemplateStr", 2),
+        ("Name", 3),
+        ("Name", 4),
+        ("TemplateStr", 5),
+        ("Name", 5),
+    ]
+    assert [c.operand_span.col for c in result.templates.concats][1] == 12
+
+
+def test_templatelib_dynamic_format_specs() -> None:
+    result = run(
+        """
+        a = t"{x:{s}}"
+        b = t"{x:lit}"
+        c = t"{x}"
+        d = t"{x:a{s}b}"
+        e = t"{x!r:{s}}"
+        def w(spec):
+            return t"select {v:{spec}}"
+        """,
+    )
+    assert [(s.span.line, s.direct_argument_of) for s in result.templates.dynamic_specs] == [
+        (2, None),
+        (5, None),
+        (6, None),
+        (8, None),
+    ]
+    assert not result.diagnostics
+
+
+def test_templatelib_dynamic_format_spec_direct_arguments() -> None:
+    result = run(
+        """
+        from rowx import query, query_unchecked
+
+        a = query_unchecked(t"select {x:{s}}")
+        b = query[int](t"select {x:{s}}")
+        c = query_unchecked(t"select {x:{s}}" + t"{y}")
+        d = query_unchecked(t"select {x:{s}}", t"")
+        e = query_unchecked(t"select {t'{y:{s}}'}")
+        f = query_unchecked(t"select {x:{y:{s}}}")
+        """,
+    )
+    assert [(s.span.line, s.direct_argument_of) for s in result.templates.dynamic_specs] == [
+        (4, "query_unchecked"),
+        (5, "query"),
+        (6, None),
+        (7, None),
+        (8, None),
+        (9, "query_unchecked"),
+    ]
+    assert rules(result).count("dynamic-query") == 3
+
+
+def test_templatelib_facts_default_empty() -> None:
+    result = run("x = 1\n")
+    assert result.templates.calls == ()
+    assert result.templates.indirect_uses == ()
+    assert result.templates.concats == ()
+    assert result.templates.dynamic_specs == ()
+
+
+@pytest.mark.parametrize("order", [0, 1])
+def test_query_ambiguity_with_templatelib_name_is_order_independent(order: int) -> None:
+    imports = ["from string.templatelib import Template as q", "from rowx import query as q"]
+    result = run("\n".join(imports[::-1] if order else imports) + '\nq[int](t"select 1")\n')
+    assert rules(result) == ["indirect-query"]
+    assert not result.calls
+    assert ("ambiguous", "Template") in indirect_kinds(result)
+
+
+def test_templatelib_ambiguous_indirect_use_is_recorded_for_mixed_name() -> None:
+    result = run("from rowx import query as q\nfrom string.templatelib import Template as q\nx = q\n")
+    assert rules(result) == ["indirect-query"]
+    assert indirect_kinds(result) == [("ambiguous", "Template")]
+
+
+@pytest.mark.parametrize(
+    ("source", "kind", "name", "called"),
+    [
+        (
+            "from string import templatelib\ntemplatelib._template_unpickle(('x',), ())",
+            None,
+            "_template_unpickle",
+            True,
+        ),
+        ("from string.templatelib import _template_unpickle\n_template_unpickle(('x',), ())", "private", None, True),
+        (
+            "import string.templatelib\nstring.templatelib._template_unpickle(('x',), ())",
+            None,
+            "_template_unpickle",
+            True,
+        ),
+        ("from string import templatelib\nx = templatelib._template_unpickle", "private", "_template_unpickle", False),
+        ("from string import templatelib\nx = templatelib.__dict__", "private", "__dict__", False),
+    ],
+)
+def test_templatelib_non_public_names(source: str, kind: str | None, name: str | None, called: bool) -> None:  # ruff: ignore[boolean-type-hint-positional-argument]
+    result = run(source)
+    if called:
+        [call] = result.templates.calls
+        assert call.private
+        assert call.name == "_template_unpickle"
+    else:
+        assert not result.templates.calls
+    uses = indirect_kinds(result)
+    if kind is not None:
+        assert ("private", name or "_template_unpickle") in uses
+
+
+def test_templatelib_public_names_are_not_private() -> None:
+    result = run(
+        "from string import templatelib\nfrom string.templatelib import convert\nconvert(1, 's')\ntemplatelib.convert(1, 's')\n"
+    )
+    assert not result.templates.calls
+    assert not result.templates.indirect_uses
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        "m = templatelib",
+        "f(templatelib)",
+        "d = {'m': templatelib}",
+        "vars(templatelib)",
+        "m = string.templatelib",
+        "f(string)",
+        "t = (string,)",
+    ],
+)
+def test_templatelib_module_used_as_value(use: str) -> None:
+    result = run(f"import string\nfrom string import templatelib\n{use}\n")
+    assert {u.kind for u in result.templates.indirect_uses} == {"module-value"}
+
+
+def test_templatelib_module_as_attribute_base_is_not_a_value() -> None:
+    result = run(
+        """
+        import string
+        from string import templatelib
+        a = string.ascii_letters + string.digits
+        b = templatelib.convert
+        c = string.Template("x")
+        """,
+    )
+    assert not result.templates.indirect_uses
+    assert not result.templates.calls
+
+
+@pytest.mark.parametrize(
+    ("use", "kind", "name"),
+    [
+        ("type(q)(x)", "type-call", None),
+        ("q.__class__(x)", "type-call", None),
+        ("T = type(q)", "value", "Template"),
+        ("T = q.__class__", "attribute", "Template"),
+        ("type(Template('a'))(x)", "type-call", None),
+    ],
+)
+def test_templatelib_type_of_evident_template(use: str, kind: str, name: str | None) -> None:
+    result = run(
+        f"""
+        from string.templatelib import Template
+        q = t"a"
+        def f(r: Template, x):
+            {use}
+        {use}
+        """,
+    )
+    assert [(u.kind, u.name) for u in result.templates.indirect_uses if u.span.line == 6] == [(kind, name)]
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "Template | None",
+        "None | Template",
+        "Optional[Template]",
+        "typing.Optional[Template]",
+        "'Template | None'",
+        "Template | None | None",
+    ],
+)
+def test_templatelib_optional_template_annotation_is_a_template(annotation: str) -> None:
+    result = run(
+        f"""
+        import typing
+        from typing import Optional
+        from string.templatelib import Template
+        def f(q: {annotation}, sql):
+            return type(q)(sql), q.__class__(sql)
+        """,
+    )
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("type-call", 6), ("type-call", 6)]
+
+
+@pytest.mark.parametrize("annotation", ["Template | str", "Template | str | None", "None", "Optional[str]"])
+def test_templatelib_non_template_union_annotation_is_unknown(annotation: str) -> None:
+    result = run(
+        f"""
+        from typing import Optional
+        from string.templatelib import Template
+        def f(q: {annotation}, sql):
+            return type(q)(sql)
+        """,
+    )
+    assert not result.templates.indirect_uses
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        "isinstance(x, (type(t''),))",
+        "isinstance(x, (int, (type(t''), str)))",
+        "issubclass(type(x), ((type(t''),),))",
+    ],
+)
+def test_templatelib_class_tuples_are_not_indirect(check: str) -> None:
+    result = run(f"t = t'a'\nx = 1\n{check}\n")
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_call_inside_a_class_tuple_is_still_recorded() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+        t = t'a'
+        def f(x, q: Template):
+            isinstance(x, (Template(x),))
+            isinstance(x, (int, (type(q)(x),)))
+        """,
+    )
+    assert [(c.name, c.span.line) for c in result.templates.calls] == [("Template", 5)]
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("type-call", 6)]
+
+
+def test_templatelib_type_of_unknown_receiver_is_not_recorded() -> None:
+    result = run(
+        """
+        class C:
+            def m(self, q, x):
+                a = type(self)(x)
+                b = type(q)(x)
+                c = q.__class__(x)
+                d = self.__class__
+        q = t"a"
+        q = t"b"
+        type(q)(1)
+        """,
+    )
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_dunder_on_t_string_literal() -> None:
+    result = run("a = t'a'.__add__\nb = t'a'.__class__\nc = t'a'.strings\nd = t'a'.__add__(1)\n")
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [
+        ("attribute", 1),
+        ("attribute", 2),
+        ("attribute", 4),
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from string.templatelib import Template\ntype T = Template\n",
+        "from typing import TypeAlias\nfrom string.templatelib import Template\nT: TypeAlias = Template\n",
+        "import typing\nimport string.templatelib as m\nT: typing.TypeAlias = m.Template\n",
+    ],
+)
+def test_templatelib_type_aliases(source: str) -> None:
+    assert [u.kind for u in run(source).templates.indirect_uses] == ["alias"]
+
+
+def test_templatelib_reexport_in_all() -> None:
+    result = run(
+        """
+        from string.templatelib import Template as T, Interpolation, convert
+        from string import templatelib
+        __all__ = ["T", "templatelib", "convert", "missing", 3]
+        __all__ += ["Interpolation"]
+        """,
+    )
+    assert [(u.kind, u.name, u.span.line) for u in result.templates.indirect_uses] == [
+        ("re-export", "T", 4),
+        ("re-export", "templatelib", 4),
+        ("re-export", "Interpolation", 5),
+    ]
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        "x: list[Template] = []",
+        "y = list[Template]",
+        "class P(Protocol[Template]): ...",
+        "z = dict[str, Template]",
+        "w = cast(Template, v)",
+        "w = typing.cast(Template, v)",
+        "w = cast(typ=Template, val=v)",
+        "def g(a: 'Template') -> 'Template': ...",
+        "w = d[m.Template]",
+        "w = list[string.templatelib.Template]",
+    ],
+)
+def test_templatelib_type_level_uses_are_not_recorded(use: str) -> None:
+    result = run(
+        f"""
+        import string
+        import typing
+        import string.templatelib as m
+        from typing import Protocol, cast
+        from string.templatelib import Template
+        {use}
+        """,
+    )
+    assert not result.templates.indirect_uses
+
+
+@pytest.mark.parametrize(
+    "use",
+    ["T = Template", "f(Template)", "class C(Template): ...", "def g(a=Template): ...", "cast(int, Template)"],
+)
+def test_templatelib_runtime_value_uses_are_still_recorded(use: str) -> None:
+    result = run(
+        f"""
+        from typing import cast
+        from string.templatelib import Template
+        {use}
+        """,
+    )
+    assert [u.kind for u in result.templates.indirect_uses] == ["value"]
+
+
+def test_templatelib_call_inside_subscript_and_cast_is_recorded() -> None:
+    result = run(
+        """
+        from typing import cast
+        from string.templatelib import Template
+        a = d[Template("x")]
+        b = cast(Template, Template("y"))
+        """,
+    )
+    assert len(result.templates.calls) == 2
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_type_of_annotated_parameter_and_decorator() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+        @Template
+        def g(r: Template, x):
+            return type(r)(x)
+        """,
+    )
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("value", 3), ("type-call", 5)]
+
+
+def test_templatelib_parameter_annotation_resolves_in_the_enclosing_scope() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+        def f(q: Template, sql):
+            Template = str
+            return type(q)(sql)
+        """,
+    )
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("type-call", 5)]
+
+
+def test_templatelib_import_in_a_body_does_not_type_an_outer_annotation() -> None:
+    result = run(
+        """
+        class Template: ...
+        def f(q: Template, sql):
+            from string.templatelib import Template
+            return type(q)(sql)
+        """,
+    )
+    assert not result.templates.indirect_uses
+
+
+def test_templatelib_annotation_in_a_nested_function_uses_the_enclosing_function() -> None:
+    result = run(
+        """
+        def outer(sql):
+            from string.templatelib import Template
+            def inner(q: Template):
+                return type(q)(sql)
+            return inner
+        """,
+    )
+    assert [(u.kind, u.span.line) for u in result.templates.indirect_uses] == [("type-call", 5)]
+
+
+def test_templatelib_method_annotation_sees_a_shadowing_class_body() -> None:
+    result = run(
+        """
+        from string.templatelib import Template
+        class C:
+            Template = str
+            def m(self, q: Template, sql):
+                return type(q)(sql)
+        """,
+    )
+    assert not result.templates.indirect_uses
+
+
+MIXED_TEMPLATE_IMPORT = "from string.templatelib import Template as q\n"
+MIXED_QUERY_IMPORT = "from rowx import query as q\n"
+# each usage with the diagnostics main reports when `q` is bound only by `from rowx import query as q`
+MIXED_USAGES = [
+    ('q[int](t"select 1")\n', []),
+    ('q(t"select 1")\n', []),
+    ('q.__call__(t"select 1")\n', ["indirect-query"]),
+    ("x = q\n", ["indirect-query"]),
+    ("f(q)\n", ["indirect-query"]),
+    ("q.attr\n", ["indirect-query"]),
+    ("T: TypeAlias = q\n", ["indirect-query"]),
+    ('q.Template(t"select 1")\n', ["indirect-query"]),
+]
+
+
+@pytest.mark.parametrize(("usage", "query_only"), MIXED_USAGES)
+def test_templatelib_mixed_name_keeps_query_diagnostics(usage: str, query_only: list[str]) -> None:
+    assert rules(run(MIXED_QUERY_IMPORT + usage)) == query_only
+    assert not rules(run(MIXED_TEMPLATE_IMPORT + usage))
+    for imports in (
+        MIXED_TEMPLATE_IMPORT + MIXED_QUERY_IMPORT,
+        MIXED_QUERY_IMPORT + MIXED_TEMPLATE_IMPORT,
+    ):
+        assert rules(run(imports + usage)) == ["indirect-query"], (imports, usage)
+
+
+def test_templatelib_mixed_module_name_keeps_query_diagnostics() -> None:
+    result = run(
+        """
+        import string.templatelib as tl
+        from rowx import query as tl
+        tl.Template(t"select 1")
+        """,
+    )
+    assert rules(result) == ["indirect-query"]

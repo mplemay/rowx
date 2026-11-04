@@ -5,18 +5,61 @@ from re import compile as re_compile
 from tokenize import detect_encoding
 from typing import TYPE_CHECKING, Final, Literal, Self, override
 
-from rowx.check.model import QUERY_KINDS, Diagnostic, FileResult, QueryCall, QueryKind, Rule, Span
+from rowx.check.model import (
+    QUERY_KINDS,
+    Diagnostic,
+    DynamicFormatSpec,
+    FileResult,
+    IndirectKind,
+    IndirectUse,
+    QueryCall,
+    QueryKind,
+    Rule,
+    Span,
+    TemplateCall,
+    TemplateConcat,
+    TemplateFacts,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
 ROWX_MODULE: Final[str] = "rowx"
+STRING_MODULE: Final[str] = "string"
+DUNDER: Final[str] = "__"
+TEMPLATELIB_ATTR: Final[str] = "templatelib"
+TEMPLATELIB_MODULE: Final[str] = f"{STRING_MODULE}.{TEMPLATELIB_ATTR}"
 TYPE_CHECK_FUNCTIONS: Final[frozenset[str]] = frozenset({"isinstance", "issubclass"})
 TYPE_PARAMS: Final = (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
 LINE_PATTERN: Final = re_compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
-type Tag = Literal["query", "query_unchecked", "module", "other"]
+# "private" is a `string.templatelib` name other than `Template`, `Interpolation` and `convert`
+type Tag = Literal[
+    "query",
+    "query_unchecked",
+    "module",
+    "template",
+    "interpolation",
+    "private",
+    "string",
+    "templatelib",
+    "cast",
+    "typing",
+    "other",
+]
+
+TEMPLATELIB_PUBLIC: Final[frozenset[str]] = frozenset({"Template", "Interpolation", "convert"})
+TYPING_MODULES: Final[frozenset[str]] = frozenset({"typing", "typing_extensions"})
+MODULE_TAG: Final[frozenset[Tag]] = frozenset({"module"})
+TEMPLATELIB_TAG: Final[frozenset[Tag]] = frozenset({"templatelib"})
+STRING_TAG: Final[frozenset[Tag]] = frozenset({"string"})
+CAST_TAG: Final[frozenset[Tag]] = frozenset({"cast"})
+TYPING_TAG: Final[frozenset[Tag]] = frozenset({"typing"})
+QUERY_TAGS: Final[frozenset[Tag]] = frozenset({"query", "query_unchecked"})
+CLASS_TAGS: Final[frozenset[Tag]] = frozenset({"template", "interpolation", "private"})
+MODULE_VALUE_TAGS: Final[frozenset[Tag]] = frozenset({"string", "templatelib"})
+EXPORT_TAGS: Final[frozenset[Tag]] = frozenset({*CLASS_TAGS, *MODULE_VALUE_TAGS})
 type Scoped = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef | ast.Module
 type Comprehension = ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp
 
@@ -45,6 +88,12 @@ class _Lines:
 class _Scope:
     kind: Literal["module", "function", "class", "comprehension", "annotation"]
     bindings: dict[str, list[Tag]] = field(default_factory=dict)
+    # how a name was declared evidently as a `Template`: the annotation it was declared with, or "literal" for a
+    # t-string; annotations of parameters are evaluated in the enclosing scope, the others in this one
+    hints: dict[str, ast.expr | Literal["literal"]] = field(default_factory=dict)
+    arg_hints: dict[str, ast.expr] = field(default_factory=dict)
+    # the names whose declaration is evidently a `Template`, resolved in the scope that evaluates the annotation
+    templates: set[str] = field(default_factory=set)
 
     def bind(self, name: str, tag: Tag = "other") -> None:
         self.bindings.setdefault(name, []).append(tag)
@@ -78,7 +127,11 @@ class _Scope:
 
 
 def _bind_arguments(scope: _Scope, arguments: ast.arguments) -> None:
-    for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg):
+    for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+        scope.bind(arg.arg)
+        if arg.annotation is not None:
+            scope.arg_hints[arg.arg] = arg.annotation
+    for arg in (arguments.vararg, arguments.kwarg):
         if arg is not None:
             scope.bind(arg.arg)
 
@@ -92,9 +145,40 @@ def _as_query_kind(name: str) -> QueryKind | None:
     return None
 
 
+def _templatelib_tag(name: str) -> Tag:
+    match name:
+        case "Template":
+            return "template"
+        case "Interpolation":
+            return "interpolation"
+        case "*" | "convert":
+            return "other"
+    return "private"
+
+
 def _import_tag(module: str, name: str) -> Tag:
     if module == ROWX_MODULE and name in QUERY_KINDS:
         return "query" if name == "query" else "query_unchecked"
+    if module in TYPING_MODULES and name == "cast":
+        return "cast"
+    if module == TEMPLATELIB_MODULE:
+        return _templatelib_tag(name)
+    if module == STRING_MODULE and name == TEMPLATELIB_ATTR:
+        return "templatelib"
+    return "other"
+
+
+def _module_tag(alias: ast.alias) -> Tag:
+    root = alias.name.split(".")[0]
+    if root == ROWX_MODULE and (alias.asname is None or alias.name == ROWX_MODULE):
+        return "module"
+    # `import string.templatelib` binds `string`; with an alias the alias is the submodule
+    if root == STRING_MODULE and (alias.asname is None or alias.name == STRING_MODULE):
+        return "string"
+    if root in TYPING_MODULES and (alias.asname is None or alias.name == root):
+        return "typing"
+    if alias.name == TEMPLATELIB_MODULE and alias.asname is not None:
+        return "templatelib"
     return "other"
 
 
@@ -104,9 +188,7 @@ def _bind_import(scope: _Scope, node: ast.Import | ast.ImportFrom) -> None:
             tag = _import_tag(node.module or "", alias.name) if node.level == 0 else "other"
             scope.bind(alias.asname or alias.name, tag)
         else:
-            root = alias.name.split(".")[0]
-            is_module = root == ROWX_MODULE and (alias.asname is None or alias.name == ROWX_MODULE)
-            scope.bind(alias.asname or root, "module" if is_module else "other")
+            scope.bind(alias.asname or alias.name.split(".")[0], _module_tag(alias))
 
 
 def _bind_pattern_name(scope: _Scope, node: ast.ExceptHandler | ast.MatchAs | ast.MatchStar | ast.MatchMapping) -> None:
@@ -137,6 +219,16 @@ def _enclosing_expressions(node: ast.AST) -> list[ast.AST]:
     return [item for item in found if item is not None]
 
 
+def _record_hints(scope: _Scope, node: ast.Assign | ast.AnnAssign) -> None:
+    if isinstance(node, ast.AnnAssign):
+        if isinstance(node.target, ast.Name):
+            scope.hints[node.target.id] = node.annotation
+    elif isinstance(node.value, ast.TemplateStr):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                scope.hints[target.id] = "literal"
+
+
 def _collect(scope: _Scope, nodes: Iterable[ast.AST], *, in_comprehension: bool = False) -> None:
     for node in nodes:
         match node:
@@ -157,6 +249,9 @@ def _collect(scope: _Scope, nodes: Iterable[ast.AST], *, in_comprehension: bool 
                 _bind_import(scope, node)
             case ast.Name() if isinstance(node.ctx, ast.Store) and not in_comprehension:
                 scope.bind(node.id)
+            case ast.Assign() | ast.AnnAssign():
+                _record_hints(scope, node)
+                _collect(scope, ast.iter_child_nodes(node), in_comprehension=in_comprehension)
             case ast.NamedExpr():
                 scope.bind(node.target.id)
                 _collect(scope, [node.value], in_comprehension=in_comprehension)
@@ -173,20 +268,90 @@ class _Ref:
     ambiguous: bool
 
 
+@dataclass(slots=True, frozen=True)
+class _TemplatelibRef:
+    name: str
+    ambiguous: bool
+    private: bool = False
+
+
+def _is_dunder(name: str) -> bool:
+    return len(name) > len(DUNDER) * 2 and name.startswith(DUNDER) and name.endswith(DUNDER)
+
+
+# `X | None`, `Optional[X]` and `"X | None"` are `X`; a union of several non-None types is unknown
+def _without_none(annotation: ast.expr) -> ast.expr | None:
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value.strip(), mode="eval").body
+        except SyntaxError:
+            return None
+    members: list[ast.expr] = []
+    pending = [annotation]
+    while pending:
+        match pending.pop():
+            case ast.BinOp(left=left, op=ast.BitOr(), right=right):
+                pending.extend([right, left])
+            case ast.Constant(value=None):
+                pass
+            case ast.Subscript(value=ast.Name(id="Optional") | ast.Attribute(attr="Optional"), slice=inner):
+                pending.append(inner)
+            case other:
+                members.append(other)
+    return members[0] if len(members) == 1 else None
+
+
+def _is_type_alias(annotation: ast.expr) -> bool:
+    match annotation:
+        case ast.Name(id="TypeAlias") | ast.Attribute(attr="TypeAlias"):
+            return True
+    return False
+
+
+def _is_dynamic_spec(part: ast.Interpolation) -> bool:
+    return isinstance(part.format_spec, ast.JoinedStr) and not all(
+        isinstance(value, ast.Constant) for value in part.format_spec.values
+    )
+
+
 class _Finder(ast.NodeVisitor):
     def __init__(self, path: Path, tree: ast.Module, lines: _Lines) -> None:
         self._path = path
         self._lines = lines
         self._scopes = [_Scope.build(tree)]
+        self._resolve_hints(self._scopes[0], [])
         self._annotating = 0
         self.result = FileResult(path=path, tree=tree)
+        self._template_calls: list[TemplateCall] = []
+        self._indirect_uses: list[IndirectUse] = []
+        self._concats: list[TemplateConcat] = []
+        self._dynamic_specs: list[DynamicFormatSpec] = []
+        # interpolations of the sole t-string argument of a query call, and the t-string chains seen so far
+        self._direct: dict[int, QueryKind] = {}
+        self._chains: set[int] = set()
+        # nodes that are the base of an attribute, so a module there is not used as a value
+        self._bases: set[int] = set()
+        # `type(q)` / `q.__class__` nodes already recorded as the callable of a call
+        self._skip: set[int] = set()
+        # nesting depth of type-level positions (subscripts, the type argument of `cast`)
+        self._type_level = 0
+        # nesting depth of nodes already recorded as template facts, which are only checked for query names
+        self._query_only = 0
+
+    def facts(self) -> TemplateFacts:
+        return TemplateFacts(
+            calls=tuple(self._template_calls),
+            indirect_uses=tuple(self._indirect_uses),
+            concats=tuple(self._concats),
+            dynamic_specs=tuple(self._dynamic_specs),
+        )
 
     def _report(self, rule: Rule, message: str, node: ast.expr | ast.stmt | ast.alias) -> None:
         self.result.diagnostics.append(
             Diagnostic(rule=rule, message=message, path=self._path, span=self._lines.span(node)),
         )
 
-    def _lookup(self, name: str) -> list[Tag] | None:
+    def _lookup_scope(self, name: str) -> _Scope | None:
         # a class body is only visible to code directly in it (including its annotations), not to
         # functions or comprehensions nested in it
         in_code = False
@@ -194,35 +359,141 @@ class _Finder(ast.NodeVisitor):
             if scope.kind == "class" and in_code:
                 continue
             if name in scope.bindings:
-                return scope.bindings[name]
+                return scope
             in_code = in_code or scope.kind in {"function", "comprehension"}
         return None
 
-    def _tags(self, name: str) -> tuple[Tag | None, bool]:
-        tags = self._lookup(name)
-        if tags is None:
+    def _lookup(self, name: str) -> list[Tag] | None:
+        return None if (scope := self._lookup_scope(name)) is None else scope.bindings[name]
+
+    # the first binding of `name` whose tag is in `wanted`; ambiguous when the name has any other binding
+    def _tags(self, name: str, wanted: frozenset[Tag]) -> tuple[Tag | None, bool]:
+        if (tags := self._lookup(name)) is None or (len(tags) == 1 and tags[0] not in wanted):
             return None, False
-        distinct = set(tags)
-        if distinct == {"other"}:
-            return None, False
-        if len(distinct) == 1:
-            return tags[0], False
-        return next(tag for tag in tags if tag != "other"), True
+        tag = next((tag for tag in tags if tag in wanted), None)
+        return tag, tag is not None and len(set(tags)) > 1
+
+    # a name with no binding, or only plain ones, that no tagged resolution can concern
+    def _plain(self, node: ast.expr) -> bool:
+        while isinstance(node, ast.Attribute):
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return False
+        tags = self._lookup(node.id)
+        return tags is None or (len(tags) == 1 and tags[0] == "other")
 
     def _module_name(self, node: ast.expr) -> bool:
-        return isinstance(node, ast.Name) and self._tags(node.id)[0] == "module"
+        return isinstance(node, ast.Name) and self._tags(node.id, MODULE_TAG)[0] == "module"
 
     def _ref(self, node: ast.expr) -> _Ref | None:
         match node:
             case ast.Name():
-                tag, ambiguous = self._tags(node.id)
+                tag, ambiguous = self._tags(node.id, QUERY_TAGS)
                 if tag in QUERY_KINDS:
                     return _Ref(tag, ambiguous)
             case ast.Attribute(value=ast.Name() as base, attr=attr) if (kind := _as_query_kind(attr)) is not None:
-                tag, ambiguous = self._tags(base.id)
+                tag, ambiguous = self._tags(base.id, MODULE_TAG)
                 if tag == "module":
                     return _Ref(kind, ambiguous)
         return None
+
+    # whether `node` is the `string.templatelib` module, and whether that is ambiguous
+    def _templatelib_module(self, node: ast.expr) -> bool | None:
+        match node:
+            case ast.Name():
+                tag, ambiguous = self._tags(node.id, TEMPLATELIB_TAG)
+                want = "templatelib"
+            case ast.Attribute(value=ast.Name() as root, attr=attr) if attr == TEMPLATELIB_ATTR:
+                tag, ambiguous = self._tags(root.id, STRING_TAG)
+                want = "string"
+            case _:
+                return None
+        return ambiguous if tag == want else None
+
+    def _templatelib_ref(self, node: ast.expr) -> _TemplatelibRef | None:
+        match node:
+            case ast.Name():
+                tag, ambiguous = self._tags(node.id, CLASS_TAGS)
+                match tag:
+                    case "template":
+                        return _TemplatelibRef("Template", ambiguous)
+                    case "interpolation":
+                        return _TemplatelibRef("Interpolation", ambiguous)
+                    case "private":
+                        return _TemplatelibRef(node.id, ambiguous, private=True)
+            case ast.Attribute(value=base, attr=attr) if attr != "convert":
+                if (ambiguous := self._templatelib_module(base)) is not None:
+                    return _TemplatelibRef(attr, ambiguous, private=attr not in TEMPLATELIB_PUBLIC)
+        return None
+
+    def _is_template_value(self, node: ast.expr) -> bool:
+        match node:
+            case ast.TemplateStr():
+                return True
+            case ast.Call(func=func):
+                return (ref := self._templatelib_ref(func)) is not None and ref.name == "Template" and not ref.ambiguous
+            case ast.Name(id=name) if (scope := self._lookup_scope(name)) is not None:
+                return len(scope.bindings[name]) == 1 and name in scope.templates
+        return False
+
+    def _is_template_annotation(self, annotation: ast.expr) -> bool:
+        if (inner := _without_none(annotation)) is None:
+            return False
+        return (ref := self._templatelib_ref(inner)) is not None and ref.name == "Template" and not ref.ambiguous
+
+    # resolve the hints of a scope where their annotations are evaluated: `enclosing` is the scope stack around it
+    def _resolve_hints(self, scope: _Scope, enclosing: list[_Scope]) -> None:
+        own = [*enclosing, scope]
+        stack, self._scopes = self._scopes, enclosing
+        scope.templates.update(name for name, hint in scope.arg_hints.items() if self._is_template_annotation(hint))
+        self._scopes = own
+        scope.templates.update(
+            name for name, hint in scope.hints.items() if hint == "literal" or self._is_template_annotation(hint)
+        )
+        self._scopes = stack
+
+    # `type(<template>)`
+    def _is_type_of_template(self, node: ast.expr) -> bool:
+        match node:
+            case ast.Call(func=ast.Name(id="type") as func, args=[arg], keywords=[]):
+                return self._lookup(func.id) is None and self._is_template_value(arg)
+        return False
+
+    def _is_class_of_template(self, node: ast.expr) -> bool:
+        return isinstance(node, ast.Attribute) and node.attr == "__class__" and self._is_template_value(node.value)
+
+    def _is_cast(self, node: ast.expr) -> bool:
+        match node:
+            case ast.Name():
+                tag, ambiguous = self._tags(node.id, CAST_TAG)
+                return tag == "cast" and not ambiguous
+            case ast.Attribute(value=ast.Name() as base, attr="cast"):
+                tag, ambiguous = self._tags(base.id, TYPING_TAG)
+                return tag == "typing" and not ambiguous
+        return False
+
+    def _type_level_visit(self, node: ast.AST) -> None:
+        self._type_level += 1
+        self.visit(node)
+        self._type_level -= 1
+
+    def _exports(self, target: ast.expr, value: ast.expr | None) -> None:
+        if len(self._scopes) != 1 or not isinstance(target, ast.Name) or target.id != "__all__":
+            return
+        if not isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            return
+        for item in value.elts:
+            if not (isinstance(item, ast.Constant) and isinstance(item.value, str)):
+                continue
+            if any(tag in EXPORT_TAGS for tag in self._scopes[0].bindings.get(item.value, ())):
+                self._indirect_uses.append(IndirectUse(kind="re-export", name=item.value, span=self._lines.span(item)))
+
+    def _template_use(self, ref: _TemplatelibRef, node: ast.expr, kind: IndirectKind) -> None:
+        if ref.private and kind in {"value", "attribute"}:
+            kind = "private"
+        self._indirect_uses.append(
+            IndirectUse(kind="ambiguous" if ref.ambiguous else kind, name=ref.name, span=self._lines.span(node)),
+        )
 
     def _indirect(self, node: ast.expr | ast.stmt | ast.alias, what: str) -> None:
         self._report("indirect-query", f'{what} is only allowed as `query[T](t"...")` or in an annotation', node)
@@ -248,7 +519,9 @@ class _Finder(ast.NodeVisitor):
         return 1
 
     def _scoped(self, node: Scoped | Comprehension, body: Iterable[ast.AST | None]) -> None:
-        self._scopes.append(_Scope.build(node))
+        scope = _Scope.build(node)
+        self._resolve_hints(scope, self._scopes)
+        self._scopes.append(scope)
         self._visit_all(body)
         self._scopes.pop()
 
@@ -256,22 +529,125 @@ class _Finder(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name) -> None:
         if self._annotating or not isinstance(node.ctx, ast.Load):
             return
+        if self._plain(node):
+            return
         if (ref := self._ref(node)) is not None:
             self._indirect(node, f"`{node.id}` (rowx.{ref.kind})")
+        if self._type_level or self._query_only:
+            return
+        if (template_ref := self._templatelib_ref(node)) is not None:
+            self._template_use(template_ref, node, "value")
+        elif id(node) not in self._bases:
+            tag, ambiguous = self._tags(node.id, MODULE_VALUE_TAGS)
+            if tag is not None:
+                self._template_use(_TemplatelibRef(tag, ambiguous), node, "module-value")
 
     @override
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if (ref := self._ref(node)) is None:
+        self._bases.add(id(node.value))
+        plain = self._plain(node)
+        if not plain and (query := self._ref(node)) is not None:
+            if not self._annotating:
+                self._indirect(node, f"`rowx.{query.kind}`")
+        elif not plain and self._resolve_attribute(node):
+            # the base may also be a query name, which still has to be reported
+            self._query_only_visit(node)
+        else:
+            recording = not (self._annotating or self._type_level or self._query_only) and id(node) not in self._skip
+            if recording and self._is_template_attribute(node):
+                self._indirect_uses.append(IndirectUse(kind="attribute", name="Template", span=self._lines.span(node)))
             self.generic_visit(node)
-        elif not self._annotating:
-            self._indirect(node, f"`rowx.{ref.kind}`")
+
+    def _query_only_visit(self, node: ast.AST) -> None:
+        self._query_only += 1
+        self.generic_visit(node)
+        self._query_only -= 1
+
+    # whether `node` resolved to a rowx or `string.templatelib` name, which is then recorded
+    def _resolve_attribute(self, node: ast.Attribute) -> bool:
+        recording = not (self._annotating or self._type_level or self._query_only)
+        if (template_ref := self._templatelib_ref(node)) is not None:
+            if recording:
+                self._template_use(template_ref, node, "value")
+        elif (base_ref := self._templatelib_ref(node.value)) is not None:
+            if recording:
+                self._template_use(base_ref, node, "attribute")
+        elif (ambiguous := self._templatelib_module(node)) is not None:
+            if recording and id(node) not in self._bases:
+                self._template_use(_TemplatelibRef(TEMPLATELIB_ATTR, ambiguous), node, "module-value")
+        else:
+            return False
+        return True
+
+    def _is_template_attribute(self, node: ast.Attribute) -> bool:
+        if isinstance(node.value, ast.TemplateStr):
+            return _is_dunder(node.attr)
+        return self._is_class_of_template(node)
+
+    @override
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        self._type_level += 1
+        self.generic_visit(node)
+        self._type_level -= 1
+
+    @override
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._exports(target, node.value)
+        self.generic_visit(node)
+
+    @override
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._exports(node.target, node.value)
+        self.generic_visit(node)
 
     @override
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.level == 0 and node.module == ROWX_MODULE:
+        if node.level == 0 and node.module in {ROWX_MODULE, TEMPLATELIB_MODULE}:
             for alias in node.names:
-                if alias.name == "*":
+                if node.module == TEMPLATELIB_MODULE:
+                    if alias.name == "*":
+                        self._indirect_uses.append(
+                            IndirectUse(kind="star-import", name=None, span=self._lines.span(node)),
+                        )
+                    elif alias.name not in TEMPLATELIB_PUBLIC:
+                        self._indirect_uses.append(
+                            IndirectUse(kind="private", name=alias.name, span=self._lines.span(alias)),
+                        )
+                elif alias.name == "*":
                     self._indirect(node, "`from rowx import *`")
+
+    @override
+    def visit_Interpolation(self, node: ast.Interpolation) -> None:
+        if _is_dynamic_spec(node):
+            self._dynamic_specs.append(
+                DynamicFormatSpec(
+                    node=node,
+                    span=self._lines.span(node),
+                    direct_argument_of=self._direct.get(id(node)),
+                ),
+            )
+        self.generic_visit(node)
+
+    @override
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        self.generic_visit(node)
+        if not isinstance(node.op, ast.Add):
+            return
+        left = isinstance(node.left, ast.TemplateStr) or id(node.left) in self._chains
+        right = isinstance(node.right, ast.TemplateStr) or id(node.right) in self._chains
+        if not (left or right):
+            return
+        self._chains.add(id(node))
+        operand = node.right if left else node.left
+        self._concats.append(
+            TemplateConcat(
+                node=node,
+                operand=operand,
+                span=self._lines.span(node),
+                operand_span=self._lines.span(operand),
+            ),
+        )
 
     @override
     def visit_Call(self, node: ast.Call) -> None:
@@ -280,25 +656,84 @@ class _Finder(ast.NodeVisitor):
         if subscript is not None:
             target = subscript.value
         annotating, self._annotating = self._annotating, 0
-        if (ref := self._ref(target)) is not None:
+        type_level, self._type_level = self._type_level, 0
+        plain = self._plain(target)
+        if not plain and (ref := self._ref(target)) is not None:
+            if (template_ref := self._templatelib_ref(target)) is not None:
+                self._template_use(template_ref, target, "ambiguous")
             self._visit_query(node, target, subscript, ref)
         elif isinstance(node.func, ast.Name) and node.func.id in TYPE_CHECK_FUNCTIONS:
-            self.visit(node.func)
-            self._visit_all(node.args[:1])
-            self._annotating += 1
-            self._visit_all(node.args[1:])
-            self._annotating -= 1
-            self._visit_all(node.keywords)
+            self._visit_type_check(node)
+        elif not plain and (template_ref := self._templatelib_ref(node.func)) is not None:
+            self._visit_template_call(node, template_ref)
+        elif not plain and self._is_cast(node.func):
+            self._visit_cast(node)
         else:
+            self._record_type_of_template(node)
             is_getattr = isinstance(node.func, ast.Name) and node.func.id == "getattr"
             if is_getattr and node.args and self._module_name(node.args[0]):
                 self._indirect(node.args[0], "`getattr(rowx, ...)`")
             self.generic_visit(node)
         self._annotating = annotating
+        self._type_level = type_level
+
+    def _class_operands(self, node: ast.expr) -> list[ast.expr]:
+        if isinstance(node, ast.Tuple):
+            return [operand for elt in node.elts for operand in self._class_operands(elt)]
+        return [node]
+
+    def _visit_type_check(self, node: ast.Call) -> None:
+        self.visit(node.func)
+        # `issubclass(type(q), ...)` only inspects the class
+        if len(node.args) > 1:
+            self._skip.update(id(arg) for arg in self._class_operands(node.args[1]) if self._is_type_of_template(arg))
+        if node.args and self._is_type_of_template(node.args[0]):
+            self._skip.add(id(node.args[0]))
+        self._visit_all(node.args[:1])
+        self._annotating += 1
+        self._visit_all(node.args[1:])
+        self._annotating -= 1
+        self._visit_all(node.keywords)
+
+    def _visit_cast(self, node: ast.Call) -> None:
+        self.visit(node.func)
+        for index, arg in enumerate(node.args):
+            self._type_level_visit(arg) if index == 0 else self.visit(arg)
+        for keyword in node.keywords:
+            self._type_level_visit(keyword) if keyword.arg == "typ" else self.visit(keyword)
+
+    def _record_type_of_template(self, node: ast.Call) -> None:
+        if self._is_class_of_template(node.func) or self._is_type_of_template(node.func):
+            self._skip.add(id(node.func))
+            self._indirect_uses.append(IndirectUse(kind="type-call", name=None, span=self._lines.span(node.func)))
+        elif id(node) not in self._skip and self._is_type_of_template(node):
+            self._indirect_uses.append(IndirectUse(kind="value", name="Template", span=self._lines.span(node)))
+
+    def _visit_template_call(self, node: ast.Call, ref: _TemplatelibRef) -> None:
+        if ref.ambiguous:
+            self._template_use(ref, node.func, "ambiguous")
+        else:
+            self._template_calls.append(
+                TemplateCall(name=ref.name, private=ref.private, node=node, span=self._lines.span(node)),
+            )
+        self._query_only_visit(node.func)
+        self._visit_all(node.args)
+        self._visit_all(node.keywords)
+
+    def _mark_direct(self, node: ast.Call, kind: QueryKind) -> None:
+        if len(node.args) != 1 or isinstance(node.args[0], ast.Starred):
+            return
+        if (kind == "query" and node.keywords) or not isinstance(template := node.args[0], ast.TemplateStr):
+            return
+        for part in template.values:
+            if isinstance(part, ast.Interpolation):
+                self._direct[id(part)] = kind
 
     def _visit_query(self, node: ast.Call, target: ast.expr, subscript: ast.Subscript | None, ref: _Ref) -> None:
         if ref.ambiguous:
             self._indirect(target, "an ambiguous name that is also bound another way in its scope")
+        else:
+            self._mark_direct(node, ref.kind)
         if subscript is not None:
             self.visit(subscript.slice)
         self._visit_all(node.args)
@@ -330,11 +765,7 @@ class _Finder(ast.NodeVisitor):
         if len(node.args) != 1 or not isinstance(template := node.args[0], ast.TemplateStr):
             return
         for part in template.values:
-            if (
-                isinstance(part, ast.Interpolation)
-                and isinstance(part.format_spec, ast.JoinedStr)
-                and not all(isinstance(value, ast.Constant) for value in part.format_spec.values)
-            ):
+            if isinstance(part, ast.Interpolation) and _is_dynamic_spec(part):
                 self._report(
                     "dynamic-query",
                     "a format spec in a `query_unchecked` interpolation must be a literal",
@@ -395,12 +826,27 @@ class _Finder(ast.NodeVisitor):
     @override
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         self._annotation(node.annotation)
+        self._exports(node.target, node.value)
+        if (
+            node.value is not None
+            and _is_type_alias(node.annotation)
+            and (ref := self._templatelib_ref(node.value)) is not None
+        ):
+            self._template_use(ref, node.value, "alias")
+            self.visit(node.target)
+            self._query_only += 1
+            self.visit(node.value)
+            self._query_only -= 1
+            return
         self._visit_all((node.target, node.value))
 
     @override
     def visit_TypeAlias(self, node: ast.TypeAlias) -> None:
         pushed = self._type_params(node)
-        self._annotation(node.value)
+        if (ref := self._templatelib_ref(node.value)) is not None:
+            self._template_use(ref, node.value, "alias")
+        else:
+            self._annotation(node.value)
         del self._scopes[len(self._scopes) - pushed :]
 
     def _visit_comprehension(self, node: Comprehension) -> None:
@@ -457,6 +903,7 @@ def discover_source(path: Path, data: bytes) -> FileResult:
         return _syntax_error(path, f"cannot parse file: {error}", Span(line=1, col=1, end_line=1, end_col=2))
     finder = _Finder(path, tree, lines)
     finder.visit(tree)
+    finder.result.templates = finder.facts()
     finder.result.source = source
     return finder.result
 
