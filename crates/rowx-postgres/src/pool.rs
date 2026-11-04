@@ -21,6 +21,9 @@ pub const RESET_QUERY: &str = "RESET SESSION AUTHORIZATION; RESET ALL; SELECT pg
 /// qualified because the batch runs under the previous checkout's `search_path`.
 pub(crate) const IDLE_GUARD: &str = "SELECT 1 OPERATOR(pg_catalog./) (pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp())::pg_catalog.int4;";
 
+/// `IDLE_GUARD` without its trailing `;`, for sending on its own.
+pub(crate) const IDLE_GUARD_BARE: &str = "SELECT 1 OPERATOR(pg_catalog./) (pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp())::pg_catalog.int4";
+
 /// The simple queries a release sends in order, empty when there is nothing to send.
 ///
 /// `rollback` is the "maybe in a transaction" flag: a set flag sends `ROLLBACK` first (even without a reset query),
@@ -29,12 +32,16 @@ pub(crate) const IDLE_GUARD: &str = "SELECT 1 OPERATOR(pg_catalog./) (pg_catalog
 /// `VACUUM` cannot run in one.
 #[must_use]
 pub fn reset_batches(query: Option<&str>, rollback: bool) -> Vec<String> {
-    let first = if rollback { "ROLLBACK;" } else { IDLE_GUARD };
+    let (first, bare) = if rollback {
+        ("ROLLBACK;", "ROLLBACK")
+    } else {
+        (IDLE_GUARD, IDLE_GUARD_BARE)
+    };
     match query {
         None if rollback => vec!["ROLLBACK".to_owned()],
         None => Vec::new(),
         Some(query) if query == RESET_QUERY => vec![format!("{first} {query}")],
-        Some(query) => vec![first.trim_end_matches(';').to_owned(), query.to_owned()],
+        Some(query) => vec![bare.to_owned(), query.to_owned()],
     }
 }
 
@@ -199,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn the_reset_batch_is_guarded_only_when_the_flag_is_clear() {
+    fn reset_batches_guard_only_when_the_flag_is_clear() {
         assert_eq!(reset_batches(None, false).len(), 0);
         assert_eq!(reset_batches(None, true), ["ROLLBACK"]);
         assert_eq!(
@@ -217,8 +224,9 @@ mod tests {
         );
         assert_eq!(
             reset_batches(Some("DISCARD ALL"), false),
-            [IDLE_GUARD.trim_end_matches(';'), "DISCARD ALL"]
+            [IDLE_GUARD_BARE, "DISCARD ALL"]
         );
+        assert_eq!(format!("{IDLE_GUARD_BARE};"), IDLE_GUARD);
         assert!(!RESET_QUERY.contains("DEALLOCATE"));
     }
 

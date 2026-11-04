@@ -13,8 +13,13 @@
 //   - forms that look an operator up by name without writing it: `IS [NOT] DISTINCT FROM`, `NULLIF`, a simple
 //     `CASE x WHEN`, `CAST(x AS type)` and a typed literal such as `oid '1'`;
 //   - in a `CREATE` statement, a well-known catalog type name (`text`, `oid`, `int8`, ...) used as a column type.
-// What it does not cover: SQL built at runtime from user text (a migration file, a user query), SQL in Python
-// (`src/rowx/testing.py` is audited by hand), and a type name outside the lists below.
+// What it does not cover:
+//   - a literal whose first word (after leading whitespace) is not one of the SQL verbs listed below;
+//   - later pieces of `concat!`, `+`, `push_str` or `write!` that do not start with a verb;
+//   - names behind `format!` placeholders (`{t}` is treated as a quoted name, not checked);
+//   - `\u{..}` and `\x..` escapes, which are not decoded;
+//   - SQL built at runtime from user text (a migration file, a user query), and a type name outside the lists below;
+//   - SQL in Python (`src/rowx/testing.py` and the rest of `src/rowx`), which is audited by hand.
 //
 // A name that is genuinely fine does not get an allowlist entry here: qualify it instead.
 
@@ -375,7 +380,70 @@ fn check_name_resolving_forms(tokens: &[Token], at: usize, word: &str, found: &m
     }
 }
 
-// the source without its `#[cfg(test)] mod name { ... }` blocks, which other items may follow
+// the index past a char literal that starts at `at`; a lifetime has no closing quote, so only the quote is skipped
+fn skip_char_literal(chars: &[char], at: usize) -> usize {
+    if chars.get(at + 1) == Some(&'\\') {
+        // `'\n'`, `'\''`, `'\x41'` and `'\u{1F600}'` all end at the next quote after the escaped character
+        let mut i = at + 3;
+        while i < chars.len() && chars[i] != '\'' && i < at + 12 {
+            i += 1;
+        }
+        i + 1
+    } else if chars.get(at + 2) == Some(&'\'') {
+        at + 3
+    } else {
+        at + 1
+    }
+}
+
+// a raw string `r"..."`, `r#"..."#`, `br##"..."##` that starts at `at`: its body and the index past its closing quote
+fn read_raw_string(chars: &[char], at: usize) -> Option<(String, usize)> {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let before = at.checked_sub(1).map(|p| chars[p]);
+    let prefixed = before == Some('b') && at.checked_sub(2).is_none_or(|p| !ident(chars[p]));
+    if chars.get(at) != Some(&'r') || before.is_some_and(ident) && !prefixed {
+        return None;
+    }
+    let mut i = at + 1;
+    let mut hashes = 0_usize;
+    while chars.get(i) == Some(&'#') {
+        hashes += 1;
+        i += 1;
+    }
+    if chars.get(i) != Some(&'"') {
+        return None;
+    }
+    i += 1;
+    let start = i;
+    while i < chars.len() {
+        if chars[i] == '"' && (1..=hashes).all(|n| chars.get(i + n) == Some(&'#')) {
+            return Some((chars[start..i].iter().collect(), i + 1 + hashes));
+        }
+        i += 1;
+    }
+    Some((chars[start..].iter().collect(), chars.len()))
+}
+
+// the index past the line comment, block comment, string or char literal at `at`, if there is one
+fn skip_non_code(chars: &[char], at: usize) -> Option<usize> {
+    match (chars[at], chars.get(at + 1)) {
+        ('/', Some('/')) => Some(
+            chars[at..]
+                .iter()
+                .position(|c| *c == '\n')
+                .map_or(chars.len(), |n| at + n),
+        ),
+        ('/', Some('*')) => Some(skip_block(chars, at + 2)),
+        ('"', _) => Some(read_string(chars, at + 1).1),
+        ('\'', _) => Some(skip_char_literal(chars, at)),
+        ('r' | 'b', _) => read_raw_string(chars, at).map(|(_, end)| end),
+        _ => None,
+    }
+}
+
+// the source without its `#[cfg(test)] mod name { ... }` blocks, which other items may follow. A body-less
+// `#[cfg(test)] mod name;` drops only that item. If the scanner loses its place the failure is in the safe direction
+// for a lint: it drops less or more of the file, and the extractor test notices statements that go missing.
 fn without_test_modules(source: &str) -> String {
     const MARKER: &str = "#[cfg(test)]";
     let mut out = String::new();
@@ -383,55 +451,47 @@ fn without_test_modules(source: &str) -> String {
     while let Some(at) = rest.find(MARKER) {
         out.push_str(&rest[..at]);
         let after = &rest[at + MARKER.len()..];
-        let tail = after.trim_start();
-        if !tail.starts_with("mod ") {
+        let Some(declared) = after.trim_start().strip_prefix("mod ") else {
             // a cfg(test) item that is not a module stays in the scan
             out.push_str(MARKER);
             rest = after;
             continue;
-        }
-        let Some(open) = after.find('{') else {
+        };
+        // `mod name;` has no body; `mod name {` does
+        let Some(end) = declared.find(['{', ';']) else {
             return out;
         };
-        let chars: Vec<char> = after[open..].chars().collect();
+        let body_start = &declared[end..];
+        if let Some(after_semi) = body_start.strip_prefix(';') {
+            rest = after_semi;
+            continue;
+        }
+        let chars: Vec<char> = body_start.chars().collect();
         let mut depth = 0_usize;
         let mut i = 0;
         while i < chars.len() {
+            if let Some(next) = skip_non_code(&chars, i) {
+                i = next;
+                continue;
+            }
             match chars[i] {
                 '{' => depth += 1,
                 '}' => {
-                    depth -= 1;
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
                         i += 1;
                         break;
                     }
                 }
-                '/' if chars.get(i + 1) == Some(&'/') => {
-                    while i < chars.len() && chars[i] != '\n' {
-                        i += 1;
-                    }
-                    continue;
-                }
-                '"' => {
-                    i = read_string(&chars, i + 1).1;
-                    continue;
-                }
-                '\'' => {
-                    i += if chars.get(i + 1) == Some(&'\\') {
-                        4
-                    } else if chars.get(i + 2) == Some(&'\'') {
-                        3
-                    } else {
-                        1
-                    };
-                    continue;
-                }
                 _ => {}
             }
             i += 1;
         }
-        let consumed: usize = chars[..i].iter().map(|c| c.len_utf8()).sum();
-        rest = &after[open + consumed..];
+        let consumed: usize = chars[..i.min(chars.len())]
+            .iter()
+            .map(|c| c.len_utf8())
+            .sum();
+        rest = &body_start[consumed..];
     }
     out.push_str(rest);
     out
@@ -444,35 +504,26 @@ fn sql_literals(source: &str) -> Vec<String> {
     let mut literals = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        match chars[i] {
-            '/' if chars.get(i + 1) == Some(&'/') => {
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
+        let literal = if let Some((text, end)) = read_raw_string(&chars, i) {
+            i = end;
+            Some(text)
+        } else if chars[i] == '"' {
+            let (text, end) = read_string(&chars, i + 1);
+            i = end;
+            Some(text)
+        } else {
+            i = skip_non_code(&chars, i).unwrap_or(i + 1);
+            None
+        };
+        if let Some(text) = literal {
+            let first = text
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if VERBS.contains(&first.as_str()) {
+                literals.push(text);
             }
-            '\'' => {
-                // a char literal; a lifetime has no closing quote two or three characters on
-                i += if chars.get(i + 1) == Some(&'\\') {
-                    4
-                } else if chars.get(i + 2) == Some(&'\'') {
-                    3
-                } else {
-                    1
-                };
-            }
-            '"' => {
-                let (text, end) = read_string(&chars, i + 1);
-                i = end;
-                let first = text
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if VERBS.contains(&first.as_str()) {
-                    literals.push(text);
-                }
-            }
-            _ => i += 1,
         }
     }
     literals
@@ -571,6 +622,28 @@ fn the_scanner_flags_what_it_claims_to() {
     ] {
         assert_eq!(violations(good), Vec::<String>::new(), "{good}");
     }
+}
+
+#[test]
+fn a_bodyless_test_module_does_not_swallow_the_next_block() {
+    let kept = without_test_modules("#[cfg(test)] mod t;\nfn f() { \"SELECT now()\" }");
+    assert!(sql_literals(&kept).iter().any(|sql| sql == "SELECT now()"));
+    let dropped = without_test_modules(
+        "#[cfg(test)] mod t { fn a() { let c = '}'; let d = '\\x41'; /* } */ let s = r#\"}\"#; } }\nfn f() { \"SELECT now()\" }",
+    );
+    assert!(
+        sql_literals(&dropped)
+            .iter()
+            .any(|sql| sql == "SELECT now()")
+    );
+    assert!(!dropped.contains("let c"));
+}
+
+#[test]
+fn raw_strings_end_at_their_own_hashes() {
+    let found = sql_literals("fn f() { r#\"SELECT \"a\", now()\"#; r\"SELECT 1\"; }");
+    assert_eq!(found, ["SELECT \"a\", now()", "SELECT 1"]);
+    assert_eq!(violations(&found[0]), ["unqualified function call `now(`"]);
 }
 
 #[test]
