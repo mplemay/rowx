@@ -136,10 +136,10 @@ pub async fn ensure_table(
     conn.simple(&format!(
         "CREATE TABLE IF NOT EXISTS {quoted} (\n\
          version BIGINT PRIMARY KEY,\n\
-         description TEXT NOT NULL,\n\
-         installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),\n\
+         description pg_catalog.text NOT NULL,\n\
+         installed_on pg_catalog.timestamptz NOT NULL DEFAULT pg_catalog.now(),\n\
          success BOOLEAN NOT NULL,\n\
-         checksum BYTEA NOT NULL,\n\
+         checksum pg_catalog.bytea NOT NULL,\n\
          execution_time BIGINT NOT NULL\n\
          )"
     ))
@@ -159,7 +159,7 @@ pub async fn list_applied(
     let exists: bool = conn
         .client()?
         .query_one(
-            "SELECT pg_catalog.to_regclass($1::text) IS NOT NULL",
+            "SELECT pg_catalog.to_regclass($1::pg_catalog.text) IS NOT NULL",
             &[&quoted],
         )
         .await
@@ -178,7 +178,7 @@ async fn list_records(conn: &Connection, quoted: &str) -> Result<Vec<AppliedReco
         .query(
             &format!(
                 "SELECT version, checksum, success, \
-                 (EXTRACT(EPOCH FROM installed_on) * 1000000)::bigint, execution_time \
+                 (EXTRACT(EPOCH FROM installed_on) OPERATOR(pg_catalog.*) 1000000)::bigint, execution_time \
                  FROM {quoted} ORDER BY version"
             ),
             &[],
@@ -356,7 +356,7 @@ async fn apply(conn: &Connection, quoted: &str, migration: &Migration) -> Result
         } else {
             "execution_time"
         };
-        format!("UPDATE {quoted} SET {set} = $1 WHERE version = $2")
+        format!("UPDATE {quoted} SET {set} = $1 WHERE version OPERATOR(pg_catalog.=) $2")
     };
     if migration.no_transaction {
         insert_row(conn, quoted, migration, false).await?;
@@ -388,11 +388,11 @@ async fn revert_step(
     migration: &Migration,
 ) -> Result<(), MigrateError> {
     let version = migration.version;
-    let delete = format!("DELETE FROM {quoted} WHERE version = $1");
+    let delete = format!("DELETE FROM {quoted} WHERE version OPERATOR(pg_catalog.=) $1");
     if migration.no_transaction {
         execute(
             conn,
-            &format!("UPDATE {quoted} SET success = FALSE WHERE version = $1"),
+            &format!("UPDATE {quoted} SET success = FALSE WHERE version OPERATOR(pg_catalog.=) $1"),
             version,
         )
         .await?;
@@ -512,8 +512,8 @@ async fn resolve_table(conn: &Connection, table: &TableName) -> Result<String, M
         .query_one(
             "SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) \
              FROM pg_catalog.pg_class c \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE c.oid = pg_catalog.to_regclass($1::text)",
+             JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace \
+             WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1::pg_catalog.text)",
             &[&quoted],
         )
         .await

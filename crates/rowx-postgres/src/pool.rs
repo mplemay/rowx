@@ -13,7 +13,27 @@ use crate::dsn::{ConnectOptions, ParsedDsn};
 use crate::error::Error;
 
 /// The reset a pool runs on release; the same text as `rowx.postgres.RESET_QUERY`.
-pub const RESET_QUERY: &str = "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;";
+pub const RESET_QUERY: &str = "RESET SESSION AUTHORIZATION; RESET ALL; SELECT pg_catalog.pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; DISCARD TEMP;";
+
+/// Fails unless the session is idle.
+///
+/// Inside a transaction `now()` is the transaction's start, so it differs from `statement_timestamp()`. Names are
+/// qualified because the batch runs under the previous checkout's `search_path`.
+pub const IDLE_GUARD: &str = "SELECT 1 OPERATOR(pg_catalog./) (pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp())::pg_catalog.int4;";
+
+/// The batch a release sends, or `None` when there is nothing to send.
+///
+/// `rollback` is the "maybe in a transaction" flag: a set flag sends `ROLLBACK` first (even without a reset query),
+/// a clear one puts the idle guard in front of the reset query.
+#[must_use]
+pub fn reset_sql(query: Option<&str>, rollback: bool) -> Option<String> {
+    match (rollback, query) {
+        (false, None) => None,
+        (true, None) => Some("ROLLBACK".to_owned()),
+        (false, Some(query)) => Some(format!("{IDLE_GUARD} {query}")),
+        (true, Some(query)) => Some(format!("ROLLBACK; {query}")),
+    }
+}
 
 pub type Pool = rowx_core::pool::Pool<PgManager>;
 pub type Pooled = rowx_core::pool::Pooled<PgManager>;
@@ -114,12 +134,8 @@ impl Manage for PgManager {
         if conn.reset_done.swap(false, Ordering::AcqRel) && !rollback {
             return Ok(());
         }
-        // an unconditional ROLLBACK would log a server WARNING on every idle release
-        let sql = match (rollback, self.reset_query.as_deref()) {
-            (false, None) => return Ok(()),
-            (true, None) => "ROLLBACK".to_owned(),
-            (false, Some(query)) => query.to_owned(),
-            (true, Some(query)) => format!("ROLLBACK; {query}"),
+        let Some(sql) = reset_sql(self.reset_query.as_deref(), rollback) else {
+            return Ok(());
         };
         conn.cancel.backend.conn.lock().await.simple(&sql).await
     }
@@ -170,6 +186,19 @@ mod tests {
         let manager = PgManager::new(&options, runtime.handle().clone(), None)?;
         assert!(!format!("{manager:?}").contains("Zq9"));
         Ok(())
+    }
+
+    #[test]
+    fn the_reset_batch_is_guarded_only_when_the_flag_is_clear() {
+        assert_eq!(reset_sql(None, false), None);
+        assert_eq!(reset_sql(None, true).as_deref(), Some("ROLLBACK"));
+        assert_eq!(
+            reset_sql(Some("RESET ALL;"), true).as_deref(),
+            Some("ROLLBACK; RESET ALL;")
+        );
+        let guarded = reset_sql(Some(RESET_QUERY), false).unwrap_or_default();
+        assert_eq!(guarded, format!("{IDLE_GUARD} {RESET_QUERY}"));
+        assert!(!RESET_QUERY.contains("DEALLOCATE"));
     }
 
     #[test]

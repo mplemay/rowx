@@ -10,6 +10,7 @@ use rowx_postgres::cancel::{self, Cancel, Hook};
 use rowx_postgres::conn::opens_transaction;
 use rowx_postgres::error::Error;
 use rowx_postgres::exec::{self, Raw, Shape};
+use rowx_postgres::pool::reset_sql;
 use rowx_postgres::pool::{Pool as PgPool, is_stale_plan};
 use rowx_postgres::{Row, Type};
 
@@ -329,7 +330,7 @@ pub fn simple<'py>(
     py: Python<'py>,
     cancel: &Cancel,
     access: &Access,
-    sql: String,
+    sql: Option<String>,
     reset: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let claim = access
@@ -346,10 +347,13 @@ pub fn simple<'py>(
         let pending = cancel::spawn(&cancel, claim, &hook, async move {
             let conn = inner.lock().await;
             // an unconditional ROLLBACK would log a server WARNING on every idle reset
-            let sql = if reset && state.maybe_in_txn() {
-                format!("ROLLBACK; {sql}")
+            let sql = if reset {
+                let Some(batch) = reset_sql(sql.as_deref(), state.maybe_in_txn()) else {
+                    return Ok(());
+                };
+                batch
             } else {
-                sql
+                sql.unwrap_or_default()
             };
             let result = conn.simple(&sql).await;
             drop(conn);
