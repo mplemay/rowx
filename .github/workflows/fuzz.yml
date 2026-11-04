@@ -27,7 +27,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [array, numeric, date, time, timetz, timestamp, interval]
+        target:
+          - array
+          - numeric
+          - date
+          - time
+          - timetz
+          - timestamp
+          - interval
+          - array_elements
+          - range
+          - network
+          - geometric
+          - money
+          - bits
+          - mac
+          - hstore
+          - ltree
+          - cube
+          - uuid
+          - explain
+          - dsn
+          - rt_array
+          - rt_numeric
+          - rt_temporal
+          - rt_range
+          - rt_network
+          - rt_geometric
+          - rt_money
+          - rt_bits
+          - rt_mac
+          - rt_hstore
+          - rt_ltree
+          - rt_cube
+          - rt_uuid
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,7 +84,8 @@ jobs:
         working-directory: fuzz
         env:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '60' }}
-        run: cargo +nightly fuzz run "${{ matrix.target }}" -- -max_total_time="$SECONDS_PER_TARGET"
+        # an input that makes a decoder allocate past the limit fails the run instead of exhausting the runner
+        run: cargo +nightly fuzz run "${{ matrix.target }}" -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=2048
 
       - name: Upload crashing inputs
         if: failure()

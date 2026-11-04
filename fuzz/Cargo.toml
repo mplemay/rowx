@@ -10,6 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rowx-postgres = { path = "../crates/rowx-postgres" }
+# the plan walkers take a `serde_json::Value`, and rowx-postgres already depends on it
+serde_json = "1"
 
 # the workspace forbids unsafe code, and `fuzz_target!` expands to some, so this crate sits outside it
 [workspace]
@@ -68,6 +70,188 @@ bench = false
 [[bin]]
 name = "interval"
 path = "fuzz_targets/interval.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "array_elements"
+path = "fuzz_targets/array_elements.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "range"
+path = "fuzz_targets/range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "network"
+path = "fuzz_targets/network.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "geometric"
+path = "fuzz_targets/geometric.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "money"
+path = "fuzz_targets/money.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bits"
+path = "fuzz_targets/bits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mac"
+path = "fuzz_targets/mac.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hstore"
+path = "fuzz_targets/hstore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ltree"
+path = "fuzz_targets/ltree.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cube"
+path = "fuzz_targets/cube.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uuid"
+path = "fuzz_targets/uuid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "explain"
+path = "fuzz_targets/explain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dsn"
+path = "fuzz_targets/dsn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_array"
+path = "fuzz_targets/rt_array.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_numeric"
+path = "fuzz_targets/rt_numeric.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_temporal"
+path = "fuzz_targets/rt_temporal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_range"
+path = "fuzz_targets/rt_range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_network"
+path = "fuzz_targets/rt_network.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_geometric"
+path = "fuzz_targets/rt_geometric.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_money"
+path = "fuzz_targets/rt_money.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_bits"
+path = "fuzz_targets/rt_bits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_mac"
+path = "fuzz_targets/rt_mac.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_hstore"
+path = "fuzz_targets/rt_hstore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_ltree"
+path = "fuzz_targets/rt_ltree.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_cube"
+path = "fuzz_targets/rt_cube.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rt_uuid"
+path = "fuzz_targets/rt_uuid.rs"
 test = false
 doc = false
 bench = false

@@ -12,9 +12,9 @@ pub mod types;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyBytes, PyList, PyString, PyTuple};
 use pyo3::wrap_pyfunction;
-use rowx_postgres::Type;
+use rowx_postgres::{Kind, Type};
 
 #[pyfunction]
 fn _cancel_requests_sent() -> u64 {
@@ -50,6 +50,39 @@ fn _param_formats(
         .collect())
 }
 
+// a type for the `_decode` hook: an int is a built-in oid, and a tuple names the rest, such as
+// `("name", "hstore")`, `("enum",)`, `("array", spec)`, `("range", subtype_spec)` or `("domain", spec)`
+fn hook_type(spec: &Bound<'_, PyAny>) -> PyResult<Type> {
+    if let Ok(oid) = spec.extract::<u32>() {
+        return Type::from_oid(oid)
+            .ok_or_else(|| PyValueError::new_err(format!("{oid} is not a built-in type")));
+    }
+    let tuple = spec.cast::<PyTuple>()?;
+    let kind = tuple.get_item(0)?.cast_into::<PyString>()?.to_string();
+    let new = |name: &str, kind: Kind| Type::new(name.to_owned(), 0, kind, "public".to_owned());
+    match kind.as_str() {
+        "name" => Ok(new(&tuple.get_item(1)?.extract::<String>()?, Kind::Simple)),
+        "enum" => Ok(new("mood", Kind::Enum(vec!["ok".to_owned()]))),
+        "array" => Ok(new("_array", Kind::Array(hook_type(&tuple.get_item(1)?)?))),
+        "range" => Ok(new("_range", Kind::Range(hook_type(&tuple.get_item(1)?)?))),
+        "domain" => Ok(new(
+            "_domain",
+            Kind::Domain(hook_type(&tuple.get_item(1)?)?),
+        )),
+        other => Err(PyValueError::new_err(format!("unknown type spec {other}"))),
+    }
+}
+
+// test hook: decodes a binary value of the described type through the real codec, as a row would be
+#[pyfunction]
+fn _decode<'py>(
+    py: Python<'py>,
+    spec: &Bound<'py, PyAny>,
+    raw: &Bound<'py, PyBytes>,
+) -> PyResult<Bound<'py, PyAny>> {
+    codec::decode(py, &hook_type(spec)?, Some(raw.as_bytes()))
+}
+
 /// Builds the `rowx._core.postgres` submodule.
 ///
 /// # Errors
@@ -79,5 +112,6 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_function(wrap_pyfunction!(_cancel_requests_sent, &m)?)?;
     m.add_function(wrap_pyfunction!(_catalog_queries, &m)?)?;
     m.add_function(wrap_pyfunction!(_param_formats, &m)?)?;
+    m.add_function(wrap_pyfunction!(_decode, &m)?)?;
     Ok(m)
 }
