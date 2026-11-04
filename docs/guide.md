@@ -1543,7 +1543,7 @@ postgresql://app@db.example/app?sslmode=verify-full&sslrootcert=/etc/ssl/db-ca.p
 password or SASL request unless the server authenticates with `SCRAM-SHA-256-PLUS`, which ties the login to the TLS
 session so a man in the middle can't relay it. The default, `prefer`, binds when it can. `require` together with
 `sslmode=disable` is an `InterfaceError` when the options are parsed. `channel_binding` is a typed option, so it is not
-accepted as an `extra` key.
+accepted as an `extra` key. As in libpq, a key given twice in a DSN resolves last-wins, `channel_binding` included.
 
 Channel binding uses `tls-server-end-point`, which the driver derives from the server certificate's signature algorithm.
 That works for RSA (SHA-1, SHA-256, SHA-384, SHA-512) and ECDSA (SHA-256, SHA-384) certificates only. Against an Ed25519

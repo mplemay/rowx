@@ -7,6 +7,7 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -25,6 +26,8 @@ pub enum Tls {
     Refuse,
     /// Answers `S` and completes the handshake with the test certificate.
     Accept,
+    /// Answers `S`, then sends plaintext protocol messages instead of a handshake.
+    AcceptThenPlaintext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +37,28 @@ pub enum Auth {
     Md5,
     /// `AuthenticationSASL` offering only `SCRAM-SHA-256`.
     ScramWithoutPlus,
+    /// `AuthenticationSASL` offering only `SCRAM-SHA-256-PLUS`.
+    OnlyPlus,
+    /// A SASL exchange whose server-final message carries a wrong signature, then `AuthenticationOk`.
+    ScramBadFinal,
+    /// `AuthenticationGSS`.
+    Gss,
+    /// `AuthenticationSSPI`.
+    Sspi,
+}
+
+/// What the client did after the server's authentication request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Reply {
+    #[default]
+    /// The test never got that far.
+    None,
+    /// The client closed the connection without sending anything.
+    Closed,
+    /// The client sent this many bytes.
+    Bytes(usize),
+    /// Neither happened within the wait, which a test must treat as a failure.
+    TimedOut,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,8 +81,7 @@ pub struct Seen {
     pub tls: bool,
     /// The first message after the optional `SSLRequest`.
     pub first: Option<First>,
-    /// Bytes the client sent in answer to a password or SASL request (zero if it closed instead).
-    pub after_auth_request: usize,
+    pub after_auth_request: Reply,
 }
 
 impl Seen {
@@ -92,13 +116,27 @@ struct Shared {
 pub struct FakeServer {
     addr: SocketAddr,
     shared: Arc<Shared>,
+    stop: Arc<AtomicBool>,
+    accept: Option<thread::JoinHandle<()>>,
 }
 
 impl FakeServer {
     /// # Errors
     /// When the socket cannot be bound or the TLS material cannot be read.
     pub fn start(scripts: Vec<Script>, certs: Option<&Path>) -> io::Result<Self> {
-        let tls = certs.map(tls_config).transpose()?;
+        Self::start_with_cert(scripts, certs, "server")
+    }
+
+    /// As `start`, serving the certificate `<stem>.crt` with `<stem>.key` from the directory.
+    ///
+    /// # Errors
+    /// When the socket cannot be bound or the TLS material cannot be read.
+    pub fn start_with_cert(
+        scripts: Vec<Script>,
+        certs: Option<&Path>,
+        stem: &str,
+    ) -> io::Result<Self> {
+        let tls = certs.map(|dir| tls_config(dir, stem)).transpose()?;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         let shared = Arc::new(Shared {
@@ -106,8 +144,13 @@ impl FakeServer {
             changed: Condvar::new(),
         });
         let background = Arc::clone(&shared);
-        thread::spawn(move || {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let accept = thread::spawn(move || {
             for (index, stream) in listener.incoming().enumerate() {
+                if stopping.load(Ordering::SeqCst) {
+                    return;
+                }
                 let Ok(stream) = stream else { return };
                 let Some(script) = scripts.get(index).or_else(|| scripts.last()).copied() else {
                     return;
@@ -123,7 +166,12 @@ impl FakeServer {
                 });
             }
         });
-        Ok(Self { addr, shared })
+        Ok(Self {
+            addr,
+            shared,
+            stop,
+            accept: Some(accept),
+        })
     }
 
     #[must_use]
@@ -158,6 +206,17 @@ impl FakeServer {
     }
 }
 
+impl Drop for FakeServer {
+    fn drop(&mut self) {
+        // the accept loop blocks in accept(); a last connection to ourselves wakes it to see the flag
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect_timeout(&self.addr, WAIT);
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+    }
+}
+
 /// `$ROWX_TEST_CERTS`, else the repo's `.rowx-certs`, for tests that need a TLS server.
 #[must_use]
 pub fn certs_dir() -> PathBuf {
@@ -167,14 +226,14 @@ pub fn certs_dir() -> PathBuf {
     )
 }
 
-fn tls_config(dir: &Path) -> io::Result<Arc<ServerConfig>> {
+fn tls_config(dir: &Path, stem: &str) -> io::Result<Arc<ServerConfig>> {
     let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
     let chain = rustls_pemfile::certs(&mut io::BufReader::new(std::fs::File::open(
-        dir.join("server.crt"),
+        dir.join(format!("{stem}.crt")),
     )?))
     .collect::<Result<Vec<_>, _>>()?;
     let key = rustls_pemfile::private_key(&mut io::BufReader::new(std::fs::File::open(
-        dir.join("server.key"),
+        dir.join(format!("{stem}.key")),
     )?))?
     .ok_or_else(|| invalid("no private key"))?;
     let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
@@ -255,7 +314,66 @@ fn auth_request(auth: Auth) -> io::Result<Vec<u8>> {
             body.extend_from_slice(b"SCRAM-SHA-256\0\0");
             message(b'R', &body)
         }
+        Auth::OnlyPlus => {
+            let mut body = 10_u32.to_be_bytes().to_vec();
+            body.extend_from_slice(b"SCRAM-SHA-256-PLUS\0\0");
+            message(b'R', &body)
+        }
+        Auth::ScramBadFinal => {
+            let mut body = 10_u32.to_be_bytes().to_vec();
+            body.extend_from_slice(b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0");
+            message(b'R', &body)
+        }
+        Auth::Gss => message(b'R', &7_u32.to_be_bytes()),
+        Auth::Sspi => message(b'R', &9_u32.to_be_bytes()),
     }
+}
+
+// one typed frontend message: a type byte, a length that counts itself, then the body
+fn read_typed(stream: &mut Stream) -> io::Result<Option<Vec<u8>>> {
+    let mut head = [0_u8; 5];
+    if stream.read(&mut head[..1])? == 0 {
+        return Ok(None);
+    }
+    stream.read_exact(&mut head[1..])?;
+    let len = usize::try_from(u32::from_be_bytes([head[1], head[2], head[3], head[4]]))
+        .map_err(|_| io::ErrorKind::InvalidData)?
+        .checked_sub(4)
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let mut body = vec![0_u8; len];
+    stream.read_exact(&mut body)?;
+    Ok(Some(body))
+}
+
+// the client-first message of a SASL initial response: mechanism, NUL, length, then the data
+fn client_nonce(body: &[u8]) -> Option<String> {
+    let nul = body.iter().position(|b| *b == 0)?;
+    let data = String::from_utf8_lossy(body.get(nul.checked_add(5)?..)?).into_owned();
+    data.split("r=").nth(1).map(str::to_owned)
+}
+
+// a SCRAM exchange that ends in a forged server-final message and then a success
+fn bad_final(stream: &mut Stream) -> io::Result<Reply> {
+    let Some(first) = read_typed(stream)? else {
+        return Ok(Reply::Closed);
+    };
+    let reply = Reply::Bytes(first.len() + 5);
+    let nonce = client_nonce(&first).ok_or(io::ErrorKind::InvalidData)?;
+    let mut challenge = 11_u32.to_be_bytes().to_vec();
+    challenge.extend_from_slice(format!("r={nonce}srvnonce,s=c2FsdHNhbHQ=,i=4096").as_bytes());
+    stream.write_all(&message(b'R', &challenge)?)?;
+    stream.flush()?;
+    if read_typed(stream)?.is_none() {
+        return Ok(reply);
+    }
+    let mut last = 12_u32.to_be_bytes().to_vec();
+    last.extend_from_slice(b"v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+    stream.write_all(&message(b'R', &last)?)?;
+    stream.write_all(&message(b'R', &0_u32.to_be_bytes())?)?;
+    stream.write_all(&session_start()?)?;
+    stream.flush()?;
+    drain(stream);
+    Ok(reply)
 }
 
 // what a real server sends after a successful authentication, enough for a session to open
@@ -271,6 +389,24 @@ fn session_start() -> io::Result<Vec<u8>> {
     out.extend(message(b'K', &[0, 0, 0, 7, 0, 0, 0, 9])?);
     out.extend(message(b'Z', b"I")?);
     Ok(out)
+}
+
+fn first_reply(stream: &mut Stream) -> Reply {
+    let mut buf = [0_u8; 256];
+    match stream.read(&mut buf) {
+        Ok(0) => Reply::Closed,
+        Ok(n) => Reply::Bytes(n),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Reply::TimedOut
+        }
+        // a reset or a missing close_notify is the client going away
+        Err(_) => Reply::Closed,
+    }
 }
 
 // reads to the end of the stream; a client that gives up closes it, possibly without close_notify
@@ -298,6 +434,14 @@ fn converse(
     if matches!(first, Some((SSL_REQUEST, _))) {
         seen.ssl_request = true;
         match (script.tls, tls) {
+            (Tls::AcceptThenPlaintext, _) => {
+                stream.write_all(b"S")?;
+                stream.write_all(&auth_request(Auth::Ok)?)?;
+                stream.write_all(&session_start()?)?;
+                stream.flush()?;
+                drain(&mut stream);
+                return Ok(());
+            }
             (Tls::Accept, Some(config)) => {
                 stream.write_all(b"S")?;
                 let conn = ServerConnection::new(config).map_err(io::Error::other)?;
@@ -322,13 +466,15 @@ fn converse(
                 stream.write_all(&session_start()?)?;
             }
             stream.flush()?;
-            if script.auth == Auth::Ok {
-                drain(&mut stream);
+            if script.auth == Auth::ScramBadFinal {
+                seen.after_auth_request = bad_final(&mut stream)?;
             } else {
                 // a client that answers waits for the next message, so the first bytes are enough;
-                // one that refuses closes the socket, which ends the read with nothing
-                let mut buf = [0_u8; 256];
-                seen.after_auth_request = stream.read(&mut buf).unwrap_or(0);
+                // one that refuses closes the socket, which is an end of stream and not a timeout
+                seen.after_auth_request = first_reply(&mut stream);
+                if script.auth == Auth::Ok {
+                    drain(&mut stream);
+                }
             }
             return Ok(());
         }

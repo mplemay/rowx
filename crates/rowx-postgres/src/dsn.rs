@@ -787,6 +787,18 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicate_channel_binding_resolves_last_wins() -> Result<(), Error> {
+        for dsn in [
+            "postgres://u@h/db?channel_binding=require&channel_binding=disable",
+            "host=h channel_binding=require channel_binding=disable",
+        ] {
+            let opts = ConnectOptions::from_dsn(dsn)?;
+            assert_eq!(opts.channel_binding.as_deref(), Some("disable"), "{dsn}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn an_invalid_channel_binding_names_the_key_and_never_the_value() {
         for dsn in [
             "host=h channel_binding=Zq9bogus",

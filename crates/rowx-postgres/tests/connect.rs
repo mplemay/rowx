@@ -2,7 +2,7 @@
 pub mod common;
 
 use common::TestResult;
-use common::fake_server::{Auth, FakeServer, Script, Tls};
+use common::fake_server::{Auth, FakeServer, Reply, Script, Tls};
 use rowx_core::error::CoreError;
 use rowx_postgres::conn::Connection;
 use rowx_postgres::dsn::ConnectOptions;
@@ -167,7 +167,7 @@ async fn channel_binding_require_answers_no_password_request_in_clear() -> TestR
             .try_into()
             .map_err(|_| "one connection")?;
         assert!(seen.startup_in_clear(), "{auth:?}: {seen:?}");
-        assert_eq!(seen.after_auth_request, 0, "{auth:?}: {seen:?}");
+        assert_eq!(seen.after_auth_request, Reply::Closed, "{auth:?}: {seen:?}");
     }
     Ok(())
 }
@@ -186,7 +186,7 @@ async fn channel_binding_require_answers_no_password_request_under_tls() -> Test
             .try_into()
             .map_err(|_| "one connection")?;
         assert!(seen.startup_in_tls(), "{auth:?}: {seen:?}");
-        assert_eq!(seen.after_auth_request, 0, "{auth:?}: {seen:?}");
+        assert_eq!(seen.after_auth_request, Reply::Closed, "{auth:?}: {seen:?}");
     }
     Ok(())
 }
@@ -202,7 +202,8 @@ async fn channel_binding_prefer_answers_the_password_request() -> TestResult {
         }
         let seen = server.finished(3)?;
         assert!(
-            seen.iter().all(|s| s.after_auth_request > 0),
+            seen.iter()
+                .all(|s| matches!(s.after_auth_request, Reply::Bytes(_))),
             "{auth:?}: {seen:?}"
         );
     }
@@ -422,8 +423,151 @@ async fn channel_binding_require_fails_against_a_server_without_tls() -> TestRes
     };
     // an authentication failure of the client's own making, not a server's rejection (which is `Db`)
     assert!(
-        matches!(&err, Error::Interface(m) if m == "authentication error"),
+        matches!(&err, Error::Interface(m) if m == "authentication error: server did not use channel binding"),
         "{err:?}"
     );
+    Ok(())
+}
+
+fn root_option(certs: &std::path::Path) -> String {
+    format!("sslrootcert={}", certs.join("ca.crt").display())
+}
+
+// connects to a one-script server and returns the failure with what the server saw of the connection
+async fn refused(
+    tls: Tls,
+    auth: Auth,
+    certs: Option<&std::path::Path>,
+    extra: &str,
+) -> TestResult<(Error, common::fake_server::Seen)> {
+    let server = FakeServer::start(vec![script(tls, auth)], certs)?;
+    let result = connect_fake(server.port(), extra).await;
+    let Err(err) = result else {
+        return Err(format!("{auth:?} {extra}: connect unexpectedly succeeded").into());
+    };
+    assert!(!err.to_string().contains("fake-secret-pw"), "{err}");
+    let [seen] = server
+        .finished(1)?
+        .try_into()
+        .map_err(|_| "one connection")?;
+    Ok((err, seen))
+}
+
+#[tokio::test]
+async fn channel_binding_require_names_the_refusal() -> TestResult {
+    let (err, _) = refused(
+        Tls::Refuse,
+        Auth::Cleartext,
+        None,
+        "channel_binding=require",
+    )
+    .await?;
+    assert_eq!(
+        err,
+        Error::Interface("authentication error: server did not use channel binding".to_owned())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn channel_binding_require_rejects_authentication_ok_without_auth() -> TestResult {
+    let (_, seen) = refused(Tls::Refuse, Auth::Ok, None, "channel_binding=require").await?;
+    assert!(seen.startup_in_clear(), "{seen:?}");
+    assert_eq!(seen.after_auth_request, Reply::Closed, "{seen:?}");
+    let Some(certs) = common::test_certs()? else {
+        return Ok(());
+    };
+    let (_, seen) = refused(
+        Tls::Accept,
+        Auth::Ok,
+        Some(&certs),
+        "sslmode=require channel_binding=require",
+    )
+    .await?;
+    assert!(seen.startup_in_tls(), "{seen:?}");
+    assert_eq!(seen.after_auth_request, Reply::Closed, "{seen:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn channel_binding_require_rejects_scram_plus_over_plaintext() -> TestResult {
+    let (_, seen) = refused(Tls::Refuse, Auth::OnlyPlus, None, "channel_binding=require").await?;
+    assert!(seen.startup_in_clear(), "{seen:?}");
+    assert_eq!(seen.after_auth_request, Reply::Closed, "{seen:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn channel_binding_require_refuses_gss_and_sspi() -> TestResult {
+    for auth in [Auth::Gss, Auth::Sspi] {
+        let (_, seen) = refused(Tls::Refuse, auth, None, "channel_binding=require").await?;
+        assert!(seen.startup_in_clear(), "{auth:?}: {seen:?}");
+        assert_eq!(seen.after_auth_request, Reply::Closed, "{auth:?}: {seen:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bad_scram_server_signature_fails_even_if_the_server_then_says_ok() -> TestResult {
+    let Some(certs) = common::test_certs()? else {
+        return Ok(());
+    };
+    let (err, seen) = refused(
+        Tls::Accept,
+        Auth::ScramBadFinal,
+        Some(&certs),
+        "sslmode=require channel_binding=require",
+    )
+    .await?;
+    assert!(seen.startup_in_tls(), "{seen:?}");
+    assert!(
+        matches!(seen.after_auth_request, Reply::Bytes(_)),
+        "{seen:?}"
+    );
+    assert!(
+        matches!(&err, Error::Interface(m) if m.starts_with("authentication error")),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn verify_full_against_a_wrong_host_certificate_fails_before_the_startup_message()
+-> TestResult {
+    let Some(certs) = common::test_certs()? else {
+        return Ok(());
+    };
+    if !certs.join("wrong-host.crt").exists() {
+        return Err("scripts/gen-certs.sh did not generate wrong-host.crt".into());
+    }
+    let server = FakeServer::start_with_cert(
+        vec![script(Tls::Accept, Auth::Ok)],
+        Some(&certs),
+        "wrong-host",
+    )?;
+    let extra = format!("sslmode=verify-full {}", root_option(&certs));
+    assert!(connect_fake(server.port(), &extra).await.is_err());
+    let [seen] = server
+        .finished(1)?
+        .try_into()
+        .map_err(|_| "one connection")?;
+    assert!(seen.ssl_request && seen.first.is_none(), "{seen:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn s_followed_by_plaintext_never_falls_back_to_plaintext() -> TestResult {
+    let Some(certs) = common::test_certs()? else {
+        return Ok(());
+    };
+    let verify_full = format!("sslmode=verify-full {}", root_option(&certs));
+    for mode in [verify_full.as_str(), "sslmode=require", "sslmode=prefer"] {
+        let (_, seen) = refused(Tls::AcceptThenPlaintext, Auth::Ok, None, mode).await?;
+        assert!(seen.ssl_request, "{mode}: {seen:?}");
+        assert!(
+            !seen.startup_in_clear() && !seen.startup_in_tls(),
+            "{mode}: {seen:?}"
+        );
+    }
     Ok(())
 }
