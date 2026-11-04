@@ -55,8 +55,9 @@ pub fn decode(raw: &[u8]) -> Result<Cube, CubeError> {
         return Err(CubeError::Dimensions(dim));
     }
     let is_point = header & POINT_BIT != 0;
-    let count = if is_point { dim } else { 2 * dim };
-    let expected = HEADER_LEN + count * F64_LEN;
+    // dim <= MAX_DIM was checked above, so these cannot saturate
+    let count = if is_point { dim } else { dim.saturating_mul(2) };
+    let expected = count.saturating_mul(F64_LEN).saturating_add(HEADER_LEN);
     if raw.len() != expected {
         return Err(CubeError::Length {
             dim,
@@ -68,7 +69,10 @@ pub fn decode(raw: &[u8]) -> Result<Cube, CubeError> {
     let upper_right = if is_point {
         lower_left.clone()
     } else {
-        floats(&data[dim * F64_LEN..], dim)
+        floats(
+            data.get(dim.saturating_mul(F64_LEN)..).unwrap_or_default(),
+            dim,
+        )
     };
     Ok(Cube {
         lower_left,
@@ -102,7 +106,7 @@ pub fn encode(cube: &Cube) -> Result<Vec<u8>, CubeError> {
     } else {
         dim_bits
     };
-    let mut out = Vec::with_capacity(HEADER_LEN + 2 * dim * F64_LEN);
+    let mut out = Vec::with_capacity(dim.saturating_mul(2 * F64_LEN).saturating_add(HEADER_LEN));
     out.extend_from_slice(&header.to_be_bytes());
     let corners: &[&[f64]] = if is_point {
         &[&cube.lower_left]
@@ -133,16 +137,16 @@ mod tests {
     #[test]
     fn a_point_is_written_once_with_the_point_flag() {
         let raw = encode(&cube(&[1.0, 2.0], &[1.0, 2.0])).unwrap_or_default();
-        assert_eq!(&raw[..4], [0x80, 0, 0, 2]);
-        assert_eq!(raw.len(), 4 + 2 * 8);
+        assert_eq!(raw.get(..4), Some(&[0x80, 0, 0, 2][..]));
+        assert_eq!(raw.len(), 20);
         assert_eq!(decode(&raw), Ok(cube(&[1.0, 2.0], &[1.0, 2.0])));
     }
 
     #[test]
     fn a_box_is_written_as_both_corners() {
         let raw = encode(&cube(&[0.0, 0.0], &[1.0, 2.0])).unwrap_or_default();
-        assert_eq!(&raw[..4], [0, 0, 0, 2]);
-        assert_eq!(raw.len(), 4 + 4 * 8);
+        assert_eq!(raw.get(..4), Some(&[0, 0, 0, 2][..]));
+        assert_eq!(raw.len(), 36);
         assert_eq!(decode(&raw), Ok(cube(&[0.0, 0.0], &[1.0, 2.0])));
     }
 
@@ -179,9 +183,30 @@ mod tests {
     }
 
     #[test]
+    fn the_widest_cube_round_trips_and_checks_its_length() {
+        let wide = vec![1.5; MAX_DIM];
+        let other = vec![2.5; MAX_DIM];
+        let raw = encode(&cube(&wide, &other)).unwrap_or_default();
+        assert_eq!(raw.len(), 4 + 2 * MAX_DIM * 8);
+        assert_eq!(decode(&raw), Ok(cube(&wide, &other)));
+        let (_, short) = raw.split_last().unwrap_or((&0, &[]));
+        assert_eq!(
+            decode(short),
+            Err(CubeError::Length {
+                dim: MAX_DIM,
+                expected: raw.len(),
+                got: short.len()
+            })
+        );
+        let point = encode(&cube(&wide, &wide)).unwrap_or_default();
+        assert_eq!(point.len(), 4 + MAX_DIM * 8);
+        assert_eq!(decode(&point), Ok(cube(&wide, &wide)));
+    }
+
+    #[test]
     fn negative_zero_is_not_collapsed_into_a_point() {
         let raw = encode(&cube(&[0.0], &[-0.0])).unwrap_or_default();
-        assert_eq!(raw[0], 0);
+        assert_eq!(raw.first(), Some(&0));
     }
 
     proptest! {

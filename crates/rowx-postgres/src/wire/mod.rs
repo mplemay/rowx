@@ -1,3 +1,6 @@
+// wire codecs take untrusted bytes: no panicking index, slice or arithmetic
+#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+
 pub mod array;
 pub mod bits;
 pub mod cube;

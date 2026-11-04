@@ -30,7 +30,7 @@ pub fn decode<'a>(raw: &'a [u8], name: &'static str) -> Result<&'a str, LtreeErr
 
 #[must_use]
 pub fn encode(text: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(text.len() + 1);
+    let mut out = Vec::with_capacity(text.len().saturating_add(1));
     out.push(VERSION);
     out.extend_from_slice(text.as_bytes());
     out

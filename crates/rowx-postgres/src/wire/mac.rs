@@ -39,7 +39,8 @@ pub fn decode(raw: &[u8], width: usize) -> Result<String, MacError> {
             got: raw.len(),
         });
     }
-    let mut out = String::with_capacity(width * 3);
+    // width equals raw.len() here, so this cannot saturate
+    let mut out = String::with_capacity(width.saturating_mul(3));
     for (index, byte) in raw.iter().enumerate() {
         if index > 0 {
             out.push(':');
@@ -63,8 +64,12 @@ fn hex_pairs(text: &str) -> Option<Vec<u8>> {
         if !text.is_ascii() || !text.len().is_multiple_of(2) {
             return None;
         }
-        (0..text.len() / 2)
-            .filter_map(|i| text.get(i * 2..i * 2 + 2))
+        // ASCII and even length, so every chunk is a whole two-character str
+        text.as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter_map(|pair| std::str::from_utf8(pair).ok())
             .collect()
     };
     digits
@@ -137,6 +142,26 @@ mod tests {
             encode("08:00:2b:01:02:03", MAC8_LEN),
             Ok(vec![8, 0, 0x2b, 0xff, 0xfe, 1, 2, 3])
         );
+    }
+
+    #[test]
+    fn bare_digits_must_be_ascii_and_even() {
+        assert_eq!(
+            encode("08002B010203", MAC_LEN),
+            Ok(vec![8, 0, 0x2b, 1, 2, 3])
+        );
+        assert!(matches!(
+            encode("08002b01020", MAC_LEN),
+            Err(MacError::Syntax(_))
+        ));
+        assert!(matches!(
+            encode("éééééé", MAC_LEN),
+            Err(MacError::Syntax(_))
+        ));
+        assert!(matches!(
+            encode("0800 b010203", MAC_LEN),
+            Err(MacError::Syntax(_))
+        ));
     }
 
     #[test]
