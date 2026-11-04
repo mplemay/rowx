@@ -54,6 +54,7 @@ dev = [
     "shellcheck-py==0.11.0.1",
     "shfmt-py==4.2.0",
     "ty>=0.0.95",
+    "zizmor==1.32.0",
 ]
 bench = [
     "asyncpg>=0.31.0",

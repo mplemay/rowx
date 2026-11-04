@@ -84,8 +84,9 @@ jobs:
         working-directory: fuzz
         env:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '60' }}
+          FUZZ_TARGET: ${{ matrix.target }}
         # an input that makes a decoder allocate past the limit fails the run instead of exhausting the runner
-        run: cargo +nightly fuzz run "${{ matrix.target }}" -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=2048
+        run: cargo +nightly fuzz run "$FUZZ_TARGET" -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=2048
 
       - name: Upload crashing inputs
         if: failure()
