@@ -13,7 +13,37 @@ use crate::dsn::{ConnectOptions, ParsedDsn};
 use crate::error::Error;
 
 /// The reset a pool runs on release; the same text as `rowx.postgres.RESET_QUERY`.
-pub const RESET_QUERY: &str = "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;";
+pub const RESET_QUERY: &str = "RESET SESSION AUTHORIZATION; RESET ALL; SELECT pg_catalog.pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; DISCARD TEMP;";
+
+/// Fails unless the session is idle.
+///
+/// Inside a transaction `now()` is the transaction's start, so it differs from `statement_timestamp()`. Names are
+/// qualified because the batch runs under the previous checkout's `search_path`.
+pub(crate) const IDLE_GUARD: &str = "SELECT 1 OPERATOR(pg_catalog./) (pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp())::pg_catalog.int4;";
+
+/// `IDLE_GUARD` without its trailing `;`, for sending on its own.
+pub(crate) const IDLE_GUARD_BARE: &str = "SELECT 1 OPERATOR(pg_catalog./) (pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp())::pg_catalog.int4";
+
+/// The simple queries a release sends in order, empty when there is nothing to send.
+///
+/// `rollback` is the "maybe in a transaction" flag: a set flag sends `ROLLBACK` first (even without a reset query),
+/// a clear one puts the idle guard in front of the reset query. The default query goes out as one batch; a custom one
+/// is sent alone, because a multi-statement batch is an implicit transaction and statements such as `DISCARD ALL` or
+/// `VACUUM` cannot run in one.
+#[must_use]
+pub fn reset_batches(query: Option<&str>, rollback: bool) -> Vec<String> {
+    let (first, bare) = if rollback {
+        ("ROLLBACK;", "ROLLBACK")
+    } else {
+        (IDLE_GUARD, IDLE_GUARD_BARE)
+    };
+    match query {
+        None if rollback => vec!["ROLLBACK".to_owned()],
+        None => Vec::new(),
+        Some(query) if query == RESET_QUERY => vec![format!("{first} {query}")],
+        Some(query) => vec![bare.to_owned(), query.to_owned()],
+    }
+}
 
 pub type Pool = rowx_core::pool::Pool<PgManager>;
 pub type Pooled = rowx_core::pool::Pooled<PgManager>;
@@ -114,14 +144,17 @@ impl Manage for PgManager {
         if conn.reset_done.swap(false, Ordering::AcqRel) && !rollback {
             return Ok(());
         }
-        // an unconditional ROLLBACK would log a server WARNING on every idle release
-        let sql = match (rollback, self.reset_query.as_deref()) {
-            (false, None) => return Ok(()),
-            (true, None) => "ROLLBACK".to_owned(),
-            (false, Some(query)) => query.to_owned(),
-            (true, Some(query)) => format!("ROLLBACK; {query}"),
-        };
-        conn.cancel.backend.conn.lock().await.simple(&sql).await
+        let batches = reset_batches(self.reset_query.as_deref(), rollback);
+        let guard = conn.cancel.backend.conn.lock().await;
+        let mut result = Ok(());
+        for sql in &batches {
+            result = guard.simple(sql).await;
+            if result.is_err() {
+                break;
+            }
+        }
+        drop(guard);
+        result
     }
 
     fn is_broken(&self, conn: &PgConn) -> bool {
@@ -170,6 +203,31 @@ mod tests {
         let manager = PgManager::new(&options, runtime.handle().clone(), None)?;
         assert!(!format!("{manager:?}").contains("Zq9"));
         Ok(())
+    }
+
+    #[test]
+    fn reset_batches_guard_only_when_the_flag_is_clear() {
+        assert_eq!(reset_batches(None, false).len(), 0);
+        assert_eq!(reset_batches(None, true), ["ROLLBACK"]);
+        assert_eq!(
+            reset_batches(Some(RESET_QUERY), true),
+            [format!("ROLLBACK; {RESET_QUERY}")]
+        );
+        assert_eq!(
+            reset_batches(Some(RESET_QUERY), false),
+            [format!("{IDLE_GUARD} {RESET_QUERY}")]
+        );
+        // a custom query is sent alone so it can be DISCARD ALL or VACUUM
+        assert_eq!(
+            reset_batches(Some("DISCARD ALL"), true),
+            ["ROLLBACK", "DISCARD ALL"]
+        );
+        assert_eq!(
+            reset_batches(Some("DISCARD ALL"), false),
+            [IDLE_GUARD_BARE, "DISCARD ALL"]
+        );
+        assert_eq!(format!("{IDLE_GUARD_BARE};"), IDLE_GUARD);
+        assert!(!RESET_QUERY.contains("DEALLOCATE"));
     }
 
     #[test]

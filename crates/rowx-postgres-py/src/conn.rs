@@ -195,10 +195,10 @@ impl Connection {
     }
 
     fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        exec::simple(py, &self.cancel, &self.access, String::new(), false)
+        exec::simple(py, &self.cancel, &self.access, Some(String::new()), false)
     }
 
-    fn reset<'py>(&self, py: Python<'py>, query: String) -> PyResult<Bound<'py, PyAny>> {
+    fn reset<'py>(&self, py: Python<'py>, query: Option<String>) -> PyResult<Bound<'py, PyAny>> {
         exec::simple(py, &self.cancel, &self.access, query, true)
     }
 

@@ -175,10 +175,11 @@ pub async fn extension_owners(client: &Client, oids: &[u32]) -> Result<Owners, E
     }
     let rows = client
         .query(
-            "SELECT d.objid, e.extname::text FROM pg_depend d \
-             JOIN pg_extension e ON e.oid = d.refobjid \
-             WHERE d.classid = 'pg_type'::regclass AND d.refclassid = 'pg_extension'::regclass \
-             AND d.deptype = 'e' AND d.objid = ANY($1::oid[])",
+            "SELECT d.objid, e.extname::pg_catalog.text FROM pg_catalog.pg_depend d \
+             JOIN pg_catalog.pg_extension e ON e.oid OPERATOR(pg_catalog.=) d.refobjid \
+             WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_type'::pg_catalog.regclass \
+             AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass \
+             AND d.deptype OPERATOR(pg_catalog.=) 'e' AND d.objid OPERATOR(pg_catalog.=) ANY($1::pg_catalog.oid[])",
             &[&oids],
         )
         .await?;
@@ -239,17 +240,17 @@ pub fn catalog_queries() -> u64 {
 // one round trip for every column with a table origin; foreign tables and views are never NotNull here, and a
 // view is resolved afterwards from its definition
 const BASE_NULLABILITY_SQL: &str = "\
-SELECT o.relid, o.attnum, n.nspname::text, c.relname::text, a.attname::text, CASE \
-    WHEN c.relkind = 'v' THEN 'view' \
-    WHEN c.relkind NOT IN ('r', 'p', 'm') THEN 'foreign_or_view' \
+SELECT o.relid, o.attnum, n.nspname::pg_catalog.text, c.relname::pg_catalog.text, a.attname::pg_catalog.text, CASE \
+    WHEN c.relkind OPERATOR(pg_catalog.=) 'v' THEN 'view' \
+    WHEN c.relkind OPERATOR(pg_catalog.<>) ALL (ARRAY['r', 'p', 'm']::pg_catalog.\"char\"[]) THEN 'foreign_or_view' \
     WHEN NOT a.attnotnull THEN 'nullable' \
-    WHEN EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = a.attrelid AND k.contype = 'n' \
-        AND NOT k.convalidated AND k.conkey = ARRAY[a.attnum]) THEN 'not_validated' \
+    WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid OPERATOR(pg_catalog.=) a.attrelid AND k.contype OPERATOR(pg_catalog.=) 'n' \
+        AND NOT k.convalidated AND k.conkey OPERATOR(pg_catalog.=) ARRAY[a.attnum]) THEN 'not_validated' \
     ELSE 'not_null' END \
-FROM unnest($1::oid[], $2::int2[]) AS o(relid, attnum) \
-JOIN pg_attribute a ON a.attrelid = o.relid AND a.attnum = o.attnum \
-JOIN pg_class c ON c.oid = a.attrelid \
-JOIN pg_namespace n ON n.oid = c.relnamespace";
+FROM ROWS FROM (pg_catalog.unnest($1::pg_catalog.oid[]), pg_catalog.unnest($2::pg_catalog.int2[])) AS o(relid, attnum) \
+JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) o.relid AND a.attnum OPERATOR(pg_catalog.=) o.attnum \
+JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) a.attrelid \
+JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace";
 
 // the verdict, the origin and whether the relation is a view
 type Base = HashMap<(u32, i16), (NullReason, Origin, bool)>;
@@ -292,7 +293,7 @@ async fn typsends(client: &Client, oids: &[u32]) -> Result<HashMap<u32, String>,
     }
     let rows = client
         .query(
-            "SELECT oid, typsend::text FROM pg_type WHERE oid = ANY($1::oid[])",
+            "SELECT oid, typsend::pg_catalog.text FROM pg_catalog.pg_type WHERE oid OPERATOR(pg_catalog.=) ANY($1::pg_catalog.oid[])",
             &[&oids],
         )
         .await?;
@@ -305,12 +306,14 @@ async fn typsends(client: &Client, oids: &[u32]) -> Result<HashMap<u32, String>,
 // the leaf columns that are NOT NULL on a real table (never a view, foreign table or NOT VALID constraint);
 // a failed lookup proves nothing, so it is an empty set
 const LEAF_NOT_NULL_SQL: &str = "\
-SELECT l.s, l.r, l.c FROM unnest($1::text[], $2::text[], $3::text[]) AS l(s, r, c) \
-JOIN pg_namespace n ON n.nspname = l.s \
-JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = l.r AND c.relkind IN ('r', 'p') \
-JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = l.c AND a.attnotnull AND NOT a.attisdropped \
-WHERE NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = a.attrelid AND k.contype = 'n' \
-    AND NOT k.convalidated AND k.conkey = ARRAY[a.attnum])";
+SELECT l.s, l.r, l.c FROM ROWS FROM (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[]), \
+    pg_catalog.unnest($3::pg_catalog.text[])) AS l(s, r, c) \
+JOIN pg_catalog.pg_namespace n ON n.nspname OPERATOR(pg_catalog.=) l.s \
+JOIN pg_catalog.pg_class c ON c.relnamespace OPERATOR(pg_catalog.=) n.oid AND c.relname OPERATOR(pg_catalog.=) l.r \
+    AND c.relkind OPERATOR(pg_catalog.=) ANY (ARRAY['r', 'p']::pg_catalog.\"char\"[]) \
+JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) c.oid AND a.attname OPERATOR(pg_catalog.=) l.c AND a.attnotnull AND NOT a.attisdropped \
+WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid OPERATOR(pg_catalog.=) a.attrelid AND k.contype OPERATOR(pg_catalog.=) 'n' \
+    AND NOT k.convalidated AND k.conkey OPERATOR(pg_catalog.=) ARRAY[a.attnum])";
 
 async fn not_null_leaves(client: &Client, leaves: &[Origin]) -> explain::NotNullLeaves {
     if leaves.is_empty() {
@@ -339,8 +342,8 @@ async fn not_null_leaves(client: &Client, leaves: &[Origin]) -> explain::NotNull
 // A function with a whitelisted name outside `pg_catalog` may shadow the built-in under the session's
 // `search_path`, because the plan prints functions by bare name. A failed lookup is treated as a shadow.
 const SHADOWED_FUNCTIONS_SQL: &str = "\
-SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-WHERE p.proname = ANY($1::text[]) AND n.nspname <> 'pg_catalog' LIMIT 1";
+SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace \
+WHERE p.proname OPERATOR(pg_catalog.=) ANY($1::pg_catalog.text[]) AND n.nspname OPERATOR(pg_catalog.<>) 'pg_catalog' LIMIT 1";
 
 async fn functions_are_unshadowed(client: &Client) -> bool {
     let names: Vec<&str> = explain::WHITELISTED_FUNCTIONS.to_vec();
@@ -502,7 +505,8 @@ async fn live_attnums(client: &Client, view: u32) -> Option<Vec<i16>> {
     let rows = client
         .query(
             "SELECT attnum FROM pg_catalog.pg_attribute \
-             WHERE attrelid = $1::oid AND attnum > 0 AND NOT attisdropped ORDER BY attnum",
+             WHERE attrelid OPERATOR(pg_catalog.=) $1::pg_catalog.oid AND attnum OPERATOR(pg_catalog.>) 0 AND NOT attisdropped \
+             ORDER BY attnum",
             &[&view],
         )
         .await
@@ -567,15 +571,19 @@ async fn savepointed_view_verdicts(
 // the view is eligible unless it has a rule besides `_RETURN`, or is `security_invoker` over a relation the
 // role cannot read
 const VIEW_ELIGIBLE_SQL: &str = "\
-SELECT c.relkind = 'v' \
-    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid AND r.rulename <> '_RETURN') \
-    AND (NOT COALESCE((SELECT bool_or(o.option_value::boolean) FROM pg_catalog.pg_options_to_table(c.reloptions) o \
-            WHERE o.option_name = 'security_invoker'), false) \
+SELECT c.relkind OPERATOR(pg_catalog.=) 'v' \
+    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class OPERATOR(pg_catalog.=) c.oid \
+        AND r.rulename OPERATOR(pg_catalog.<>) '_RETURN') \
+    AND (NOT COALESCE((SELECT pg_catalog.bool_or(o.option_value::boolean) \
+            FROM pg_catalog.pg_options_to_table(c.reloptions) o \
+            WHERE o.option_name OPERATOR(pg_catalog.=) 'security_invoker'), false) \
         OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r \
-            JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass AND d.objid = r.oid \
-                AND d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid <> c.oid \
-            WHERE r.ev_class = c.oid AND NOT pg_catalog.has_table_privilege(d.refobjid, 'SELECT'))) \
-FROM pg_catalog.pg_class c WHERE c.oid = $1::oid";
+            JOIN pg_catalog.pg_depend d ON d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass \
+                AND d.objid OPERATOR(pg_catalog.=) r.oid \
+                AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass \
+                AND d.refobjid OPERATOR(pg_catalog.<>) c.oid \
+            WHERE r.ev_class OPERATOR(pg_catalog.=) c.oid AND NOT pg_catalog.has_table_privilege(d.refobjid, 'SELECT'))) \
+FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) $1::pg_catalog.oid";
 
 async fn definition_verdicts(client: &Client, view: u32, ctx: &mut ViewCtx) -> Option<Vec<bool>> {
     let eligible: bool = client
@@ -588,7 +596,10 @@ async fn definition_verdicts(client: &Client, view: u32, ctx: &mut ViewCtx) -> O
         return None;
     }
     let definition: String = client
-        .query_one("SELECT pg_catalog.pg_get_viewdef($1::oid, false)", &[&view])
+        .query_one(
+            "SELECT pg_catalog.pg_get_viewdef($1::pg_catalog.oid, false)",
+            &[&view],
+        )
         .await
         .ok()?
         .try_get(0)

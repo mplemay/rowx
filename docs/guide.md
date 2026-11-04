@@ -640,9 +640,16 @@ discards the connection.
 - `setup` runs before each checkout.
 - `reset` runs at release, after the reset query.
 
-On release the pool runs `reset_query` (by default `RESET_QUERY`: `SELECT pg_advisory_unlock_all(); CLOSE ALL;
-UNLISTEN *; RESET ALL;`), preceded by a `ROLLBACK` when the connection may be inside a transaction. It does not
-`DISCARD ALL`, so the statement cache survives. Pass `reset_query=None` to turn it off.
+On release the pool runs `reset_query` (by default `RESET_QUERY`: `RESET SESSION AUTHORIZATION; RESET ALL; SELECT
+pg_catalog.pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; DISCARD TEMP;`), preceded by a `ROLLBACK` when the
+connection may be inside a transaction. When it may not be, the pool puts a short idle check in front of the reset
+(default or custom), and a reset that fails the check, because a transaction is unexpectedly open, discards the
+connection. The reset resets authorization first and then the settings, so the rest of it runs as the startup role with
+the startup `search_path`. It does not `DISCARD ALL` or `DEALLOCATE ALL`, so the statement cache survives. Pass
+`reset_query=None` to turn it off; an open transaction is still rolled back before a `reset` hook runs.
+
+`reset_query=None` is unsafe for a pool that serves more than one tenant or role: nothing then clears `SET ROLE`,
+`search_path`, temporary tables, advisory locks or custom settings between checkouts.
 
 `RESET ALL` returns session settings to their startup values. That is why `server_settings` survive a release (they
 are part of the startup options) while a `SET` run in `init` does not: put settings you want to keep in
@@ -681,8 +688,13 @@ A `fetch` on a pool acquires at its first row and holds that connection until th
 - **Fork.** A pool records its process id, and using it in a forked child raises `InterfaceError`. Create the pool
   after the fork (for gunicorn, do not create it at import time under `--preload`; create it in a worker start hook or
   the app's startup).
-- **What `RESET ALL` does not reset:** `SET ROLE`, `SET SESSION AUTHORIZATION` and temporary tables. Undo them
-  yourself, in a `reset` hook or a custom `reset_query`.
+- **What the reset resets:** the role and session authorization (`RESET SESSION AUTHORIZATION`; `RESET ALL` alone
+  doesn't cover them), settings, advisory locks, cursors, `LISTEN`s and temporary tables (`DISCARD TEMP`). A cached
+  statement that used a dropped temporary table fails on its next use, like any statement against a dropped table.
+  A custom `reset_query` replaces all of this, so keep the parts you need.
+- **SQL-level `PREPARE` is unsupported across checkouts.** The reset doesn't `DEALLOCATE ALL`, because that would
+  destroy the statements rowx caches, so a statement prepared with `PREPARE` may or may not survive into the next
+  checkout. Use bound parameters instead.
 - **Session encoding drift.** rowx sends UTF-8 and standard-conforming strings, and watches the server's parameter
   reports. If application SQL runs `SET client_encoding` to anything but `UTF8` (or its alias `UNICODE`) or `SET
   standard_conforming_strings = off` (also `SET LOCAL`), the connection fails every later call with `InterfaceError`

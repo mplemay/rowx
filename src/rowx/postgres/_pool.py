@@ -264,10 +264,9 @@ class Pool:
         # a task that still runs on the connection is cancelled and settled first, so the reset
         # query and then the hook see an idle connection
         await impl._settle()  # ruff: ignore[private-member-access]
-        done = False
-        if self._reset_query is not None:
-            await impl.reset(self._reset_query)
-            done = True
+        # with no reset query this still ends an open transaction, so the hook sees an idle connection
+        await impl.reset(self._reset_query)
+        done = self._reset_query is not None
         if self._reset is not None:
             await self._call(self._reset, impl)
         return done

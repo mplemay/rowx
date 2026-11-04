@@ -5,7 +5,9 @@ from rowx.errors import ConnectionBusyError, InterfaceError
 from rowx.postgres._options import ConnectOptions
 from rowx.postgres._transaction import TrackedStream, Transaction
 
-RESET_QUERY: Final[str] = "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;"
+RESET_QUERY: Final[str] = (
+    "RESET SESSION AUTHORIZATION; RESET ALL; SELECT pg_catalog.pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; DISCARD TEMP;"
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

@@ -297,11 +297,14 @@ pub fn rollback_to_savepoint_sql(n: u32) -> String {
 #[must_use]
 pub fn opens_transaction(sql: &str) -> bool {
     let mut rest = sql.trim_start();
-    // leading comments do not change the statement
+    // leading comments and empty statements (`;`) do not change the statement
     loop {
-        if let Some(after) = rest.strip_prefix("--") {
+        if let Some(after) = rest.strip_prefix(';') {
+            rest = after.trim_start();
+        } else if let Some(after) = rest.strip_prefix("--") {
+            // the server ends a line comment at `\r` as well as `\n`
             rest = after
-                .split_once('\n')
+                .split_once(['\n', '\r'])
                 .map_or("", |(_, tail)| tail)
                 .trim_start();
         } else if let Some(after) = rest.strip_prefix("/*") {
@@ -436,8 +439,15 @@ mod tests {
             "begin isolation level serializable",
             "  Start TRANSACTION",
             "-- note\nSAVEPOINT a",
+            "-- note\rBEGIN",
+            "-- a\r\n-- b\rSTART TRANSACTION",
             "/* x */ begin;",
             "/* outer /* inner */ outer */ BEGIN",
+            ";BEGIN",
+            ";;START TRANSACTION",
+            "/**/;BEGIN",
+            "; -- x\nBEGIN",
+            " ; /* a */ ; SAVEPOINT a",
         ] {
             assert!(opens_transaction(sql), "{sql}");
         }
@@ -450,8 +460,12 @@ mod tests {
             "COMMIT",
             "",
             "-- BEGIN\nSELECT 1",
+            "-- BEGIN\rSELECT 1",
             "BEGINNING()",
             "startx",
+            ";",
+            "; SELECT 1",
+            ";-- BEGIN\nSELECT 1",
         ] {
             assert!(!opens_transaction(sql), "{sql}");
         }

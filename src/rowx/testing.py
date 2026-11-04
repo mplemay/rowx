@@ -129,13 +129,13 @@ async def connect_lock(server_dsn: str) -> tuple[Connection, str]:
 async def locked(lock_dsn: str, key: int) -> AsyncGenerator[Connection]:
     # a session lock on its own connection, released by closing it, so a crashed process never leaves it behind
     async with await connect(lock_dsn) as conn:
-        await query_unchecked[tuple[()]](t"SELECT pg_advisory_lock({key}::int8)").execute(conn)
+        await query_unchecked[tuple[()]](t"SELECT pg_catalog.pg_advisory_lock({key}::pg_catalog.int8)").execute(conn)
         yield conn
 
 
 async def exists(conn: Connection, name: str) -> bool:
     (found,) = await query_unchecked[tuple[bool]](
-        t"SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = {name})"
+        t"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname OPERATOR(pg_catalog.=) {name})"
     ).one(conn)
     return found
 
@@ -143,8 +143,9 @@ async def exists(conn: Connection, name: str) -> bool:
 async def stale_templates(conn: Connection, project: str, keep: str) -> list[str]:
     prefix = f"{TEMPLATE_PREFIX}{project}_"
     rows = await query_unchecked[tuple[str]](
-        t"SELECT datname FROM pg_database WHERE starts_with(datname, {prefix}) AND datname <> {keep} "
-        t"AND position({TMP_MARKER} IN datname) = 0 ORDER BY datname"
+        t"SELECT datname FROM pg_catalog.pg_database WHERE pg_catalog.starts_with(datname, {prefix}) "
+        t"AND datname OPERATOR(pg_catalog.<>) {keep} "
+        t"AND position({TMP_MARKER} IN datname) OPERATOR(pg_catalog.=) 0 ORDER BY datname"
     ).all(conn)
     return [name for (name,) in rows]
 
@@ -200,9 +201,9 @@ async def drop_stale(server_dsn: str, lock: Connection, project: str, keep: str)
     for stale in await stale_templates(lock, project, keep):
         key = template_key(stale)
         # a template another live session holds (its shared lock) is still in use, even while no clone is running
-        (free,) = await query_unchecked[tuple[bool]](t"SELECT pg_try_advisory_lock({LOCK_KEY}::int4, {key}::int4)").one(
-            lock
-        )
+        (free,) = await query_unchecked[tuple[bool]](
+            t"SELECT pg_catalog.pg_try_advisory_lock({LOCK_KEY}::pg_catalog.int4, {key}::pg_catalog.int4)"
+        ).one(lock)
         if not free:
             continue
         try:
@@ -211,7 +212,9 @@ async def drop_stale(server_dsn: str, lock: Connection, project: str, keep: str)
                 await query_unchecked[tuple[()]](t"ALTER DATABASE {stale:ident} WITH IS_TEMPLATE false").execute(lock)
                 await drop_database(server_dsn, stale)
         finally:
-            await query_unchecked[tuple[()]](t"SELECT pg_advisory_unlock({LOCK_KEY}::int4, {key}::int4)").execute(lock)
+            await query_unchecked[tuple[()]](
+                t"SELECT pg_catalog.pg_advisory_unlock({LOCK_KEY}::pg_catalog.int4, {key}::pg_catalog.int4)"
+            ).execute(lock)
 
 
 # reuses the template or builds it, under the build lock (`lock`) taken before the lookup
@@ -232,9 +235,9 @@ async def ensure_template(server_dsn: str, migrator: Migrator | None, name: str,
     key = template_key(name)
     try:
         async with locked(lock_dsn, build_key(name)) as lock:
-            await query_unchecked[tuple[()]](t"SELECT pg_advisory_lock_shared({LOCK_KEY}::int4, {key}::int4)").execute(
-                hold
-            )
+            await query_unchecked[tuple[()]](
+                t"SELECT pg_catalog.pg_advisory_lock_shared({LOCK_KEY}::pg_catalog.int4, {key}::pg_catalog.int4)"
+            ).execute(hold)
             await prepare(server_dsn, lock, migrator, name, keep_stale=keep_stale)
     except BaseException:
         await hold.close()

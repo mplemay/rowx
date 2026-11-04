@@ -3,18 +3,22 @@ import contextlib
 import inspect
 import os
 import random
+import secrets
 import warnings
 from collections import Counter
+from string.templatelib import Template
 from typing import TYPE_CHECKING, Final
 
+import psycopg
 import pytest
+from psycopg.sql import SQL, Identifier
 
 from rowx import query, query_unchecked
 from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError, PoolTimeoutError, RowShapeError
-from rowx.postgres import RESET_QUERY, Connection, Pool, connect
+from rowx.postgres import RESET_QUERY, Connection, ConnectOptions, Pool, connect
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -591,3 +595,283 @@ def test_a_drifted_idle_connection_is_not_reused(schema: str) -> None:
 
     first, second = asyncio.run(run())
     assert first != second
+
+
+@pytest.fixture
+def hostile() -> Iterator[str]:
+    # a schema `name` holding same-named functions and operators, and two roles `name_a` and `name_b`
+    name = f"rowx_h_{secrets.token_hex(6)}"
+    schema = Identifier(name)
+    roles = [Identifier(f"{name}_a"), Identifier(f"{name}_b")]
+    unlock = Identifier(name, "pg_advisory_unlock_all")
+    always_true = Identifier(name, "always_true")
+    setup = [
+        *(SQL("CREATE ROLE {}").format(role) for role in roles),
+        SQL("CREATE SCHEMA {}").format(schema),
+        SQL("CREATE FUNCTION {}() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$").format(unlock),
+        SQL("CREATE FUNCTION {}(timestamptz, timestamptz) RETURNS boolean LANGUAGE sql AS $$ SELECT true $$").format(
+            always_true
+        ),
+        SQL("CREATE OPERATOR {}.= (LEFTARG = timestamptz, RIGHTARG = timestamptz, FUNCTION = {})").format(
+            schema, always_true
+        ),
+    ]
+    with psycopg.connect(os.environ["ROWX_TEST_DSN"], autocommit=True) as admin:
+        for statement in setup:
+            admin.execute(statement)
+        try:
+            yield name
+        finally:
+            admin.execute(SQL("DROP SCHEMA {} CASCADE").format(schema))
+            for role in roles:
+                admin.execute(SQL("DROP ROLE {}").format(role))
+
+
+async def identity(conn: Connection) -> tuple[str, str]:
+    return await query[tuple[str, str]](t"SELECT current_user::text, session_user::text").one(conn)
+
+
+async def set_identity(conn: Connection, statement: str, role: str) -> None:
+    if statement == "SET ROLE":
+        await query_unchecked[tuple[()]](t"SET ROLE {role:ident}").execute(conn)
+    else:
+        await query_unchecked[tuple[()]](t"SET SESSION AUTHORIZATION {role:ident}").execute(conn)
+
+
+def pool_options(schema: str, **settings: str) -> ConnectOptions:
+    base = ConnectOptions.from_dsn(schema)
+    return ConnectOptions.from_dsn(schema, server_settings={**base.server_settings, **settings})
+
+
+@pytest.mark.parametrize("statement", ["SET ROLE", "SET SESSION AUTHORIZATION"])
+@pytest.mark.parametrize("startup_role", [False, True])
+def test_a_changed_role_does_not_survive_a_release(
+    schema: str, hostile: str, *, statement: str, startup_role: bool
+) -> None:
+    other = f"{hostile}_b"
+    startup = f"{hostile}_a"
+
+    async def run() -> tuple[tuple[str, str], tuple[str, str], tuple[str, str], int, int]:
+        options = pool_options(schema, **({"role": startup} if startup_role else {}))
+        async with Pool(options, max_size=1) as pool:
+            async with pool.acquire() as conn:
+                first, pid = await identity(conn), await backend_pid(conn)
+                await set_identity(conn, statement, other)
+                changed = await identity(conn)
+            async with pool.acquire() as conn:
+                return first, changed, await identity(conn), pid, await backend_pid(conn)
+
+    first, changed, after, pid, after_pid = asyncio.run(run())
+    assert pid == after_pid
+    assert other in changed
+    assert after == first
+    if startup_role:
+        # the role from the connection settings is the one that comes back
+        assert first[0] == startup
+    else:
+        assert first[0] == first[1]
+
+
+def test_search_path_does_not_survive_a_release(schema: str, hostile: str) -> None:
+    async def run() -> tuple[str, str, int, int]:
+        async with Pool(schema, max_size=1) as pool:
+            async with pool.acquire() as conn:
+                before, pid = await query[str](t"SHOW search_path").one(conn), await backend_pid(conn)
+                await query_unchecked[tuple[()]](t"SET search_path = {hostile:ident}, pg_catalog").execute(conn)
+            async with pool.acquire() as conn:
+                return before, await query[str](t"SHOW search_path").one(conn), pid, await backend_pid(conn)
+
+    before, after, pid, after_pid = asyncio.run(run())
+    assert pid == after_pid
+    assert after == before
+
+
+@pytest.mark.parametrize("explicit_transaction", [False, True])
+def test_a_temp_table_does_not_survive_a_release(schema: str, *, explicit_transaction: bool) -> None:
+    async def run() -> tuple[bool, int, int]:
+        async with Pool(schema, max_size=1) as pool:
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                if explicit_transaction:
+                    await query(t"BEGIN").execute(conn)
+                await query(t"CREATE TEMP TABLE leaked (id int)").execute(conn)
+                if explicit_transaction:
+                    await query(t"COMMIT").execute(conn)
+                assert await query[bool](t"SELECT to_regclass('pg_temp.leaked') IS NOT NULL").one(conn)
+            async with pool.acquire() as conn:
+                found = await query[bool](t"SELECT to_regclass('pg_temp.leaked') IS NOT NULL").one(conn)
+                return found, pid, await backend_pid(conn)
+
+    found, pid, after_pid = asyncio.run(run())
+    assert pid == after_pid
+    assert found is False
+
+
+@pytest.mark.parametrize("hooked", [False, True])
+def test_an_advisory_lock_does_not_survive_a_release_despite_a_shadowing_function(
+    schema: str, hostile: str, *, hooked: bool
+) -> None:
+    async def noop(_conn: Connection) -> None:
+        await asyncio.sleep(0)
+
+    async def locks(conn: Connection, pid: int) -> int:
+        return await query[int](t"SELECT count(*)::int4 FROM pg_locks WHERE locktype = 'advisory' AND pid = {pid}").one(
+            conn
+        )
+
+    async def run() -> tuple[int, int, int, int]:
+        async with Pool(schema, max_size=1, reset=noop if hooked else None) as pool:
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                await query(t"SELECT pg_advisory_lock({ADVISORY_KEY})").execute(conn)
+                # `pg_catalog` listed after the schema makes the schema's same-named function win a bare call
+                await query_unchecked[tuple[()]](t"SET search_path = {hostile:ident}, pg_catalog").execute(conn)
+                held = await locks(conn, pid)
+            async with pool.acquire() as conn:
+                return held, await locks(conn, pid), pid, await backend_pid(conn)
+
+    held, after, pid, after_pid = asyncio.run(run())
+    assert pid == after_pid
+    assert (held, after) == (1, 0)
+
+
+def test_a_custom_placeholder_setting_is_empty_after_a_release(schema: str) -> None:
+    async def run() -> tuple[str, int, int]:
+        async with Pool(schema, max_size=1) as pool:
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                await query(t"SET app.tenant = 'acme'").execute(conn)
+                assert await query[str](t"SHOW app.tenant").one(conn) == "acme"
+            async with pool.acquire() as conn:
+                return await query[str](t"SHOW app.tenant").one(conn), pid, await backend_pid(conn)
+
+    value, pid, after_pid = asyncio.run(run())
+    assert pid == after_pid
+    assert not value
+
+
+async def session_state(observer: Connection, pid: int) -> str:
+    return await query[str](t"SELECT state FROM pg_stat_activity WHERE pid = {pid}").one(observer)
+
+
+@pytest.mark.parametrize("reset_query", [RESET_QUERY, "SET work_mem = '7MB';"], ids=["default", "custom"])
+def test_a_begin_after_a_carriage_return_comment_is_rolled_back(schema: str, reset_query: str) -> None:
+    async def run() -> tuple[str, str, int, int]:
+        async with await connect(schema) as observer, Pool(schema, max_size=1, reset_query=reset_query) as pool:
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                # the server ends a line comment at a carriage return, so this opens a transaction
+                await query_unchecked[tuple[()]](t"-- opens a transaction\rBEGIN").execute(conn)
+                during = await session_state(observer, pid)
+            async with pool.acquire() as conn:
+                return during, await session_state(observer, pid), pid, await backend_pid(conn)
+
+    during, after, pid, after_pid = asyncio.run(run())
+    assert during == "idle in transaction"
+    assert after == "idle"
+    assert pid == after_pid
+
+
+@pytest.mark.parametrize("reset_query", [RESET_QUERY, "SET work_mem = '7MB';"], ids=["default", "custom"])
+def test_the_idle_guard_discards_a_connection_left_in_a_transaction(
+    schema: str, hostile: str, reset_query: str
+) -> None:
+    async def run() -> tuple[str, str, int, int]:
+        async with await connect(schema) as observer, Pool(schema, max_size=1, reset_query=reset_query) as pool:
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                # a reset that leaves a transaction open, which the "maybe in a transaction" flag does not see.
+                # The search path holds a same-named `=` for timestamptz that is always true
+                await query_unchecked[tuple[()]](t"SET search_path = {hostile:ident}, pg_catalog").execute(conn)
+                await conn._impl.reset("BEGIN;")
+                during = await session_state(observer, pid)
+            async with pool.acquire() as conn:
+                new_pid = await backend_pid(conn)
+                return during, await session_state(observer, new_pid), pid, new_pid
+
+    during, after, pid, new_pid = asyncio.run(run())
+    assert during == "idle in transaction"
+    assert after == "idle"
+    assert pid != new_pid
+
+
+@pytest.mark.parametrize("opener", [";BEGIN", ";;START TRANSACTION", "/**/;BEGIN", "; -- x\nBEGIN"])
+@pytest.mark.parametrize("hooked", [False, True])
+def test_a_transaction_opened_after_leading_semicolons_does_not_survive_a_release(
+    schema: str, opener: str, *, hooked: bool
+) -> None:
+    seen: list[str | None] = []
+
+    async def hook(conn: Connection) -> None:
+        # a transaction-local setting is still visible when the hook runs inside the transaction
+        seen.append(await query_unchecked[str | None](t"SELECT current_setting('app.secret', true)").one(conn))
+
+    async def run() -> tuple[str, str | None, int, int]:
+        async with (
+            await connect(schema) as observer,
+            Pool(schema, max_size=1, reset_query=None, reset=hook if hooked else None) as pool,
+        ):
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                await query_unchecked[tuple[()]](Template(opener)).execute(conn)
+                await query_unchecked[tuple[()]](t"SELECT set_config('app.secret', 'x', true)").execute(conn)
+            async with pool.acquire() as conn:
+                value = await query_unchecked[str | None](t"SELECT current_setting('app.secret', true)").one(conn)
+                return await session_state(observer, pid), value, pid, await backend_pid(conn)
+
+    state, value, pid, after_pid = asyncio.run(run())
+    assert state == "idle"
+    assert value in {None, ""}
+    assert pid == after_pid
+    assert all(item in {None, ""} for item in seen)
+    assert len(seen) == (2 if hooked else 0)
+
+
+@pytest.mark.parametrize("reset_query", ["DISCARD ALL", "VACUUM"])
+@pytest.mark.parametrize("open_transaction", [False, True])
+def test_a_custom_reset_query_that_cannot_run_in_a_transaction_keeps_the_connection(
+    schema: str, reset_query: str, *, open_transaction: bool
+) -> None:
+    async def run() -> list[int]:
+        pids = []
+        async with Pool(schema, max_size=1, reset_query=reset_query) as pool:
+            for _ in range(3):
+                async with pool.acquire() as conn:
+                    pids.append(await backend_pid(conn))
+                    if open_transaction:
+                        await query_unchecked[tuple[()]](t"BEGIN").execute(conn)
+        return pids
+
+    assert len(set(asyncio.run(run()))) == 1
+
+
+def test_a_custom_reset_query_still_discards_a_connection_left_in_a_transaction(schema: str) -> None:
+    async def run() -> tuple[int, int]:
+        async with Pool(schema, max_size=1, reset_query="DISCARD ALL") as pool:
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                await conn._impl.reset("BEGIN;")
+            async with pool.acquire() as conn:
+                return pid, await backend_pid(conn)
+
+    pid, new_pid = asyncio.run(run())
+    assert pid != new_pid
+
+
+def test_a_reset_hook_runs_on_an_idle_connection_after_an_aborted_transaction(schema: str) -> None:
+    async def hook(conn: Connection) -> None:
+        await query(t"SET work_mem = '13MB'").execute(conn)
+
+    async def run() -> tuple[str, int, int]:
+        async with Pool(schema, max_size=1, reset_query=None, reset=hook) as pool:
+            async with pool.acquire() as conn:
+                pid = await backend_pid(conn)
+                await query(t"BEGIN").execute(conn)
+                with pytest.raises(DatabaseError):
+                    await query[int](t"SELECT 1 / 0").one(conn)
+            async with pool.acquire() as conn:
+                return await query[str](t"SHOW work_mem").one(conn), pid, await backend_pid(conn)
+
+    work_mem, pid, after_pid = asyncio.run(run())
+    assert pid == after_pid
+    assert work_mem == "13MB"

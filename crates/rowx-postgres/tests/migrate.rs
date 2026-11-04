@@ -1709,3 +1709,76 @@ async fn a_clean_failure_is_not_a_broken_connection() -> TestResult {
     conn.close().await;
     db.finish().await
 }
+
+#[tokio::test]
+async fn migrations_under_a_hostile_search_path_use_the_real_functions_and_operators() -> TestResult
+{
+    let Some(db) = TestDb::new().await? else {
+        return Ok(());
+    };
+    let mut setup = db.connect().await?;
+    // `evil` shadows `now()` and the int8 `=` operator, and comes before `pg_catalog` on the path
+    setup
+        .simple(
+            "CREATE SCHEMA evil; \
+             CREATE FUNCTION evil.now() RETURNS timestamptz LANGUAGE sql AS $$ SELECT '2001-01-01'::timestamptz $$; \
+             CREATE FUNCTION evil.never(int8, int8) RETURNS boolean LANGUAGE sql AS $$ SELECT false $$; \
+             CREATE OPERATOR evil.= (LEFTARG = int8, RIGHTARG = int8, FUNCTION = evil.never)",
+        )
+        .await?;
+    let mut options = db.options.clone();
+    options
+        .server_settings
+        .push(("search_path".to_owned(), "evil, pg_catalog".to_owned()));
+    let mut conn = Connection::connect(&options, &Handle::current()).await?;
+    let all: Vec<Migration> = [
+        reversible(1, "CREATE TABLE a (i int)", "DROP TABLE a"),
+        reversible(
+            2,
+            "-- no-transaction\nCREATE TABLE b (i int)",
+            "-- no-transaction\nDROP TABLE b",
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let applied = run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    assert_eq!(versions(applied), [1, 2]);
+
+    // the history table is where the first schema on the path puts it, and `resolve_table` agrees
+    assert_eq!(
+        count(
+            &setup,
+            &format!(
+                "SELECT count(*) FROM evil.{TABLE} WHERE installed_on > now() - interval '1 hour' \
+                 AND execution_time >= 0 AND success"
+            )
+        )
+        .await?,
+        2
+    );
+    assert_eq!(
+        count(
+            &setup,
+            &format!(
+                "SELECT count(*) FROM pg_tables WHERE tablename = '{TABLE}' AND schemaname = 'evil'"
+            )
+        )
+        .await?,
+        1
+    );
+    let listed = list_applied(&conn, &table(TABLE)).await?;
+    assert_eq!(listed.len(), 2);
+
+    let reverted = revert(&conn, &config(), &all, RevertTarget::All, false, &LIVE).await?;
+    assert_eq!(versions(reverted), [2, 1]);
+    assert_eq!(
+        count(&setup, &format!("SELECT count(*) FROM evil.{TABLE}")).await?,
+        0
+    );
+
+    conn.close().await;
+    setup.close().await;
+    db.finish().await
+}

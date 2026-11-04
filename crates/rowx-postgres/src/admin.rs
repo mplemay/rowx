@@ -179,7 +179,10 @@ pub async fn database_exists(
     with_maintenance(options, name, handle, async |conn| {
         let row = conn
             .client()?
-            .query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&name])
+            .query_opt(
+                "SELECT 1 FROM pg_catalog.pg_database WHERE datname OPERATOR(pg_catalog.=) $1",
+                &[&name],
+            )
             .await?;
         Ok(row.is_some())
     })
@@ -231,9 +234,11 @@ pub async fn list_databases(
         let rows = conn
             .client()?
             .query(
-                "SELECT d.datname::text, shobj_description(d.oid, 'pg_database'), \
-                 COALESCE((SELECT s.numbackends FROM pg_stat_database s WHERE s.datid = d.oid), 0)::int8 \
-                 FROM pg_database d WHERE starts_with(d.datname::text, $1) ORDER BY d.datname",
+                "SELECT d.datname::pg_catalog.text, pg_catalog.shobj_description(d.oid, 'pg_database'), \
+                 COALESCE((SELECT s.numbackends FROM pg_catalog.pg_stat_database s \
+                 WHERE s.datid OPERATOR(pg_catalog.=) d.oid), 0)::pg_catalog.int8 \
+                 FROM pg_catalog.pg_database d WHERE pg_catalog.starts_with(d.datname::pg_catalog.text, $1) \
+                 ORDER BY d.datname",
                 &[&prefix],
             )
             .await?;

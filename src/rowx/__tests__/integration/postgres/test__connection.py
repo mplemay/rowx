@@ -11,7 +11,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from rowx import query, query_unchecked
 from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError
-from rowx.postgres import Connection, connect
+from rowx.postgres import RESET_QUERY, Connection, connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -130,7 +130,9 @@ def test_reset_sends_no_rollback_when_nothing_is_open(schema: str) -> None:
 
     state, last = run_with_two(schema, body)
     assert state == "idle"
-    assert last.startswith("SELECT pg_advisory_unlock_all()")
+    # the idle guard goes in front of the reset query when no transaction can be open
+    assert last.startswith("SELECT 1 OPERATOR(pg_catalog./)")
+    assert last.endswith(RESET_QUERY)
     assert "ROLLBACK" not in last
 
 
