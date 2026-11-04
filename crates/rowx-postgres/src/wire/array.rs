@@ -66,13 +66,30 @@ pub fn decode(raw: &[u8]) -> Result<Array<'_>, ArrayError> {
 
     let mut dims = Vec::new();
     let mut total: usize = usize::from(ndim != 0);
+    let mut empty = false;
     for _ in 0..ndim {
         let (Some(len), Some(_lower_bound)) = (reader.i32(), reader.i32()) else {
             return Err(ArrayError::Truncated(raw.len()));
         };
         let len = usize::try_from(len).map_err(|_| ArrayError::NegativeLength(len))?;
-        total = total.checked_mul(len).ok_or(ArrayError::TooLarge)?;
+        // a zero-length dimension makes the array empty whatever the others declare
+        empty |= len == 0;
+        total = total.saturating_mul(len);
         dims.push(len);
+    }
+    if empty {
+        // Postgres sends this shape for an empty oidvector or int2vector; there are no elements to read
+        if reader.at != raw.len() {
+            return Err(ArrayError::Trailing(raw.len() - reader.at));
+        }
+        return Ok(Array {
+            element_oid,
+            dims: Vec::new(),
+            elements: Vec::new(),
+        });
+    }
+    if total == usize::MAX {
+        return Err(ArrayError::TooLarge);
     }
 
     // every element takes at least 4 bytes, which bounds the allocation by the input size
@@ -156,6 +173,42 @@ mod tests {
         )
     }
 
+    fn zero_length_shapes() -> [&'static [i32]; 4] {
+        [&[0], &[i32::MAX, 0], &[3, 2, 0], &[0, i32::MAX]]
+    }
+
+    fn zero_length_header(lens: &[i32]) -> Vec<u8> {
+        let mut raw = header(i32::try_from(lens.len()).unwrap_or(0), 0, 23);
+        for &len in lens {
+            raw.extend(dim(len, 1));
+        }
+        raw
+    }
+
+    #[test]
+    fn a_zero_length_dimension_is_an_empty_array() {
+        for lens in zero_length_shapes() {
+            assert_eq!(
+                decode(&zero_length_header(lens)),
+                Ok(Array {
+                    element_oid: 23,
+                    dims: vec![],
+                    elements: vec![]
+                }),
+                "{lens:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_length_dimension_with_element_bytes_is_malformed() {
+        for lens in zero_length_shapes() {
+            let mut raw = zero_length_header(lens);
+            raw.extend(elem(Some(&[0, 0, 0, 1])));
+            assert_eq!(decode(&raw), Err(ArrayError::Trailing(8)), "{lens:?}");
+        }
+    }
+
     #[test]
     fn empty_array_has_no_dims() {
         let raw = header(0, 0, 25);
@@ -215,16 +268,6 @@ mod tests {
     }
 
     #[test]
-    fn zero_length_dimension_has_no_elements() {
-        let mut raw = header(1, 0, 25);
-        raw.extend(dim(0, 1));
-        assert_eq!(
-            decode(&raw).map(|a| (a.dims, a.elements.len())),
-            Ok((vec![0], 0))
-        );
-    }
-
-    #[test]
     fn rejects_malformed_input() {
         assert_eq!(decode(&[0; 4]), Err(ArrayError::Truncated(4)));
         assert_eq!(decode(&header(7, 0, 23)), Err(ArrayError::Dimensions(7)));
@@ -271,9 +314,9 @@ mod proptests {
 
     type Elements = Vec<Option<Vec<u8>>>;
 
-    // rectangular shapes of up to three dimensions, each length 0..=3, with a matching flat element list
+    // rectangular shapes of up to three dimensions, each length 1..=3 (an empty array has no dimensions), with a matching flat element list
     fn shaped() -> impl Strategy<Value = (Vec<usize>, Elements)> {
-        prop::collection::vec(0usize..4, 0..=3).prop_flat_map(|dims| {
+        prop::collection::vec(1usize..4, 0..=3).prop_flat_map(|dims| {
             let total = if dims.is_empty() {
                 0
             } else {
