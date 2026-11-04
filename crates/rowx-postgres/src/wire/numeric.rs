@@ -61,9 +61,9 @@ pub enum Numeric {
 }
 
 fn be_u16(raw: &[u8], at: usize) -> Option<u16> {
-    raw.get(at..at + 2)
-        .and_then(|b| <[u8; 2]>::try_from(b).ok())
-        .map(u16::from_be_bytes)
+    raw.get(at..)
+        .and_then(<[u8]>::first_chunk::<2>)
+        .map(|b| u16::from_be_bytes(*b))
 }
 
 fn be_i16(raw: &[u8], at: usize) -> Option<i16> {
@@ -82,8 +82,10 @@ pub fn decode(raw: &[u8]) -> Result<Numeric, NumericError> {
     ) else {
         return Err(NumericError::Truncated(raw.len()));
     };
-    let body = &raw[HEADER_LEN..];
-    if body.len() != usize::from(ndigits) * 2 {
+    let Some(body) = raw.get(HEADER_LEN..) else {
+        return Err(NumericError::Truncated(raw.len()));
+    };
+    if usize::from(ndigits).checked_mul(2) != Some(body.len()) {
         return Err(NumericError::LengthMismatch {
             declared: ndigits,
             actual: body.len(),
@@ -122,10 +124,12 @@ pub fn decode(raw: &[u8]) -> Result<Numeric, NumericError> {
 
 // appends the four decimal digits of a base-10000 group, zero padded
 fn push_padded(out: &mut String, group: u16) {
-    for divisor in [1000_u16, 100, 10, 1] {
-        out.push(char::from(
-            b'0' + u8::try_from(group / divisor % 10).unwrap_or(0),
-        ));
+    // a group past 9999 keeps its low four digits, as the decoder never produces one
+    let group = group.rem_euclid(BASE);
+    for pair in [group.div_euclid(100), group.rem_euclid(100)] {
+        for digit in [pair.div_euclid(10), pair.rem_euclid(10)] {
+            out.push(char::from_digit(u32::from(digit), 10).unwrap_or('0'));
+        }
     }
 }
 
@@ -171,13 +175,24 @@ impl Numeric {
             });
         };
         let significant = digits.get(first..=last).ok_or(NumericError::Magnitude)?;
+        // `last` indexes `digits`, so the subtractions cannot fail
+        let trailing_zeros = digits
+            .len()
+            .checked_sub(last)
+            .and_then(|n| n.checked_sub(1))
+            .ok_or(NumericError::Magnitude)?;
         let to_i64 = |n: usize| i64::try_from(n).map_err(|_| NumericError::Magnitude);
         // decimal exponents of the last and the first significant digit
         let low = exponent
-            .checked_add(to_i64(digits.len() - 1 - last)?)
+            .checked_add(to_i64(trailing_zeros)?)
             .ok_or(NumericError::Magnitude)?;
         let high = low
-            .checked_add(to_i64(significant.len() - 1)?)
+            .checked_add(to_i64(
+                significant
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(NumericError::Magnitude)?,
+            )?)
             .ok_or(NumericError::Magnitude)?;
         // base-10000 group `k` holds the decimal exponents `4k..=4k+3`
         let top = high.div_euclid(4);
@@ -198,16 +213,17 @@ impl Numeric {
                 .and_then(|index| significant.get(index))
                 .map_or(0, |&d| u16::from(d))
         };
-        let groups = (bottom..=top)
-            .rev()
-            .map(|k| {
-                (0..4).fold(0u16, |acc, offset| {
-                    // most significant decimal place of the group first
-                    let place = k * 4 + (3 - offset);
-                    acc * 10 + digit_at(place)
-                })
-            })
-            .collect();
+        let mut groups = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+        for k in (bottom..=top).rev() {
+            // the group index is bounded by the checked weight and group count, and a group holds at most 9999, so nothing saturates
+            let base = k.saturating_mul(4);
+            // most significant decimal place of the group first
+            let group = [3_i64, 2, 1, 0].into_iter().fold(0u16, |acc, plus| {
+                acc.saturating_mul(10)
+                    .saturating_add(digit_at(base.saturating_add(plus)))
+            });
+            groups.push(group);
+        }
         Ok(Self::Finite {
             negative,
             weight,
@@ -243,7 +259,7 @@ impl Numeric {
         };
         let count =
             u16::try_from(digits.len()).map_err(|_| NumericError::TooManyDigits(digits.len()))?;
-        let mut out = Vec::with_capacity(HEADER_LEN + digits.len() * 2);
+        let mut out = Vec::with_capacity(digits.len().saturating_mul(2).saturating_add(HEADER_LEN));
         out.extend_from_slice(&count.to_be_bytes());
         out.extend_from_slice(&weight.to_be_bytes());
         out.extend_from_slice(&sign.to_be_bytes());
@@ -276,8 +292,14 @@ impl Numeric {
                 .copied()
                 .unwrap_or(0)
         };
-        let int_groups = usize::try_from(weight + 1).unwrap_or(0);
-        let mut out = String::with_capacity(int_groups * 4 + scale + 6);
+        let after_int = weight.saturating_add(1);
+        let int_groups = usize::try_from(after_int).unwrap_or(0);
+        let mut out = String::with_capacity(
+            int_groups
+                .saturating_mul(4)
+                .saturating_add(scale)
+                .saturating_add(6),
+        );
         if negative {
             out.push('-');
         }
@@ -286,20 +308,23 @@ impl Numeric {
             push_padded(&mut out, group(index));
         }
         // drop the leading zeros of the integer part, keeping one digit
-        let zeros = out[start..].bytes().take_while(|&b| b == b'0').count();
-        out.replace_range(start..start + zeros, "");
+        let zeros = out
+            .get(start..)
+            .map_or(0, |int| int.bytes().take_while(|&b| b == b'0').count());
+        out.replace_range(start..start.saturating_add(zeros), "");
         if out.len() == start {
             out.push('0');
         }
         if scale > 0 {
             out.push('.');
             let frac_start = out.len();
-            let mut index = weight + 1;
-            while out.len() - frac_start < scale {
+            for index in after_int.. {
+                if out.len().saturating_sub(frac_start) >= scale {
+                    break;
+                }
                 push_padded(&mut out, group(index));
-                index += 1;
             }
-            out.truncate(frac_start + scale);
+            out.truncate(frac_start.saturating_add(scale));
         }
         out
     }
@@ -337,12 +362,12 @@ pub fn parse_decimal_str(text: &str) -> Result<(bool, Vec<u8>, DecimalExponent),
         None => (rest, 0),
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let mut digits = Vec::with_capacity(whole.len() + fraction.len());
+    let mut digits = Vec::with_capacity(whole.len().saturating_add(fraction.len()));
     for byte in whole.bytes().chain(fraction.bytes()) {
         if !byte.is_ascii_digit() {
             return Err(NumericError::DecimalSyntax);
         }
-        digits.push(byte - b'0');
+        digits.push(byte.checked_sub(b'0').ok_or(NumericError::DecimalSyntax)?);
     }
     if digits.is_empty() {
         return Err(NumericError::DecimalSyntax);
@@ -376,7 +401,9 @@ pub fn decimal_text(
     if digits.is_empty() {
         out.push('0');
     }
-    out.extend(digits.iter().map(|d| char::from(b'0' + d)));
+    for &d in digits {
+        out.push(char::from_digit(u32::from(d), 10).unwrap_or('0'));
+    }
     let _ = write!(out, "E{exponent}");
     Ok(out)
 }
@@ -474,6 +501,66 @@ mod tests {
     }
 
     #[test]
+    fn extreme_weights_and_scales_render() {
+        let max_weight = text(&wire(i16::MAX, SIGN_POSITIVE, MAX_SCALE, &[1]));
+        // a leading 1, 32767 zero groups, the point and the fraction
+        assert_eq!(
+            max_weight.len(),
+            1 + 4 * 32_767 + 1 + usize::from(MAX_SCALE)
+        );
+        assert!(max_weight.starts_with("1000"));
+        assert_eq!(
+            max_weight.split_once('.').map(|(_, frac)| frac.len()),
+            Some(usize::from(MAX_SCALE))
+        );
+        let min_weight = text(&wire(i16::MIN, SIGN_NEGATIVE, MAX_SCALE, &[1]));
+        assert_eq!(min_weight.len(), 3 + usize::from(MAX_SCALE));
+        assert!(min_weight.starts_with("-0.0000"));
+        // weight -32768 puts the lone group far below the displayed scale
+        assert_eq!(min_weight.trim_start_matches("-0.").trim_matches('0'), "");
+        assert_eq!(text(&wire(i16::MIN, SIGN_POSITIVE, 0, &[1])), "0");
+    }
+
+    #[test]
+    fn the_maximum_digit_count_decodes() {
+        let digits = vec![9999; usize::from(u16::MAX)];
+        let raw = wire(i16::MAX, SIGN_POSITIVE, 0, &digits);
+        assert!(
+            matches!(decode(&raw), Ok(Numeric::Finite { digits, .. }) if digits.len() == 65_535)
+        );
+        let mut longer = raw;
+        longer.extend_from_slice(&[0, 0]);
+        assert!(matches!(
+            decode(&longer),
+            Err(NumericError::LengthMismatch {
+                declared: 65_535,
+                ..
+            })
+        ));
+        // an odd trailing byte is a mismatch too
+        let mut odd = wire(0, SIGN_POSITIVE, 0, &[1]);
+        odd.push(0);
+        assert!(matches!(
+            decode(&odd),
+            Err(NumericError::LengthMismatch { .. })
+        ));
+        // exactly the header
+        assert_eq!(text(&wire(0, SIGN_POSITIVE, 0, &[])), "0");
+        assert_eq!(decode(&[0; 7]), Err(NumericError::Truncated(7)));
+    }
+
+    #[test]
+    fn a_group_outside_the_decoder_range_still_renders() {
+        let value = Numeric::Finite {
+            negative: false,
+            weight: 0,
+            scale: 0,
+            digits: vec![u16::MAX],
+        };
+        assert_eq!(value.to_decimal_string(), "5535");
+    }
+
+    #[test]
     fn digit_count_is_unsigned() {
         // 32768 groups overflow i16; postgres reads the count as uint16
         let digits = vec![1; 32_768];
@@ -522,8 +609,8 @@ mod proptests {
         #[test]
         fn every_strict_prefix_of_an_encoding_is_rejected(value in any_numeric(), cut in 0usize..64) {
             let raw = value.encode().unwrap_or_default();
-            let cut = cut % raw.len().max(1);
-            prop_assert!(decode(&raw[..cut]).is_err());
+            let cut = cut.checked_rem(raw.len().max(1)).unwrap_or(0);
+            prop_assert!(decode(raw.get(..cut).unwrap_or_default()).is_err());
         }
 
         #[test]
@@ -720,6 +807,27 @@ mod decimal_parts_tests {
         assert_eq!(
             parts(false, &[0], i64::MIN),
             Err(NumericError::ScaleRange(i64::MIN.unsigned_abs()))
+        );
+    }
+
+    #[test]
+    fn the_lowest_reachable_weight_follows_the_scale_limit() {
+        // the scale limit puts the lowest decimal place at -16383, in group -4096
+        assert_eq!(
+            parts(false, &[1], -i64::from(MAX_SCALE)),
+            Ok(finite(false, -4096, MAX_SCALE, &[10]))
+        );
+    }
+
+    #[test]
+    fn the_widest_representable_span_is_accepted() {
+        // 147455 nines from decimal place -16383 up to 4 * 32767 + 3 fill weights 32767 down to -4096
+        let digits = vec![9u8; 4 * 36_864 - 1];
+        let mut groups = vec![9999u16; 36_863];
+        groups.push(9990);
+        assert_eq!(
+            parts(false, &digits, -i64::from(MAX_SCALE)),
+            Ok(finite(false, i16::MAX, MAX_SCALE, &groups))
         );
     }
 
