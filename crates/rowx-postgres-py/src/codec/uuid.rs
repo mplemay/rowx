@@ -37,21 +37,32 @@ pub fn decode<'py>(py: Python<'py>, raw: &[u8]) -> PyResult<Bound<'py, PyAny>> {
     uuid_class(py)?.call((), Some(&kwargs))
 }
 
-/// A scalar `UUID` goes out as 16 binary bytes and a scalar `str` as text for the server to parse; as an
-/// array element a `str` is parsed here, so the element is always 16 bytes.
+/// A scalar `UUID` goes out as 16 binary bytes and a scalar `str` as text for the server to parse.
 ///
 /// # Errors
 /// A description of why the value cannot be encoded as `uuid`.
-pub fn encode(param: &PyParam, element: bool) -> Result<Param, String> {
+pub fn encode(param: &PyParam) -> Result<Param, String> {
     match param {
         PyParam::Uuid(bytes) => Ok(Param::binary(bytes.to_vec())),
-        PyParam::Str(s) if element => uuid::parse(s)
+        PyParam::Str(s) => Ok(Param::text(s.clone().into_bytes())),
+        _ => Err(not_uuid(param)),
+    }
+}
+
+/// As an array element a `str` is parsed here, so the element is always 16 bytes.
+///
+/// # Errors
+/// A description of why the value cannot be encoded as `uuid`.
+pub fn encode_binary(param: &PyParam) -> Result<Param, String> {
+    match param {
+        PyParam::Uuid(bytes) => Ok(Param::binary(bytes.to_vec())),
+        PyParam::Str(s) => uuid::parse(s)
             .map(|bytes| Param::binary(bytes.to_vec()))
             .map_err(|e| e.to_string()),
-        PyParam::Str(s) => Ok(Param::text(s.clone().into_bytes())),
-        _ => Err(format!(
-            "a Python {} cannot be encoded as uuid",
-            param.type_name()
-        )),
+        _ => Err(not_uuid(param)),
     }
+}
+
+fn not_uuid(param: &PyParam) -> String {
+    format!("a Python {} cannot be encoded as uuid", param.type_name())
 }

@@ -10,8 +10,11 @@ pub mod pool;
 pub mod stream;
 pub mod types;
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use pyo3::wrap_pyfunction;
+use rowx_postgres::Type;
 
 #[pyfunction]
 fn _cancel_requests_sent() -> u64 {
@@ -28,16 +31,15 @@ fn _catalog_queries() -> u64 {
 #[pyfunction]
 fn _param_formats(
     py: Python<'_>,
-    oids: &Bound<'_, pyo3::types::PyList>,
-    params: &Bound<'_, pyo3::types::PyList>,
+    oids: &Bound<'_, PyList>,
+    params: &Bound<'_, PyList>,
 ) -> PyResult<Vec<&'static str>> {
     let types = oids
         .extract::<Vec<u32>>()?
         .into_iter()
         .map(|oid| {
-            rowx_postgres::Type::from_oid(oid).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!("{oid} is not a built-in type"))
-            })
+            Type::from_oid(oid)
+                .ok_or_else(|| PyValueError::new_err(format!("{oid} is not a built-in type")))
         })
         .collect::<PyResult<Vec<_>>>()?;
     let values = codec::extract(py, params)?;

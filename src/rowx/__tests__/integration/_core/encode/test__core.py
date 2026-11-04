@@ -1,14 +1,30 @@
 import asyncio
 import datetime as dt
+import decimal
 import sys
 from decimal import Decimal, DecimalTuple
+from ipaddress import ip_address, ip_network
 from math import isnan
 from typing import Any, Final, override
+from uuid import UUID
 
 import pytest
 
 from rowx.errors import DatabaseError, EncodeError
-from rowx.postgres import connect
+from rowx.postgres import (
+    Box,
+    Circle,
+    Cube,
+    Interval,
+    Line,
+    LineSegment,
+    Money,
+    Path,
+    Point,
+    Polygon,
+    Range,
+    connect,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -318,3 +334,298 @@ def test_an_int_past_the_str_digit_limit_does_not_crash_the_array_encoder(schema
         assert fetch_scalar(schema, "SELECT $1::numeric[]", [[value]]) == [Decimal(value)]
     with pytest.raises(EncodeError, match="int8"):
         fetch_scalar(schema, "SELECT $1::int8[]", [[10**limit]])
+
+
+def family_point(x: float = 1.0) -> Point:
+    return Point(x, 2.0)
+
+
+# one value of every element family in TYPE_TABLE that has an array type; void and nested arrays are the only
+# entries left out, because neither can be a parameter value or an element
+ARRAY_FAMILIES: Final[dict[str, object]] = {
+    "bool": True,
+    "int2": 7,
+    "int4": 7,
+    "int8": 2**62,
+    "oid": 4_000_000_000,
+    "float4": 1.5,
+    "float8": 2.5,
+    "numeric": Decimal("1.50E+10"),
+    "text": 'a"b\\c,{}NULL ā',
+    "varchar": "va",
+    "bpchar": "bp",
+    "name": 'a"b',
+    "public.citext": "AbC",
+    '"char"': "a",
+    "bytea": b"\x00\xff",
+    "date": dt.date(2024, 1, 2),
+    "time": dt.time(1, 2, 3),
+    "timetz": dt.time(1, 2, 3, tzinfo=dt.timezone(dt.timedelta(hours=5, minutes=30))),
+    "timestamp": dt.datetime(2024, 1, 2, 3, 4, 5),  # ruff: ignore[call-datetime-without-tzinfo]
+    "timestamptz": dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.UTC),
+    "interval": dt.timedelta(days=2, microseconds=3),
+    "uuid": UUID("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"),
+    "inet": ip_address("10.0.0.1"),
+    "cidr": ip_network("10.0.0.0/8"),
+    "macaddr": "08:00:2b:01:02:03",
+    "macaddr8": "08:00:2b:01:02:03:04:05",
+    "int4range": Range(1, 5),
+    "int8range": Range(2**40, 2**41),
+    "numrange": Range(Decimal("1.5"), Decimal("2.5")),
+    "daterange": Range(dt.date(2024, 1, 1), dt.date(2024, 2, 1)),
+    "tsrange": Range(dt.datetime(2024, 1, 1), dt.datetime(2024, 2, 1)),  # ruff: ignore[call-datetime-without-tzinfo]
+    "tstzrange": Range(dt.datetime(2024, 1, 1, tzinfo=dt.UTC), dt.datetime(2024, 2, 1, tzinfo=dt.UTC)),
+    "money": Money(150),
+    "bit(3)": "101",
+    "varbit": "1010",
+    "json": {"k": ["ā", 1]},
+    "jsonb": {"k": ["ā", 1]},
+    "point": family_point(),
+    "line": Line(1.0, 2.0, 3.0),
+    "lseg": LineSegment(family_point(), family_point(3.0)),
+    "box": Box(family_point(3.0), family_point()),
+    "path": Path((family_point(), family_point(3.0)), closed=False),
+    "polygon": Polygon((family_point(), family_point(3.0), family_point(5.0))),
+    "circle": Circle(1.0, 2.0, 3.0),
+    "public.hstore": {"a": "b", "k": None},
+    "public.ltree": "a.b.c",
+    "public.lquery": "a.*",
+    "public.cube": Cube((1.0, 2.0), (3.0, 4.0)),
+    "mood": "ok",
+    "positive_int": 5,
+}
+
+
+@pytest.mark.parametrize("sql_type", sorted(ARRAY_FAMILIES))
+def test_every_element_family_round_trips_as_an_array_parameter(schema: str, sql_type: str) -> None:
+    value = ARRAY_FAMILIES[sql_type]
+    # the oracle builds the same array on the server from scalar parameters, so decoding and the server's text
+    # rendering are compared without guessing either
+    one = f"ARRAY[$1::{sql_type}, NULL]::{sql_type}[]"
+    two = f"ARRAY[ARRAY[$1::{sql_type}, NULL], ARRAY[NULL, $1::{sql_type}]]::{sql_type}[]"
+    for param_array, oracle in (([value, None], one), ([[value, None], [None, value]], two)):
+        sent = fetch_scalar(schema, f"SELECT $1::{sql_type}[]", [param_array])
+        assert sent == fetch_scalar(schema, f"SELECT {oracle}", [value])
+        assert fetch_scalar(schema, f"SELECT $1::{sql_type}[]::text", [param_array]) == fetch_scalar(
+            schema, f"SELECT {oracle}::text", [value]
+        )
+
+
+def test_decimals_encode_under_a_lowercase_exponent_context(schema: str) -> None:
+    # `capitals = 0` makes `Decimal.__str__` print `e` instead of `E`
+    values = [Decimal("1E+5"), Decimal("-1.5E-3"), Decimal("0E-10"), Decimal("Infinity"), Decimal("1E+100")]
+    with decimal.localcontext() as context:
+        context.capitals = 0
+        assert "e" in str(values[0])
+        for value in values:
+            assert fetch_scalar(schema, "SELECT $1::numeric", [value]) == value
+        sent = fetch_scalar(schema, "SELECT $1::numeric[]", [[*values, None]])
+        assert sent == [*values, None]
+        assert fetch_scalar(schema, "SELECT $1::numrange", [Range(Decimal("1E+5"), Decimal("2E+5"))]) == Range(
+            Decimal("1E+5"), Decimal("2E+5")
+        )
+        assert fetch_scalar(schema, "SELECT $1::numrange[]", [[Range(Decimal("1E+5"), Decimal("2E+5"))]]) == [
+            Range(Decimal("1E+5"), Decimal("2E+5"))
+        ]
+
+
+# the overridden properties report other values, some far outside any range
+def lie(value: object) -> property:
+    return property(lambda _self: value, lambda _self, _value: None)
+
+
+# the same for a slotted dataclass: the setter still stores the real value in the base class's slot
+def lie_slot(base: type, name: str, *, value: object) -> property:
+    slot = getattr(base, name)
+
+    def store(self: object, real: object) -> None:
+        slot.__set__(self, real)
+
+    return property(lambda _self: value, store)
+
+
+class LyingTimedelta(dt.timedelta):
+    days = lie(0)
+    seconds = lie(5)
+    microseconds = lie(7)
+
+
+class HugeTimedelta(dt.timedelta):
+    days = lie(2**62)
+    seconds = lie(2**62)
+    microseconds = lie(2**62)
+
+
+class LyingTime(dt.time):
+    hour = lie(23)
+    minute = lie(59)
+    second = lie(59)
+    microsecond = lie(2**62)
+
+    @override
+    def utcoffset(self) -> dt.timedelta | None:
+        return dt.timedelta(hours=9)
+
+
+class LyingDate(dt.date):
+    year = lie(1)
+    month = lie(12)
+    day = lie(2**62)
+
+
+class LyingDatetime(dt.datetime):
+    year = lie(1)
+    month = lie(12)
+    day = lie(2**62)
+    hour = lie(23)
+    minute = lie(2**62)
+    second = lie(59)
+    microsecond = lie(2**62)
+
+    @override
+    def utcoffset(self) -> dt.timedelta | None:
+        return dt.timedelta(hours=9)
+
+
+def test_timedelta_subclasses_encode_their_real_value(schema: str) -> None:
+    expected = dt.timedelta(hours=1, microseconds=250)
+    for cls in (LyingTimedelta, HugeTimedelta):
+        value = cls(hours=1, microseconds=250)
+        assert fetch_scalar(schema, "SELECT $1::interval", [value]) == expected
+        assert fetch_scalar(schema, "SELECT $1::interval[]", [[value, None, value]]) == [expected, None, expected]
+        assert fetch_scalar(schema, "SELECT $1::interval[]::text", [[value]]) == "{01:00:00.00025}"
+
+
+def test_time_subclasses_encode_their_real_value(schema: str) -> None:
+    plain = dt.time(1, 2, 3, 4)
+    value = LyingTime(1, 2, 3, 4)
+    assert fetch_scalar(schema, "SELECT $1::time", [value]) == plain
+    assert fetch_scalar(schema, "SELECT $1::time[]", [[value, None]]) == [plain, None]
+    # the zone comes from the tzinfo, not from the subclass's own utcoffset
+    zone = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    zoned = LyingTime(1, 2, 3, 4, tzinfo=zone)
+    expected = dt.time(1, 2, 3, 4, tzinfo=zone)
+    assert fetch_scalar(schema, "SELECT $1::timetz", [zoned]) == expected
+    assert fetch_scalar(schema, "SELECT $1::timetz[]", [[zoned]]) == [expected]
+
+
+def test_date_and_datetime_subclasses_encode_their_real_value(schema: str) -> None:
+    day = dt.date(2024, 3, 4)
+    assert fetch_scalar(schema, "SELECT $1::date", [LyingDate(2024, 3, 4)]) == day
+    assert fetch_scalar(schema, "SELECT $1::date[]", [[LyingDate(2024, 3, 4), None]]) == [day, None]
+    naive = dt.datetime(2024, 3, 4, 5, 6, 7, 8)  # ruff: ignore[call-datetime-without-tzinfo]
+    lying = LyingDatetime(2024, 3, 4, 5, 6, 7, 8)
+    assert fetch_scalar(schema, "SELECT $1::timestamp", [lying]) == naive
+    assert fetch_scalar(schema, "SELECT $1::timestamp[]", [[lying, None]]) == [naive, None]
+    zone = dt.timezone(dt.timedelta(hours=-3))
+    aware = LyingDatetime(2024, 3, 4, 5, 6, 7, 8, tzinfo=zone)
+    expected = dt.datetime(2024, 3, 4, 5, 6, 7, 8, tzinfo=zone)
+    assert fetch_scalar(schema, "SELECT $1::timestamptz", [aware]) == expected
+    assert fetch_scalar(schema, "SELECT $1::timestamptz[]", [[aware]]) == [expected]
+    assert fetch_scalar(schema, "SELECT $1::tstzrange", [Range(aware, aware + dt.timedelta(days=1))]) == Range(
+        expected, expected + dt.timedelta(days=1)
+    )
+
+
+class OffsetZone(dt.tzinfo):
+    def __init__(self, offset: dt.timedelta | None) -> None:
+        self.offset = offset
+
+    @override
+    def utcoffset(self, when: dt.datetime | None) -> dt.timedelta | None:
+        return self.offset
+
+    @override
+    def dst(self, when: dt.datetime | None) -> dt.timedelta | None:
+        return None
+
+    @override
+    def tzname(self, when: dt.datetime | None) -> str | None:
+        return None
+
+
+def test_a_tzinfo_returning_a_timedelta_subclass_is_read_exactly(schema: str) -> None:
+    offset = HugeTimedelta(hours=5, minutes=30)
+    zone = OffsetZone(offset)
+    moment = dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=zone)
+    assert fetch_scalar(schema, "SELECT $1::timestamptz", [moment]) == moment
+    assert fetch_scalar(schema, "SELECT $1::timestamptz::text", [moment]) == "2024-01-01 21:34:05+00"
+    assert fetch_scalar(schema, "SELECT $1::timestamptz[]::text", [[moment]]) == '{"2024-01-01 21:34:05+00"}'
+    stamped = dt.time(1, 2, 3, tzinfo=OffsetZone(LyingTimedelta(hours=5, minutes=30)))
+    assert fetch_scalar(schema, "SELECT $1::timetz[]::text", [[stamped]]) == "{01:02:03+05:30}"
+    with pytest.raises(EncodeError, match="naive"):
+        fetch_scalar(schema, "SELECT $1::timestamptz", [dt.datetime(2024, 1, 2, tzinfo=OffsetZone(None))])
+
+
+class LyingInterval(Interval):
+    months = lie_slot(Interval, "months", value=99)  # ty: ignore[invalid-assignment]
+    days = lie_slot(Interval, "days", value=2**62)  # ty: ignore[invalid-assignment]
+    microseconds = lie_slot(Interval, "microseconds", value=2**62)  # ty: ignore[invalid-assignment]
+
+
+class LyingMoney(Money):
+    minor_units = lie_slot(Money, "minor_units", value=2**62)  # ty: ignore[invalid-assignment]
+
+
+class LyingPoint(Point):
+    x = lie_slot(Point, "x", value=100.0)  # ty: ignore[invalid-assignment]
+    y = lie_slot(Point, "y", value=float("nan"))  # ty: ignore[invalid-assignment]
+
+
+class LyingCube(Cube):
+    lower_left = lie_slot(Cube, "lower_left", value=(9.0,))  # ty: ignore[invalid-assignment]
+    upper_right = lie_slot(Cube, "upper_right", value=(9.0,))  # ty: ignore[invalid-assignment]
+
+
+class LyingRange(Range[int]):
+    lower = lie_slot(Range, "lower", value=99)  # ty: ignore[invalid-assignment]
+    upper = lie_slot(Range, "upper", value=100)  # ty: ignore[invalid-assignment]
+    lower_inc = lie_slot(Range, "lower_inc", value=False)  # ty: ignore[invalid-assignment]
+    upper_inc = lie_slot(Range, "upper_inc", value=True)  # ty: ignore[invalid-assignment]
+
+
+class LyingPath(Path):
+    points = lie_slot(Path, "points", value=())  # ty: ignore[invalid-assignment]
+
+
+class IteratingTuple(tuple[float, ...]):
+    __slots__ = ()
+
+    @override
+    def __iter__(self) -> Any:
+        return iter((9.0,))
+
+
+def test_rowx_value_subclasses_encode_their_real_value(schema: str) -> None:
+    assert fetch_scalar(schema, "SELECT $1::interval::text", [Interval(months=1, days=2, microseconds=3)]) == (
+        fetch_scalar(schema, "SELECT $1::interval::text", [LyingInterval(months=1, days=2, microseconds=3)])
+    )
+    assert fetch_scalar(schema, "SELECT $1::interval[]::text", [[LyingInterval(months=1, days=2, microseconds=3)]]) == (
+        '{"1 mon 2 days 00:00:00.000003"}'
+    )
+    assert fetch_scalar(schema, "SELECT $1::money[]::text", [[LyingMoney(150)]]) == fetch_scalar(
+        schema, "SELECT $1::money[]::text", [[Money(150)]]
+    )
+    assert fetch_scalar(schema, "SELECT $1::point[]", [[LyingPoint(1.0, 2.0)]]) == [Point(1.0, 2.0)]
+    assert fetch_scalar(schema, "SELECT $1::point", [LyingPoint(1.0, 2.0)]) == Point(1.0, 2.0)
+    assert fetch_scalar(schema, "SELECT $1::path", [LyingPath((Point(1.0, 2.0),), closed=True)]) == Path(
+        (Point(1.0, 2.0),), closed=True
+    )
+    assert fetch_scalar(schema, "SELECT $1::public.cube[]", [[LyingCube((1.0, 2.0), (3.0, 4.0))]]) == [
+        Cube((1.0, 2.0), (3.0, 4.0))
+    ]
+    assert fetch_scalar(schema, "SELECT $1::public.cube", [Cube(IteratingTuple((1.0, 2.0)), (3.0, 4.0))]) == Cube(
+        (1.0, 2.0), (3.0, 4.0)
+    )
+    assert fetch_scalar(schema, "SELECT $1::int4range", [LyingRange(1, 5)]) == Range(1, 5)
+    assert fetch_scalar(schema, "SELECT $1::int4range[]", [[LyingRange(1, 5)]]) == [Range(1, 5)]
+
+
+def test_a_uuid_subclass_cannot_choose_the_bytes_that_are_sent(schema: str) -> None:
+    class LyingUuid(UUID):
+        bytes = lie(b"\xff" * 16)
+
+    real = UUID("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
+    value = LyingUuid(str(real))
+    assert fetch_scalar(schema, "SELECT $1::uuid", [value]) == real
+    assert fetch_scalar(schema, "SELECT $1::uuid[]", [[value]]) == [real]

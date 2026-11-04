@@ -2,6 +2,7 @@ pub mod array;
 pub mod array_enc;
 pub mod bits;
 pub mod bytes;
+pub mod exact;
 pub mod extension;
 pub mod extract;
 pub mod float;
@@ -179,7 +180,8 @@ fn encode_in(ty: &Type, param: &PyParam, slot: Slot) -> Result<Param, String> {
         }
         Type::CHAR => text::encode_char(param).map(Param::binary),
         Type::BYTEA => bytes::encode(param).map(Param::binary),
-        Type::UUID => uuid::encode(param, element),
+        Type::UUID if element => uuid::encode_binary(param),
+        Type::UUID => uuid::encode(param),
         Type::INET | Type::CIDR => network::encode(ty, param),
         Type::MACADDR | Type::MACADDR8 => mac::encode(ty, param),
         Type::JSON | Type::JSONB if element => json::encode_binary(ty, param).map(Param::binary),

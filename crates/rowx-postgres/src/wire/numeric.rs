@@ -322,7 +322,7 @@ pub fn parse_decimal_str(text: &str) -> Result<(bool, Vec<u8>, DecimalExponent),
     if payload("sNaN").is_some() {
         return Ok((negative, Vec::new(), DecimalExponent::SignalingNaN));
     }
-    let (mantissa, exponent) = match rest.split_once('E') {
+    let (mantissa, exponent) = match rest.split_once(['E', 'e']) {
         Some((mantissa, exponent)) => (
             mantissa,
             exponent
@@ -835,6 +835,9 @@ mod decimal_str_tests {
             Ok((false, vec![0, 0, 0, 0, 1, 2, 3], finite(-6)))
         );
         assert_eq!(parsed("1E+100000"), Ok((false, vec![1], finite(100_000))));
+        // `decimal.getcontext().capitals = 0` prints a lowercase exponent marker
+        assert_eq!(parsed("1e+5"), Ok((false, vec![1], finite(5))));
+        assert_eq!(parsed("-1.5e-3"), Ok((true, vec![1, 5], finite(-4))));
         assert_eq!(
             parsed("-Infinity"),
             Ok((true, vec![0], DecimalExponent::Infinity))
@@ -850,8 +853,8 @@ mod decimal_str_tests {
     #[test]
     fn rejects_everything_else() {
         for text in [
-            "", "-", "E5", "1E", "1E+x", "1.2.3", "1 ", "+1", "١٢", "nan", "Inf", "NaNx", "1e5",
-            ".", "-.",
+            "", "-", "E5", "1E", "1E+x", "1.2.3", "1 ", "+1", "١٢", "nan", "Inf", "NaNx", "e5",
+            "1e", "1e+x", ".", "-.",
         ] {
             assert_eq!(parsed(text), Err(NumericError::DecimalSyntax), "{text:?}");
         }
