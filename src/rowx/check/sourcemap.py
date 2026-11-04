@@ -97,7 +97,7 @@ class SourceMapper:
             self._tokens = tokens
         return self._tokens
 
-    def span(self, node: ast.expr) -> Span:
+    def span(self, node: ast.expr | ast.keyword) -> Span:
         end_line = node.end_lineno or node.lineno
         return _span(
             (node.lineno, self._col(node.lineno, node.col_offset)),
