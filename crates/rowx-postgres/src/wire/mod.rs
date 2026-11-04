@@ -1,4 +1,4 @@
-// wire codecs take untrusted bytes: no panicking index, slice or arithmetic
+// wire codecs take untrusted bytes: no panicking index, slice or arithmetic (this comment also keeps `#![` off line 1 for the prek shebang check, so do not delete it)
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 pub mod array;

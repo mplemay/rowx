@@ -63,16 +63,20 @@ pub fn encode(text: &str) -> Result<Vec<u8>, BitsError> {
         return Err(BitsError::Length(i64::try_from(bits).unwrap_or(i64::MAX)));
     }
     let declared = i32::try_from(bits).map_err(|_| BitsError::Length(i64::MAX))?;
-    let mut data = vec![0_u8; bits.div_ceil(8)];
-    for (i, b) in text.bytes().enumerate() {
-        if b == b'1'
-            && let Some(byte) = data.get_mut(i / 8)
-        {
-            *byte |= 0x80 >> (i % 8);
+    // bits <= MAX_BITS was checked above, so the length cannot overflow
+    let total = bits.div_ceil(8).saturating_add(4);
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&declared.to_be_bytes());
+    out.resize(total, 0);
+    if let Some(packed) = out.get_mut(4..) {
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'1'
+                && let Some(byte) = packed.get_mut(i / 8)
+            {
+                *byte |= 0x80 >> (i % 8);
+            }
         }
     }
-    let mut out = declared.to_be_bytes().to_vec();
-    out.extend_from_slice(&data);
     Ok(out)
 }
 

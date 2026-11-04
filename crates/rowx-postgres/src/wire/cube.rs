@@ -55,7 +55,7 @@ pub fn decode(raw: &[u8]) -> Result<Cube, CubeError> {
         return Err(CubeError::Dimensions(dim));
     }
     let is_point = header & POINT_BIT != 0;
-    // dim <= MAX_DIM was checked above, so these cannot saturate
+    // dim <= MAX_DIM was checked above, so these cannot saturate; raw.len() == expected below implies data.len() == count * 8
     let count = if is_point { dim } else { dim.saturating_mul(2) };
     let expected = count.saturating_mul(F64_LEN).saturating_add(HEADER_LEN);
     if raw.len() != expected {
@@ -70,6 +70,7 @@ pub fn decode(raw: &[u8]) -> Result<Cube, CubeError> {
         lower_left.clone()
     } else {
         floats(
+            // the default is unreachable: the length check above gives data.len() == count * 8
             data.get(dim.saturating_mul(F64_LEN)..).unwrap_or_default(),
             dim,
         )
