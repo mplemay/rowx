@@ -9,6 +9,7 @@ type Rule = Literal[
     "syntax-error",
     "indirect-query",
     "dynamic-query",
+    "template-construction",
     "unresolved-row-type",
     "invalid-row-type",
     "sql-error",
@@ -106,6 +107,8 @@ class TemplateConcat:
     operand: ast.expr
     span: Span
     operand_span: Span
+    # the operand is a t-string chain, or evidently a `Template` (a `Template(...)` call, or a name declared as one)
+    evident: bool = False
 
 
 # an interpolation of a t-string literal whose format spec is not a literal

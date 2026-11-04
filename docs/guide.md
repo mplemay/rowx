@@ -1393,6 +1393,30 @@ statement_timeout = "10s"         # integer + unit: ms|s|min
 
 The database URL comes from `--database-url`, else from the environment variable named by `database_url_env`.
 
+### Hand-built templates
+
+`Template(...)` with a non-literal string is raw SQL: the string becomes part of the statement text and is not a
+bound parameter. The `template-construction` rule keeps that path out of your code. It runs on **every file under the
+include roots**, not only on files with queries, because a helper can build a template in one file and pass it to
+`query_unchecked` in another. It reports:
+
+- a `Template(...)` call with any argument that is not a `str` literal, an inline t-string or an `Interpolation(...)`
+  call, including a starred argument (`Template(*parts)`) and any keyword argument;
+- an `Interpolation(...)` call whose `conversion` or `format_spec` is not a literal, or that takes a starred or `**`
+  argument;
+- an indirect use of the class that hides the call, such as `T = Template`, passing `Template` as a value,
+  `Template.__new__`, `from string.templatelib import *` or `type(t"...")("...")`;
+- `t"..." + x` where `x` is neither an inline t-string nor evidently a `Template`;
+- a format spec that is not a literal in any t-string (`t"{x:{spec}}"`). The t-string that is the direct argument of
+  `query_unchecked` reports it as `dynamic-query` instead, so one interpolation is never reported twice.
+
+Aliased imports (`from string.templatelib import Template as T`) are followed. Build dynamic SQL by nesting t-string
+literals instead (`t"WHERE {cond}"`), which keeps every value a parameter.
+
+The rule is **best-effort**. It reads source only, so `getattr`, `eval`, dynamic imports, generated code and code
+outside the include roots can still build a template. There are no ignore comments: the only escape is to exclude the
+path in `[tool.rowx]`, such as `exclude = ["**/raw_sql.py"]`.
+
 ### Safety
 
 - The checker performs Parse/Describe, catalog lookups and `EXPLAIN` only, never `ANALYZE`. It does not execute your

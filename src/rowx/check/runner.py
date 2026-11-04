@@ -16,6 +16,7 @@ from rowx._core.postgres import (
     parse_dsn as parse_dsn_impl,
 )
 from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
+from rowx.check.construction import template_reports
 from rowx.check.discover import discover_source
 from rowx.check.model import Diagnostic, Rule, Span
 from rowx.check.params import ParamInference
@@ -557,6 +558,7 @@ def _collect(
         inference = ParamInference(result.tree) if result.tree is not None else None
         sources[path] = result.source
         mapper = SourceMapper(result.source)
+        reports.extend(template_reports(path, result.templates, mapper, inference))
         for call in result.calls:
             stats.call_sites += 1
             if call.template is None:

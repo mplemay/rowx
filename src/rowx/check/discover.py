@@ -46,6 +46,7 @@ type Tag = Literal[
     "templatelib",
     "cast",
     "typing",
+    "optional",
     "other",
 ]
 
@@ -56,6 +57,7 @@ TEMPLATELIB_TAG: Final[frozenset[Tag]] = frozenset({"templatelib"})
 STRING_TAG: Final[frozenset[Tag]] = frozenset({"string"})
 CAST_TAG: Final[frozenset[Tag]] = frozenset({"cast"})
 TYPING_TAG: Final[frozenset[Tag]] = frozenset({"typing"})
+OPTIONAL_TAG: Final[frozenset[Tag]] = frozenset({"optional"})
 QUERY_TAGS: Final[frozenset[Tag]] = frozenset({"query", "query_unchecked"})
 CLASS_TAGS: Final[frozenset[Tag]] = frozenset({"template", "interpolation", "private"})
 MODULE_VALUE_TAGS: Final[frozenset[Tag]] = frozenset({"string", "templatelib"})
@@ -161,6 +163,8 @@ def _import_tag(module: str, name: str) -> Tag:
         return "query" if name == "query" else "query_unchecked"
     if module in TYPING_MODULES and name == "cast":
         return "cast"
+    if module in TYPING_MODULES and name == "Optional":
+        return "optional"
     if module == TEMPLATELIB_MODULE:
         return _templatelib_tag(name)
     if module == STRING_MODULE and name == TEMPLATELIB_ATTR:
@@ -277,28 +281,6 @@ class _TemplatelibRef:
 
 def _is_dunder(name: str) -> bool:
     return len(name) > len(DUNDER) * 2 and name.startswith(DUNDER) and name.endswith(DUNDER)
-
-
-# `X | None`, `Optional[X]` and `"X | None"` are `X`; a union of several non-None types is unknown
-def _without_none(annotation: ast.expr) -> ast.expr | None:
-    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-        try:
-            annotation = ast.parse(annotation.value.strip(), mode="eval").body
-        except SyntaxError:
-            return None
-    members: list[ast.expr] = []
-    pending = [annotation]
-    while pending:
-        match pending.pop():
-            case ast.BinOp(left=left, op=ast.BitOr(), right=right):
-                pending.extend([right, left])
-            case ast.Constant(value=None):
-                pass
-            case ast.Subscript(value=ast.Name(id="Optional") | ast.Attribute(attr="Optional"), slice=inner):
-                pending.append(inner)
-            case other:
-                members.append(other)
-    return members[0] if len(members) == 1 else None
 
 
 def _is_type_alias(annotation: ast.expr) -> bool:
@@ -426,6 +408,38 @@ class _Finder(ast.NodeVisitor):
                     return _TemplatelibRef(attr, ambiguous, private=attr not in TEMPLATELIB_PUBLIC)
         return None
 
+    # `X | None`, `Optional[X]` and `"X | None"` are `X`; a union of several non-None types is unknown
+    def _without_none(self, annotation: ast.expr) -> ast.expr | None:
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            try:
+                annotation = ast.parse(annotation.value.strip(), mode="eval").body
+            except SyntaxError:
+                return None
+        members: list[ast.expr] = []
+        pending = [annotation]
+        while pending:
+            match pending.pop():
+                case ast.BinOp(left=left, op=ast.BitOr(), right=right):
+                    pending.extend([right, left])
+                case ast.Constant(value=None):
+                    pass
+                case ast.Subscript(value=value, slice=inner) if self._is_optional(value):
+                    pending.append(inner)
+                case other:
+                    members.append(other)
+        return members[0] if len(members) == 1 else None
+
+    # `Optional` resolved through its binding: `from typing import Optional [as X]` or `typing.Optional`
+    def _is_optional(self, node: ast.expr) -> bool:
+        match node:
+            case ast.Name(id=name):
+                tag, ambiguous = self._tags(name, OPTIONAL_TAG)
+                return tag == "optional" and not ambiguous
+            case ast.Attribute(value=ast.Name() as base, attr="Optional"):
+                tag, ambiguous = self._tags(base.id, TYPING_TAG)
+                return tag == "typing" and not ambiguous
+        return False
+
     def _is_template_value(self, node: ast.expr) -> bool:
         match node:
             case ast.TemplateStr():
@@ -437,7 +451,7 @@ class _Finder(ast.NodeVisitor):
         return False
 
     def _is_template_annotation(self, annotation: ast.expr) -> bool:
-        if (inner := _without_none(annotation)) is None:
+        if (inner := self._without_none(annotation)) is None:
             return False
         return (ref := self._templatelib_ref(inner)) is not None and ref.name == "Template" and not ref.ambiguous
 
@@ -646,6 +660,7 @@ class _Finder(ast.NodeVisitor):
                 operand=operand,
                 span=self._lines.span(node),
                 operand_span=self._lines.span(operand),
+                evident=id(operand) in self._chains or self._is_template_value(operand),
             ),
         )
 
@@ -662,7 +677,12 @@ class _Finder(ast.NodeVisitor):
             if (template_ref := self._templatelib_ref(target)) is not None:
                 self._template_use(template_ref, target, "ambiguous")
             self._visit_query(node, target, subscript, ref)
-        elif isinstance(node.func, ast.Name) and node.func.id in TYPE_CHECK_FUNCTIONS:
+        elif (
+            isinstance(node.func, ast.Name)
+            and node.func.id in TYPE_CHECK_FUNCTIONS
+            # the builtin only when the name is unbound
+            and self._lookup(node.func.id) is None
+        ):
             self._visit_type_check(node)
         elif not plain and (template_ref := self._templatelib_ref(node.func)) is not None:
             self._visit_template_call(node, template_ref)
