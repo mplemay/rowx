@@ -683,6 +683,13 @@ A `fetch` on a pool acquires at its first row and holds that connection until th
   the app's startup).
 - **What `RESET ALL` does not reset:** `SET ROLE`, `SET SESSION AUTHORIZATION` and temporary tables. Undo them
   yourself, in a `reset` hook or a custom `reset_query`.
+- **Session encoding drift.** rowx sends UTF-8 and standard-conforming strings, and watches the server's parameter
+  reports. If application SQL runs `SET client_encoding` to anything but `UTF8` or `SET standard_conforming_strings =
+  off` (also `SET LOCAL`, or a role or database default of `standard_conforming_strings = off`), the connection is
+  marked broken for good. The next call raises `InterfaceError` naming the setting, and a pool discards the connection
+  when it is released, so a legitimate `SET standard_conforming_strings = off` costs a connection. Setting
+  `client_encoding = 'UTF8'` again changes nothing. This is a backstop with a small window: a statement already queued
+  behind the `SET` (for example from another task sharing a connection) may still run first.
 - **Early exit from a pooled stream drains.** Breaking out of a `fetch` makes the connection discard the remaining rows
   before the reset runs. The connection stays counted against `max_size` while it drains. Bound large reads with
   `LIMIT`.

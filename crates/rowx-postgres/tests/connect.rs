@@ -5,7 +5,7 @@ use common::TestResult;
 use rowx_core::error::CoreError;
 use rowx_postgres::conn::Connection;
 use rowx_postgres::dsn::ConnectOptions;
-use rowx_postgres::error::Error;
+use rowx_postgres::error::{Drift, Error};
 use tokio::runtime::Handle;
 
 fn with_password(dsn: &str, password: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -87,5 +87,48 @@ async fn client_certificate_settings_are_interface_errors() -> TestResult {
         return Err("parse unexpectedly succeeded".into());
     };
     assert!(matches!(err, Error::Interface(_)));
+    Ok(())
+}
+
+async fn first_failure(conn: &Connection) -> Result<Error, Box<dyn std::error::Error>> {
+    // the ParameterStatus is processed right after the SET completes, so retry instead of sleeping
+    for _ in 0..10_000 {
+        if let Err(err) = conn.client() {
+            return Ok(err);
+        }
+        tokio::task::yield_now().await;
+    }
+    Err("the connection never failed".into())
+}
+
+#[tokio::test]
+async fn a_changed_client_encoding_fails_client_and_parts() -> TestResult {
+    let Some(dsn) = common::test_dsn()? else {
+        return Ok(());
+    };
+    let mut conn =
+        Connection::connect(&ConnectOptions::from_dsn(&dsn)?, &Handle::current()).await?;
+    conn.simple("SET client_encoding = 'UTF8'").await?;
+    conn.client()?;
+    conn.simple("SET client_encoding = 'SJIS'").await?;
+    let err = first_failure(&conn).await?;
+    assert_eq!(err, Error::Drift(Drift::ClientEncoding("SJIS".into())));
+    assert!(matches!(conn.parts(), Err(Error::Drift(_))));
+    // sticky: going back to UTF8 does not clear it
+    assert!(conn.simple("SET client_encoding = 'UTF8'").await.is_err());
+    assert!(matches!(conn.client(), Err(Error::Drift(_))));
+    conn.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn standard_conforming_strings_off_fails_client() -> TestResult {
+    let Some(dsn) = common::test_dsn()? else {
+        return Ok(());
+    };
+    let conn = Connection::connect(&ConnectOptions::from_dsn(&dsn)?, &Handle::current()).await?;
+    conn.simple("SET standard_conforming_strings = off").await?;
+    let err = first_failure(&conn).await?;
+    assert_eq!(err, Error::Drift(Drift::StandardConformingStrings));
     Ok(())
 }

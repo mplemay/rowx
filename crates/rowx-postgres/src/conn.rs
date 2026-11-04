@@ -1,5 +1,6 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::future::poll_fn;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::runtime::Handle;
@@ -10,14 +11,65 @@ use rowx_core::error::CoreError;
 
 use crate::cancel::CancelTarget;
 use crate::dsn::{ConnectOptions, ParsedDsn};
-use crate::error::Error;
+use crate::error::{Drift, Error};
 use crate::stmt_cache::StmtCache;
+
+const CLEAN: u8 = 0;
+const ENCODING: u8 = 1;
+const STRINGS: u8 = 2;
+
+/// Records that the session left the settings rowx encodes for. The taint is sticky: the first reason
+/// stays for the life of the connection, whatever the session sets afterwards.
+#[derive(Debug, Default)]
+pub struct Taint {
+    reason: AtomicU8,
+    // written before `reason` is published, so a reader that sees ENCODING always finds the name
+    encoding: OnceLock<Box<str>>,
+}
+
+impl Taint {
+    /// Looks at the runtime parameters the server reported so far; `parameter` reads one by name.
+    pub fn observe<'a>(&self, parameter: impl Fn(&str) -> Option<&'a str>) {
+        if let Some(name) = parameter("client_encoding").filter(|name| *name != "UTF8") {
+            // a server-supplied name goes into an error message, so it is bounded and made printable
+            let shown: String = name
+                .chars()
+                .map(|c| if c.is_ascii_graphic() { c } else { '?' })
+                .take(64)
+                .collect();
+            let _ = self.encoding.set(shown.into());
+            self.mark(ENCODING);
+        }
+        if parameter("standard_conforming_strings") == Some("off") {
+            self.mark(STRINGS);
+        }
+    }
+
+    fn mark(&self, reason: u8) {
+        // a failed exchange means an earlier reason already holds
+        let _ = self
+            .reason
+            .compare_exchange(CLEAN, reason, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    #[must_use]
+    pub fn drift(&self) -> Option<Drift> {
+        match self.reason.load(Ordering::Acquire) {
+            ENCODING => Some(Drift::ClientEncoding(
+                self.encoding.get().cloned().unwrap_or_default(),
+            )),
+            STRINGS => Some(Drift::StandardConformingStrings),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Connection {
     client: Option<Client>,
     task: Option<JoinHandle<()>>,
     broken: Arc<AtomicBool>,
+    taint: Arc<Taint>,
     cache: StmtCache<Statement>,
     cancel: CancelTarget,
 }
@@ -39,7 +91,7 @@ impl Connection {
         handle: &Handle,
     ) -> Result<Self, Error> {
         let connector = parsed.tls.connector().map_err(|e| parsed.redact_error(e))?;
-        let (client, connection) = parsed
+        let (client, mut connection) = parsed
             .config
             .connect(connector.clone())
             .await
@@ -48,15 +100,37 @@ impl Connection {
             .map_err(|e| parsed.redact_error(e))?;
         let broken = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&broken);
+        // startup parameters are in already (a role-level `standard_conforming_strings = off`), so
+        // the first call fails without waiting for the task's first poll
+        let taint = Arc::new(Taint::default());
+        taint.observe(|name| connection.parameter(name));
+        let watch = Arc::clone(&taint);
         let task = handle.spawn(async move {
-            if connection.await.is_err() {
-                flag.store(true, Ordering::Release);
+            // ParameterStatus is consumed inside poll_read and never returned by poll_message, so
+            // the check runs on every poll, including Pending
+            loop {
+                let message = poll_fn(|cx| {
+                    let polled = connection.poll_message(cx);
+                    watch.observe(|name| connection.parameter(name));
+                    polled
+                })
+                .await;
+                match message {
+                    // notices and notifications were only logged before, which no one reads
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => {
+                        flag.store(true, Ordering::Release);
+                        return;
+                    }
+                    None => return,
+                }
             }
         });
         Ok(Self {
             client: Some(client),
             task: Some(task),
             broken,
+            taint,
             cache: StmtCache::new(statement_cache_size),
             cancel,
         })
@@ -101,11 +175,15 @@ impl Connection {
     }
 
     /// # Errors
-    /// `Closed` after `close()`, `Broken` once the connection task has failed.
+    /// `Closed` after `close()`, `Broken` once the connection task has failed, `Drift` once the session
+    /// changed `client_encoding` or `standard_conforming_strings`.
     pub fn client(&self) -> Result<&Client, Error> {
         let client = self.client.as_ref().ok_or(CoreError::Closed)?;
         if self.broken.load(Ordering::Acquire) {
             return Err(CoreError::Broken.into());
+        }
+        if let Some(drift) = self.taint.drift() {
+            return Err(Error::Drift(drift));
         }
         Ok(client)
     }
@@ -113,11 +191,15 @@ impl Connection {
     /// The client together with the statement cache, for operations that prepare through it.
     ///
     /// # Errors
-    /// `Closed` after `close()`, `Broken` once the connection task has failed.
+    /// `Closed` after `close()`, `Broken` once the connection task has failed, `Drift` once the session
+    /// changed `client_encoding` or `standard_conforming_strings`.
     pub fn parts(&mut self) -> Result<(&Client, &mut StmtCache<Statement>), Error> {
         let client = self.client.as_ref().ok_or(CoreError::Closed)?;
         if self.broken.load(Ordering::Acquire) {
             return Err(CoreError::Broken.into());
+        }
+        if let Some(drift) = self.taint.drift() {
+            return Err(Error::Drift(drift));
         }
         Ok((client, &mut self.cache))
     }
@@ -241,7 +323,65 @@ fn skip_block_comment(after: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{begin_sql, opens_transaction, release_savepoint_sql, savepoint_sql};
+    use super::{Taint, begin_sql, opens_transaction, release_savepoint_sql, savepoint_sql};
+    use crate::error::Drift;
+
+    fn observed(taint: &Taint, encoding: &str, strings: &str) {
+        taint.observe(|name| match name {
+            "client_encoding" => Some(encoding),
+            "standard_conforming_strings" => Some(strings),
+            _ => None,
+        });
+    }
+
+    #[test]
+    fn utf8_with_conforming_strings_never_taints() {
+        let taint = Taint::default();
+        observed(&taint, "UTF8", "on");
+        taint.observe(|_| None);
+        assert_eq!(taint.drift(), None);
+    }
+
+    #[test]
+    fn another_encoding_taints_and_names_it() {
+        let taint = Taint::default();
+        observed(&taint, "SJIS", "on");
+        assert_eq!(taint.drift(), Some(Drift::ClientEncoding("SJIS".into())));
+        assert_eq!(
+            taint.drift().map(|d| d.to_string()).as_deref(),
+            Some("the session changed client_encoding to SJIS; rowx requires UTF8")
+        );
+    }
+
+    #[test]
+    fn standard_conforming_strings_off_taints() {
+        let taint = Taint::default();
+        observed(&taint, "UTF8", "off");
+        assert_eq!(taint.drift(), Some(Drift::StandardConformingStrings));
+    }
+
+    #[test]
+    fn the_taint_is_sticky_and_keeps_the_first_reason() {
+        let taint = Taint::default();
+        observed(&taint, "UTF8", "off");
+        observed(&taint, "SJIS", "on");
+        observed(&taint, "UTF8", "on");
+        assert_eq!(taint.drift(), Some(Drift::StandardConformingStrings));
+        let other = Taint::default();
+        observed(&other, "LATIN1", "on");
+        observed(&other, "UTF8", "on");
+        assert_eq!(other.drift(), Some(Drift::ClientEncoding("LATIN1".into())));
+    }
+
+    #[test]
+    fn a_hostile_encoding_name_is_bounded_and_printable() {
+        let taint = Taint::default();
+        let name = format!("a\nb{}", "x".repeat(200));
+        observed(&taint, &name, "on");
+        let text = taint.drift().map(|d| d.to_string()).unwrap_or_default();
+        assert!(!text.contains('\n'));
+        assert!(text.len() < 150);
+    }
 
     #[test]
     fn builds_begin_statements() {

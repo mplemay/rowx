@@ -1,14 +1,18 @@
 import asyncio
+import secrets
 from typing import TYPE_CHECKING, Final
 
+import psycopg
 import pytest
+from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from rowx import query
+from rowx import query, query_unchecked
 from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError
 from rowx.postgres import Connection, connect
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -178,3 +182,98 @@ def test_reset_leaves_prepared_statements_unchanged(schema: str) -> None:
     before, after = run_with_two(schema, body)
     assert before > 0
     assert before == after
+
+
+async def assert_drifted(conn: Connection, match: str) -> None:
+    # every later call fails the same way, whatever the session sets back
+    for _ in range(2):
+        with pytest.raises(InterfaceError, match=match):
+            await query[int](t"SELECT 1").one(conn)
+    with pytest.raises(InterfaceError, match=match):
+        await conn.ping()
+
+
+def test_a_changed_client_encoding_fails_the_next_call_naming_it(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            assert await query[int](t"SELECT 1").one(conn) == 1
+            await query(t"SET client_encoding = 'SJIS'").execute(conn)
+            await assert_drifted(conn, r"changed client_encoding to SJIS; rowx requires UTF8")
+
+    asyncio.run(run())
+
+
+def test_standard_conforming_strings_off_fails_the_next_call(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            await query(t"SET standard_conforming_strings = off").execute(conn)
+            await assert_drifted(conn, r"standard_conforming_strings off; rowx requires on")
+
+    asyncio.run(run())
+
+
+def test_setting_the_same_client_encoding_keeps_the_connection(schema: str) -> None:
+    async def run() -> int:
+        async with await connect(schema) as conn:
+            await query(t"SET client_encoding = 'UTF8'").execute(conn)
+            await query(t"SET client_encoding = 'utf8'").execute(conn)
+            await query(t"SET standard_conforming_strings = on").execute(conn)
+            return await query[int](t"SELECT 1").one(conn)
+
+    assert asyncio.run(run()) == 1
+
+
+def test_a_change_undone_inside_one_statement_is_never_reported_and_keeps_the_connection(schema: str) -> None:
+    async def run() -> int:
+        async with await connect(schema) as conn:
+            # the server reports a changed parameter once per statement, and only if it differs from the last report
+            await query_unchecked(
+                t"DO $$ BEGIN SET client_encoding = 'SJIS'; SET client_encoding = 'UTF8'; END $$"
+            ).execute(conn)
+            return await query[int](t"SELECT 1").one(conn)
+
+    assert asyncio.run(run()) == 1
+
+
+def test_the_taint_survives_reset_all_and_a_later_utf8(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            await query(t"SET client_encoding = 'LATIN1'").execute(conn)
+            with pytest.raises(InterfaceError, match="LATIN1"):
+                await query(t"RESET ALL").execute(conn)
+            await assert_drifted(conn, "LATIN1")
+
+    asyncio.run(run())
+
+
+def test_set_local_client_encoding_in_a_transaction_taints(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            await query(t"BEGIN").execute(conn)
+            await query(t"SET LOCAL client_encoding = 'SJIS'").execute(conn)
+            await assert_drifted(conn, "SJIS")
+
+    asyncio.run(run())
+
+
+@pytest.fixture
+def lax_strings_role(schema: str) -> Iterator[str]:
+    role = f"rowx_scs_{secrets.token_hex(4)}"
+    schema_name = str(conninfo_to_dict(schema)["options"]).rsplit("=", 1)[1]
+    with psycopg.connect(schema, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD 'x'").format(sql.Identifier(role)))
+        admin.execute(sql.SQL("ALTER ROLE {} SET standard_conforming_strings = off").format(sql.Identifier(role)))
+        admin.execute(sql.SQL("GRANT ALL ON SCHEMA {} TO {}").format(sql.Identifier(schema_name), sql.Identifier(role)))
+        try:
+            yield make_conninfo(schema, user=role, password="x")  # ruff: ignore[hardcoded-password-func-arg]
+        finally:
+            admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+            admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+
+
+def test_a_role_default_of_standard_conforming_strings_off_fails_the_first_call(lax_strings_role: str) -> None:
+    async def run() -> None:
+        async with await connect(lax_strings_role) as conn:
+            await assert_drifted(conn, "standard_conforming_strings")
+
+    asyncio.run(run())
