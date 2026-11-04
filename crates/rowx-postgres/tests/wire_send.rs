@@ -1002,37 +1002,58 @@ async fn date_and_timestamp_ranges_use_the_subtype_bounds() -> TestResult {
 }
 
 #[tokio::test]
-async fn numrange_text_literals_are_read_back_by_the_server() -> TestResult {
+async fn numrange_scalars_are_binary_and_match_range_send() -> TestResult {
     let (schema, client) = connect!();
+    let num = |negative: bool, digits: &[u8], exp: i64| -> TestResult<Vec<u8>> {
+        Ok(
+            Numeric::from_decimal_parts(negative, digits, DecimalExponent::Finite(exp))?
+                .encode()?,
+        )
+    };
+    let one_five = num(false, &[1, 5, 0], -2)?;
+    let two_five = num(false, &[2, 5], -1)?;
+    let minus_small = num(true, &[1], -3)?;
+    let big = num(false, &[1], 5)?;
     let cases = [
         (
             Range::Bounds {
-                lower: Bound::Inclusive(b"1.50"),
-                upper: Bound::Exclusive(b"2.5"),
+                lower: Bound::Inclusive(&one_five),
+                upper: Bound::Exclusive(&two_five),
             },
             "[1.50,2.5)",
         ),
         (
             Range::Bounds {
                 lower: Bound::Unbounded,
-                upper: Bound::Inclusive(b"-0.001"),
+                upper: Bound::Inclusive(&minus_small),
             },
             "(,-0.001]",
         ),
+        (
+            Range::Bounds {
+                lower: Bound::Exclusive(&minus_small),
+                upper: Bound::Exclusive(&big),
+            },
+            "(-0.001,100000)",
+        ),
+        (
+            Range::Bounds {
+                lower: Bound::Unbounded,
+                upper: Bound::Unbounded,
+            },
+            "(,)",
+        ),
         (Range::Empty, "empty"),
     ];
-    for (ours, expected) in cases {
-        let literal = range::encode_literal(&ours);
-        let shown = read_back(
-            &client,
-            "numrange",
-            Param::text(literal.clone().into_bytes()),
-        )
-        .await?;
+    for (ours, text) in cases {
+        let raw = range::encode(&ours)?;
+        let sent = send(&client, "range_send", "numrange", text).await?;
+        assert_eq!(raw, sent, "{text}");
+        let shown = read_back(&client, "numrange", Param::binary(raw)).await?;
         assert_eq!(
             shown,
-            literal_text(&client, "numrange", expected).await?,
-            "{literal}"
+            literal_text(&client, "numrange", text).await?,
+            "{text}"
         );
     }
     schema.drop().await

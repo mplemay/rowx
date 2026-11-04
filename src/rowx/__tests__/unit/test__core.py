@@ -260,6 +260,32 @@ def test_an_array_parameter_is_never_sent_in_text_format(name: str) -> None:
     assert _param_formats([oid] * len(arrays), arrays) == ["binary"] * len(arrays)
 
 
+RANGE_SAMPLES: Final[dict[str, tuple[int, int, object]]] = {
+    "int4range": (3904, 3905, 1),
+    "int8range": (3926, 3927, 1),
+    "numrange": (3906, 3907, Decimal("1.5")),
+    "tsrange": (3908, 3909, dt.datetime(2024, 1, 2)),  # ruff: ignore[call-datetime-without-tzinfo]
+    "tstzrange": (3910, 3911, dt.datetime(2024, 1, 2, tzinfo=dt.UTC)),
+    "daterange": (3912, 3913, dt.date(2024, 1, 2)),
+}
+
+
+@pytest.mark.parametrize("name", sorted(RANGE_SAMPLES))
+def test_a_range_parameter_is_never_sent_in_text_format(name: str) -> None:
+    scalar_oid, array_oid, bound = RANGE_SAMPLES[name]
+    ranges = [
+        Range(bound, bound, lower_inc=True, upper_inc=True),
+        Range(bound, None),
+        Range(None, bound),
+        Range(),
+        Range(empty=True),
+        None,
+    ]
+    assert _param_formats([scalar_oid] * len(ranges), ranges) == ["binary"] * len(ranges)
+    arrays: list[object] = [ranges, [ranges, ranges], []]
+    assert _param_formats([array_oid] * len(arrays), arrays) == ["binary"] * len(arrays)
+
+
 def test_only_scalar_numeric_timetz_and_json_stay_text() -> None:
     zoned = dt.time(1, tzinfo=dt.UTC)
     # numeric and timetz carry text-format scalars; json and jsonb too

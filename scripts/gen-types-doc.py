@@ -35,6 +35,9 @@ FOOTER: Final[str] = """
 - A domain behaves as its base type.
 - An array column decodes to `list[X]` (nested lists for multi-dimensional arrays). `list[X]` and `list[X | None]`
   both match, at every nesting level.
+- Arrays and ranges are always sent in the binary format, whatever the format of their element or subtype is as a
+  scalar (a `numeric` parameter is text, a `numeric[]` or `numrange` parameter is binary), so a value can never change
+  the element or bound structure.
 - `void` decodes to `None` and is only valid as a tuple element.
 - A range decodes to `rowx.postgres.Range[T]`, with `T` the leaf of its subtype, in the server's canonical form (`[1,5]`
   of `int4range` is `[1, 6)`). A `None` bound is an infinite side, and `Range(empty=True)` is the empty range. A
@@ -130,13 +133,15 @@ def _row(info: TypeInfo) -> str:
     encoding = info.encode_format
     match info.key:
         case "array":
-            result, encoding = "`list[X]`", "binary, or text if an element needs it"
+            result, encoding = "`list[X]`", "binary"
         case "json" | "jsonb":
             result, accepted = "any value (`json.loads`)", "any JSON-serialisable value"
         case "domain":
             accepted, encoding = "base type", "base type"
         case "void":
             encoding = ""
+        case key if key.endswith("range"):
+            encoding = "binary"
     cells = (
         f"`{info.key}`",
         result,

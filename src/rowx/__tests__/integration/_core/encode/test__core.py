@@ -415,6 +415,79 @@ def test_every_element_family_round_trips_as_an_array_parameter(schema: str, sql
         )
 
 
+# no supported range subtype has a bound text that can hold a quote, backslash, comma, bracket or whitespace, or
+# spell `empty`; the literal grammar is gone, so the checks that matter are the exact `range_send` bytes below
+TS_LOW: Final = dt.datetime(1900, 1, 1, 0, 0, 0, 1)  # ruff: ignore[call-datetime-without-tzinfo]
+TS_HIGH: Final = dt.datetime(2262, 4, 11, 23, 47, 16, 854775)  # ruff: ignore[call-datetime-without-tzinfo]
+RANGE_BOUNDS: Final[dict[str, tuple[object, object]]] = {
+    "int4range": (-(2**31), 2**31 - 2),
+    "int8range": (-(2**63), 2**63 - 2),
+    "numrange": (Decimal("-1E+5"), Decimal("1.50E+400")),
+    "daterange": (dt.date(1, 1, 1), dt.date(9999, 12, 30)),
+    "tsrange": (TS_LOW, TS_HIGH),
+    "tstzrange": (
+        dt.datetime(1999, 12, 31, 23, 59, 59, 999999, tzinfo=dt.timezone(dt.timedelta(hours=-5, minutes=-30))),
+        dt.datetime(2100, 2, 28, 12, tzinfo=UTC),
+    ),
+}
+RANGE_SHAPES: Final[list[tuple[bool, bool, bool, bool]]] = [
+    # lower bounded, upper bounded, lower inclusive, upper inclusive
+    (True, True, True, False),
+    (True, True, True, True),
+    (True, True, False, False),
+    (True, True, False, True),
+    (True, False, True, False),
+    (False, True, False, True),
+    (False, False, False, False),
+]
+
+
+@pytest.mark.parametrize("sql_type", sorted(RANGE_BOUNDS))
+def test_every_range_subtype_round_trips_as_a_binary_scalar(schema: str, sql_type: str) -> None:
+    low, high = RANGE_BOUNDS[sql_type]
+    cases: list[tuple[Range[Any], str, list[object]]] = [(Range(empty=True), f"'empty'::{sql_type}", [])]
+    for lower_bounded, upper_bounded, lower_inc, upper_inc in RANGE_SHAPES:
+        lower, upper = (low if lower_bounded else None), (high if upper_bounded else None)
+        bounds = ("[" if lower_inc else "(") + ("]" if upper_inc else ")")
+        cases.append((
+            Range(lower, upper, lower_inc=lower_inc, upper_inc=upper_inc),
+            f"{sql_type}($1, $2, '{bounds}')",
+            [lower, upper],
+        ))
+    for value, oracle, oracle_params in cases:
+        sent = fetch_scalar(schema, f"SELECT $1::{sql_type}", [value])
+        # the oracle builds the same range on the server from its bounds, so nothing is guessed
+        built = fetch_scalar(schema, f"SELECT {oracle}", oracle_params)
+        assert sent == built
+        for expr in ("{}::text", "range_send({})"):
+            assert fetch_scalar(schema, f"SELECT {expr.format(f'$1::{sql_type}')}", [value]) == fetch_scalar(
+                schema, f"SELECT {expr.format(oracle)}", oracle_params
+            )
+
+
+@pytest.mark.parametrize("sql_type", sorted(RANGE_BOUNDS))
+def test_every_range_subtype_round_trips_as_an_array_element(schema: str, sql_type: str) -> None:
+    low, high = RANGE_BOUNDS[sql_type]
+    values: list[object] = [
+        Range(empty=True),
+        Range(low, high),
+        Range(low, None, lower_inc=False),
+        Range(None, high, upper_inc=True),
+        Range(),
+        None,
+    ]
+    marks = [f"${i}::{sql_type}" for i in range(1, 7)]
+    oracles = {
+        "flat": f"ARRAY[{', '.join(marks)}]",
+        "nested": f"ARRAY[ARRAY[{', '.join(marks[:3])}], ARRAY[{', '.join(marks[3:])}]]",
+    }
+    for sent, oracle in ((values, oracles["flat"]), ([values[:3], values[3:]], oracles["nested"])):
+        got = fetch_scalar(schema, f"SELECT $1::{sql_type}[]", [sent])
+        text = fetch_scalar(schema, f"SELECT $1::{sql_type}[]::text", [sent])
+        assert got == fetch_scalar(schema, f"SELECT {oracle}::{sql_type}[]", values)
+        assert text == fetch_scalar(schema, f"SELECT {oracle}::{sql_type}[]::text", values)
+
+
 def test_decimals_encode_under_a_lowercase_exponent_context(schema: str) -> None:
     # `capitals = 0` makes `Decimal.__str__` print `e` instead of `E`
     values = [Decimal("1E+5"), Decimal("-1.5E-3"), Decimal("0E-10"), Decimal("Infinity"), Decimal("1E+100")]

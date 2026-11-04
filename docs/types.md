@@ -40,7 +40,7 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 | `macaddr8` | `str` |  | `str` | binary |
 | `int4range` | `rowx.postgres.Range[int]` |  | `Range` | binary |
 | `int8range` | `rowx.postgres.Range[int]` |  | `Range` | binary |
-| `numrange` | `rowx.postgres.Range[decimal.Decimal]` |  | `Range` | text |
+| `numrange` | `rowx.postgres.Range[decimal.Decimal]` |  | `Range` | binary |
 | `daterange` | `rowx.postgres.Range[datetime.date]` |  | `Range` | binary |
 | `tsrange` | `rowx.postgres.Range[datetime.datetime]` | naive | `Range` | binary |
 | `tstzrange` | `rowx.postgres.Range[datetime.datetime]` | aware | `Range` | binary |
@@ -51,7 +51,7 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 | `jsonb` | any value (`json.loads`) |  | any JSON-serialisable value | text |
 | `enum` | `str` |  | `str` | text |
 | `domain` | base type |  | base type | base type |
-| `array` | `list[X]` |  | `list`, `tuple` | binary, or text if an element needs it |
+| `array` | `list[X]` |  | `list`, `tuple` | binary |
 | `void` | `None` |  | none |  |
 | `point` | `rowx.postgres.Point` |  | `Point` | binary |
 | `line` | `rowx.postgres.Line` |  | `Line` | binary |
@@ -77,6 +77,9 @@ runtime codecs and for `rowx check`. Regenerate it with `uv run python scripts/g
 - A domain behaves as its base type.
 - An array column decodes to `list[X]` (nested lists for multi-dimensional arrays). `list[X]` and `list[X | None]`
   both match, at every nesting level.
+- Arrays and ranges are always sent in the binary format, whatever the format of their element or subtype is as a
+  scalar (a `numeric` parameter is text, a `numeric[]` or `numrange` parameter is binary), so a value can never change
+  the element or bound structure.
 - `void` decodes to `None` and is only valid as a tuple element.
 - A range decodes to `rowx.postgres.Range[T]`, with `T` the leaf of its subtype, in the server's canonical form (`[1,5]`
   of `int4range` is `[1, 6)`). A `None` bound is an infinite side, and `Range(empty=True)` is the empty range. A

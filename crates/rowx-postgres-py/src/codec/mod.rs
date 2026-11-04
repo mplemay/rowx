@@ -209,7 +209,6 @@ fn encode_in(ty: &Type, param: &PyParam, slot: Slot) -> Result<Param, String> {
         _ if is_citext(ty) => text::encode(ty, param).map(Param::binary),
         _ if is_extension(ty) => extension::encode(ty, param),
         _ if is_array => array_enc::encode(ty, param),
-        _ if is_supported_range(ty) && element => range::encode_binary(ty, param),
         _ if is_supported_range(ty) => range::encode(ty, param),
         _ => Err(format!("no encoder for the postgres type {}", ty.name())),
     }
