@@ -293,8 +293,10 @@ async fn fetch_once(
             check_nulls(&row, rows.len(), mask, mapping.as_ref())?;
         }
         rows.push(row);
-        // dropping the stream discards the rest of the result; the connection task drains it
         if shape.limit_one {
+            // read to the end, so the encoding watch has seen the response's last report; a failure
+            // after the first row is not this call's
+            while let Ok(Some(_)) = stream.try_next().await {}
             break;
         }
     }

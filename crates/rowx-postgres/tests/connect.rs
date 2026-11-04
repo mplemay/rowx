@@ -110,9 +110,12 @@ async fn a_changed_client_encoding_fails_client_and_parts() -> TestResult {
         Connection::connect(&ConnectOptions::from_dsn(&dsn)?, &Handle::current()).await?;
     conn.simple("SET client_encoding = 'UTF8'").await?;
     conn.client()?;
+    assert_eq!(conn.settled(Ok(1)), Ok(1));
     conn.simple("SET client_encoding = 'SJIS'").await?;
     let err = first_failure(&conn).await?;
     assert_eq!(err, Error::Drift(Drift::ClientEncoding("SJIS".into())));
+    // an operation that finished after the drift reports it instead of its result
+    assert_eq!(conn.settled(Ok(1)), Err(err));
     assert!(matches!(conn.parts(), Err(Error::Drift(_))));
     // sticky: going back to UTF8 does not clear it
     assert!(conn.simple("SET client_encoding = 'UTF8'").await.is_err());

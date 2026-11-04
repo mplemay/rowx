@@ -18,6 +18,11 @@ const CLEAN: u8 = 0;
 const ENCODING: u8 = 1;
 const STRINGS: u8 = 2;
 
+// the server reports `SET client_encoding = 'UNICODE'` under the alias it was given
+fn is_utf8(name: &str) -> bool {
+    name.eq_ignore_ascii_case("UTF8") || name.eq_ignore_ascii_case("UNICODE")
+}
+
 /// Records that the session left the settings rowx encodes for. The taint is sticky: the first reason
 /// stays for the life of the connection, whatever the session sets afterwards.
 #[derive(Debug, Default)]
@@ -30,7 +35,7 @@ pub struct Taint {
 impl Taint {
     /// Looks at the runtime parameters the server reported so far; `parameter` reads one by name.
     pub fn observe<'a>(&self, parameter: impl Fn(&str) -> Option<&'a str>) {
-        if let Some(name) = parameter("client_encoding").filter(|name| *name != "UTF8") {
+        if let Some(name) = parameter("client_encoding").filter(|name| !is_utf8(name)) {
             // a server-supplied name goes into an error message, so it is bounded and made printable
             let shown: String = name
                 .chars()
@@ -188,6 +193,18 @@ impl Connection {
         Ok(client)
     }
 
+    /// Passes `result` through, unless the session drifted while the operation ran. The rows of the
+    /// statement that changed the encoding were already sent in it, so they may be mis-decoded.
+    ///
+    /// # Errors
+    /// `Drift` when the taint is set; otherwise `result`'s own error.
+    pub fn settled<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
+        let value = result?;
+        self.taint
+            .drift()
+            .map_or(Ok(value), |d| Err(Error::Drift(d)))
+    }
+
     /// The client together with the statement cache, for operations that prepare through it.
     ///
     /// # Errors
@@ -340,6 +357,15 @@ mod tests {
         observed(&taint, "UTF8", "on");
         taint.observe(|_| None);
         assert_eq!(taint.drift(), None);
+    }
+
+    #[test]
+    fn the_unicode_alias_is_utf8() {
+        for name in ["UNICODE", "unicode", "utf8", "Utf8"] {
+            let taint = Taint::default();
+            observed(&taint, name, "on");
+            assert_eq!(taint.drift(), None, "{name}");
+        }
     }
 
     #[test]

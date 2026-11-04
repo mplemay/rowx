@@ -142,7 +142,16 @@ class Transaction:
         if self._ended:
             return
         if exc_type is not None:
-            await self._end(commit=False)
+            try:
+                await self._end(commit=False)
+            except ConnectionBusyError:
+                raise
+            except InterfaceError as rollback_error:
+                # a tainted or dead connection cannot roll back; the body's own exception is the one to
+                # report, and the connection is discarded as before
+                if exc is not None:
+                    exc.add_note(f"the rollback also failed: {rollback_error}")
+                return
             return
         if self._child is not None:
             await self._end(commit=False)

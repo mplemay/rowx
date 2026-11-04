@@ -29,6 +29,20 @@ async def backend_pid(conn: Connection) -> int:
     return await query[int](t"SELECT pg_backend_pid()").one(conn)
 
 
+async def first_drift(conn: Connection, match: str) -> None:
+    # the report is processed right after the statement completes, so re-issue a call instead of sleeping
+    failure: InterfaceError | None = None
+    for _ in range(POLL_LIMIT):
+        try:
+            await backend_pid(conn)
+        except InterfaceError as err:
+            failure = err
+            break
+        await asyncio.sleep(0)
+    assert failure is not None
+    assert match in str(failure)
+
+
 async def wait_active(observer: Connection, pid: int) -> None:
     # each poll is a round trip on the observer, so no sleep is needed
     for _ in range(POLL_LIMIT):
@@ -546,9 +560,9 @@ def test_a_connection_that_drifted_is_replaced_after_release(schema: str, *, hoo
         async with Pool(schema, max_size=1, acquire_timeout=5, reset=reset if hooked else None) as pool:
             conn = await pool.acquire()
             first = await backend_pid(conn)
-            await query(t"SET client_encoding = 'SJIS'").execute(conn)
-            with pytest.raises(InterfaceError, match="client_encoding to SJIS"):
-                await backend_pid(conn)
+            with contextlib.suppress(InterfaceError):
+                await query(t"SET client_encoding = 'SJIS'").execute(conn)
+            await first_drift(conn, "client_encoding to SJIS")
             # the reset needs the connection, which fails, so it is discarded; the hook path says so
             if hooked:
                 with pytest.raises(InterfaceError, match="SJIS"):
@@ -570,7 +584,8 @@ def test_a_drifted_idle_connection_is_not_reused(schema: str) -> None:
         async with Pool(schema, max_size=1, acquire_timeout=5) as pool:
             async with pool.acquire() as conn:
                 first = await backend_pid(conn)
-                await query(t"SET standard_conforming_strings = off").execute(conn)
+                with contextlib.suppress(InterfaceError):
+                    await query(t"SET standard_conforming_strings = off").execute(conn)
             async with pool.acquire() as fresh:
                 return first, await backend_pid(fresh)
 

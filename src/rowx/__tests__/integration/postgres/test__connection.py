@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import re
 import secrets
 from typing import TYPE_CHECKING, Final
 
@@ -13,6 +15,7 @@ from rowx.postgres import Connection, connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+    from string.templatelib import Template
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -184,6 +187,33 @@ def test_reset_leaves_prepared_statements_unchanged(schema: str) -> None:
     assert before == after
 
 
+DRIFT_ATTEMPTS: Final[int] = 1000
+DRIFTING_ROWS: Final[Template] = t"""
+    SELECT set_config('client_encoding', 'LATIN1', false), convert_from(decode('c383c2a9', 'hex'), 'UTF8')
+"""
+
+
+async def first_failure(conn: Connection, match: str) -> None:
+    # the report is processed right after the statement completes, so re-issue a call instead of sleeping
+    failure: InterfaceError | None = None
+    for _ in range(DRIFT_ATTEMPTS):
+        try:
+            await query[int](t"SELECT 1").one(conn)
+        except InterfaceError as err:
+            failure = err
+            break
+        await asyncio.sleep(0)
+    assert failure is not None
+    assert re.search(match, str(failure))
+
+
+async def drift(conn: Connection, statement: Template, match: str) -> None:
+    # the statement itself fails once its own report is seen, so its error is allowed here
+    with contextlib.suppress(InterfaceError):
+        await query(statement).execute(conn)
+    await first_failure(conn, match)
+
+
 async def assert_drifted(conn: Connection, match: str) -> None:
     # every later call fails the same way, whatever the session sets back
     for _ in range(2):
@@ -197,8 +227,17 @@ def test_a_changed_client_encoding_fails_the_next_call_naming_it(schema: str) ->
     async def run() -> None:
         async with await connect(schema) as conn:
             assert await query[int](t"SELECT 1").one(conn) == 1
-            await query(t"SET client_encoding = 'SJIS'").execute(conn)
+            await drift(conn, t"SET client_encoding = 'SJIS'", r"changed client_encoding to SJIS; rowx requires UTF8")
             await assert_drifted(conn, r"changed client_encoding to SJIS; rowx requires UTF8")
+
+    asyncio.run(run())
+
+
+def test_the_statement_that_changes_the_encoding_itself_fails(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            with pytest.raises(InterfaceError, match="changed client_encoding to SJIS"):
+                await query(t"SET client_encoding = 'SJIS'").execute(conn)
 
     asyncio.run(run())
 
@@ -206,7 +245,9 @@ def test_a_changed_client_encoding_fails_the_next_call_naming_it(schema: str) ->
 def test_standard_conforming_strings_off_fails_the_next_call(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
-            await query(t"SET standard_conforming_strings = off").execute(conn)
+            await drift(
+                conn, t"SET standard_conforming_strings = off", r"standard_conforming_strings off; rowx requires on"
+            )
             await assert_drifted(conn, r"standard_conforming_strings off; rowx requires on")
 
     asyncio.run(run())
@@ -218,6 +259,16 @@ def test_setting_the_same_client_encoding_keeps_the_connection(schema: str) -> N
             await query(t"SET client_encoding = 'UTF8'").execute(conn)
             await query(t"SET client_encoding = 'utf8'").execute(conn)
             await query(t"SET standard_conforming_strings = on").execute(conn)
+            return await query[int](t"SELECT 1").one(conn)
+
+    assert asyncio.run(run()) == 1
+
+
+@pytest.mark.parametrize("alias", ["UNICODE", "unicode"])
+def test_the_unicode_alias_keeps_the_connection(schema: str, alias: str) -> None:
+    async def run() -> int:
+        async with await connect(schema) as conn:
+            await query_unchecked(t"SET client_encoding = {alias:ident}").execute(conn)
             return await query[int](t"SELECT 1").one(conn)
 
     assert asyncio.run(run()) == 1
@@ -238,7 +289,7 @@ def test_a_change_undone_inside_one_statement_is_never_reported_and_keeps_the_co
 def test_the_taint_survives_reset_all_and_a_later_utf8(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
-            await query(t"SET client_encoding = 'LATIN1'").execute(conn)
+            await drift(conn, t"SET client_encoding = 'LATIN1'", "LATIN1")
             with pytest.raises(InterfaceError, match="LATIN1"):
                 await query(t"RESET ALL").execute(conn)
             await assert_drifted(conn, "LATIN1")
@@ -250,7 +301,62 @@ def test_set_local_client_encoding_in_a_transaction_taints(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
             await query(t"BEGIN").execute(conn)
-            await query(t"SET LOCAL client_encoding = 'SJIS'").execute(conn)
+            await drift(conn, t"SET LOCAL client_encoding = 'SJIS'", "SJIS")
+            await assert_drifted(conn, "SJIS")
+
+    asyncio.run(run())
+
+
+def test_rows_of_the_drifting_statement_fail_for_one(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            with pytest.raises(InterfaceError, match="changed client_encoding to LATIN1"):
+                await query[tuple[str, str]](DRIFTING_ROWS).one(conn)
+            await assert_drifted(conn, "LATIN1")
+
+    asyncio.run(run())
+
+
+def test_rows_of_the_drifting_statement_fail_for_all(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            with pytest.raises(InterfaceError, match="changed client_encoding to LATIN1"):
+                await query[tuple[str, str]](DRIFTING_ROWS).all(conn)
+            await assert_drifted(conn, "LATIN1")
+
+    asyncio.run(run())
+
+
+def test_rows_of_the_drifting_statement_fail_for_a_fetch_stream(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            with pytest.raises(InterfaceError, match="changed client_encoding to LATIN1"):
+                _ = [row async for row in query[tuple[str, str]](DRIFTING_ROWS).fetch(conn)]
+            await assert_drifted(conn, "LATIN1")
+
+    asyncio.run(run())
+
+
+def test_a_body_exception_is_kept_when_the_rollback_fails_on_a_drifted_connection(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            with pytest.raises(ValueError, match="body") as raised:  # ruff: ignore[pytest-raises-with-multiple-statements]
+                async with conn.transaction():
+                    await drift(conn, t"SET client_encoding = 'SJIS'", "SJIS")
+                    msg = "body"
+                    raise ValueError(msg)
+            assert any("rollback also failed" in note and "SJIS" in note for note in raised.value.__notes__)
+            await assert_drifted(conn, "SJIS")
+
+    asyncio.run(run())
+
+
+def test_a_clean_exit_on_a_drifted_connection_raises_the_drift_error(schema: str) -> None:
+    async def run() -> None:
+        async with await connect(schema) as conn:
+            with pytest.raises(InterfaceError, match="changed client_encoding to SJIS"):
+                async with conn.transaction():
+                    await drift(conn, t"SET client_encoding = 'SJIS'", "SJIS")
             await assert_drifted(conn, "SJIS")
 
     asyncio.run(run())
