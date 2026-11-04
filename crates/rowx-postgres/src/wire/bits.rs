@@ -63,13 +63,18 @@ pub fn encode(text: &str) -> Result<Vec<u8>, BitsError> {
         return Err(BitsError::Length(i64::try_from(bits).unwrap_or(i64::MAX)));
     }
     let declared = i32::try_from(bits).map_err(|_| BitsError::Length(i64::MAX))?;
-    let mut out = declared.to_be_bytes().to_vec();
-    out.resize(4 + bits.div_ceil(8), 0);
-    for (i, b) in text.bytes().enumerate() {
-        if b == b'1'
-            && let Some(byte) = out.get_mut(4 + i / 8)
-        {
-            *byte |= 0x80 >> (i % 8);
+    // bits <= MAX_BITS was checked above, so the length cannot overflow
+    let total = bits.div_ceil(8).saturating_add(4);
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&declared.to_be_bytes());
+    out.resize(total, 0);
+    if let Some(packed) = out.get_mut(4..) {
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'1'
+                && let Some(byte) = packed.get_mut(i / 8)
+            {
+                *byte |= 0x80 >> (i % 8);
+            }
         }
     }
     Ok(out)
@@ -93,6 +98,15 @@ mod tests {
         assert_eq!(encode("0000000"), Ok(vec![0, 0, 0, 7, 0]));
         assert_eq!(encode("10000001"), Ok(vec![0, 0, 0, 8, 0x81]));
         assert_eq!(encode("111111111"), Ok(vec![0, 0, 0, 9, 0xff, 0x80]));
+    }
+
+    #[test]
+    fn encode_sizes_follow_the_byte_boundaries() {
+        for bits in [7_usize, 8, 9, 15, 16, 17] {
+            let raw = encode(&"1".repeat(bits)).unwrap_or_default();
+            assert_eq!(raw.len(), 4 + bits.div_ceil(8), "{bits}");
+            assert_eq!(decode(&raw), Ok("1".repeat(bits)), "{bits}");
+        }
     }
 
     #[test]

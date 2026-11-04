@@ -95,7 +95,7 @@ pub fn encode(network: &Network) -> Result<Vec<u8>, NetworkError> {
         Addr::V6(_) => FAMILY_V6,
     };
     let bytes = network.addr.bytes();
-    let mut out = Vec::with_capacity(HEADER_LEN + bytes.len());
+    let mut out = Vec::with_capacity(HEADER_LEN.saturating_add(bytes.len()));
     out.push(family);
     out.push(network.bits);
     out.push(u8::from(network.is_cidr));
