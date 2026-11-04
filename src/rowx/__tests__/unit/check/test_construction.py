@@ -224,6 +224,52 @@ def test_private_rowx_names_that_are_not_templatelib_are_fine() -> None:
     assert not reports("from rowx._query import helper\nfrom rowx import _core\nhelper(_core.foo)\n")
 
 
+def test_a_function_imported_from_a_private_module_is_ordinary() -> None:
+    assert not reports("from rowx._template import _is_ident_char as ok\nok('a')\ny = ok\n")
+    assert not reports("from rowx._template import helper, _helper\nhelper(1)\n_helper(2)\n")
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        "from typing import Annotated\nAnnotated[Template, 1](x)",
+        "import typing\ntyping.Annotated[Template, 1](x)",
+        "import typing_extensions as te\nte.Annotated[Template, 1](x)",
+        "from typing import Annotated\nA = Annotated[Template, 1]\nA(x)",
+    ],
+)
+def test_annotated_is_callable_at_runtime(use: str) -> None:
+    assert lines("from string.templatelib import Template\n" + use)
+
+
+def test_annotated_in_an_annotation_is_a_type() -> None:
+    source = "from typing import Annotated\nfrom string.templatelib import Template\nx: Annotated[Template, 1] = 1\n"
+    assert not reports(source + "def f(a: Annotated[Template, 1]) -> Annotated[Template, 2]: ...\n")
+
+
+def test_issubclass_names_classes_in_both_arguments() -> None:
+    header = "from string.templatelib import Template\n"
+    assert not reports(header + "issubclass(Template, object)\nissubclass(Template, (Template, int))\n")
+    assert not reports(header + "isinstance(x, Template)\n")
+    assert lines(header + "issubclass(Template(y), object)\n") == [2]
+    assert lines(header + "isinstance(Template, object)\n") == [2]
+
+
+def test_value_pattern_is_an_inspection() -> None:
+    header = "import string.templatelib\nmatch q:\n    case string.templatelib.Template:\n        pass\n"
+    assert not reports(header)
+
+
+def test_comparing_with_the_class_is_an_inspection() -> None:
+    header = "import string.templatelib\nfrom string.templatelib import Template\n"
+    source = "def f(t):\n    return type(t) is Template or type(t) != string.templatelib.Template\n"
+    assert not reports(header + source)
+    assert not reports(header + "def g(t: Template):\n    return type(t).__name__\n")
+    assert lines(header + "def h(t: Template):\n    return type(t).__new__\n") == [4]
+    assert lines(header + "y = Template if x else 1\n") == [3]
+    assert lines(header + "y = Template < x\n") == [3]
+
+
 def test_deeply_nested_file_is_a_syntax_error_not_a_crash() -> None:
     for source in ("y = " + " + ".join(["1"] * 3000) + "\n", "a" + ".b" * 5000 + "\n"):
         result = discover_source(PATH, source.encode())

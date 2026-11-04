@@ -1,7 +1,8 @@
 import string.templatelib
+import typing
 from string import templatelib
 from string.templatelib import Template, _template_unpickle  # error: [template-construction]  # ty: ignore[unresolved-import]
-from typing import cast
+from typing import Annotated, cast
 
 import rowx._template
 import rowx._template as private_module
@@ -45,3 +46,9 @@ rowx_from = private_alias.Template(text)  # error: [template-construction]
 rowx_interpolation = RowxInterpolation(1, "a", None, text)  # error: [template-construction]
 rowx_module = private_module  # error: [template-construction]
 rowx_class = RowxTemplate  # error: [template-construction]
+
+# `Annotated[X, ...]` is callable at runtime and builds an `X`
+annotated_call = Annotated[Template, 1](text)  # error: [template-construction]  # ty: ignore[call-non-callable]
+annotated_attr = typing.Annotated[Template, 1](text)  # error: [template-construction]  # ty: ignore[call-non-callable]
+annotated_alias = Annotated[Template, 1]  # error: [template-construction]
+annotated_nested = Annotated[string.templatelib.Template, 1]  # error: [template-construction]

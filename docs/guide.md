@@ -1419,7 +1419,8 @@ nesting t-string literals instead (`t"WHERE {cond}"`), which keeps every value a
 The rule is **best-effort**. It reads source only, so `getattr`, `eval`, dynamic imports, generated code and code
 outside the include roots can still build a template. So can reflection: `type(x)(...)` on a value that is not evidently
 a `Template`, `__reduce__` and pickle, `__annotations__`, `typing.get_type_hints` and `inspect.signature`, `globals()`,
-`locals()` and `vars()`, `sys.modules[...]` and `operator.attrgetter`.
+`locals()` and `vars()` (read, or assigned through), `sys.modules[__name__]`, `setattr` on a module and
+`operator.attrgetter`.
 
 Only tracked `*.py` files under the include roots are checked. `.pyi` stubs, extensionless scripts, and gitignored or
 untracked files are not. `exclude` entries are matched relative to the project, so an absolute path matches nothing.

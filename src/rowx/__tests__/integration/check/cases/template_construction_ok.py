@@ -5,9 +5,10 @@ from string.templatelib import (
     Template as T,  # ruff: ignore[camelcase-imported-as-acronym]
     convert,
 )
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Annotated, Optional, cast
 
 from rowx import query, query_unchecked
+from rowx._template import _is_ident_char as is_ident_char
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,7 +53,15 @@ def direct_argument_specs() -> None:
     _ = value_spec
 
 
-def types_and_inspection(x: object, parts: dict[str, Template], call: Callable[[Template], int]) -> int:
+def types_and_inspection(
+    x: object,
+    parts: dict[str, Template],
+    call: Callable[[Template], int],
+    marked: Annotated[Template, 1],
+) -> int:
+    issubclass(Template, object)
+    issubclass(Template, (Template, int))
+    _ = marked
     cast(Template, x)  # ruff: ignore[runtime-cast-value]
     cast(list[Template], x)  # ruff: ignore[runtime-cast-value]
     cast(dict[str, Template], x)  # ruff: ignore[runtime-cast-value]
@@ -65,6 +74,8 @@ def types_and_inspection(x: object, parts: dict[str, Template], call: Callable[[
             return 0
         case string.templatelib.Template():
             return 1
+        case string.templatelib.Template:
+            return 2
     return len(parts) + call(Template("a"))
 
 
@@ -75,3 +86,12 @@ def evident_through_assignment(first: Template) -> None:
     t"a" + second
     third + t"a"
     t"a" + fourth
+
+
+def private_function_from_a_private_module(char: str) -> bool:
+    return is_ident_char(char)
+
+
+def compare_with_the_class(value: object) -> bool:
+    name = type(value).__name__
+    return type(value) is Template or type(value) is not string.templatelib.Template or bool(name)

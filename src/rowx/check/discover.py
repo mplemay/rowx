@@ -30,6 +30,8 @@ STRING_MODULE: Final[str] = "string"
 DUNDER: Final[str] = "__"
 TEMPLATELIB_ATTR: Final[str] = "templatelib"
 TEMPLATELIB_MODULE: Final[str] = f"{STRING_MODULE}.{TEMPLATELIB_ATTR}"
+IDENTITY_OPERATORS: Final = (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)
+NAME_ATTRIBUTES: Final[frozenset[str]] = frozenset({"__name__", "__qualname__", "__module__"})
 TYPE_CHECK_FUNCTIONS: Final[frozenset[str]] = frozenset({"isinstance", "issubclass"})
 TYPE_PARAMS: Final = (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
 LINE_PATTERN: Final = re_compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
@@ -48,10 +50,12 @@ type Tag = Literal[
     "cast",
     "typing",
     "optional",
+    "annotated",
     "other",
 ]
 
 TEMPLATELIB_PUBLIC: Final[frozenset[str]] = frozenset({"Template", "Interpolation", "convert"})
+TYPING_TAGS: Final[dict[str, Tag]] = {"cast": "cast", "Optional": "optional", "Annotated": "annotated"}
 TYPING_MODULES: Final[frozenset[str]] = frozenset({"typing", "typing_extensions"})
 MODULE_TAG: Final[frozenset[Tag]] = frozenset({"module"})
 TEMPLATELIB_TAG: Final[frozenset[Tag]] = frozenset({"templatelib"})
@@ -59,6 +63,7 @@ STRING_TAG: Final[frozenset[Tag]] = frozenset({"string"})
 CAST_TAG: Final[frozenset[Tag]] = frozenset({"cast"})
 TYPING_TAG: Final[frozenset[Tag]] = frozenset({"typing"})
 OPTIONAL_TAG: Final[frozenset[Tag]] = frozenset({"optional"})
+ANNOTATED_TAG: Final[frozenset[Tag]] = frozenset({"annotated"})
 QUERY_TAGS: Final[frozenset[Tag]] = frozenset({"query", "query_unchecked"})
 CLASS_TAGS: Final[frozenset[Tag]] = frozenset({"template", "interpolation", "private"})
 PRIVATE_MODULE_TAG: Final[frozenset[Tag]] = frozenset({"rowxpriv"})
@@ -176,18 +181,17 @@ def _is_private_rowx_module(module: str) -> bool:
 def _rowx_private_tag(module: str, name: str) -> Tag:
     if module.split(".", maxsplit=1)[0] != ROWX_MODULE:
         return "other"
-    if _is_private_name(name):
-        return "rowxpriv"
-    return _templatelib_tag(name) if _is_private_rowx_module(module) and name in RE_EXPORTED else "other"
+    # a name imported from a private module is a function or class unless it re-exports `Template` or `Interpolation`
+    if _is_private_rowx_module(module):
+        return _templatelib_tag(name) if name in RE_EXPORTED else "other"
+    return "rowxpriv" if _is_private_name(name) else "other"
 
 
 def _import_tag(module: str, name: str) -> Tag:
     if module == ROWX_MODULE and name in QUERY_KINDS:
         return "query" if name == "query" else "query_unchecked"
-    if module in TYPING_MODULES and name == "cast":
-        return "cast"
-    if module in TYPING_MODULES and name == "Optional":
-        return "optional"
+    if module in TYPING_MODULES and name in TYPING_TAGS:
+        return TYPING_TAGS[name]
     if module == TEMPLATELIB_MODULE:
         return _templatelib_tag(name)
     if module == STRING_MODULE and name == TEMPLATELIB_ATTR:
@@ -559,6 +563,16 @@ class _Finder(ast.NodeVisitor):
                 return tag == "typing" and not ambiguous
         return False
 
+    def _is_annotated(self, node: ast.expr) -> bool:
+        match node:
+            case ast.Name():
+                tag, ambiguous = self._tags(node.id, ANNOTATED_TAG)
+                return tag == "annotated" and not ambiguous
+            case ast.Attribute(value=ast.Name() as base, attr="Annotated"):
+                tag, ambiguous = self._tags(base.id, TYPING_TAG)
+                return tag == "typing" and not ambiguous
+        return False
+
     # a position that names a type: a name, attribute chain, subscript of those, `|` union, string, `None` or a
     # tuple (or list, as in `Callable[[X], Y]`) of those. Anything else is a runtime value even inside a subscript.
     def _is_type_expr(self, node: ast.expr) -> bool:
@@ -661,6 +675,9 @@ class _Finder(ast.NodeVisitor):
     @override
     def visit_Attribute(self, node: ast.Attribute) -> None:
         self._bases.add(id(node.value))
+        # reading the name of the class builds nothing
+        if node.attr in NAME_ATTRIBUTES and self._is_type_of_template(node.value):
+            self._skip.add(id(node.value))
         plain = self._plain(node)
         if not plain and (query := self._ref(node)) is not None:
             if not self._annotating:
@@ -705,6 +722,16 @@ class _Finder(ast.NodeVisitor):
         if self._type_level:
             self.generic_visit(node)
             return
+        # `Annotated[X, ...]` is callable and builds an `X`, so outside an annotation `X` is a runtime value
+        if not self._annotating and self._is_annotated(node.value):
+            self.visit(node.value)
+            if isinstance(node.slice, ast.Tuple) and node.slice.elts:
+                self.visit(node.slice.elts[0])
+                for item in node.slice.elts[1:]:
+                    self._type_level_visit(item)
+            else:
+                self.visit(node.slice)
+            return
         # only the subscript of a name is a generic alias; the value of any other subscript is a runtime value
         self.visit(node.value)
         if _is_name_chain(node.value):
@@ -744,6 +771,25 @@ class _Finder(ast.NodeVisitor):
         # a class pattern only inspects the class
         self._query_only_visit(node.cls)
         self._visit_all((*node.patterns, *node.kwd_patterns))
+
+    @override
+    def visit_Compare(self, node: ast.Compare) -> None:
+        # comparing with the class (`type(x) is Template`) only inspects it
+        if all(isinstance(op, IDENTITY_OPERATORS) for op in node.ops):
+            for operand in (node.left, *node.comparators):
+                if self._is_type_of_template(operand):
+                    self._skip.add(id(operand))
+                elif not self._plain(operand) and self._templatelib_ref(operand) is not None:
+                    self._query_only_visit(operand)
+                    continue
+                self.visit(operand)
+            return
+        self.generic_visit(node)
+
+    @override
+    def visit_MatchValue(self, node: ast.MatchValue) -> None:
+        # a value pattern only compares with the class
+        self._query_only_visit(node.value)
 
     @override
     def visit_Interpolation(self, node: ast.Interpolation) -> None:
@@ -823,8 +869,11 @@ class _Finder(ast.NodeVisitor):
             self._skip.update(id(arg) for arg in self._class_operands(node.args[1]) if self._is_type_of_template(arg))
         if node.args and self._is_type_of_template(node.args[0]):
             self._skip.add(id(node.args[0]))
-        self._visit_all(node.args[:1])
-        for operand in (operand for arg in node.args[1:] for operand in self._class_operands(arg)):
+        # the first argument of `issubclass`, and the second of both, name classes
+        is_subclass = isinstance(node.func, ast.Name) and node.func.id == "issubclass"
+        self._visit_all(node.args[:0] if is_subclass else node.args[:1])
+        class_args = node.args if is_subclass else node.args[1:]
+        for operand in (operand for arg in class_args for operand in self._class_operands(arg)):
             if self._is_type_expr(operand):
                 self._annotating += 1
                 self.visit(operand)
