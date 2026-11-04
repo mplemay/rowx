@@ -1532,7 +1532,23 @@ Also behind a pooler:
   Postgres directly.
 
 TLS defaults to `prefer`, as in libpq: it uses TLS when the server offers it, without verifying the certificate, and
-falls back to plaintext when the server doesn't support TLS. Use `sslmode=verify-full` in production.
+falls back to plaintext when the server doesn't support TLS. Use `sslmode=verify-full` in production, and pair it with
+`channel_binding=require`:
+
+```text
+postgresql://app@db.example/app?sslmode=verify-full&sslrootcert=/etc/ssl/db-ca.pem&channel_binding=require
+```
+
+`verify-full` and `require` never fall back to plaintext. `channel_binding=require` makes the client refuse to answer a
+password or SASL request unless the server authenticates with `SCRAM-SHA-256-PLUS`, which ties the login to the TLS
+session so a man in the middle can't relay it. The default, `prefer`, binds when it can. `require` together with
+`sslmode=disable` is an `InterfaceError` when the options are parsed. `channel_binding` is a typed option, so it is not
+accepted as an `extra` key.
+
+Channel binding uses `tls-server-end-point`, which the driver derives from the server certificate's signature algorithm.
+That works for RSA (SHA-1, SHA-256, SHA-384, SHA-512) and ECDSA (SHA-256, SHA-384) certificates only. Against an Ed25519
+or ECDSA-with-SHA-512 server certificate `channel_binding=require` fails to connect, and so does a server that doesn't
+offer `SCRAM-SHA-256-PLUS` (`trust`, `md5`, `password` or plain `scram-sha-256` authentication). Use `prefer` there.
 
 ## Known limits
 

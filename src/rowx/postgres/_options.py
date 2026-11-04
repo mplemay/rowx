@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, fields, replace
-from typing import TYPE_CHECKING, Final, Self, override
+from typing import TYPE_CHECKING, Final, Literal, Self, override
 
 from rowx._core.postgres import parse_dsn as parse_dsn_impl
 
@@ -18,6 +18,7 @@ class ConnectOptions:
     database: str | None = None
     sslmode: str | None = None
     sslrootcert: str | None = None
+    channel_binding: Literal["disable", "prefer", "require"] | None = None
     connect_timeout: float | None = None
     statement_cache_size: int = DEFAULT_STATEMENT_CACHE_SIZE
     application_name: str | None = None

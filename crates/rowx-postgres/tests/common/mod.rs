@@ -1,3 +1,6 @@
+// pub, so the helpers are reachable from the crate root and need no visibility waiver
+pub mod fake_server;
+
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 
@@ -99,4 +102,19 @@ fn with_search_path(admin_dsn: &str, schema: &str) -> String {
     } else {
         format!("{admin_dsn} options='-c search_path={schema}'")
     }
+}
+
+/// The test certificate directory, or `None` when TLS tests should skip.
+///
+/// # Errors
+/// When `ROWX_REQUIRE_DB=1` and the certificates are missing.
+pub fn test_certs() -> TestResult<Option<std::path::PathBuf>> {
+    let dir = fake_server::certs_dir();
+    if dir.join("server.crt").exists() && dir.join("ca.crt").exists() {
+        return Ok(Some(dir));
+    }
+    if std::env::var("ROWX_REQUIRE_DB").is_ok_and(|v| v == "1") {
+        return Err("ROWX_REQUIRE_DB=1 but the test certificates are missing".into());
+    }
+    Ok(None)
 }
