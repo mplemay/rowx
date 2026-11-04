@@ -1,11 +1,12 @@
 import asyncio
 import datetime as dt
 import decimal
+import ipaddress
 import sys
 from decimal import Decimal, DecimalTuple
 from ipaddress import ip_address, ip_network
 from math import isnan
-from typing import Any, Final, override
+from typing import TYPE_CHECKING, Any, Final, override
 from uuid import UUID
 
 import pytest
@@ -25,6 +26,9 @@ from rowx.postgres import (
     Range,
     connect,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -629,3 +633,141 @@ def test_a_uuid_subclass_cannot_choose_the_bytes_that_are_sent(schema: str) -> N
     value = LyingUuid(str(real))
     assert fetch_scalar(schema, "SELECT $1::uuid", [value]) == real
     assert fetch_scalar(schema, "SELECT $1::uuid[]", [[value]]) == [real]
+
+
+def test_an_ip_address_subclass_cannot_choose_the_bytes_that_are_sent(schema: str) -> None:
+    class LyingAddress(ipaddress.IPv4Address): ...
+
+    value = LyingAddress("1.2.3.4")
+    LyingAddress.packed = lie(b"\x09\x09\x09\x09")
+    assert fetch_scalar(schema, "SELECT $1::inet::text", [value]) == "1.2.3.4/32"
+    assert fetch_scalar(schema, "SELECT $1::inet[]::text", [[value]]) == "{1.2.3.4}"
+
+
+def test_an_ip_interface_subclass_cannot_choose_the_prefix_that_is_sent(schema: str) -> None:
+    class LyingInterface(ipaddress.IPv4Interface): ...
+
+    # the lie goes on after construction, because `__init__` stores the real network through the same name
+    value = LyingInterface("1.2.3.4/24")
+    LyingInterface.network = lie(ipaddress.IPv4Network("10.0.0.0/8"))  # ty: ignore[invalid-assignment]
+    assert fetch_scalar(schema, "SELECT $1::inet::text", [value]) == "1.2.3.4/24"
+    assert fetch_scalar(schema, "SELECT $1::inet[]::text", [[value]]) == "{1.2.3.4/24}"
+
+
+def test_an_ip_network_subclass_cannot_choose_the_address_or_prefix_that_is_sent(schema: str) -> None:
+    class LyingNetwork(ipaddress.IPv4Network): ...
+
+    value = LyingNetwork("1.2.3.0/24")
+    LyingNetwork.network_address = lie(ipaddress.IPv4Address("9.9.9.9"))  # ty: ignore[invalid-assignment]
+    LyingNetwork.prefixlen = lie(8)
+    assert fetch_scalar(schema, "SELECT $1::cidr::text", [value]) == "1.2.3.0/24"
+    assert fetch_scalar(schema, "SELECT $1::cidr[]::text", [[value]]) == "{1.2.3.0/24}"
+
+
+def test_an_ip_subclass_cannot_hide_a_zone_id(schema: str) -> None:
+    class HidingAddress(ipaddress.IPv6Address):
+        scope_id = lie(None)
+
+    value = HidingAddress("fe80::1%eth0")
+    with pytest.raises(EncodeError, match="zone id"):
+        fetch_scalar(schema, "SELECT $1::inet::text", [value])
+    with pytest.raises(EncodeError, match="zone id"):
+        fetch_scalar(schema, "SELECT $1::inet[]::text", [[value]])
+
+
+def test_an_object_claiming_an_ip_class_is_an_encode_error(schema: str) -> None:
+    class Liar:
+        @property
+        @override
+        def __class__(self) -> type:
+            return ipaddress.IPv4Address
+
+        packed = b"\x09\x09\x09\x09"
+        scope_id = None
+
+    with pytest.raises(EncodeError, match=r"\$1"):
+        fetch_scalar(schema, "SELECT $1::inet::text", [Liar()])
+    with pytest.raises(EncodeError, match=r"\$1"):
+        fetch_scalar(schema, "SELECT $1::inet[]::text", [[Liar()]])
+
+
+def evil_buffer(_self: object, _flags: int) -> memoryview:
+    return memoryview(b"EVIL")
+
+
+def test_bytes_subclasses_cannot_choose_the_content_that_is_sent(schema: str) -> None:
+    named_bytes = type("bytes", (bytes,), {"__buffer__": evil_buffer})
+    named_bytearray = type("bytearray", (bytearray,), {"__buffer__": evil_buffer})
+    for value in (named_bytes(b"good"), named_bytearray(b"good")):
+        assert fetch_scalar(schema, "SELECT $1::bytea", [value]) == b"good"
+        assert fetch_scalar(schema, "SELECT $1::bytea[]", [[value]]) == [b"good"]
+
+
+def test_a_class_named_bytes_that_is_not_bytes_is_an_encode_error(schema: str) -> None:
+    fake = type("bytes", (), {"__buffer__": lambda _self, _flags: memoryview(b"EVIL")})
+    with pytest.raises(EncodeError):
+        fetch_scalar(schema, "SELECT $1::bytea", [fake()])
+
+
+class ShiftyList(list[int]):  # ruff: ignore[subclass-builtin]
+    @override
+    def __iter__(self) -> Iterator[int]:
+        return iter([7, 7])
+
+    @override
+    def __len__(self) -> int:
+        return 5
+
+    @override
+    def __getitem__(self, _index: object) -> int:  # ty: ignore[invalid-method-override]
+        return 8
+
+
+class ShiftyTuple(tuple[int, ...]):
+    __slots__ = ()
+
+    @override
+    def __iter__(self) -> Iterator[int]:
+        return iter([7, 7])
+
+
+def shifty_iter(_self: object) -> Iterator[int]:
+    return iter([7, 7])
+
+
+def test_list_and_tuple_subclasses_send_their_real_items(schema: str) -> None:
+    named_list = type("list", (list,), {"__iter__": shifty_iter})
+    named_tuple = type("tuple", (tuple,), {"__iter__": shifty_iter})
+    assert fetch_scalar(schema, "SELECT $1::int4[]", [ShiftyList([1, 2])]) == [1, 2]
+    assert fetch_scalar(schema, "SELECT $1::int4[]", [ShiftyTuple((1, 2))]) == [1, 2]
+    assert fetch_scalar(schema, "SELECT $1::int4[]", [named_list([1, 2])]) == [1, 2]
+    assert fetch_scalar(schema, "SELECT $1::int4[]", [named_tuple((1, 2))]) == [1, 2]
+    assert fetch_scalar(schema, "SELECT $1::int4[]", [[ShiftyList([1, 2])]]) == [[1, 2]]
+    nested = [ShiftyTuple((3, 4)), named_tuple((5, 6))]
+    assert fetch_scalar(schema, "SELECT $1::int4[]", [nested]) == [[3, 4], [5, 6]]
+
+
+def test_a_class_named_list_that_is_not_a_list_is_an_encode_error(schema: str) -> None:
+    fake = type("list", (), {"__iter__": lambda _self: iter([1, 2])})
+    with pytest.raises(EncodeError):
+        fetch_scalar(schema, "SELECT $1::int4[]", [fake()])
+
+
+def test_a_descriptor_failure_on_a_class_liar_is_an_encode_error(schema: str) -> None:
+    class Liar:
+        @property
+        @override
+        def __class__(self) -> type:
+            return dt.date
+
+        year = 2024
+
+    with pytest.raises(EncodeError, match=r"\$1"):
+        fetch_scalar(schema, "SELECT $1::date", [Liar()])
+
+
+def test_a_range_with_a_non_bool_flag_is_an_encode_error(schema: str) -> None:
+    value = Range(1, 5)
+    Range.lower_inc.__set__(value, "yes")
+    with pytest.raises(EncodeError, match=r"\$1"):
+        fetch_scalar(schema, "SELECT $1::int4range", [value])

@@ -4,6 +4,7 @@ import statistics
 import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from ipaddress import IPv4Address
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Final
 
@@ -24,6 +25,8 @@ CASES: Final[dict[str, list[Any]]] = {
     "jsonb[]": [{"id": i, "name": f"n{i}"} for i in range(ELEMENTS)],
     "timestamptz[]": [BASE + timedelta(seconds=i) for i in range(ELEMENTS)],
     "interval[]": [timedelta(days=i % 30, seconds=i, microseconds=i % 1000) for i in range(ELEMENTS)],
+    "inet[]": [IPv4Address(i) for i in range(ELEMENTS)],
+    "bytea[]": [i.to_bytes(4) * 4 for i in range(ELEMENTS)],
 }
 
 QUERIES: Final[dict[str, Callable[[list[Any]], rowx.query[int]]]] = {
@@ -32,6 +35,8 @@ QUERIES: Final[dict[str, Callable[[list[Any]], rowx.query[int]]]] = {
     "jsonb[]": lambda values: rowx.query[int](t"SELECT cardinality({values}::jsonb[])"),
     "timestamptz[]": lambda values: rowx.query[int](t"SELECT cardinality({values}::timestamptz[])"),
     "interval[]": lambda values: rowx.query[int](t"SELECT cardinality({values}::interval[])"),
+    "inet[]": lambda values: rowx.query[int](t"SELECT cardinality({values}::inet[])"),
+    "bytea[]": lambda values: rowx.query[int](t"SELECT cardinality({values}::bytea[])"),
 }
 
 

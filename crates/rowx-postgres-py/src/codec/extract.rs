@@ -1,11 +1,11 @@
-use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyAttributeError, PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyFloat, PyInt, PyList, PyMemoryView, PyString, PyTuple, PyType,
 };
 
-use crate::codec::exact::{field, items};
+use crate::codec::exact::{field, is_a, items};
 use crate::codec::extension::cube_class;
 use crate::codec::geometric::{class as geo_class, class_name, kind_of_object, point_class};
 use crate::codec::money::money_class;
@@ -252,7 +252,7 @@ fn geo_float(
 
 fn geo_point(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult<Point> {
     let cls = point_class(py)?;
-    if !obj.is_instance(&cls)? {
+    if !is_a(obj, &cls)? {
         return Err(encode_error(
             py,
             &format!(
@@ -336,7 +336,7 @@ fn value_class(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult
             &format!("${}: {what} is outside the int8 range", index + 1),
         )
     };
-    if obj.is_instance(interval_class(py)?)? {
+    if is_a(obj, interval_class(py)?)? {
         let cls = interval_class(py)?;
         let read = |name: &str| {
             int_field(obj, cls, name).map_err(|_| overflow(&format!("the interval {name}")))
@@ -347,13 +347,13 @@ fn value_class(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResult
             micros: read("microseconds")?,
         }));
     }
-    if obj.is_instance(money_class(py)?)? {
+    if is_a(obj, money_class(py)?)? {
         return field(obj, money_class(py)?, "minor_units")?
             .extract::<i64>()
             .map(|minor| Some(PyParam::Money(minor)))
             .map_err(|_| overflow("the money amount"));
     }
-    if obj.is_instance(cube_class(py)?)? {
+    if is_a(obj, cube_class(py)?)? {
         let cls = cube_class(py)?;
         let corner = |name: &str| -> PyResult<Vec<f64>> {
             items(&field(obj, cls, name)?)?
@@ -421,6 +421,54 @@ fn decimal_param(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> PyResu
     })
 }
 
+// Content is read from the real storage, never through a subclass's `__buffer__`.
+fn bytes_param(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>) -> Option<PyResult<PyParam>> {
+    let (name, data) = if let Ok(bytes) = obj.cast::<PyBytes>() {
+        ("bytes", Ok(bytes.as_bytes().to_vec()))
+    } else if let Ok(array) = obj.cast::<PyByteArray>() {
+        ("bytearray", Ok(array.to_vec()))
+    } else if obj.is_instance_of::<PyMemoryView>() {
+        // a memoryview of any element format or layout is copied as its raw bytes
+        (
+            "memoryview",
+            obj.call_method0("tobytes")
+                .and_then(|raw| Ok(raw.cast_into::<PyBytes>()?.as_bytes().to_vec())),
+        )
+    } else {
+        return None;
+    };
+    Some(
+        data.map(|data| PyParam::Bytes(data, name.to_owned()))
+            .map_err(|e| encode_error(py, &format!("${}: the buffer is unusable: {e}", index + 1))),
+    )
+}
+
+// A list or tuple is recognised by its real type and read by index, so a subclass's `__iter__`, `__len__` and
+// `__getitem__` decide nothing.
+fn seq_param(
+    py: Python<'_>,
+    index: usize,
+    obj: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<Option<PyParam>> {
+    let kind = if obj.cast::<PyList>().is_ok() {
+        "list"
+    } else if obj.cast::<PyTuple>().is_ok() {
+        "tuple"
+    } else {
+        return Ok(None);
+    };
+    let items = items(obj)?
+        .iter()
+        .map(|item| one(py, index, item, depth + 1))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Some(PyParam::Seq(
+        items,
+        obj.clone().unbind(),
+        kind.to_owned(),
+    )))
+}
+
 fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> PyResult<PyParam> {
     if obj.is_none() {
         return Ok(PyParam::Null);
@@ -438,26 +486,13 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
     if let Ok(float) = obj.cast::<PyFloat>() {
         return Ok(PyParam::Float(float.value()));
     }
-    if obj.is_instance(decimal_class(py)?)? {
+    if is_a(obj, decimal_class(py)?)? {
         return decimal_param(py, index, obj);
     }
-    if obj.is_instance_of::<PyBytes>()
-        || obj.is_instance_of::<PyByteArray>()
-        || obj.is_instance_of::<PyMemoryView>()
-    {
-        let name = obj.get_type().name()?.to_string();
-        let data = if obj.is_instance_of::<PyMemoryView>() {
-            // a memoryview of any element format or layout is copied as its raw bytes
-            obj.call_method0("tobytes")
-                .and_then(|raw| Ok(raw.cast_into::<PyBytes>()?.as_bytes().to_vec()))
-        } else {
-            PyBuffer::<u8>::get(obj).and_then(|buf| buf.to_vec(py))
-        };
-        return data.map(|data| PyParam::Bytes(data, name)).map_err(|e| {
-            encode_error(py, &format!("${}: the buffer is unusable: {e}", index + 1))
-        });
+    if let Some(param) = bytes_param(py, index, obj) {
+        return param;
     }
-    if obj.is_instance(uuid_class(py)?)? {
+    if is_a(obj, uuid_class(py)?)? {
         // the `int` slot, because `bytes` is a property a subclass can override
         let value = field(obj, uuid_class(py)?, "int")?.extract::<u128>()?;
         return Ok(PyParam::Uuid(value.to_be_bytes()));
@@ -468,7 +503,7 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
         return Ok(PyParam::Ip { kind, addr, bits });
     }
     // datetime subclasses date, so it has to be checked first
-    if obj.is_instance(datetime_class(py)?)? {
+    if is_a(obj, datetime_class(py)?)? {
         let cls = datetime_class(py)?;
         return Ok(PyParam::DateTime {
             date: ymd(py, obj, cls)?,
@@ -476,17 +511,17 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
             offset: utc_offset(py, obj, cls)?,
         });
     }
-    if obj.is_instance(date_class(py)?)? {
+    if is_a(obj, date_class(py)?)? {
         return Ok(PyParam::Date(ymd(py, obj, date_class(py)?)?));
     }
-    if obj.is_instance(time_class(py)?)? {
+    if is_a(obj, time_class(py)?)? {
         let cls = time_class(py)?;
         return Ok(PyParam::Time {
             micros: time_micros(py, obj, cls)?,
             offset: utc_offset(py, obj, cls)?,
         });
     }
-    if obj.is_instance(timedelta_class(py)?)? {
+    if is_a(obj, timedelta_class(py)?)? {
         let (days, micros) = delta_micros(py, obj)?;
         return Ok(PyParam::Timedelta { days, micros });
     }
@@ -507,18 +542,15 @@ fn one(py: Python<'_>, index: usize, obj: &Bound<'_, PyAny>, depth: usize) -> Py
     if let Some(kind) = kind_of_object(py, obj)? {
         return geometric_param(py, index, kind, obj);
     }
-    if depth < MAX_SEQ_DEPTH && obj.is_instance(range_class(py)?)? {
+    if depth < MAX_SEQ_DEPTH && is_a(obj, range_class(py)?)? {
         return range_param(py, index, obj, depth);
     }
-    let name = obj.get_type().name()?.to_string();
-    if depth < MAX_SEQ_DEPTH && (obj.is_instance_of::<PyList>() || obj.is_instance_of::<PyTuple>())
+    if depth < MAX_SEQ_DEPTH
+        && let Some(param) = seq_param(py, index, obj, depth)?
     {
-        let items = obj
-            .try_iter()?
-            .map(|item| one(py, index, &item?, depth + 1))
-            .collect::<PyResult<Vec<_>>>()?;
-        return Ok(PyParam::Seq(items, obj.clone().unbind(), name));
+        return Ok(param);
     }
+    let name = obj.get_type().name()?.to_string();
     Ok(PyParam::Other(obj.clone().unbind(), name))
 }
 
@@ -528,6 +560,20 @@ pub fn extract(py: Python<'_>, params: &Bound<'_, PyList>) -> PyResult<Vec<PyPar
     params
         .iter()
         .enumerate()
-        .map(|(index, obj)| one(py, index, &obj, 0))
+        .map(|(index, obj)| {
+            one(py, index, &obj, 0).map_err(|e| {
+                // a failed descriptor call or extraction is a bad parameter like any other
+                if e.is_instance_of::<PyTypeError>(py)
+                    || e.is_instance_of::<PyValueError>(py)
+                    || e.is_instance_of::<PyAttributeError>(py)
+                    || e.is_instance_of::<PyKeyError>(py)
+                    || e.is_instance_of::<PyOverflowError>(py)
+                {
+                    encode_error(py, &format!("${}: {e}", index + 1))
+                } else {
+                    e
+                }
+            })
+        })
         .collect()
 }

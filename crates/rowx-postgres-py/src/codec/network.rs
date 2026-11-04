@@ -1,10 +1,11 @@
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBytes, PyModule};
+use pyo3::types::{PyBytes, PyInt, PyModule, PyType};
 use rowx_postgres::Type;
 use rowx_postgres::exec::Param;
 use rowx_postgres::wire::network::{self, Addr, Network};
 
+use crate::codec::exact::{field, instance_dict, is_a};
 use crate::codec::extract::{IpKind, PyParam};
 use crate::errors::decode_error;
 
@@ -42,56 +43,84 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: &[u8]) -> PyResult<Bound<'py
     class(py, name)?.call1(((PyBytes::new(py, bytes), value.bits),))
 }
 
-// `ip` is the address object, `prefix` its prefix length
-fn parts(py: Python<'_>, ip: &Bound<'_, PyAny>, prefix: u8) -> PyResult<(Addr, u8)> {
+fn bad(py: Python<'_>, what: &str) -> PyErr {
+    crate::errors::encode_error(py, what)
+}
+
+// The address of an `ipaddress` address (or interface) read from its `_ip` and `_scope_id` slots through the base
+// class, so a subclass's `packed` or `scope_id` property changes nothing.
+fn address(py: Python<'_>, obj: &Bound<'_, PyAny>, v4: bool) -> PyResult<Addr> {
+    let cls = class(py, if v4 { "IPv4Address" } else { "IPv6Address" })?.cast_into::<PyType>()?;
+    if !is_a(obj, &cls)? {
+        return Err(bad(
+            py,
+            "an ipaddress object holds a value that is not an address",
+        ));
+    }
     // a zone id has no wire form, so it would be silently dropped
-    if ip.getattr("scope_id").is_ok_and(|scope| !scope.is_none()) {
-        return Err(crate::errors::encode_error(
+    if !v4 && !field(obj, &cls, "_scope_id")?.is_none() {
+        return Err(bad(
             py,
             "an IPv6 address with a zone id cannot be sent as inet or cidr",
         ));
     }
-    let packed = ip.getattr("packed")?.extract::<Vec<u8>>()?;
-    let addr = match <[u8; 4]>::try_from(packed.as_slice()) {
-        Ok(bytes) => Addr::V4(bytes),
-        Err(_) => Addr::V6(<[u8; 16]>::try_from(packed.as_slice()).map_err(|_| {
-            crate::errors::encode_error(py, "an address is neither 4 nor 16 bytes")
-        })?),
-    };
-    Ok((addr, prefix))
+    let raw = field(obj, &cls, "_ip")?;
+    let int = raw
+        .cast::<PyInt>()
+        .map_err(|_| bad(py, "an ipaddress object has a malformed address"))?;
+    let value = int.extract::<u128>()?;
+    if v4 {
+        let value = u32::try_from(value)
+            .map_err(|_| bad(py, "an ipaddress object has a malformed address"))?;
+        Ok(Addr::V4(value.to_be_bytes()))
+    } else {
+        Ok(Addr::V6(value.to_be_bytes()))
+    }
 }
 
-/// Reads an `ipaddress` object into its address, prefix and kind; `None` when it is not one.
+// the prefix length from the instance state `ipaddress` sets in `__init__`, not from the `prefixlen` property
+fn prefix(py: Python<'_>, dict: &Bound<'_, PyAny>) -> PyResult<u8> {
+    dict.get_item("_prefixlen")?
+        .cast::<PyInt>()
+        .map_err(|_| bad(py, "an ipaddress object has a malformed prefix length"))?
+        .extract::<u8>()
+        .map_err(|_| bad(py, "an ipaddress object has a malformed prefix length"))
+}
+
+/// Reads an `ipaddress` object into its address, prefix and kind; `None` when it is not one. The object is
+/// recognised by its real type and read through the base classes' slots and instance state.
 ///
 /// # Errors
 /// `EncodeError` for a zone id.
 pub fn read(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<(IpKind, Addr, u8)>> {
     // an interface subclasses its address type, so it is checked first
-    for (name, kind) in [
-        ("IPv4Interface", IpKind::Interface),
-        ("IPv6Interface", IpKind::Interface),
-        ("IPv4Address", IpKind::Address),
-        ("IPv6Address", IpKind::Address),
-        ("IPv4Network", IpKind::Network),
-        ("IPv6Network", IpKind::Network),
+    for (name, kind, v4) in [
+        ("IPv4Interface", IpKind::Interface, true),
+        ("IPv6Interface", IpKind::Interface, false),
+        ("IPv4Address", IpKind::Address, true),
+        ("IPv6Address", IpKind::Address, false),
+        ("IPv4Network", IpKind::Network, true),
+        ("IPv6Network", IpKind::Network, false),
     ] {
-        if !obj.is_instance(&class(py, name)?)? {
+        let cls = class(py, name)?.cast_into::<PyType>()?;
+        if !is_a(obj, &cls)? {
             continue;
         }
-        let (ip, prefix) = match kind {
-            // an interface is itself an address and keeps the zone id that its `ip` drops
+        let (addr, bits) = match kind {
             IpKind::Interface => (
-                obj.clone(),
-                obj.getattr("network")?.getattr("prefixlen")?.extract()?,
+                address(py, obj, v4)?,
+                prefix(py, &instance_dict(obj, &cls)?)?,
             ),
-            IpKind::Address => (obj.clone(), if name == "IPv4Address" { 32 } else { 128 }),
-            IpKind::Network => (
-                obj.getattr("network_address")?,
-                obj.getattr("prefixlen")?.extract()?,
-            ),
+            IpKind::Address => (address(py, obj, v4)?, if v4 { 32 } else { 128 }),
+            IpKind::Network => {
+                let dict = instance_dict(obj, &cls)?;
+                (
+                    address(py, &dict.get_item("network_address")?, v4)?,
+                    prefix(py, &dict)?,
+                )
+            }
         };
-        let (addr, prefix) = parts(py, &ip, prefix)?;
-        return Ok(Some((kind, addr, prefix)));
+        return Ok(Some((kind, addr, bits)));
     }
     Ok(None)
 }
