@@ -335,18 +335,35 @@ def test_a_declared_count_larger_than_the_input_does_not_allocate() -> None:
         _decode(604, be32(HUGE))
 
 
-def test_a_zero_length_dimension_is_an_empty_array_decoded_quickly_without_allocating() -> None:
-    shapes = [[(HUGE, 1), (0, 1)], [(10_000_000, 1), (0, 1)], [(65_536, 1), (65_536, 1), (0, 1)], [(0, 1)]]
-    tracemalloc.start()
-    started = time.perf_counter()
-    for dims in shapes:
+ZERO_DIMENSION_SHAPES: Final[list[list[tuple[int, int]]]] = [
+    [(HUGE, 1), (0, 1)],
+    [(10_000_000, 1), (0, 1)],
+    [(65_536, 1), (65_536, 1), (0, 1)],
+    [(0, 1)],
+]
+
+
+def decode_zero_dimension_arrays() -> None:
+    for dims in ZERO_DIMENSION_SHAPES:
         raw = be32(len(dims), 0, ARRAY_OID) + b"".join(starmap(be32, dims))
         assert _decode(("array", 25), raw) == []
-    elapsed = time.perf_counter() - started
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    assert elapsed < 1
+
+
+def test_a_zero_length_dimension_is_an_empty_array_without_allocating() -> None:
+    tracemalloc.start()
+    try:
+        decode_zero_dimension_arrays()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
     assert peak < 1_000_000
+
+
+@pytest.mark.timing
+def test_a_zero_length_dimension_is_an_empty_array_decoded_quickly() -> None:
+    started = time.perf_counter()
+    decode_zero_dimension_arrays()
+    assert time.perf_counter() - started < 1
 
 
 def test_a_spec_nested_past_the_depth_cap_is_refused() -> None:
