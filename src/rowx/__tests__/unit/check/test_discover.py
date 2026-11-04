@@ -1162,3 +1162,40 @@ def test_templatelib_method_annotation_sees_a_shadowing_class_body() -> None:
         """,
     )
     assert not result.templates.indirect_uses
+
+
+MIXED_TEMPLATE_IMPORT = "from string.templatelib import Template as q\n"
+MIXED_QUERY_IMPORT = "from rowx import query as q\n"
+# each usage with the diagnostics main reports when `q` is bound only by `from rowx import query as q`
+MIXED_USAGES = [
+    ('q[int](t"select 1")\n', []),
+    ('q(t"select 1")\n', []),
+    ('q.__call__(t"select 1")\n', ["indirect-query"]),
+    ("x = q\n", ["indirect-query"]),
+    ("f(q)\n", ["indirect-query"]),
+    ("q.attr\n", ["indirect-query"]),
+    ("T: TypeAlias = q\n", ["indirect-query"]),
+    ('q.Template(t"select 1")\n', ["indirect-query"]),
+]
+
+
+@pytest.mark.parametrize(("usage", "query_only"), MIXED_USAGES)
+def test_templatelib_mixed_name_keeps_query_diagnostics(usage: str, query_only: list[str]) -> None:
+    assert rules(run(MIXED_QUERY_IMPORT + usage)) == query_only
+    assert not rules(run(MIXED_TEMPLATE_IMPORT + usage))
+    for imports in (
+        MIXED_TEMPLATE_IMPORT + MIXED_QUERY_IMPORT,
+        MIXED_QUERY_IMPORT + MIXED_TEMPLATE_IMPORT,
+    ):
+        assert rules(run(imports + usage)) == ["indirect-query"], (imports, usage)
+
+
+def test_templatelib_mixed_module_name_keeps_query_diagnostics() -> None:
+    result = run(
+        """
+        import string.templatelib as tl
+        from rowx import query as tl
+        tl.Template(t"select 1")
+        """,
+    )
+    assert rules(result) == ["indirect-query"]

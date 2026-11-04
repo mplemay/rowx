@@ -335,6 +335,8 @@ class _Finder(ast.NodeVisitor):
         self._skip: set[int] = set()
         # nesting depth of type-level positions (subscripts, the type argument of `cast`)
         self._type_level = 0
+        # nesting depth of nodes already recorded as template facts, which are only checked for query names
+        self._query_only = 0
 
     def facts(self) -> TemplateFacts:
         return TemplateFacts(
@@ -531,7 +533,7 @@ class _Finder(ast.NodeVisitor):
             return
         if (ref := self._ref(node)) is not None:
             self._indirect(node, f"`{node.id}` (rowx.{ref.kind})")
-        if self._type_level:
+        if self._type_level or self._query_only:
             return
         if (template_ref := self._templatelib_ref(node)) is not None:
             self._template_use(template_ref, node, "value")
@@ -543,19 +545,28 @@ class _Finder(ast.NodeVisitor):
     @override
     def visit_Attribute(self, node: ast.Attribute) -> None:
         self._bases.add(id(node.value))
-        if self._plain(node) or not self._resolve_attribute(node):
-            recording = not (self._annotating or self._type_level) and id(node) not in self._skip
+        plain = self._plain(node)
+        if not plain and (query := self._ref(node)) is not None:
+            if not self._annotating:
+                self._indirect(node, f"`rowx.{query.kind}`")
+        elif not plain and self._resolve_attribute(node):
+            # the base may also be a query name, which still has to be reported
+            self._query_only_visit(node)
+        else:
+            recording = not (self._annotating or self._type_level or self._query_only) and id(node) not in self._skip
             if recording and self._is_template_attribute(node):
                 self._indirect_uses.append(IndirectUse(kind="attribute", name="Template", span=self._lines.span(node)))
             self.generic_visit(node)
 
+    def _query_only_visit(self, node: ast.AST) -> None:
+        self._query_only += 1
+        self.generic_visit(node)
+        self._query_only -= 1
+
     # whether `node` resolved to a rowx or `string.templatelib` name, which is then recorded
     def _resolve_attribute(self, node: ast.Attribute) -> bool:
-        recording = not (self._annotating or self._type_level)
-        if (ref := self._ref(node)) is not None:
-            if not self._annotating:
-                self._indirect(node, f"`rowx.{ref.kind}`")
-        elif (template_ref := self._templatelib_ref(node)) is not None:
+        recording = not (self._annotating or self._type_level or self._query_only)
+        if (template_ref := self._templatelib_ref(node)) is not None:
             if recording:
                 self._template_use(template_ref, node, "value")
         elif (base_ref := self._templatelib_ref(node.value)) is not None:
@@ -705,6 +716,7 @@ class _Finder(ast.NodeVisitor):
             self._template_calls.append(
                 TemplateCall(name=ref.name, private=ref.private, node=node, span=self._lines.span(node)),
             )
+        self._query_only_visit(node.func)
         self._visit_all(node.args)
         self._visit_all(node.keywords)
 
@@ -822,6 +834,9 @@ class _Finder(ast.NodeVisitor):
         ):
             self._template_use(ref, node.value, "alias")
             self.visit(node.target)
+            self._query_only += 1
+            self.visit(node.value)
+            self._query_only -= 1
             return
         self._visit_all((node.target, node.value))
 
