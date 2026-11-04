@@ -5,18 +5,36 @@ from re import compile as re_compile
 from tokenize import detect_encoding
 from typing import TYPE_CHECKING, Final, Literal, Self, override
 
-from rowx.check.model import QUERY_KINDS, Diagnostic, FileResult, QueryCall, QueryKind, Rule, Span
+from rowx.check.model import (
+    QUERY_KINDS,
+    Diagnostic,
+    DynamicFormatSpec,
+    FileResult,
+    IndirectKind,
+    IndirectUse,
+    QueryCall,
+    QueryKind,
+    Rule,
+    Span,
+    TemplateCall,
+    TemplateConcat,
+    TemplateFacts,
+    TemplatelibName,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
 ROWX_MODULE: Final[str] = "rowx"
+STRING_MODULE: Final[str] = "string"
+TEMPLATELIB_ATTR: Final[str] = "templatelib"
+TEMPLATELIB_MODULE: Final[str] = f"{STRING_MODULE}.{TEMPLATELIB_ATTR}"
 TYPE_CHECK_FUNCTIONS: Final[frozenset[str]] = frozenset({"isinstance", "issubclass"})
 TYPE_PARAMS: Final = (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
 LINE_PATTERN: Final = re_compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
-type Tag = Literal["query", "query_unchecked", "module", "other"]
+type Tag = Literal["query", "query_unchecked", "module", "template", "interpolation", "string", "templatelib", "other"]
 type Scoped = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef | ast.Module
 type Comprehension = ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp
 
@@ -92,9 +110,37 @@ def _as_query_kind(name: str) -> QueryKind | None:
     return None
 
 
+def _as_templatelib_name(name: str) -> TemplatelibName | None:
+    if name == "Template":
+        return "Template"
+    if name == "Interpolation":
+        return "Interpolation"
+    return None
+
+
 def _import_tag(module: str, name: str) -> Tag:
     if module == ROWX_MODULE and name in QUERY_KINDS:
         return "query" if name == "query" else "query_unchecked"
+    if module == TEMPLATELIB_MODULE:
+        match _as_templatelib_name(name):
+            case "Template":
+                return "template"
+            case "Interpolation":
+                return "interpolation"
+    if module == STRING_MODULE and name == TEMPLATELIB_ATTR:
+        return "templatelib"
+    return "other"
+
+
+def _module_tag(alias: ast.alias) -> Tag:
+    root = alias.name.split(".")[0]
+    if root == ROWX_MODULE and (alias.asname is None or alias.name == ROWX_MODULE):
+        return "module"
+    # `import string.templatelib` binds `string`; with an alias the alias is the submodule
+    if root == STRING_MODULE and (alias.asname is None or alias.name == STRING_MODULE):
+        return "string"
+    if alias.name == TEMPLATELIB_MODULE and alias.asname is not None:
+        return "templatelib"
     return "other"
 
 
@@ -104,9 +150,7 @@ def _bind_import(scope: _Scope, node: ast.Import | ast.ImportFrom) -> None:
             tag = _import_tag(node.module or "", alias.name) if node.level == 0 else "other"
             scope.bind(alias.asname or alias.name, tag)
         else:
-            root = alias.name.split(".")[0]
-            is_module = root == ROWX_MODULE and (alias.asname is None or alias.name == ROWX_MODULE)
-            scope.bind(alias.asname or root, "module" if is_module else "other")
+            scope.bind(alias.asname or alias.name.split(".")[0], _module_tag(alias))
 
 
 def _bind_pattern_name(scope: _Scope, node: ast.ExceptHandler | ast.MatchAs | ast.MatchStar | ast.MatchMapping) -> None:
@@ -173,6 +217,22 @@ class _Ref:
     ambiguous: bool
 
 
+@dataclass(slots=True, frozen=True)
+class _TemplatelibRef:
+    name: TemplatelibName
+    ambiguous: bool
+
+
+def _is_class_of_template(node: ast.expr) -> bool:
+    return isinstance(node, ast.Attribute) and isinstance(node.value, ast.TemplateStr) and node.attr == "__class__"
+
+
+def _is_dynamic_spec(part: ast.Interpolation) -> bool:
+    return isinstance(part.format_spec, ast.JoinedStr) and not all(
+        isinstance(value, ast.Constant) for value in part.format_spec.values
+    )
+
+
 class _Finder(ast.NodeVisitor):
     def __init__(self, path: Path, tree: ast.Module, lines: _Lines) -> None:
         self._path = path
@@ -180,6 +240,21 @@ class _Finder(ast.NodeVisitor):
         self._scopes = [_Scope.build(tree)]
         self._annotating = 0
         self.result = FileResult(path=path, tree=tree)
+        self._template_calls: list[TemplateCall] = []
+        self._indirect_uses: list[IndirectUse] = []
+        self._concats: list[TemplateConcat] = []
+        self._dynamic_specs: list[DynamicFormatSpec] = []
+        # interpolations of the sole t-string argument of a query call, and the t-string chains seen so far
+        self._direct: dict[int, QueryKind] = {}
+        self._chains: set[int] = set()
+
+    def facts(self) -> TemplateFacts:
+        return TemplateFacts(
+            calls=tuple(self._template_calls),
+            indirect_uses=tuple(self._indirect_uses),
+            concats=tuple(self._concats),
+            dynamic_specs=tuple(self._dynamic_specs),
+        )
 
     def _report(self, rule: Rule, message: str, node: ast.expr | ast.stmt | ast.alias) -> None:
         self.result.diagnostics.append(
@@ -224,6 +299,33 @@ class _Finder(ast.NodeVisitor):
                     return _Ref(kind, ambiguous)
         return None
 
+    def _templatelib_ref(self, node: ast.expr) -> _TemplatelibRef | None:
+        match node:
+            case ast.Name():
+                tag, ambiguous = self._tags(node.id)
+                if tag == "template":
+                    return _TemplatelibRef("Template", ambiguous)
+                if tag == "interpolation":
+                    return _TemplatelibRef("Interpolation", ambiguous)
+            case ast.Attribute(value=base, attr=attr) if (name := _as_templatelib_name(attr)) is not None:
+                match base:
+                    case ast.Name():
+                        tag, ambiguous = self._tags(base.id)
+                        want = "templatelib"
+                    case ast.Attribute(value=ast.Name() as root, attr="templatelib"):
+                        tag, ambiguous = self._tags(root.id)
+                        want = "string"
+                    case _:
+                        return None
+                if tag == want:
+                    return _TemplatelibRef(name, ambiguous)
+        return None
+
+    def _template_use(self, ref: _TemplatelibRef, node: ast.expr, kind: IndirectKind) -> None:
+        self._indirect_uses.append(
+            IndirectUse(kind="ambiguous" if ref.ambiguous else kind, name=ref.name, span=self._lines.span(node)),
+        )
+
     def _indirect(self, node: ast.expr | ast.stmt | ast.alias, what: str) -> None:
         self._report("indirect-query", f'{what} is only allowed as `query[T](t"...")` or in an annotation', node)
 
@@ -258,20 +360,65 @@ class _Finder(ast.NodeVisitor):
             return
         if (ref := self._ref(node)) is not None:
             self._indirect(node, f"`{node.id}` (rowx.{ref.kind})")
+        elif (template_ref := self._templatelib_ref(node)) is not None:
+            self._template_use(template_ref, node, "value")
 
     @override
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if (ref := self._ref(node)) is None:
+        if (ref := self._ref(node)) is not None:
+            if not self._annotating:
+                self._indirect(node, f"`rowx.{ref.kind}`")
+        elif (template_ref := self._templatelib_ref(node)) is not None:
+            if not self._annotating:
+                self._template_use(template_ref, node, "value")
+        elif (base_ref := self._templatelib_ref(node.value)) is not None:
+            if not self._annotating:
+                self._template_use(base_ref, node, "attribute")
+        else:
             self.generic_visit(node)
-        elif not self._annotating:
-            self._indirect(node, f"`rowx.{ref.kind}`")
 
     @override
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.level == 0 and node.module == ROWX_MODULE:
+        if node.level == 0 and node.module in {ROWX_MODULE, TEMPLATELIB_MODULE}:
             for alias in node.names:
-                if alias.name == "*":
+                if alias.name != "*":
+                    continue
+                if node.module == ROWX_MODULE:
                     self._indirect(node, "`from rowx import *`")
+                else:
+                    self._indirect_uses.append(IndirectUse(kind="star-import", name=None, span=self._lines.span(node)))
+
+    @override
+    def visit_Interpolation(self, node: ast.Interpolation) -> None:
+        if _is_dynamic_spec(node):
+            self._dynamic_specs.append(
+                DynamicFormatSpec(
+                    node=node,
+                    span=self._lines.span(node),
+                    direct_argument_of=self._direct.get(id(node)),
+                ),
+            )
+        self.generic_visit(node)
+
+    @override
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        self.generic_visit(node)
+        if not isinstance(node.op, ast.Add):
+            return
+        left = isinstance(node.left, ast.TemplateStr) or id(node.left) in self._chains
+        right = isinstance(node.right, ast.TemplateStr) or id(node.right) in self._chains
+        if not (left or right):
+            return
+        self._chains.add(id(node))
+        operand = node.right if left else node.left
+        self._concats.append(
+            TemplateConcat(
+                node=node,
+                operand=operand,
+                span=self._lines.span(node),
+                operand_span=self._lines.span(operand),
+            ),
+        )
 
     @override
     def visit_Call(self, node: ast.Call) -> None:
@@ -289,16 +436,47 @@ class _Finder(ast.NodeVisitor):
             self._visit_all(node.args[1:])
             self._annotating -= 1
             self._visit_all(node.keywords)
+        elif (template_ref := self._templatelib_ref(node.func)) is not None:
+            self._visit_template_call(node, template_ref)
         else:
+            if _is_class_of_template(node.func) or self._is_type_of_template(node.func):
+                self._indirect_uses.append(
+                    IndirectUse(kind="type-call", name=None, span=self._lines.span(node.func)),
+                )
             is_getattr = isinstance(node.func, ast.Name) and node.func.id == "getattr"
             if is_getattr and node.args and self._module_name(node.args[0]):
                 self._indirect(node.args[0], "`getattr(rowx, ...)`")
             self.generic_visit(node)
         self._annotating = annotating
 
+    def _is_type_of_template(self, node: ast.expr) -> bool:
+        match node:
+            case ast.Call(func=ast.Name(id="type") as func, args=[ast.TemplateStr()], keywords=[]):
+                return self._lookup(func.id) is None
+        return False
+
+    def _visit_template_call(self, node: ast.Call, ref: _TemplatelibRef) -> None:
+        if ref.ambiguous:
+            self._template_use(ref, node.func, "ambiguous")
+        else:
+            self._template_calls.append(TemplateCall(name=ref.name, node=node, span=self._lines.span(node)))
+        self._visit_all(node.args)
+        self._visit_all(node.keywords)
+
+    def _mark_direct(self, node: ast.Call, kind: QueryKind) -> None:
+        if len(node.args) != 1 or isinstance(node.args[0], ast.Starred):
+            return
+        if (kind == "query" and node.keywords) or not isinstance(template := node.args[0], ast.TemplateStr):
+            return
+        for part in template.values:
+            if isinstance(part, ast.Interpolation):
+                self._direct[id(part)] = kind
+
     def _visit_query(self, node: ast.Call, target: ast.expr, subscript: ast.Subscript | None, ref: _Ref) -> None:
         if ref.ambiguous:
             self._indirect(target, "an ambiguous name that is also bound another way in its scope")
+        else:
+            self._mark_direct(node, ref.kind)
         if subscript is not None:
             self.visit(subscript.slice)
         self._visit_all(node.args)
@@ -330,11 +508,7 @@ class _Finder(ast.NodeVisitor):
         if len(node.args) != 1 or not isinstance(template := node.args[0], ast.TemplateStr):
             return
         for part in template.values:
-            if (
-                isinstance(part, ast.Interpolation)
-                and isinstance(part.format_spec, ast.JoinedStr)
-                and not all(isinstance(value, ast.Constant) for value in part.format_spec.values)
-            ):
+            if isinstance(part, ast.Interpolation) and _is_dynamic_spec(part):
                 self._report(
                     "dynamic-query",
                     "a format spec in a `query_unchecked` interpolation must be a literal",
@@ -457,6 +631,7 @@ def discover_source(path: Path, data: bytes) -> FileResult:
         return _syntax_error(path, f"cannot parse file: {error}", Span(line=1, col=1, end_line=1, end_col=2))
     finder = _Finder(path, tree, lines)
     finder.visit(tree)
+    finder.result.templates = finder.facts()
     finder.result.source = source
     return finder.result
 
