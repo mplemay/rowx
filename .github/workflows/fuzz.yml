@@ -59,3 +59,48 @@ jobs:
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}
+
+  protocol-limits:
+    name: Protocol limits (2 GiB parameter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: rowx
+          POSTGRES_PASSWORD: rowx
+          POSTGRES_DB: rowx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rowx -d rowx"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ROWX_REQUIRE_DB: "1"
+      ROWX_TEST_DSN: postgresql://rowx:rowx@localhost:5432/rowx
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # the 2^31-byte parameter test is ignored locally because it needs about 2 GiB of memory
+      - name: Run the 2 GiB parameter regression
+        run: |
+          set -o pipefail
+          cargo test -p rowx-postgres --test exec -- --ignored --exact parameter_of_2_pow_31_bytes_errors_and_keeps_connection 2>&1 | tee protocol-limits.log
+          # --ignored exits 0 when the name matches nothing, so require exactly one passing test
+          grep -q "test result: ok. 1 passed" protocol-limits.log

@@ -601,3 +601,111 @@ async fn named_stream_accepts_null_in_a_pass_through_column() -> TestResult {
 
     schema.drop().await
 }
+
+async fn assert_connection_usable(client: &Client) -> TestResult {
+    assert_eq!(
+        client
+            .query_one("SELECT 1::int4", &[])
+            .await?
+            .get::<_, i32>(0),
+        1
+    );
+    Ok(())
+}
+
+// RUSTSEC-2024-0363 class: a length that overflows the protocol's i32 or u16 must fail before
+// anything is written, and the connection must stay in sync
+#[tokio::test]
+#[ignore = "needs ~2 GiB of memory; runs in the scheduled fuzz workflow"]
+async fn parameter_of_2_pow_31_bytes_errors_and_keeps_connection() -> TestResult {
+    let Some(schema) = common::fresh_schema().await? else {
+        return Ok(());
+    };
+    let client = schema.connect().await?;
+    let mut cache = cache();
+
+    // one allocation; zeroed pages stay untouched until the driver copies them into the Bind buffer
+    let huge = Param::binary(vec![0_u8; 1 << 31]);
+    let encode = move |_: &[Type]| -> Result<Vec<Param>, Error> { Ok(vec![huge.clone()]) };
+    let err = exec::execute(&client, &mut cache, "SELECT length($1::bytea)", encode)
+        .await
+        .err();
+    assert!(
+        matches!(err, Some(Error::Interface(_) | Error::Encode(_))),
+        "{err:?}"
+    );
+    assert_connection_usable(&client).await?;
+
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn sql_text_with_nul_errors_and_keeps_connection() -> TestResult {
+    let Some(schema) = common::fresh_schema().await? else {
+        return Ok(());
+    };
+    let client = schema.connect().await?;
+    let mut cache = cache();
+
+    let err = exec::execute(&client, &mut cache, "SELECT 1\0", no_params())
+        .await
+        .err();
+    assert!(
+        matches!(err, Some(Error::Interface(_) | Error::Encode(_))),
+        "{err:?}"
+    );
+    assert_connection_usable(&client).await?;
+
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn more_than_65535_parameters_error_and_keep_connection() -> TestResult {
+    let Some(schema) = common::fresh_schema().await? else {
+        return Ok(());
+    };
+    let client = schema.connect().await?;
+    let mut cache = cache();
+
+    let count = usize::from(u16::MAX) + 1;
+    let placeholders: Vec<String> = (1..=count).map(|n| format!("${n}::int4")).collect();
+    let sql = format!("SELECT cardinality(ARRAY[{}])", placeholders.join(", "));
+    let encode = |_: &[Type]| -> Result<Vec<Param>, Error> {
+        Ok((0..count)
+            .map(|_| Param::binary(1_i32.to_be_bytes().to_vec()))
+            .collect())
+    };
+    let err = exec::execute(&client, &mut cache, &sql, encode).await.err();
+    assert!(
+        matches!(
+            err,
+            Some(Error::Interface(_) | Error::Encode(_) | Error::Db { .. })
+        ),
+        "{err:?}"
+    );
+    assert_connection_usable(&client).await?;
+
+    schema.drop().await
+}
+
+#[tokio::test]
+async fn parameter_list_over_65535_for_one_placeholder_errors_and_keeps_connection() -> TestResult {
+    let Some(schema) = common::fresh_schema().await? else {
+        return Ok(());
+    };
+    let client = schema.connect().await?;
+    let mut cache = cache();
+
+    let encode = |_: &[Type]| -> Result<Vec<Param>, Error> {
+        Ok((0..=usize::from(u16::MAX))
+            .map(|_| Param::binary(1_i32.to_be_bytes().to_vec()))
+            .collect())
+    };
+    let err = exec::execute(&client, &mut cache, "SELECT $1::int4", encode)
+        .await
+        .err();
+    assert!(matches!(err, Some(Error::Interface(_))), "{err:?}");
+    assert_connection_usable(&client).await?;
+
+    schema.drop().await
+}
