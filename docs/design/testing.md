@@ -218,8 +218,9 @@
     after each failure.
   - *Binary arrays and ranges:* `wire_send.rs` round-trips every element family through the server with adversarial
     strings (`"`, `\`, `,`, `{}`, `NULL`, whitespace, `empty`, SJIS lead-byte characters), `Numeric::from_decimal_parts`
-    edge cases (a `Decimal` subclass overriding `as_tuple`, an `int` past the int-to-str digit limit), a test that no
-    array or range parameter is ever sent in text format, and a test pinning `json.dumps(ensure_ascii=True)`.
+    edge cases (a `Decimal` subclass overriding both `as_tuple` and `__str__`; an `int` past the int-to-str digit limit
+    encodes rather than raising), a test that no array or range parameter is ever sent in text format, and a test
+    pinning `json.dumps(ensure_ascii=True)`.
     `bench/fetch_100k.py` shows no regression.
   - *Session encoding watch:* `SET client_encoding = 'SJIS'` and `SET standard_conforming_strings = off` make the next
     call raise `InterfaceError`, a pooled connection that drifted is replaced after release, and
@@ -242,8 +243,9 @@
     and the expected value is the startup role); a custom placeholder GUC (`app.tenant`) is empty after release; a
     statement whose transaction keyword follows a `--` comment ended by `\r` leaves no transaction in the next checkout;
     with the flag clear and a transaction open, the reset fails and the connection is discarded, for the default and a
-    custom reset query (with `reset_query=None` no guard runs, because there is no reset batch, and it remains unsafe as
-    documented); a `reset=` hook after an aborted transaction sees an idle connection and its `SET` survives into the
+    custom reset query, which is a separate round trip after the guard (with `reset_query=None` and the flag clear, no
+    guard runs, because nothing is sent, and it remains unsafe as documented); a `reset=` hook after an aborted
+    transaction sees an idle connection and its `SET` survives into the
     next checkout; with `search_path` set to a schema holding a same-named `pg_advisory_unlock_all()` and an advisory
     lock held, no advisory lock survives release; with `search_path` set to a schema holding a same-named `=` operator
     for `timestamptz` that always returns true, the guard still fails inside an open transaction; a temp table is gone.

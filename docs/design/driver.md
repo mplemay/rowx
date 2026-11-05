@@ -61,6 +61,9 @@ parses a DSN or converts a `ConnectOptions`. Anything else is an `InterfaceError
   with at most 63 bytes per dot-separated segment. Because `server_settings` travel inside the startup `options` as
   `-c k=v`, a tab or newline in a key would be split by the server into extra `-c` options. This is reachable only
   through programmatic `ConnectOptions`, since DSN-parsed keys can't hold whitespace.
+- **DSN `options` names.** In an `options` string, both `--long-option` and `-c name` map `-` to `_` the way Postgres
+  `ParseLongOption` does, and the name then follows the GUC grammar. `--search-path=x` and `-c search-path=x` are
+  `search_path`.
 - **`extra` keys** **MUST** match `^[a-z_]+$`, which every libpq keyword does. They are re-parsed as conninfo.
 - **Values.** A NUL or other C0 control character in any option value (`password`, `options`, `server_settings` values,
   `extra` values) is an `InterfaceError`. The message names the key and **never** the value.
@@ -357,11 +360,10 @@ exist.
 
 - The array and range encoders do not consult `encode_format` for the element form. `TYPE_TABLE` is not edited, and
   `accepted_params` is unchanged, so the checker is unaffected.
-  - **Stale metadata.** The `encode_format = Text` row for `numrange` (and any other range or element row) is therefore
-    stale for arrays and ranges, which the encoders ignore. What reads it today is `codec/range.rs` (the `as_text`
-    lookup near line 137, removed in #219) and `type_table()` with its consumer `scripts/gen-types-doc.py`, which
-    renders `docs/types.md` (the array row says "binary, or text if an element needs it"). #219 updates
-    `docs/types.md` and the `type_table()` consumers, including `test_table_coverage.py`, to match.
+  - **Table versus what is sent.** `encode_format` stays `Text` for scalar `numeric`, `timetz`, `json`, `jsonb` and
+    `enum`, and for `numrange` (and any other range whose table row is `Text`). Nothing in `codec/range.rs` reads it.
+    `scripts/gen-types-doc.py` publishes the `array` row and every range row as binary in `docs/types.md`, whose notes
+    say an array or range is binary even when the scalar form is text.
 - **Scalar parameters are unchanged.** A scalar has no literal grammar, so a text-format scalar (`numeric`, `timetz`)
   can corrupt only itself. `json.dumps` stays ASCII-only (`ensure_ascii=True`), which a test pins.
 - **Elements and bounds whose scalar form is text get binary element encoders:**
@@ -372,10 +374,14 @@ exist.
     - a scale above `MAX_SCALE` is an `EncodeError`;
     - quiet `NaN` and `±Infinity` encode as the special values;
     - a signalling NaN is an `EncodeError`;
-    - an `int` outside `i64` is built from its decimal digits, and an `int` too large for `str()` (Python's int-to-str
-      digit limit) is an `EncodeError`;
-    - digits are read with `decimal.Decimal.as_tuple(value)` (the unbound method, so a `Decimal` subclass can't
-      override it) and each digit is validated as 0 to 9;
+    - digits of a `Decimal` are read through the unbound `decimal.Decimal.__str__`, so a subclass's `__str__` or
+      `as_tuple` cannot choose the value. The text is parsed in Rust and every digit is validated as 0 to 9.
+      `capitals = 0` prints a lowercase exponent, which the parser accepts. `clamp`, `prec`, `rounding` and
+      `Emax`/`Emin` do not change `__str__`;
+    - an `int` outside `i64` is converted through `Decimal(int)` and that same string, not `str(int)`, which is capped
+      at the int-to-str digit limit. An int past that limit still encodes. A conversion that fails is an `EncodeError`;
+    - the scalar numeric parameter text is the `digitsE±exp` form built from those parts. It can appear in server logs
+      and error DETAIL. Decoded results are unchanged;
   - `timetz` through `wire::temporal::encode_timetz`: microseconds since midnight plus the zone offset in seconds
     *west* of UTC;
   - `json` as UTF-8, and `jsonb` as `0x01` followed by UTF-8;
@@ -447,12 +453,18 @@ statement that slips through can suffer data drift but not element injection.
   `poll_fn(|cx| { let r = conn.poll_message(cx); check(&conn); r })`, so the check runs on **every** poll, including
   `Pending`. This matters because `ParameterStatus` is consumed inside `poll_read` and is never returned from
   `poll_message`.
-- **Taint.** If `client_encoding` leaves `UTF8`, or `standard_conforming_strings` turns `off`, the check stores a taint
-  reason in an `AtomicU8` next to `broken`.
-- **Failing.** `Connection::client()` and `parts()` fail with an `InterfaceError` that names the encoding, for example
+- **Taint.** `UTF8` and `UNICODE`, compared ASCII case-insensitively (`utf8`, `Utf8`, `unicode`), both count as UTF-8,
+  because Postgres reports `SET client_encoding = 'UNICODE'` under that name. Any other `client_encoding`, or
+  `standard_conforming_strings` turning `off`, stores a taint reason in an `AtomicU8` next to `broken`. A
+  server-supplied encoding name is bounded to 64 characters and made printable before it is put in a message.
+- **Failing.** The taint is a `Drift` error, mapped to `InterfaceError`. It does not move the connection state machine
+  to `Broken`. `Connection::client()` and `parts()` fail with a message that names the encoding, for example
   "the session changed client_encoding to SJIS; rowx requires UTF8". The pool's `is_broken` then discards the
   connection through its existing `client().is_err()` path, so a drifted connection never serves another checkout.
-  A `SET client_encoding = 'UTF8'` when it was already `UTF8` never taints the connection.
+  A `SET client_encoding = 'UTF8'` when it was already `UTF8` never taints the connection. The statement that changes
+  the encoding fails once its response is fully consumed (`settled` turns `Ok` into `Drift`), so `execute` of the
+  `SET` itself raises. A change undone inside the same statement, so the last `ParameterStatus` is UTF-8, is not
+  reported and the connection stays usable.
 - **Sticky.** The taint lasts for the life of the connection: a later `RESET ALL` or `SET client_encoding = UTF8`
   doesn't clear it.
 - **Discard paths.** `is_broken` uses `try_lock`, so a connection whose lock is held is not reported broken there. The
@@ -635,13 +647,16 @@ There is no round trip on the hot path.
   - a cancelled operation;
   - any 25P02 error;
   - SQL whose first keyword is `BEGIN`, `START` or `SAVEPOINT`.
-- **The flag is a heuristic, so the reset carries an idle guard.** The first-keyword scan ends a `--` comment at `\n` or
-  `\r`. When the flag is clear, rowx prepends
-  `SELECT 1 OPERATOR(pg_catalog./) (pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp())::pg_catalog.int4;`
-  to the reset batch, whether it is the default or a custom reset query. From idle, `now()` equals
-  `statement_timestamp()` inside the batch. Inside an explicit transaction it doesn't, so the guard fails, the reset
-  fails and the connection is closed. `RESET_QUERY` text is unchanged. With `reset_query=None` there is no reset batch,
-  so no guard runs, and `reset_query=None` remains unsafe (below).
+- **The flag is a heuristic, so the reset carries an idle guard.** The first-keyword scan skips leading `;`, empty
+  statements, a `--` comment ended at `\n` or `\r`, and nested `/* */` comments, then looks at the first keyword. When
+  the flag is clear, the guard is
+  `SELECT 1 OPERATOR(pg_catalog./) (pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp())::pg_catalog.int4`.
+  From idle, `now()` equals `statement_timestamp()`. Inside an explicit transaction it doesn't, so the guard fails and
+  the connection is closed. The default `RESET_QUERY` is one batch: the guard, or `ROLLBACK;`, prefixed onto that query.
+  A custom reset query is two round trips, the guard or `ROLLBACK` alone and then the custom query alone, because a
+  multi-statement batch is an implicit transaction and `DISCARD ALL` or `VACUUM` cannot run inside one. `RESET_QUERY`
+  text is unchanged. With `reset_query=None` and the flag clear, nothing is sent, so no guard runs, and
+  `reset_query=None` remains unsafe (below). With the flag set and `reset_query=None`, only `ROLLBACK` is sent.
 - When the flag is set, `ROLLBACK` is sent even with a custom `reset_query` or `reset_query=None`. As in asyncpg, an
   open transaction always ends. It takes one round trip, and **MUST** be correct from idle, in-transaction and
   failed-transaction states.

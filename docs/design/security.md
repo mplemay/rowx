@@ -69,6 +69,8 @@ Each guarantee below has a test. The sections that follow say how each row of th
   - The taint is **sticky** for the life of the connection: a later `RESET ALL` or `SET client_encoding = UTF8` doesn't
     clear it. `standard_conforming_strings = off` set at role or database level taints the connection at connect, so
     its first call raises `InterfaceError`.
+  - `UTF8` and `UNICODE` (ASCII case-insensitive) both count as UTF-8. The statement that changes the encoding fails
+    once its response is consumed, and so does every later call.
   - This is a backstop against **data drift** (text stored in the wrong encoding). It is not what stops element
     injection: binary arrays and ranges do. So the watch's residual window, a statement already queued behind the
     `SET`, can corrupt data but not change the structure of an array.
@@ -135,8 +137,10 @@ Each guarantee below has a test. The sections that follow say how each row of th
   - The batch runs under the previous checkout's session state, so it starts with `RESET SESSION AUTHORIZATION` (which
     `RESET ALL` does not cover) and then `RESET ALL`, and its function is `pg_catalog`-qualified
     ([Release](driver.md#release)).
-  - The reset batch starts with an idle guard when rowx believes no transaction is open, so a reset inside an open
-    transaction fails and the connection is discarded ([Release](driver.md#release)).
+  - When rowx believes no transaction is open, an idle guard runs with the reset. It is part of the default batch. A
+    custom reset query is a separate round trip after the guard or `ROLLBACK`. `reset_query=None` with no transaction
+    flag sends no guard. A reset inside an open transaction fails and the connection is discarded
+    ([Release](driver.md#release)).
   - A temp table matters because `pg_temp` is searched first for relations, so a leftover one would shadow an
     application table for the next checkout.
   - `DEALLOCATE ALL` is not part of the reset, because rowx's protocol-level statements are cached per connection.
@@ -162,6 +166,7 @@ Each guarantee below has a test. The sections that follow say how each row of th
   - The plan pass accepts exactly one result set, and its JSON must have a `Plan` key.
   - Tests assert that no EXPLAIN text contains the user's SQL or a view definition, and that a domain `CHECK` never runs
     during describe.
-- Server-supplied text (message, detail, hint) is sanitised before it reaches a terminal: text output strips C0 and C1
-  control characters except `\n` and `\t` ([Output](checker.md#output)).
+- Server-supplied text (message, detail, hint) is sanitised before it reaches a terminal. Text output strips Unicode
+  categories Cc (except `\n` and `\t`), Zl, Zp and Cf, and surrogate-escaped C1 bytes (U+DC80 through U+DC9F). U+200C
+  (ZWNJ), U+200D (ZWJ) and U+00AD (soft hyphen) are kept ([Output](checker.md#output)).
 - The checker never imports or executes user code, and the `template-construction` rule reads source only.

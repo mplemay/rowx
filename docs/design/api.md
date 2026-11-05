@@ -861,8 +861,9 @@ override.
 - The compiled SQL contains a NUL character: `TypeError("SQL text must not contain a NUL character")`. This applies in
   `query` too, because static text can hold one.
 - More than 65535 parameters after nested templates are flattened:
-  `TypeError("a query takes at most 65535 parameters, got N")`, where `N` is the count. The protocol carries the
-  parameter count in 16 bits.
+  `TypeError("a query takes at most 65535 parameters, got N")`. `N` is the count at the parameter that crosses the
+  limit, and compilation stops there, so a larger template is reported as `got 65536` rather than the size it would
+  have reached. The protocol carries the parameter count in 16 bits.
 
 ## Nullability overrides (SQLx convention)
 

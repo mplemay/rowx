@@ -64,18 +64,20 @@ The Python surface is in [`rowx.postgres`](api.md#rowxpostgres), the commands an
 
   ```sql
   version        BIGINT PRIMARY KEY,
-  description    TEXT NOT NULL,
-  installed_on   TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.now(),
+  description    pg_catalog.text NOT NULL,
+  installed_on   pg_catalog.timestamptz NOT NULL DEFAULT pg_catalog.now(),
   success        BOOLEAN NOT NULL,
-  checksum       BYTEA NOT NULL,
+  checksum       pg_catalog.bytea NOT NULL,
   execution_time BIGINT NOT NULL
   ```
 
 - **Internal SQL names `pg_catalog` objects explicitly.** The history-table DDL and every other statement rowx builds
-  call `pg_catalog.now()` and the like, never a bare name. A role or DSN `search_path` could otherwise decide which
-  `now()` runs, and an unqualified history table lands wherever `search_path` points first. A test runs migrations
-  under `search_path = evil, pg_catalog` with a shadowing `evil.now()`: the real time is recorded and the table is
-  created where the resolved table name says ([Security](security.md#parameters-and-sql-text)).
+  call `pg_catalog.now()` and the like, never a bare name. The type names `search_path` can shadow (`text`,
+  `timestamptz`, `bytea`) are `pg_catalog`-qualified in that DDL. `BIGINT` and `BOOLEAN` are left as written there. A
+  role or DSN `search_path` could otherwise decide which `now()` runs, and an unqualified history table lands wherever
+  `search_path` points first. A test runs migrations under `search_path = evil, pg_catalog` with a shadowing
+  `evil.now()`: the real time is recorded and the table is created where the resolved table name says
+  ([Security](security.md#parameters-and-sql-text)).
 - **Adopting sqlx.** `table = "_sqlx_migrations"` is the only change. A test runs sqlx-format history rows and checksums
   through rowx.
 - **Table names.** `table` and each `create_schemas` entry are parsed with Postgres identifier rules, at construction.
