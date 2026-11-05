@@ -4,7 +4,9 @@ import pytest
 
 from rowx.__tests__.integration.describe.sqlx_cases import SQLX_CASES
 from rowx.__tests__.integration.describe.test_base import run_checker, run_describe, scalar
+from rowx.__tests__.integration.describe.test_base_nullability import execute
 from rowx._core.postgres import describe
+from rowx.errors import DatabaseError
 
 if TYPE_CHECKING:
     from rowx._core.postgres import Connection
@@ -229,3 +231,104 @@ BOUNDARY: Final[tuple[bool, str]] = (True, "ScanBoundary")
 )
 def test_scan_boundary_mapping(schema: str, sql: str, expected: list[tuple[bool, str]]) -> None:
     assert verdicts(schema, sql.replace("@JOIN@", JOIN)) == expected
+
+
+def test_zero_parameter_statement_is_explained_without_parentheses(schema: str) -> None:
+    d = run_describe(schema, "SELECT p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id")
+    assert d.params == []
+    assert [(c.nullable, c.reason) for c in d.columns] == [(True, "OuterJoin")]
+
+
+@pytest.mark.parametrize("count", [1, 3, 100, 1000])
+def test_many_parameter_statement_gets_one_null_per_parameter(schema: str, count: int) -> None:
+    marks = ", ".join(f"${i}::int4" for i in range(1, count + 1))
+    sql = f"SELECT p.title, u.id FROM users u LEFT JOIN posts p ON p.user_id = u.id WHERE u.id IN ({marks})"  # ruff: ignore[hardcoded-sql-expression]
+    d = run_describe(schema, sql)
+    assert [p.type_key for p in d.params] == ["int4"] * count
+    assert [(c.nullable, c.reason) for c in d.columns] == [(True, "OuterJoin"), (False, "NotNullColumn")]
+
+
+@pytest.mark.parametrize("mode", ["auto", "force_custom_plan", "force_generic_plan"])
+def test_the_session_plan_cache_mode_is_unchanged_by_describe(schema: str, mode: str) -> None:
+    async def body(conn: Connection) -> list[object]:
+        await scalar(conn, f"SELECT set_config('plan_cache_mode', '{mode}', false)")
+        found: list[object] = [await scalar(conn, "SHOW plan_cache_mode")]
+        await describe(conn, "SELECT p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id WHERE u.id = $1")
+        found.append(await scalar(conn, "SHOW plan_cache_mode"))
+        # the pinned transaction of a view definition leaves nothing behind either
+        await describe(conn, "SELECT user_id, title FROM user_posts")
+        found.append(await scalar(conn, "SHOW plan_cache_mode"))
+        return found
+
+    assert run_checker(schema, body) == [mode] * 3
+
+
+# a view over a left join: its NOT NULL side is only known once the definition's own plan pass has run
+def test_view_over_a_left_join_is_resolved_through_its_plan(schema: str) -> None:
+    execute(
+        schema,
+        "CREATE VIEW lj AS SELECT u.id AS uid, u.name AS uname, p.title AS ptitle "
+        "FROM users u LEFT JOIN posts p ON p.user_id = u.id",
+        "CREATE VIEW lj2 AS SELECT uid, ptitle FROM lj",
+    )
+    assert verdicts(schema, "SELECT uid, uname, ptitle FROM lj") == [
+        (False, "ViewColumn"),
+        (False, "ViewColumn"),
+        (True, "OuterJoin"),
+    ]
+    assert verdicts(schema, "SELECT uid, ptitle FROM lj2") == [(False, "ViewColumn"), (True, "OuterJoin")]
+    assert verdicts(schema, "SELECT x.ptitle FROM users u LEFT JOIN lj x ON x.uid = u.id") == [(True, "OuterJoin")]
+
+
+def test_multi_statement_with_a_side_effect_is_rejected_and_never_runs(schema: str) -> None:
+    async def body(conn: Connection) -> object:
+        with pytest.raises(DatabaseError, match="multiple commands"):
+            await describe(conn, "SELECT 1; CREATE TABLE rowx_never_made (a int)")
+        with pytest.raises(DatabaseError, match="multiple commands"):
+            await describe(conn, "SELECT 1; SELECT 2;")
+        return await scalar(conn, "SELECT to_regclass('rowx_never_made') IS NULL")
+
+    assert run_checker(schema, body) is True
+
+
+DOMAINS: Final[dict[str, str]] = {
+    "nn_int": "CREATE DOMAIN nn_int AS int NOT NULL",
+    "ck_int": "CREATE DOMAIN ck_int AS int CHECK (VALUE IS NOT NULL)",
+    "nn_nested": "CREATE DOMAIN nn_inner AS int NOT NULL; CREATE DOMAIN nn_nested AS nn_inner",
+}
+
+
+# `EXPLAIN ... EXECUTE name(NULL)` raises for a parameter whose domain rejects NULL, while the plan itself is fine
+@pytest.mark.parametrize("domain", list(DOMAINS))
+def test_null_rejecting_domain_parameter_keeps_the_outer_join(schema: str, domain: str) -> None:
+    execute(schema, *DOMAINS[domain].split("; "))
+    sql = f"SELECT p.title, u.id FROM users u LEFT JOIN posts p ON p.user_id = u.id WHERE u.id = $1::{domain}"  # ruff: ignore[hardcoded-sql-expression]
+    d = run_describe(schema, sql)
+    assert [p.type_name for p in d.params] == [domain]
+    assert [(c.nullable, c.reason) for c in d.columns] == [(True, "OuterJoin"), (False, "NotNullColumn")]
+
+
+# the parameter takes the domain of the column it is assigned to, with no cast in the statement
+@pytest.mark.parametrize("domain", ["nn_int", "ck_int"])
+def test_null_rejecting_domain_parameter_inferred_from_a_column(schema: str, domain: str) -> None:
+    execute(
+        schema,
+        DOMAINS[domain],
+        f"CREATE TABLE dom_t (id int PRIMARY KEY, d {domain} NOT NULL DEFAULT 1)",
+    )
+    sql = (
+        "UPDATE dom_t t SET d = $1 FROM users u LEFT JOIN posts p ON p.user_id = u.id "
+        "WHERE t.id = u.id RETURNING p.title, t.id"
+    )
+    d = run_describe(schema, sql)
+    assert [p.type_name for p in d.params] == [domain]
+    assert [(c.nullable, c.reason) for c in d.columns] == [(True, "OuterJoin"), (False, "NotNullColumn")]
+
+
+def test_domain_parameter_without_a_null_check_is_explained_directly(schema: str) -> None:
+    # positive_int accepts NULL, so no second Parse is needed; the verdicts are the same
+    d = run_describe(
+        schema,
+        "SELECT p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id WHERE u.id = $1::positive_int",
+    )
+    assert [(c.nullable, c.reason) for c in d.columns] == [(True, "OuterJoin")]

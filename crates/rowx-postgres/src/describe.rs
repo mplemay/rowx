@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rowx_core::row_shape::{Override, column_name};
+use serde_json::Value;
 use tokio_postgres::types::{Kind, Type};
-use tokio_postgres::{Client, SimpleQueryMessage};
+use tokio_postgres::{Client, SimpleQueryMessage, Statement};
 
 use crate::error::Error;
 use crate::explain::{self, Origin};
@@ -357,37 +358,149 @@ async fn functions_are_unshadowed(client: &Client) -> bool {
 // computed expression does
 type PlanVerdicts = (Vec<Option<NullReason>>, Vec<bool>, Vec<bool>);
 
-// simple_query, because the extended protocol would demand values for `$n`; the caller's Parse has
-// already rejected anything but a single statement
-async fn plan_promotions(
-    client: &Client,
-    sql: &str,
-    column_count: usize,
-    origins: &[Option<Origin>],
-) -> Option<PlanVerdicts> {
-    let messages = client
-        .simple_query(&format!(
-            "EXPLAIN (GENERIC_PLAN, VERBOSE, COSTS OFF, FORMAT JSON) {sql}"
-        ))
-        .await
-        .ok()?;
-    let text: String = messages
+// The EXPLAIN is a simple query, because the extended protocol would demand values for `$n`. It names the
+// statement the server already parsed and never carries SQL text, so what runs is exactly what Parse accepted.
+// `plan_cache_mode` is pinned for this transaction alone, whatever the session says: a custom plan would fold
+// `= NULL` and drop an outer join.
+#[must_use]
+fn explain_execute_sql(name: &str, params: usize) -> String {
+    let name = format!("\"{}\"", name.replace('"', "\"\""));
+    let args = if params == 0 {
+        String::new()
+    } else {
+        format!("({})", vec!["NULL"; params].join(", "))
+    };
+    format!(
+        "SET LOCAL plan_cache_mode = force_generic_plan; \
+         EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE {name}{args}"
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXPLAIN_SENT: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// the one place the plan pass sends text, and exactly one result set may come back
+async fn explain_plan(client: &Client, text: &str) -> Option<Value> {
+    #[cfg(test)]
+    EXPLAIN_SENT.with(|sent| sent.borrow_mut().push(text.to_owned()));
+    let messages = client.simple_query(text).await.ok()?;
+    let sets = messages
+        .iter()
+        .filter(|message| matches!(message, SimpleQueryMessage::RowDescription(_)))
+        .count();
+    if sets != 1 {
+        return None;
+    }
+    let json: String = messages
         .iter()
         .filter_map(|message| match message {
             SimpleQueryMessage::Row(row) => row.get(0),
             _ => None,
         })
         .collect();
-    let plan = serde_json::from_str(&text).ok()?;
-    let leaves = not_null_leaves(client, &explain::leaf_columns(&plan)).await;
+    let plan: Value = serde_json::from_str(&json).ok()?;
+    // a utility statement (`SHOW`, `CALL`) explains as the text `Utility Statement`, which has no plan
+    plan.get(0)?.get("Plan")?;
+    Some(plan)
+}
+
+async fn plan_promotions(
+    client: &Client,
+    name: &str,
+    params: usize,
+    column_count: usize,
+    origins: &[Option<Origin>],
+) -> Option<PlanVerdicts> {
+    let plan = explain_plan(client, &explain_execute_sql(name, params)).await?;
+    Some(analyse_plan(client, &plan, column_count, origins).await)
+}
+
+async fn analyse_plan(
+    client: &Client,
+    plan: &Value,
+    column_count: usize,
+    origins: &[Option<Origin>],
+) -> PlanVerdicts {
+    let leaves = not_null_leaves(client, &explain::leaf_columns(plan)).await;
     // the lookup only runs when a function name is what proves a column
-    let functions = !explain::needs_function_check(&plan, column_count)
+    let functions = !explain::needs_function_check(plan, column_count)
         || functions_are_unshadowed(client).await;
-    Some((
-        explain::walk(&plan, column_count, origins),
-        explain::proven_not_null(&plan, column_count, &leaves),
-        explain::proven_computed(&plan, column_count, functions),
-    ))
+    (
+        explain::walk(plan, column_count, origins),
+        explain::proven_not_null(plan, column_count, &leaves),
+        explain::proven_computed(plan, column_count, functions),
+    )
+}
+
+// The server-side name of the statement just prepared from `sql`. A dropped statement's `Close` is
+// asynchronous, so several names can match and any of them is the same statement; the parameter types keep a
+// same-text statement prepared with other types from being picked. `Statement::name` is not public.
+const STATEMENT_NAME_SQL: &str = "\
+SELECT s.name::pg_catalog.text FROM pg_catalog.pg_prepared_statements s \
+WHERE NOT s.from_sql AND s.statement OPERATOR(pg_catalog.=) $1::pg_catalog.text \
+AND s.parameter_types::pg_catalog.oid[] OPERATOR(pg_catalog.=) $2::pg_catalog.oid[] \
+ORDER BY s.name LIMIT 1";
+
+async fn statement_name(client: &Client, sql: &str, params: &[Type]) -> Option<String> {
+    let oids: Vec<u32> = params.iter().map(Type::oid).collect();
+    client
+        .query_opt(STATEMENT_NAME_SQL, &[&sql, &oids])
+        .await
+        .ok()??
+        .try_get(0)
+        .ok()
+}
+
+// `stmt` must stay alive until the plan pass is done, or the server closes it
+async fn explain_statement(
+    client: &Client,
+    sql: &str,
+    stmt: &Statement,
+    column_count: usize,
+    origins: &[Option<Origin>],
+) -> Option<PlanVerdicts> {
+    let name = statement_name(client, sql, stmt.params()).await?;
+    plan_promotions(client, &name, stmt.params().len(), column_count, origins).await
+}
+
+// the type with every domain layer removed
+fn base_type(ty: &Type) -> Type {
+    match ty.kind() {
+        Kind::Domain(base) => base_type(base),
+        _ => ty.clone(),
+    }
+}
+
+// the parameter types with each domain replaced by its base type, when there is a domain among them
+fn base_param_types(params: &[Type]) -> Option<Vec<Type>> {
+    params
+        .iter()
+        .any(|ty| matches!(ty.kind(), Kind::Domain(_)))
+        .then(|| params.iter().map(base_type).collect())
+}
+
+// `EXECUTE name(NULL)` fails for a parameter whose domain rejects NULL, where the plan itself is fine. The same
+// SQL is then prepared again with those parameters typed as their base types. Not inside the view transaction,
+// where the failure has aborted it; a view definition has no parameters.
+async fn plan_verdicts(
+    client: &Client,
+    sql: &str,
+    stmt: &Statement,
+    column_count: usize,
+    origins: &[Option<Origin>],
+    ctx: &ViewCtx,
+) -> Option<PlanVerdicts> {
+    if let Some(verdicts) = explain_statement(client, sql, stmt, column_count, origins).await {
+        return Some(verdicts);
+    }
+    if ctx.pinned {
+        return None;
+    }
+    let types = base_param_types(stmt.params())?;
+    let retry = client.prepare_typed(sql, &types).await.ok()?;
+    explain_statement(client, sql, &retry, column_count, origins).await
 }
 
 // the nullability-relevant part of a column, so a view's definition can be analysed without its types
@@ -412,10 +525,11 @@ struct ViewCtx {
 }
 
 // One catalog query (base nullability), the views behind the view columns, and the plan pass. Returns whether
-// the plan pass ran; when it did not, a view definition is not trusted.
+// the plan pass ran; when it did not, a view definition is not trusted. `stmt` is `sql` prepared.
 async fn refine(
     client: &Client,
     sql: &str,
+    stmt: &Statement,
     slots: &mut [Slot],
     ctx: &mut ViewCtx,
 ) -> Result<bool, Error> {
@@ -447,7 +561,7 @@ async fn refine(
         return Ok(true);
     }
     if let Some((promotions, proven, computed)) =
-        plan_promotions(client, sql, slots.len(), &column_origins).await
+        plan_verdicts(client, sql, stmt, slots.len(), &column_origins, ctx).await
     {
         for (((slot, promotion), proven), computed) in
             slots.iter_mut().zip(promotions).zip(proven).zip(computed)
@@ -481,8 +595,7 @@ fn output_position(live_attnums: &[i16], attnum: i16) -> Option<usize> {
     live_attnums.iter().position(|n| *n == attnum)
 }
 
-// The definition without its trailing `;`, because it is concatenated into a simple-protocol `EXPLAIN`. That is
-// only safe once Parse has accepted the text as a single statement (`analyse_definition` prepares it first).
+// The definition without its trailing `;`, which Parse accepts but the statement text does not need
 fn definition_statement(definition: &str) -> Option<&str> {
     let text = definition.trim_end();
     let text = text.strip_suffix(';').unwrap_or(text);
@@ -607,8 +720,8 @@ async fn definition_verdicts(client: &Client, view: u32, ctx: &mut ViewCtx) -> O
     analyse_definition(client, &definition, ctx).await
 }
 
-// Parse rejects anything but a single statement, as for the user's own query, and only then is the text
-// concatenated into `EXPLAIN`; a definition that fails Parse, or carries a second statement, is Nullable
+// Parse rejects anything but a single statement, as for the user's own query; a definition that fails Parse, or
+// carries a second statement, is Nullable. The plan pass names the prepared statement and never sends the text.
 async fn analyse_definition(
     client: &Client,
     definition: &str,
@@ -633,7 +746,9 @@ async fn analyse_definition(
             }
         })
         .collect();
-    let plan_ran = Box::pin(refine(client, sql, &mut slots, ctx)).await.ok()?;
+    let plan_ran = Box::pin(refine(client, sql, &stmt, &mut slots, ctx))
+        .await
+        .ok()?;
     plan_ran.then(|| slots.iter().map(|s| !s.nullable).collect())
 }
 
@@ -650,8 +765,8 @@ fn apply_overrides(col: &mut ColumnInfo) {
 
 /// Prepares `sql` and reports its parameter and column types. Nothing is executed.
 ///
-/// A multi-statement string is rejected by Parse, which later steps rely on: they concatenate the
-/// SQL into a simple-protocol query.
+/// A multi-statement string is rejected by Parse. The plan pass names the prepared statement and never
+/// sends the SQL text again.
 ///
 /// # Errors
 /// `Db` (with the error position) when the server rejects the SQL, `Interface` for IO problems.
@@ -720,7 +835,7 @@ pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
             reason: c.reason.clone(),
         })
         .collect();
-    refine(client, sql, &mut slots, &mut ViewCtx::default()).await?;
+    refine(client, sql, &stmt, &mut slots, &mut ViewCtx::default()).await?;
     for (col, slot) in columns.iter_mut().zip(slots) {
         col.nullable = slot.nullable;
         col.reason = slot.reason;
@@ -737,9 +852,79 @@ mod tests {
     use tokio_postgres::types::{Kind, Type};
 
     use super::{
-        Unsupported, ViewCtx, analyse_definition, definition_statement, extension_candidates,
-        impostor, output_position, resolve, unresolved_leaf,
+        EXPLAIN_SENT, Unsupported, ViewCtx, analyse_definition, base_param_types,
+        definition_statement, describe, explain_execute_sql, extension_candidates, impostor,
+        output_position, resolve, unresolved_leaf,
     };
+
+    const MARKER: &str = "rowx_user_sql_marker_5d2c";
+
+    #[test]
+    fn explain_execute_has_no_parentheses_without_parameters() {
+        assert_eq!(
+            explain_execute_sql("s0", 0),
+            "SET LOCAL plan_cache_mode = force_generic_plan; \
+             EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE \"s0\""
+        );
+    }
+
+    #[test]
+    fn explain_execute_binds_one_null_per_parameter() {
+        let tail = |sql: String| sql.rsplit(" EXECUTE ").next().map(str::to_owned);
+        assert_eq!(
+            tail(explain_execute_sql("s1", 1)).as_deref(),
+            Some("\"s1\"(NULL)")
+        );
+        assert_eq!(
+            tail(explain_execute_sql("s1", 3)).as_deref(),
+            Some("\"s1\"(NULL, NULL, NULL)")
+        );
+        let many = explain_execute_sql("s1", 1000);
+        assert_eq!(many.matches("NULL").count(), 1000);
+        assert!(many.ends_with("NULL)"));
+    }
+
+    #[test]
+    fn explain_execute_quotes_the_name_as_an_identifier() {
+        assert!(
+            explain_execute_sql("a\"b", 0).ends_with("EXECUTE \"a\"\"b\""),
+            "a quote is doubled"
+        );
+        // the doubled quote keeps the whole name inside one identifier, so it cannot end the statement
+        let sql = explain_execute_sql("x\"; DROP TABLE t; --", 2);
+        assert!(sql.ends_with("EXECUTE \"x\"\"; DROP TABLE t; --\"(NULL, NULL)"));
+    }
+
+    #[test]
+    fn explain_execute_never_contains_the_users_sql() {
+        // the builder receives a name and a count, so nothing of the statement can reach it
+        for params in [0, 1, 7, 100] {
+            let sql = explain_execute_sql("s42", params);
+            assert!(!sql.contains(MARKER), "{sql}");
+        }
+    }
+
+    #[test]
+    fn domains_are_replaced_by_their_base_type_at_any_depth() {
+        let inner = Type::new(
+            "inner_dom".to_owned(),
+            90_040,
+            Kind::Domain(Type::INT4),
+            "public".to_owned(),
+        );
+        let outer = Type::new(
+            "outer_dom".to_owned(),
+            90_041,
+            Kind::Domain(inner),
+            "public".to_owned(),
+        );
+        assert_eq!(
+            base_param_types(&[outer, Type::TEXT]),
+            Some(vec![Type::INT4, Type::TEXT])
+        );
+        assert_eq!(base_param_types(&[Type::INT4, Type::TEXT]), None);
+        assert_eq!(base_param_types(&[]), None);
+    }
 
     #[test]
     fn output_position_is_the_rank_among_live_columns() {
@@ -795,6 +980,68 @@ mod tests {
             .await
             .map(|row| row.get::<_, bool>(0));
         assert_eq!(exists.ok(), Some(false));
+    }
+
+    // `EXPLAIN_SENT` records the text handed to the only `simple_query` the plan pass makes, so it is exactly
+    // what reaches the server for the EXPLAIN. It covers the statement and the definition of a view behind it.
+    #[tokio::test]
+    async fn no_explain_text_contains_the_users_sql_or_a_view_definition() {
+        let Some(client) = connect().await else {
+            return;
+        };
+        let view_marker = "rowx_view_marker_77b1";
+        let created = client
+            .batch_execute(&format!(
+                "CREATE TEMP VIEW rowx_marker_view AS SELECT '{view_marker}' AS m, c.oid \
+                 FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+            ))
+            .await;
+        assert!(created.is_ok());
+        EXPLAIN_SENT.with(|sent| sent.borrow_mut().clear());
+        let statements = [
+            format!("SELECT '{MARKER}' AS a, v.oid FROM rowx_marker_view v WHERE v.oid > $1::oid"),
+            format!("SELECT 1 AS \"{MARKER}\""),
+            format!("SELECT $1::int4 AS a, $2::text AS \"{MARKER}\""),
+        ];
+        for sql in &statements {
+            assert!(describe(&client, sql).await.is_ok(), "{sql}");
+        }
+        let sent = EXPLAIN_SENT.with(|sent| sent.borrow().clone());
+        // one per statement, and one for the view's definition
+        assert!(sent.len() > statements.len(), "{sent:?}");
+        for text in &sent {
+            assert!(text.starts_with("SET LOCAL plan_cache_mode = force_generic_plan; EXPLAIN"));
+            assert!(text.contains(" EXECUTE \"s"), "{text}");
+            assert!(!text.contains(MARKER), "{text}");
+            assert!(!text.contains(view_marker), "{text}");
+            assert!(!text.to_ascii_lowercase().contains("select"), "{text}");
+        }
+    }
+
+    // `EXECUTE name(NULL)` is rejected by a domain that refuses NULL while the plan is fine, so the same SQL is
+    // prepared again with the base type; the first EXPLAIN fails and the second one gives the verdicts
+    #[tokio::test]
+    async fn a_null_rejecting_domain_parameter_is_retried_with_its_base_type() {
+        let Some(client) = connect().await else {
+            return;
+        };
+        let created = client
+            .batch_execute("CREATE DOMAIN pg_temp.rowx_nn_oid AS oid NOT NULL")
+            .await;
+        assert!(created.is_ok());
+        let sql = "SELECT n.nspname FROM pg_catalog.pg_class c \
+                   LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                   WHERE c.oid > $1::pg_temp.rowx_nn_oid";
+        EXPLAIN_SENT.with(|sent| sent.borrow_mut().clear());
+        let described = describe(&client, sql).await;
+        assert!(described.is_ok(), "{described:?}");
+        let Ok(described) = described else {
+            return;
+        };
+        let reasons: Vec<&str> = described.columns.iter().map(|c| c.reason.name()).collect();
+        assert_eq!(reasons, ["OuterJoin"]);
+        let sent = EXPLAIN_SENT.with(|sent| sent.borrow().len());
+        assert_eq!(sent, 2);
     }
 
     #[tokio::test]
