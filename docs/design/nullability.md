@@ -47,9 +47,9 @@ rejects the SQL it raises `DatabaseError` with `.position` set.
 
 1. **Prepare** with `client.prepare(sql)`.
    - A server error is `sql-error`, carrying its position.
-   - Multi-statement strings fail here, and this is a security invariant: step 3
-     concatenates the SQL into a simple-protocol query, so it relies on Parse having
-     rejected anything with a second command. It is covered by a test.
+   - Multi-statement strings fail here, and this is a security invariant: Parse accepts exactly one statement, and
+     step 3 explains only that prepared statement by name. A test prepares a two-statement string with a side effect
+     and asserts that it is rejected and never runs.
    - `ParamInfo` and `ColumnInfo` come from `Statement::params()`/`columns()`, using
      `Column::table_oid()`/`column_id()`. Unsupported types are resolved through
      `pg_type.typsend`.
@@ -68,12 +68,31 @@ rejects the SQL it raises `DatabaseError` with `.position` set.
      gets `NotValidatedConstraint` (Nullable). Any other column with a table origin gets
      `NullableColumn`.
    - A column with no table origin gets `Computed` (Unknown).
-3. **Plan pass.** This step is skipped when the statement returns 0 columns.
-   - Run `EXPLAIN (GENERIC_PLAN, VERBOSE, COSTS OFF, FORMAT JSON)` + sql through
-     **`simple_query`**. Over the extended protocol, EXPLAIN would demand values for `$n`.
-   - If EXPLAIN fails, keep the base results and mark Unknown columns `ExplainFailed`.
-     This is non-fatal. Utility statements that return columns, such as `SHOW`, `CALL` and
-     `FETCH`, fail EXPLAIN with 42601.
+3. **Plan pass.** This step is skipped when the statement returns 0 columns. No SQL text, from the user or from a
+   view, is ever sent in an `EXPLAIN`: it names the statement that Parse accepted.
+   - **Domain parameters.** `EXPLAIN … EXECUTE` evaluates its arguments, so coercing `NULL` to a domain parameter
+     would evaluate the domain's constraints. A domain that rejects `NULL` would fail the EXPLAIN, and a `CHECK` that
+     calls a `VOLATILE` function would run it. A statement with any parameter whose type is a domain is therefore
+     never explained as prepared. The same SQL is prepared again with `prepare_typed`, each domain parameter typed as
+     its fully unwrapped base type, and only that statement is explained. This is a second Parse and never
+     concatenation. A `NULL` array, range or composite does not evaluate element or field constraints, so only a
+     top-level domain is unwrapped. A statement without a domain parameter is explained directly.
+   - **Find the server-side name.** tokio-postgres keeps `Statement::name` `pub(crate)`, so one query on
+     `pg_catalog.pg_prepared_statements` finds it. It matches `NOT from_sql`, the statement text (bound as a
+     parameter) and `parameter_types` against the statement's parameter OIDs, and every `pg_catalog` object and
+     operator in it is qualified. A dropped statement's `Close` is asynchronous, so several names can match and any is
+     the same statement. The pick is deterministic (`ORDER BY name LIMIT 1`), and the parameter types keep a
+     same-text statement prepared with other types from being chosen. If nothing matches, the plan pass fails as
+     below. The `Statement` stays alive until the plan pass is done, or the server would close it.
+   - **Explain by name.** One simple-query batch, because over the extended protocol EXPLAIN would demand values for
+     `$n`:
+     `SET LOCAL plan_cache_mode = force_generic_plan; EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE "<name>"(NULL, …)`.
+     The name is quoted as an identifier, with one `NULL` per parameter and no parentheses for a statement with zero
+     parameters. See [Plan pass by statement name](#plan-pass-by-statement-name) for why `plan_cache_mode` is set here.
+   - **Strict response.** The response must be exactly one result set, and its plan JSON must have a `Plan` key.
+     Anything else is an EXPLAIN failure. A prepared utility statement that returns columns, such as `SHOW` or
+     `CALL`, explains as `Utility Statement`, which has no `Plan` key, so it fails as it did before.
+   - If the plan pass fails, keep the base results and mark Unknown columns `ExplainFailed`. This is non-fatal.
    - The walk is described in [Plan walk](#plan-walk-explainrs-a-pure-function-over-serde_jsonvalue). Its result can
      only promote a column to Nullable, never the reverse. The exceptions are a Computed column behind a set
      operation, which [Set operations](#set-operations) can prove NOT NULL (`SetOperation`), and a Computed column
@@ -82,35 +101,29 @@ rejects the SQL it raises `DatabaseError` with `.position` set.
 5. **Defaulting.** An Unknown column becomes Nullable (SQLx). Computed columns therefore
    need `"col!"`.
 
-### EXPLAIN of a prepared statement (conditional on #229)
+### Plan pass by statement name
 
-**Status: this section is conditional on #229, and the [Algorithm](#algorithm) above stays authoritative until #229
-lands.** #229 is the last, severable change of the security hardening ([Security](security.md#checker)). It is
-defence in depth, because the concatenation in step 3 is safe today only through the "Parse accepted one statement"
-invariant. If it lands, steps 1 and 3 are amended as follows, and the concatenation text above is removed.
+The plan pass of the [Algorithm](#algorithm) never concatenates SQL into an `EXPLAIN`. That is defence in depth for the
+checker ([Security](security.md#checker)): the statement boundary does not depend on Parse alone, and the EXPLAIN text
+holds only a generated name and `NULL`s. Tests assert that no EXPLAIN text contains the user's SQL or a view definition.
 
-On the checker session, which has statement cache 0:
+- **`plan_cache_mode` is set for each EXPLAIN, not at connect.** `EXPLAIN … EXECUTE` shows the plan that `EXECUTE` would
+  run, so a custom plan would constant-fold `= NULL` and drop an outer join. Pinning `force_generic_plan` makes it the
+  generic plan whatever the session's mode. `describe` is a public binding that can run on any connection, so a
+  connect-time `SET` on the checker's session would not hold. The `SET LOCAL` is in the same batch as the EXPLAIN, so it
+  ends with the batch's implicit transaction and the session's own `plan_cache_mode` is unchanged afterwards. `describe`
+  is only run on the checker's own session, which never holds a caller's transaction, because inside one the
+  `SET LOCAL` would last until its end.
+- **Domain parameters are explained through their base types.** The reasons are in step 3 of the Algorithm. Without it a
+  domain that rejects `NULL` would fail the EXPLAIN, which loses outer-join promotions and so is unsound, and a domain
+  `CHECK` would run during describe.
+- **The response is validated, not trusted.** The batch holds two commands, so the result set count and the `Plan` key
+  are checked before anything is read from the JSON.
 
-1. `SET plan_cache_mode = force_generic_plan` at connect, so `EXPLAIN … EXECUTE` shows the generic plan that
-   `GENERIC_PLAN` would.
-2. **Prepare** with `client.prepare(sql)`, the Parse that already happens. Its errors are `sql-error` as before.
-3. **Find the server-side name.** tokio-postgres keeps `Statement::name` `pub(crate)`, so run
-   `SELECT DISTINCT name FROM pg_prepared_statements WHERE NOT from_sql AND statement = $1`, binding the SQL as a
-   parameter. A dropped statement's `Close` is asynchronous, so several names can match, and any of them is the same
-   text.
-4. **Plan pass.** Run `EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE <quote_ident(name)>(NULL, …)` over the simple
-   protocol, with one `NULL` per parameter and no parentheses for a statement with zero parameters. The EXPLAIN text
-   holds only a generated name and `NULL`s, never the user's SQL, so the statement boundary no longer depends on Parse.
-   A test asserts that no EXPLAIN text contains the user's SQL.
-5. The plan walk, failure handling and everything after are unchanged.
-
-- **Views.** [View columns](#view-columns) step 5 moves onto the same path: the definition is prepared and explained
-  by name, inside the same `search_path = pg_catalog` transaction, instead of being concatenated.
-- **Parity gate (mandatory).** During the PR, `fuzz-nullability` runs both forms over its corpus, and they **MUST**
-  produce identical verdicts.
-- **Fallback if parity fails.** Keep concatenation, and assert that the simple-query response is exactly one result set
-  and one `CommandComplete`, so a smuggled second statement is detected instead of trusted to Parse. The
-  [Algorithm](#algorithm) text then stays, with that assertion added.
+The change was gated on parity: a temporary harness ran every `describe` through the old concatenated
+`EXPLAIN (GENERIC_PLAN, …)` and through this form, and found no difference in the verdicts over the `fuzz-nullability`
+corpus and every statement that the integration suites describe, including parameterised and domain cases. The harness
+has been removed.
 
 ### Plan walk (`explain.rs`, a pure function over `serde_json::Value`)
 
@@ -282,9 +295,11 @@ definition and gives the column NOT NULL only when the definition proves it.
    position `n'` of its definition, where `n'` is the rank of `attnum` among the view's non-dropped columns. The
    verdict of that position becomes the verdict of the column, with reason `ViewColumn`. Only NOT NULL results change
    anything: a Nullable or Unknown definition column stays Nullable.
-5. **Invariant.** The definition ends with `;`. It is concatenated into the simple-protocol `EXPLAIN` only after it has
-   passed Parse as a single statement, and with the trailing `;` stripped. A definition that fails Parse, or contains
-   a second statement, is Nullable (`ForeignOrView`). A test feeds a crafted definition.
+5. **Invariant.** The definition ends with `;`, which is stripped. It is prepared inside the same rolled-back
+   transaction, under a savepoint, and then explained by name like any other statement
+   ([Plan pass by statement name](#plan-pass-by-statement-name)). It is never concatenated into an `EXPLAIN`. A
+   definition has no parameters. A definition that fails Parse, or contains a second statement, is Nullable
+   (`ForeignOrView`). A test feeds a crafted definition.
 
 ## Overrides
 
@@ -317,7 +332,8 @@ Measured on Postgres 18 in the spike and the review. The schema is
 sqlx gets these wrong for three reasons:
 
 1. It EXPLAINs `EXECUTE stmt(NULL…)` without forcing a generic plan, so `= NULL`
-   constant-folds the join away.
+   constant-folds the join away. rowx also uses `EXECUTE`, but pins `plan_cache_mode = force_generic_plan` for each
+   EXPLAIN ([Plan pass by statement name](#plan-pass-by-statement-name)).
 2. It treats `Inner` as the nullable side of a right join.
 3. It only walks joins at the top level.
 

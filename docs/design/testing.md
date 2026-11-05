@@ -67,8 +67,8 @@
     subquery.
   - Views: a plain view over NOT NULL columns, a nested view, a view over an outer join, a view with a dropped column
     (`attnum` gap), a view with an extra `INSTEAD` rule, an unreadable `security_invoker` view, a `search_path` trap (a
-    same-named table in another schema), a depth-limit chain, and a crafted definition that must not reach `EXPLAIN` as
-    a second statement.
+    same-named table in another schema), a depth-limit chain, and a crafted definition that must not run as a second
+    statement and whose text must not reach `EXPLAIN`.
 - **Named rows.**
   - *Unit (`rowx-core`):* `row_shape.rs` covers each `ShapeError`; `column_name` on `id!`, `id?`, `id!!` (one stripped)
     and `?column?` (kept); case sensitivity; an absent default; `Unknown` pass-through; positional trailing defaults;
@@ -263,8 +263,16 @@
     `from string.templatelib import *`, `Template.__new__` and `type(t"…")(x)` are each flagged; an f-string and an
     implicitly concatenated `str` constant as `Template` arguments (the f-string fails, the constant passes). A server
     message containing an escape sequence renders without it.
-  - *EXPLAIN of a prepared statement* (only if #229 lands): the `fuzz-nullability` parity run (both forms, identical
-    verdicts), zero- and many-parameter statements, views, and a test that no EXPLAIN text contains the user's SQL.
+  - *EXPLAIN of a prepared statement:*
+    - Rust unit tests: the EXPLAIN builder (zero parameters have no parentheses, one `NULL` per parameter for 0, 1, 3
+      and 1000, the name is quoted as an identifier, no user SQL), the base-type unwrapping at any domain depth, and
+      that the text sent for a statement, a view and its definition never contains the user's SQL or the definition.
+    - Python integration tests: zero- and many-parameter statements, a view over a left join, the generic plan
+      whatever the session's `plan_cache_mode` with that setting unchanged afterwards, and a multi-statement string
+      with a side effect that is rejected and never runs.
+    - Domain parameters: a `NULL`-rejecting domain (given or inferred from a column) keeps the outer-join promotion, a
+      domain without a `NULL` check is explained through its base type with exactly one EXPLAIN sent, and a domain
+      `CHECK` that takes an advisory lock or calls a `VOLATILE` function that writes never runs.
 - **Module split.** `import rowx` loads neither `rowx._core` nor `rowx.postgres`. `rowx._core.postgres` is importable
   and registered in `sys.modules`, its classes report `module == "rowx._core.postgres"`, and `rowx.connect`,
   `rowx.Connection` and `rowx.ping` no longer exist. `Connection`, `Pool` and `Transaction` satisfy `Executor`.

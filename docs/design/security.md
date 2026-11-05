@@ -149,16 +149,19 @@ Each guarantee below has a test. The sections that follow say how each row of th
   [Interface and checker session](nullability.md#interface-and-checker-session), including plan-time evaluation of
   functions and locking, and the amended statement for `--scratch`, which executes migration files in a database it
   creates. The docs recommend a dedicated role on a CI or disposable database.
-- The checker's EXPLAIN runs over the simple protocol only after Parse has accepted the
-  SQL as a single statement ([Algorithm](nullability.md#algorithm), step 1). This invariant is tested.
-  - A view definition is held to the same rule: it is described under a pinned `search_path` and concatenated only
-    after Parse accepts it as one statement ([View columns](nullability.md#view-columns)).
-  - **Conditional on #229.** The two bullets above describe the checker today and stay authoritative until #229 lands.
-    The target is that no SQL text reaches EXPLAIN at all: the checker prepares the statement and runs
-    `EXPLAIN … EXECUTE <name>(NULL, …)` over its server-side name, and view definitions take the same path
-    ([EXPLAIN of a prepared statement](nullability.md#explain-of-a-prepared-statement-conditional-on-229)). If the
-    verdicts differ from concatenation, the fallback keeps concatenation and asserts that the response is exactly one
-    result set and one `CommandComplete`.
+- No SQL text reaches the checker's EXPLAIN, whether the user's or a view definition. The checker prepares the
+  statement and runs `EXPLAIN … EXECUTE "<name>"(NULL, …)` over its server-side name, so the statement boundary does not
+  depend on Parse alone ([Algorithm](nullability.md#algorithm), step 3, and
+  [Plan pass by statement name](nullability.md#plan-pass-by-statement-name)).
+  - A view definition takes the same path. It is prepared under a pinned `search_path` and explained by name, never
+    concatenated ([View columns](nullability.md#view-columns)).
+  - Multi-statement SQL is still rejected by Parse, and a test asserts that it never runs.
+  - `EXPLAIN … EXECUTE` evaluates its arguments, so a statement with a domain parameter is explained through its base
+    types: the same SQL is prepared again with each domain unwrapped. No domain constraint is evaluated, so a `CHECK`
+    that calls a `VOLATILE` function or takes a lock does not run.
+  - The plan pass accepts exactly one result set, and its JSON must have a `Plan` key.
+  - Tests assert that no EXPLAIN text contains the user's SQL or a view definition, and that a domain `CHECK` never runs
+    during describe.
 - Server-supplied text (message, detail, hint) is sanitised before it reaches a terminal: text output strips C0 and C1
   control characters except `\n` and `\t` ([Output](checker.md#output)).
 - The checker never imports or executes user code, and the `template-construction` rule reads source only.
