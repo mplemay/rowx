@@ -14,6 +14,7 @@ TESTS_DIR: Final[Path] = Path(__file__).resolve().parent
 SCHEMA_SQL: Final[Path] = TESTS_DIR / "schema.sql"
 SEED_SQL: Final[Path] = TESTS_DIR / "seed_data.sql"
 APP_SCHEMA_SQL: Final[Path] = TESTS_DIR.parent / "examples" / "app" / "schema.sql"
+SECURITY_SCHEMA_SQL: Final[Path] = TESTS_DIR.parent / "examples" / "security" / "schema.sql"
 
 
 def _require_dsn() -> str:
@@ -47,8 +48,8 @@ def schema() -> Iterator[str]:
             conn.execute(f'DROP SCHEMA "{name}" CASCADE')
 
 
-@pytest.fixture
-def app_schema() -> Iterator[str]:
+# a schema holding one example's tables, on the server `ROWX_TEST_DSN` names
+def _example_schema(sql_path: Path) -> Iterator[str]:
     admin_dsn = _require_dsn()
     name = f"t_{secrets.token_hex(8)}"
     with psycopg.connect(admin_dsn, autocommit=True) as conn:
@@ -56,7 +57,17 @@ def app_schema() -> Iterator[str]:
         try:
             with conn.transaction():
                 conn.execute(f'SET LOCAL search_path = "{name}"')
-                conn.execute(APP_SCHEMA_SQL.read_text())
+                conn.execute(sql_path.read_text(encoding="utf-8"))
             yield _with_search_path(admin_dsn, name)
         finally:
             conn.execute(f'DROP SCHEMA "{name}" CASCADE')
+
+
+@pytest.fixture
+def app_schema() -> Iterator[str]:
+    yield from _example_schema(APP_SCHEMA_SQL)
+
+
+@pytest.fixture
+def security_schema() -> Iterator[str]:
+    yield from _example_schema(SECURITY_SCHEMA_SQL)
