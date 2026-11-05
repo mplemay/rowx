@@ -1,6 +1,6 @@
 [project]
 name = "rowx"
-version = "0.1.0"
+version = "0.2.0"
 description = "Typesafe SQL queries for python without an ORM"
 readme = "README.md"
 authors = [
