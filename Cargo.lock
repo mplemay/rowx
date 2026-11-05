@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sha2",
  "tempfile",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-postgres"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-postgres-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pyo3",
  "rowx-postgres",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-py-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
