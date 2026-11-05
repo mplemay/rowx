@@ -241,9 +241,10 @@ to query call sites, because a helper can build a template in one place and pass
   the same reason a non-literal format spec in `query_unchecked` is `dynamic-query`: at runtime it could evaluate to
   `"ident"`. A starred or `**` argument to `Interpolation(...)` is also `template-construction`.
 - There are **no ignore comments**. The only escape is to exclude the path in config.
-- **Best-effort.** The rule reads source only. `getattr`, `eval`, code outside the include roots and generated code can
-  still build a template. `Template(...)` with a non-literal string is the one raw-SQL path, and the docs name it as
-  such ([Security](security.md#parameters-and-sql-text)).
+- **Best-effort.** The rule reads source only. Private modules of this package (`rowx._*`) are resolved as
+  `string.templatelib` re-exports. `getattr`, `eval`, code outside the include roots and generated code can still build
+  a template. `Template(...)` with a non-literal string is the one raw-SQL path, and the docs name it as such
+  ([Security](security.md#parameters-and-sql-text)).
 
 **Interpolations in `query`.**
 
@@ -438,7 +439,7 @@ field add `note: field defined at path:line:col`.
 
 | Rule | Condition |
 |---|---|
-| `syntax-error` | The file can't be decoded or parsed. |
+| `syntax-error` | The file can't be decoded or parsed, or it is nested too deeply to analyse. |
 | `indirect-query` | A disallowed use of `query`/`query_unchecked` ([Discovery](#discovery-checkdiscoverpy)). |
 | `dynamic-query` | The argument is not one inline t-string, or it has a conversion, format spec, or evident nested Template. In a `query_unchecked` call, a non-literal format spec on an interpolation. |
 | `template-construction` | A t-string literal anywhere under the include roots whose interpolation has a non-literal `format_spec` (except an interpolation of a `query_unchecked` call's own argument, which is `dynamic-query`); a call that resolves to `string.templatelib.Template` takes anything other than `str` literals, inline t-strings and `Interpolation(...)` calls; an `Interpolation(...)` call with a non-literal `conversion` or `format_spec`, or a starred or `**` argument; has a starred argument; `t"…" + <operand>` where the operand is neither an inline t-string nor evidently a `Template`; or an indirect use of the class (`T = Template`, `from string.templatelib import *`, an attribute access other than a direct call, or `type(<t-string>)`/`<t-string>.__class__` used as a callable). Help: "build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL". Applies to every file under the include roots; no ignore comments. |
@@ -603,7 +604,8 @@ others are named in the message), `ambiguous-column`, `column-name-mismatch`, `t
 field is involved (a `duplicate-column` on `?column?` or on a name no field has). Otherwise it is `null`, so
 `missing-column` leaves `column_index` null. `ambiguous-column` adds one `field defined at` note for each field.
 
-Text output strips C0 and C1 control characters, except `\n` and `\t`, from server-supplied text (message, detail and
-hint) before printing, so server text is sanitised before it reaches a terminal.
+Text output strips Unicode categories Cc (except `\n` and `\t`), Zl, Zp and Cf, and surrogate-escaped C1 bytes (U+DC80
+through U+DC9F), from server-supplied text (message, detail and hint) before printing. U+200C (ZWNJ), U+200D (ZWJ) and
+U+00AD (soft hyphen) are kept, so server text is sanitised before it reaches a terminal.
 
 Exit-2 failures go to stderr as text. The DSN or password is never printed.
