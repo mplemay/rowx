@@ -465,30 +465,6 @@ async fn explain_statement(
     plan_promotions(client, &name, stmt.params().len(), column_count, origins).await
 }
 
-// TEMPORARY (parity harness): the plan pass as it was before #229, kept only to compare the two forms
-async fn concatenated_plan_verdicts(
-    client: &Client,
-    sql: &str,
-    column_count: usize,
-    origins: &[Option<Origin>],
-) -> Option<PlanVerdicts> {
-    let messages = client
-        .simple_query(&format!(
-            "EXPLAIN (GENERIC_PLAN, VERBOSE, COSTS OFF, FORMAT JSON) {sql}"
-        ))
-        .await
-        .ok()?;
-    let text: String = messages
-        .iter()
-        .filter_map(|message| match message {
-            SimpleQueryMessage::Row(row) => row.get(0),
-            _ => None,
-        })
-        .collect();
-    let plan: Value = serde_json::from_str(&text).ok()?;
-    Some(analyse_plan(client, &plan, column_count, origins).await)
-}
-
 // the type with every domain layer removed
 fn base_type(ty: &Type) -> Type {
     match ty.kind() {
@@ -515,11 +491,7 @@ async fn plan_verdicts(
     stmt: &Statement,
     column_count: usize,
     origins: &[Option<Origin>],
-    ctx: &ViewCtx,
 ) -> Option<PlanVerdicts> {
-    if ctx.concatenated {
-        return concatenated_plan_verdicts(client, sql, column_count, origins).await;
-    }
     let Some(types) = base_param_types(stmt.params()) else {
         return explain_statement(client, sql, stmt, column_count, origins).await;
     };
@@ -540,8 +512,6 @@ const MAX_VIEW_DEPTH: usize = 8;
 
 #[derive(Default)]
 struct ViewCtx {
-    // TEMPORARY (parity harness): plan with the old `EXPLAIN (GENERIC_PLAN) {sql}` concatenation
-    concatenated: bool,
     // inside the rolled-back transaction that pins `search_path`
     pinned: bool,
     // the chain of views being resolved, which catches a cycle and bounds the depth
@@ -587,7 +557,7 @@ async fn refine(
         return Ok(true);
     }
     if let Some((promotions, proven, computed)) =
-        plan_verdicts(client, sql, stmt, slots.len(), &column_origins, ctx).await
+        plan_verdicts(client, sql, stmt, slots.len(), &column_origins).await
     {
         for (((slot, promotion), proven), computed) in
             slots.iter_mut().zip(promotions).zip(proven).zip(computed)
@@ -797,26 +767,6 @@ fn apply_overrides(col: &mut ColumnInfo) {
 /// # Errors
 /// `Db` (with the error position) when the server rejects the SQL, `Interface` for IO problems.
 pub async fn describe(client: &Client, sql: &str) -> Result<Describe, Error> {
-    describe_with(client, sql, ViewCtx::default()).await
-}
-
-/// TEMPORARY (parity harness): `describe` with the pre-#229 concatenated plan pass.
-///
-/// # Errors
-/// As `describe`.
-pub async fn describe_concatenated(client: &Client, sql: &str) -> Result<Describe, Error> {
-    describe_with(
-        client,
-        sql,
-        ViewCtx {
-            concatenated: true,
-            ..ViewCtx::default()
-        },
-    )
-    .await
-}
-
-async fn describe_with(client: &Client, sql: &str, mut ctx: ViewCtx) -> Result<Describe, Error> {
     let stmt = client.prepare(sql).await?;
     let owners = extension_owners(
         client,
@@ -881,7 +831,7 @@ async fn describe_with(client: &Client, sql: &str, mut ctx: ViewCtx) -> Result<D
             reason: c.reason.clone(),
         })
         .collect();
-    refine(client, sql, &stmt, &mut slots, &mut ctx).await?;
+    refine(client, sql, &stmt, &mut slots, &mut ViewCtx::default()).await?;
     for (col, slot) in columns.iter_mut().zip(slots) {
         col.nullable = slot.nullable;
         col.reason = slot.reason;
