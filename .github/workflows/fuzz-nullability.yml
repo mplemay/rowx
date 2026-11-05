@@ -80,3 +80,16 @@ jobs:
           ROWX_FUZZ_SEED: random
           ROWX_FUZZ_COUNT: ${{ inputs.count || '5000' }}
         run: uv run pytest src/rowx/__tests__/integration/describe/test_nullability_fuzz.py -s
+
+      # TEMPORARY (#229): compares the EXPLAIN EXECUTE plan pass with the old concatenated one on every describe;
+      # removed with the parity harness before merge. test_one_catalog_round_trip counts catalog queries, which the
+      # harness doubles by describing twice
+      - name: Parity of the two plan passes
+        env:
+          ROWX_FUZZ_PARITY: "1"
+          ROWX_FUZZ_SEED: random
+          ROWX_FUZZ_COUNT: ${{ inputs.count || '5000' }}
+        run: >-
+          uv run pytest -p rowx.__tests__.integration.describe.parity -s
+          src/rowx/__tests__/integration/describe
+          --deselect src/rowx/__tests__/integration/describe/test_base_nullability.py::test_one_catalog_round_trip

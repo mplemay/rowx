@@ -114,6 +114,7 @@ pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_class::<describe::ParamInfo>()?;
     m.add_function(wrap_pyfunction!(describe::connect_checker, &m)?)?;
     m.add_function(wrap_pyfunction!(describe::describe, &m)?)?;
+    m.add_function(wrap_pyfunction!(describe::describe_concatenated, &m)?)?;
     m.add_class::<migrate::Migrator>()?;
     m.add_class::<named::RowShape>()?;
     m.add_class::<named::ShapeIssue>()?;

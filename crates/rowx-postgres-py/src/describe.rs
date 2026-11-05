@@ -113,6 +113,29 @@ pub fn describe<'py>(
     conn: &Connection,
     sql: String,
 ) -> PyResult<Bound<'py, PyAny>> {
+    describe_with(py, conn, sql, false)
+}
+
+/// TEMPORARY (parity harness for #229, removed before merge): `describe` with the old concatenated plan pass.
+///
+/// # Errors
+/// As `describe`.
+#[pyfunction]
+#[pyo3(name = "_describe_concatenated")]
+pub fn describe_concatenated<'py>(
+    py: Python<'py>,
+    conn: &Connection,
+    sql: String,
+) -> PyResult<Bound<'py, PyAny>> {
+    describe_with(py, conn, sql, true)
+}
+
+fn describe_with<'py>(
+    py: Python<'py>,
+    conn: &Connection,
+    sql: String,
+    concatenated: bool,
+) -> PyResult<Bound<'py, PyAny>> {
     let cancel = conn.cancel.clone();
     let claim = cancel
         .state
@@ -126,6 +149,7 @@ pub fn describe<'py>(
         let pending = cancel::spawn(&cancel, claim, &hook, async move {
             let guard = inner.lock().await;
             match guard.client() {
+                Ok(client) if concatenated => pg::describe_concatenated(client, &sql).await,
                 Ok(client) => pg::describe(client, &sql).await,
                 Err(e) => Err(e),
             }
