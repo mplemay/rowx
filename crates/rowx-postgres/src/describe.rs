@@ -361,7 +361,7 @@ type PlanVerdicts = (Vec<Option<NullReason>>, Vec<bool>, Vec<bool>);
 // The EXPLAIN is a simple query, because the extended protocol would demand values for `$n`. It names the
 // statement the server already parsed and never carries SQL text, so what runs is exactly what Parse accepted.
 // `plan_cache_mode` is pinned for this transaction alone, whatever the session says: a custom plan would fold
-// `= NULL` and drop an outer join.
+// `= NULL` and drop an outer join. Each NULL is coerced to its parameter type, so no parameter may be a domain.
 #[must_use]
 fn explain_execute_sql(name: &str, params: usize) -> String {
     let name = format!("\"{}\"", name.replace('"', "\"\""));
@@ -453,7 +453,7 @@ async fn statement_name(client: &Client, sql: &str, params: &[Type]) -> Option<S
         .ok()
 }
 
-// `stmt` must stay alive until the plan pass is done, or the server closes it
+// `stmt` must stay alive until the plan pass is done, or the server closes it, and must have no domain parameter
 async fn explain_statement(
     client: &Client,
     sql: &str,
@@ -505,9 +505,10 @@ fn base_param_types(params: &[Type]) -> Option<Vec<Type>> {
         .then(|| params.iter().map(base_type).collect())
 }
 
-// `EXECUTE name(NULL)` fails for a parameter whose domain rejects NULL, where the plan itself is fine. The same
-// SQL is then prepared again with those parameters typed as their base types. Not inside the view transaction,
-// where the failure has aborted it; a view definition has no parameters.
+// `EXPLAIN EXECUTE` coerces each NULL to its parameter type, which runs a domain's constraints, and a CHECK may
+// call a volatile function. So a statement with a domain parameter is never explained as prepared: the same SQL
+// is prepared again with each domain typed as its base type, and only that statement is explained. A NULL array,
+// range or composite checks none of its elements, so only a top-level domain needs this.
 async fn plan_verdicts(
     client: &Client,
     sql: &str,
@@ -519,15 +520,11 @@ async fn plan_verdicts(
     if ctx.concatenated {
         return concatenated_plan_verdicts(client, sql, column_count, origins).await;
     }
-    if let Some(verdicts) = explain_statement(client, sql, stmt, column_count, origins).await {
-        return Some(verdicts);
-    }
-    if ctx.pinned {
-        return None;
-    }
-    let types = base_param_types(stmt.params())?;
-    let retry = client.prepare_typed(sql, &types).await.ok()?;
-    explain_statement(client, sql, &retry, column_count, origins).await
+    let Some(types) = base_param_types(stmt.params()) else {
+        return explain_statement(client, sql, stmt, column_count, origins).await;
+    };
+    let based = client.prepare_typed(sql, &types).await.ok()?;
+    explain_statement(client, sql, &based, column_count, origins).await
 }
 
 // the nullability-relevant part of a column, so a view's definition can be analysed without its types
@@ -1067,10 +1064,10 @@ mod tests {
         }
     }
 
-    // `EXECUTE name(NULL)` is rejected by a domain that refuses NULL while the plan is fine, so the same SQL is
-    // prepared again with the base type; the first EXPLAIN fails and the second one gives the verdicts
+    // a domain parameter is never explained as prepared (that would evaluate its constraints), so the statement
+    // is prepared again with the base type and exactly one EXPLAIN is sent, for that statement
     #[tokio::test]
-    async fn a_null_rejecting_domain_parameter_is_retried_with_its_base_type() {
+    async fn a_domain_parameter_is_explained_through_its_base_type() {
         let Some(client) = connect().await else {
             return;
         };
@@ -1090,7 +1087,7 @@ mod tests {
         let reasons: Vec<&str> = described.columns.iter().map(|c| c.reason.name()).collect();
         assert_eq!(reasons, ["OuterJoin"]);
         let sent = EXPLAIN_SENT.with(|sent| sent.borrow().len());
-        assert_eq!(sent, 2);
+        assert_eq!(sent, 1);
     }
 
     #[tokio::test]

@@ -1,12 +1,15 @@
+import asyncio
 from typing import TYPE_CHECKING, Final
 
+import psycopg
 import pytest
 
 from rowx.__tests__.integration.describe.sqlx_cases import SQLX_CASES
 from rowx.__tests__.integration.describe.test_base import run_checker, run_describe, scalar
 from rowx.__tests__.integration.describe.test_base_nullability import execute
-from rowx._core.postgres import describe
+from rowx._core.postgres import connect_checker, describe
 from rowx.errors import DatabaseError
+from rowx.postgres import connect
 
 if TYPE_CHECKING:
     from rowx._core.postgres import Connection
@@ -325,10 +328,81 @@ def test_null_rejecting_domain_parameter_inferred_from_a_column(schema: str, dom
     assert [(c.nullable, c.reason) for c in d.columns] == [(True, "OuterJoin"), (False, "NotNullColumn")]
 
 
-def test_domain_parameter_without_a_null_check_is_explained_directly(schema: str) -> None:
-    # positive_int accepts NULL, so no second Parse is needed; the verdicts are the same
+def test_domain_parameter_without_a_null_check_is_explained_through_its_base_type(schema: str) -> None:
+    # positive_int accepts NULL; it is still never explained as prepared, and the verdicts are the same
     d = run_describe(
         schema,
         "SELECT p.title FROM users u LEFT JOIN posts p ON p.user_id = u.id WHERE u.id = $1::positive_int",
     )
     assert [(c.nullable, c.reason) for c in d.columns] == [(True, "OuterJoin")]
+
+
+LOCK_KEY: Final[int] = 229_250
+LOCKED_JOIN: Final[str] = (
+    "SELECT p.title, u.id FROM users u LEFT JOIN posts p ON p.user_id = u.id WHERE u.id = $1::lock_dom"
+)
+
+
+def advisory_locks_held(dsn: str) -> int:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = 0 AND objid = %s",
+            [LOCK_KEY],
+        ).fetchone()
+    assert row is not None
+    assert isinstance(row[0], int)
+    return row[0]
+
+
+# `EXPLAIN ... EXECUTE name(NULL)` would evaluate a domain's constraint, so a CHECK that takes a session lock
+# would leave it held on the checker's connection, which describe keeps open
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("SELECT $1::lock_dom", [(True, "Computed")]),
+        (LOCKED_JOIN, [(True, "OuterJoin"), (False, "NotNullColumn")]),
+    ],
+)
+def test_a_domain_check_never_runs_during_describe(schema: str, sql: str, expected: list[tuple[bool, str]]) -> None:
+    execute(schema, f"CREATE DOMAIN lock_dom AS int CHECK (pg_try_advisory_lock({LOCK_KEY}))")
+
+    async def body(conn: Connection) -> tuple[list[tuple[bool, str]], object, int]:
+        d = await describe(conn, sql)
+        held = await scalar(conn, f"SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = {LOCK_KEY}")  # ruff: ignore[hardcoded-sql-expression]
+        # read while the checker's connection is still open
+        return [(c.nullable, c.reason) for c in d.columns], held, advisory_locks_held(schema)
+
+    got, own, others = run_checker(schema, body)
+    assert got == expected
+    assert (own, others) == (0, 0)
+
+
+# a volatile function in a CHECK, on a connection that is allowed to write
+@pytest.mark.parametrize("checker", [True, False])
+def test_a_volatile_domain_check_has_no_side_effect_during_describe(schema: str, *, checker: bool) -> None:
+    execute(
+        schema,
+        "CREATE TABLE domain_effects (n int)",
+        "CREATE SEQUENCE domain_effects_seq",
+        "CREATE FUNCTION record_effect() RETURNS boolean LANGUAGE plpgsql VOLATILE AS "
+        "$$ BEGIN INSERT INTO domain_effects VALUES (1); PERFORM nextval('domain_effects_seq'); RETURN true; END $$",
+        "CREATE DOMAIN effect_dom AS int CHECK (record_effect())",
+    )
+    sql = "SELECT p.title, u.id FROM users u LEFT JOIN posts p ON p.user_id = u.id WHERE u.id = $1::effect_dom"
+
+    async def run() -> list[tuple[bool, str]]:
+        if checker:
+            conn = await connect_checker(schema)
+        else:
+            conn = (await connect(schema))._impl
+        try:
+            return [(c.nullable, c.reason) for c in (await describe(conn, sql)).columns]
+        finally:
+            await conn.close()
+
+    assert asyncio.run(run()) == [(True, "OuterJoin"), (False, "NotNullColumn")]
+    with psycopg.connect(schema, autocommit=True) as conn:
+        rows = conn.execute("SELECT count(*) FROM domain_effects").fetchone()
+        called = conn.execute("SELECT is_called FROM domain_effects_seq").fetchone()
+    assert rows == (0,)
+    assert called == (False,)
