@@ -1,5 +1,7 @@
 from dataclasses import KW_ONLY, dataclass
 
+from rowx._rowplan import register_value_class
+
 
 @dataclass(frozen=True, slots=True)
 class Range[T]:
@@ -37,3 +39,11 @@ class Range[T]:
         if self.empty:
             return "empty"
         return ("[" if self.lower_inc else "(") + ("]" if self.upper_inc else ")")
+
+
+register_value_class(
+    Range,
+    flags=0,
+    label="a subclass of rowx.postgres.Range is not a row type",
+    subscripted=True,
+)

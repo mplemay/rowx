@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Final, TypeVar
 import pytest
 
 from rowx.__tests__.conformance.row_types import PRELUDE, ROWS, NamedPlan, Plan
-from rowx._rowplan import MAX_ALIAS_DEPTH, NO_ROWS, RowPlan, _type_text, row_plan
+from rowx._rowplan import MAX_ALIAS_DEPTH, NO_ROWS, RowPlan, _type_text, register_value_class, row_plan
 from rowx.errors import InterfaceError
 
 if TYPE_CHECKING:
@@ -116,29 +116,40 @@ def test_money_and_interval_are_non_nullable_leaves(evaluate: Evaluate) -> None:
 
 
 @pytest.mark.parametrize(
-    ("source", "spans"),
+    ("source", "flags"),
     [
-        ("T = Interval", (True,)),
-        ("T = Interval | None", (True,)),
-        ("T = list[Interval | None]", (True,)),
-        ("T = list[list[Interval]]", (True,)),
-        ("T = list[Interval] | None", (True,)),
-        ("T = list[list[Interval] | None]", (True,)),
-        ("T = list[datetime.timedelta] | None", (False,)),
-        ("T = datetime.timedelta", (False,)),
-        ("T = Any", (False,)),
-        ("T = Money", (False,)),
-        ("T = tuple[Interval, datetime.timedelta | None, list[Interval], int]", (True, False, True, False)),
-        ("type I = Interval\nT = tuple[I | None, str]", (True, False)),
+        ("T = Interval", (0b10,)),
+        ("T = Interval | None", (0b10,)),
+        ("T = list[Interval | None]", (0b10,)),
+        ("T = list[list[Interval]]", (0b10,)),
+        ("T = list[Interval] | None", (0b10,)),
+        ("T = list[list[Interval] | None]", (0b10,)),
+        ("T = list[datetime.timedelta] | None", (0,)),
+        ("T = datetime.timedelta", (0,)),
+        ("T = Any", (0,)),
+        ("T = Money", (0,)),
+        ("T = tuple[Interval, datetime.timedelta | None, list[Interval], int]", (0b10, 0, 0b10, 0)),
+        ("type I = Interval\nT = tuple[I | None, str]", (0b10, 0)),
     ],
 )
-def test_interval_leaf_is_marked_per_column(source: str, spans: tuple[bool, ...], evaluate: Evaluate) -> None:
-    assert row_plan(evaluate(source)).interval_mask == spans
+def test_interval_leaf_is_marked_per_column(source: str, flags: tuple[int, ...], evaluate: Evaluate) -> None:
+    assert row_plan(evaluate(source)).class_flags == flags
 
 
 def test_flags_pack_nullability_and_the_interval_leaf(evaluate: Evaluate) -> None:
     plan = row_plan(evaluate("T = tuple[Interval, datetime.timedelta | None, Interval | None, int]"))
     assert plan.flags == [0b10, 0b01, 0b11, 0b00]
+
+
+def test_a_registered_class_is_a_leaf_and_carries_its_flags() -> None:
+    class Marker:
+        pass
+
+    register_value_class(Marker, flags=0b100, label="a subclass of example.Marker is not a row type")
+    plan = row_plan(Marker)
+    assert plan.kind == "scalar"
+    assert plan.class_flags == (0b100,)
+    assert plan.flags == [0b100]
 
 
 def test_interval_and_money_are_rejected_in_unions(evaluate: Evaluate) -> None:
@@ -154,7 +165,7 @@ def test_geometric_classes_are_non_nullable_leaves(evaluate: Evaluate) -> None:
         assert row_plan(evaluate(f"T = list[list[{name} | None]]")).nullable_mask == (False,), name
     plan = row_plan(evaluate("T = tuple[Point, Box | None, list[Circle]]"))
     assert plan.nullable_mask == (False, True, False)
-    assert plan.interval_mask == (False, False, False)
+    assert plan.class_flags == (0, 0, 0)
 
 
 def test_geometric_classes_are_rejected_in_unions_and_subscripts(evaluate: Evaluate) -> None:
@@ -318,7 +329,7 @@ def test_leaf_typed_fields_mark_intervals_and_ranges(evaluate: Evaluate) -> None
             "@dataclass\nclass T:\n    i: Interval\n    j: Interval | None\n    t: datetime.timedelta\n    r: Range[int]"
         )
     )
-    assert [f.interval for f in plan.fields] == [True, True, False, False]
+    assert [f.flags for f in plan.fields] == [0b10, 0b10, 0, 0]
     assert plan.flags == [0b10, 0b11, 0b00, 0b00]
 
 
@@ -740,7 +751,7 @@ def test_pydantic_constraint_aliases_are_accepted_at_runtime(annotation: str, ev
 def test_value_classes_are_accepted_as_pydantic_field_types(evaluate: Evaluate) -> None:
     source = "class T(BaseModel):\n    i: Interval\n    r: Range[int]\n    m: Money | None\n    p: Point\n    c: Cube"
     plan = row_plan(evaluate(source))
-    assert plan.interval_mask == (True, False, False, False, False)
+    assert plan.class_flags == (0b10, 0, 0, 0, 0)
     assert plan.nullable_mask == (False, False, True, False, False)
 
 

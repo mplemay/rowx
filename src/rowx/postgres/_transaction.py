@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from rowx._executor import StreamHandle
+    from rowx._rowplan import ShapeSpec
     from rowx.postgres._connection import Connection
     from rowx.postgres._core import RowShape, RowStream as RowStreamImpl
 
@@ -73,7 +74,7 @@ class Transaction:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         limit_one: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
-        shape: RowShape | None,
+        shape: ShapeSpec | RowShape | None,
     ) -> list[object]:
         self._check_active()
         # the connection records failures, so queries run on it directly are tracked as well
@@ -87,7 +88,7 @@ class Transaction:
         scalar: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
         arity: int | None,
         batch_size: int,
-        shape: RowShape | None,
+        shape: ShapeSpec | RowShape | None,
     ) -> StreamHandle:
         self._check_active()
         return self._conn._stream(sql, params, mask, scalar, arity, batch_size, shape)  # ruff: ignore[private-member-access]

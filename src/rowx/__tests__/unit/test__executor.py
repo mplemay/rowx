@@ -1,8 +1,18 @@
+import ast
+import inspect
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import rowx
+import rowx._executor
+import rowx._query
+import rowx._rowplan
+import rowx._template
+import rowx.errors
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 SCRIPT: Final[str] = (
     "import sys, rowx\n"
@@ -19,3 +29,81 @@ def test_import_rowx_does_not_load_a_backend() -> None:
 def test_backend_names_are_removed_from_rowx() -> None:
     assert not any(hasattr(rowx, name) for name in ("connect", "Connection", "ping"))
     assert hasattr(rowx, "Executor")
+
+
+CORE_RUNTIME_MODULES: Final[tuple[ModuleType, ...]] = (
+    rowx._query,
+    rowx._executor,
+    rowx._rowplan,
+    rowx._template,
+    rowx.errors,
+)
+
+FORBIDDEN_BACKEND_SAMPLES: Final[tuple[str, ...]] = (
+    "import rowx.postgres",
+    "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from rowx.postgres import Connection",
+    'value = "rowx.postgres"',
+    'value = "rowx.postgres._range"',
+    "import rowx._core",
+    "from rowx import postgres",
+    'name = "range"\nvalue = f"rowx.postgres.{name}"',
+    "from rowx.postgres._core import RowShape",
+    "import rowx.postgres._core",
+)
+
+
+def _forbidden_module(name: str) -> bool:
+    return (
+        name in {"rowx.postgres", "_core"}
+        or name.startswith(("rowx.postgres.", "rowx._core"))
+        or name.endswith("._core")
+    )
+
+
+def _forbidden_literal(value: str) -> bool:
+    return value == "rowx.postgres" or value.startswith(("rowx.postgres.", "rowx._core"))
+
+
+def _import_name(node: ast.Import) -> str | None:
+    for alias in node.names:
+        if _forbidden_module(alias.name):
+            return alias.name
+    return None
+
+
+def _imported_name(module: str, names: list[str]) -> str | None:
+    if module == "rowx" and any(name in {"postgres", "_core"} for name in names):
+        return "from rowx import " + ", ".join(names)
+    for name in names:
+        if name == "_core" or name.endswith("._core"):
+            return name
+    return None
+
+
+def _from_import_name(node: ast.ImportFrom) -> str | None:
+    module = node.module or ""
+    if module and _forbidden_module(module):
+        return module
+    return _imported_name(module, [alias.name for alias in node.names])
+
+
+def _backend_reference(source: str) -> str | None:
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            if (found := _import_name(node)) is not None:
+                return found
+        elif isinstance(node, ast.ImportFrom):
+            if (found := _from_import_name(node)) is not None:
+                return found
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _forbidden_literal(node.value):
+            return node.value
+    return None
+
+
+def test_core_runtime_modules_do_not_reference_a_backend() -> None:
+    for module in CORE_RUNTIME_MODULES:
+        reason = _backend_reference(inspect.getsource(module))
+        assert reason is None, f"{module.__name__}: {reason}"
+    for sample in FORBIDDEN_BACKEND_SAMPLES:
+        assert _backend_reference(sample) is not None, sample
+    assert _backend_reference("from rowx.errors import Error") is None
