@@ -5,7 +5,7 @@ use rowx_postgres::types::{Codec, Format, Matcher, TYPE_TABLE, TzRule};
     frozen,
     get_all,
     skip_from_py_object,
-    module = "rowx._core.postgres",
+    module = "rowx.postgres._core",
     name = "TypeInfo"
 )]
 #[derive(Debug, Clone)]

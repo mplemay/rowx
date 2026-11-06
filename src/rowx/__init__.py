@@ -1,3 +1,5 @@
+from pkgutil import extend_path
+
 from rowx._executor import Executor
 from rowx._query import QueryResult, RowStream, query, query_unchecked
 from rowx.errors import (
@@ -46,3 +48,6 @@ __all__ = [
     "query",
     "query_unchecked",
 ]
+
+# runtime only: an editable install has one `rowx` directory per member, and this merges them
+__path__ = extend_path(__path__, __name__)

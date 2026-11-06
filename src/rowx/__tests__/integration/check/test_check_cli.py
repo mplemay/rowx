@@ -14,12 +14,12 @@ from psycopg.conninfo import make_conninfo
 
 from rowx import query_unchecked
 from rowx.__tests__.integration.check.harness import CASES_DIR, check_case, parse_markers
-from rowx._core.postgres import connect_checker
 from rowx.check.cli import main
 from rowx.check.drift import read_history
 from rowx.check.runner import CheckError, describe_all as describe_all_impl
 from rowx.errors import DatabaseError
 from rowx.postgres import Connection, Migrator
+from rowx.postgres._core import connect_checker
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

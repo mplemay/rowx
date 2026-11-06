@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sha2",
  "thiserror",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-postgres"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc32fast",

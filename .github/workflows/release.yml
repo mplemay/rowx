@@ -55,7 +55,7 @@ jobs:
 
           version = read("pyproject.toml")["project"]["version"]
           versions = {"Cargo.toml": read("Cargo.toml")["workspace"]["package"]["version"]}
-          names = {"rowx-core", "rowx-postgres", "rowx-postgres-py", "rowx-py", "rowx-py-core"}
+          names = {"rowx-core", "rowx-postgres", "rowx-postgres-py", "rowx-py-core"}
           for package in read("Cargo.lock")["package"]:
               if package["name"] in names:
                   versions[package["name"]] = package["version"]
@@ -112,7 +112,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
-          args: --release --locked --out dist --interpreter ${{ matrix.interpreter || 'python3.14' }}
+          args: --release --locked --out dist --interpreter ${{ matrix.interpreter || 'python3.14' }} -m packages/rowx-postgres/Cargo.toml
 
       - name: Upload the wheel
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -135,7 +135,7 @@ jobs:
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: sdist
-          args: --out dist
+          args: --out dist -m packages/rowx-postgres/Cargo.toml
 
       - name: Upload the sdist
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -179,7 +179,7 @@ jobs:
           fi
           wheel="$GITHUB_WORKSPACE/${wheels[0]}"
           cd "$RUNNER_TEMP"
-          uv run --no-project --python 3.14 --with "$wheel" python -c 'import rowx, rowx._core, rowx._core.postgres'
+          uv run --no-project --python 3.14 --with "$wheel" python -c 'import rowx, rowx.postgres, rowx.postgres._core'
           uv run --no-project --python 3.14 --with "$wheel" rowx --help
 
   smoke:

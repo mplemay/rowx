@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Final, Literal, Self, override
 
-from rowx._core.postgres import parse_dsn as parse_dsn_impl
+from rowx.postgres._core import parse_dsn as parse_dsn_impl
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

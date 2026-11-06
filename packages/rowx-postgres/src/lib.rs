@@ -96,35 +96,43 @@ fn _decode<'py>(
     codec::decode(py, &hook_type(spec, 0)?, Some(raw.as_bytes()))
 }
 
-/// Builds the `rowx._core.postgres` submodule.
-///
-/// # Errors
-/// A Python error when a class or function cannot be registered.
-pub fn module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
-    let m = PyModule::new(py, "postgres")?;
-    m.add_function(wrap_pyfunction!(admin::database_exists, &m)?)?;
-    m.add_function(wrap_pyfunction!(admin::create_database, &m)?)?;
-    m.add_function(wrap_pyfunction!(admin::drop_database, &m)?)?;
-    m.add_function(wrap_pyfunction!(admin::list_databases, &m)?)?;
-    m.add_class::<conn::Connection>()?;
-    m.add_function(wrap_pyfunction!(conn::connect, &m)?)?;
-    m.add_function(wrap_pyfunction!(conn::parse_dsn, &m)?)?;
-    m.add_class::<describe::ColumnInfo>()?;
-    m.add_class::<describe::Describe>()?;
-    m.add_class::<describe::ParamInfo>()?;
-    m.add_function(wrap_pyfunction!(describe::connect_checker, &m)?)?;
-    m.add_function(wrap_pyfunction!(describe::describe, &m)?)?;
-    m.add_class::<migrate::Migrator>()?;
-    m.add_class::<named::RowShape>()?;
-    m.add_class::<named::ShapeIssue>()?;
-    m.add_class::<pool::Pool>()?;
-    m.add_class::<stream::RowStream>()?;
-    m.add_class::<types::TypeInfo>()?;
-    m.add_function(wrap_pyfunction!(named::map_columns_py, &m)?)?;
-    m.add_function(wrap_pyfunction!(types::type_table, &m)?)?;
-    m.add_function(wrap_pyfunction!(_cancel_requests_sent, &m)?)?;
-    m.add_function(wrap_pyfunction!(_catalog_queries, &m)?)?;
-    m.add_function(wrap_pyfunction!(_param_formats, &m)?)?;
-    m.add_function(wrap_pyfunction!(_decode, &m)?)?;
-    Ok(m)
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(admin::database_exists, module)?)?;
+    module.add_function(wrap_pyfunction!(admin::create_database, module)?)?;
+    module.add_function(wrap_pyfunction!(admin::drop_database, module)?)?;
+    module.add_function(wrap_pyfunction!(admin::list_databases, module)?)?;
+    module.add_class::<conn::Connection>()?;
+    module.add_function(wrap_pyfunction!(conn::connect, module)?)?;
+    module.add_function(wrap_pyfunction!(conn::parse_dsn, module)?)?;
+    module.add_class::<describe::ColumnInfo>()?;
+    module.add_class::<describe::Describe>()?;
+    module.add_class::<describe::ParamInfo>()?;
+    module.add_function(wrap_pyfunction!(describe::connect_checker, module)?)?;
+    module.add_function(wrap_pyfunction!(describe::describe, module)?)?;
+    module.add_class::<migrate::Migrator>()?;
+    module.add_class::<named::RowShape>()?;
+    module.add_class::<named::ShapeIssue>()?;
+    module.add_class::<pool::Pool>()?;
+    module.add_class::<stream::RowStream>()?;
+    module.add_class::<types::TypeInfo>()?;
+    module.add_function(wrap_pyfunction!(named::map_columns_py, module)?)?;
+    module.add_function(wrap_pyfunction!(types::type_table, module)?)?;
+    module.add_function(wrap_pyfunction!(_cancel_requests_sent, module)?)?;
+    module.add_function(wrap_pyfunction!(_catalog_queries, module)?)?;
+    module.add_function(wrap_pyfunction!(_param_formats, module)?)?;
+    module.add_function(wrap_pyfunction!(_decode, module)?)?;
+    Ok(())
+}
+
+#[pymodule]
+mod _core {
+    use pyo3::prelude::*;
+
+    #[pymodule_init]
+    fn init(module: &Bound<'_, PyModule>) -> PyResult<()> {
+        rowx_py_core::runtime::init()?;
+        let py = module.py();
+        rowx_py_core::errors::init(py)?;
+        crate::register(module)
+    }
 }

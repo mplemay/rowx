@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from rowx._core.postgres import RowShape
+    from rowx.postgres._core import RowShape
 
 
 class StreamHandle(Protocol):

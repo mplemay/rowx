@@ -4,9 +4,9 @@ from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 
-from rowx._core.postgres import Connection as ConnectionImpl, RowShape
 from rowx.errors import DecodeError, InterfaceError, RowConstructError, RowShapeError
 from rowx.postgres import Connection, Interval, Pool, connect
+from rowx.postgres._core import Connection as ConnectionImpl, RowShape
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

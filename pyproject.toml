@@ -12,33 +12,41 @@ dependencies = []
 [project.optional-dependencies]
 # only for the opt-in `rowx.testing` pytest plugin; `import rowx` never imports pytest
 pytest = ["pytest>=9.2.0"]
+postgres = ["rowx-postgres==0.2.0"]
 
 [project.scripts]
 rowx = "rowx.check.cli:main"
 
-[tool.maturin]
-manifest-path = "crates/rowx-py/Cargo.toml"
-features = ["pyo3/extension-module"]
-module-name = "rowx._core"
-python-packages = ["rowx"]
-python-source = "src"
+[tool.uv.workspace]
+members = ["packages/rowx-postgres"]
 
-[tool.uv]
-cache-keys = [
-    { file = "pyproject.toml" },
-    { file = "crates/**/*.rs" },
-    { file = "crates/**/Cargo.toml" },
-    { file = "Cargo.toml" },
-    { file = "Cargo.lock" },
-    { file = "rust-toolchain.toml" },
-]
+[tool.uv.sources]
+rowx-postgres = { workspace = true }
 
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
+requires = ["uv_build>=0.13.7,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "rowx"
+module-root = "src"
+# uv_build packs the python module only; these are the rowx-py-core sources that must ship in the sdist
+source-include = [
+    "Cargo.toml",
+    "src/lib.rs",
+    "src/errors.rs",
+    "src/runtime.rs",
+]
+wheel-exclude = [
+    "**/*.rs",
+    "**/Cargo.toml",
+    "**/__tests__/**",
+]
 
 [dependency-groups]
 dev = [
+    # default `uv sync` / `uv run` only install the root project, so a member that is only an extra is uninstalled
+    "rowx-postgres",
     "anyio>=4.16.0",
     "maturin>=1.0,<2.0",
     "mypy==2.4.1",
@@ -71,6 +79,10 @@ line-length = 120
 include = ["pyproject.toml"]
 preview = true
 required-version = ">=0.17.2"
+# both members contribute the rowx package; without this, ruff treats rowx.postgres as a third-party package
+src = ["src", "packages/rowx-postgres/src"]
+# the backend source tree has no rowx/__init__.py (that file ships only in the core wheel)
+namespace-packages = ["packages/rowx-postgres/src/rowx"]
 
 [tool.ruff.lint]
 preview = true

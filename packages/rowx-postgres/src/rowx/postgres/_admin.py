@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import quote, unquote, urlencode, urlparse, urlunparse
 
-from rowx._core.postgres import (
+from rowx.postgres._core import (
     create_database as create_database_impl,
     database_exists as database_exists_impl,
     drop_database as drop_database_impl,

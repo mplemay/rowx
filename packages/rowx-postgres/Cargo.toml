@@ -5,8 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [lib]
-test = false
-doctest = false
+name = "_core"
+crate-type = ["cdylib"]
 
 [dependencies]
 pyo3.workspace = true

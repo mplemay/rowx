@@ -1,0 +1,41 @@
+[project]
+name = "rowx-postgres"
+version = "0.2.0"
+description = "Postgres backend for rowx"
+authors = [
+    { name = "Matt LeMay", email = "mplemay@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = ["rowx==0.2.0"]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]
+module-name = "rowx.postgres._core"
+python-source = "src"
+exclude = [
+    { path = "**/*.rs", format = "wheel" },
+    { path = "**/Cargo.toml", format = "wheel" },
+    { path = "**/__tests__/**", format = "wheel" },
+    { path = "**/__pycache__/**", format = "wheel" },
+]
+
+[tool.uv.sources]
+rowx = { workspace = true }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "src/**/*.rs" },
+    { file = "../../crates/**/*.rs" },
+    { file = "../../crates/**/Cargo.toml" },
+    { file = "../../src/*.rs" },
+    { file = "../../Cargo.toml" },
+    { file = "../../Cargo.lock" },
+    { file = "../../rust-toolchain.toml" },
+]

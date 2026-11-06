@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 
-# `uv run` must not sync, which would rebuild the extension; each job builds it once with `maturin develop`.
+# `uv run` must not sync, which would rebuild the extension; each job builds it once with `maturin develop -m`.
 env:
   UV_NO_SYNC: "1"
 
@@ -70,10 +70,10 @@ jobs:
         run: uv tool install rust-just
 
       - name: Install the dependencies
-        run: uv sync --all-groups --no-install-project
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
-        run: uv run maturin develop
+        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
 
       - name: Check
         if: matrix.python-version == '3.14'
@@ -118,10 +118,10 @@ jobs:
         run: uv tool install rust-just
 
       - name: Install the dependencies
-        run: uv sync --all-groups --no-install-project
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
-        run: uv run maturin develop
+        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
 
       - name: Check
         run: just check
@@ -169,10 +169,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-groups --no-install-project
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
-        run: uv run maturin develop
+        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
 
       - name: Apply the example schema
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f examples/app/schema.sql

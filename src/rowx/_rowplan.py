@@ -38,7 +38,7 @@ from rowx.errors import InterfaceError
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from rowx._core.postgres import RowShape
+    from rowx.postgres._core import RowShape
 
 MAX_ALIAS_DEPTH: Final[int] = 16
 
@@ -591,8 +591,8 @@ def _typeddict_specs(t: type, hints: dict[str, object]) -> list[Spec]:
 def _build_shape(
     ctor: object, type_name: str, form: RowForm, fields: tuple[FieldPlan, ...], *, validate: bool = True
 ) -> RowShape:
-    # `rowx._core` is the backend, which `import rowx` must not load, so it is imported when a plan needs it
-    from rowx._core.postgres import RowShape as RowShapeImpl  # ruff: ignore[import-outside-top-level]
+    # `rowx.postgres._core` is the backend, which `import rowx` must not load, so it is imported when a plan needs it
+    from rowx.postgres._core import RowShape as RowShapeImpl  # ruff: ignore[import-outside-top-level]
 
     flags = [(int(f.nullable) | (int(f.interval) << 1)) for f in fields]
     return RowShapeImpl(

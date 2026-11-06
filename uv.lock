@@ -6,6 +6,12 @@ resolution-markers = [
     "python_full_version < '3.15'",
 ]
 
+[manifest]
+members = [
+    "rowx",
+    "rowx-postgres",
+]
+
 [[package]]
 name = "annotated-types"
 version = "0.8.0"
@@ -616,6 +622,9 @@ version = "0.2.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
+postgres = [
+    { name = "rowx-postgres" },
+]
 pytest = [
     { name = "pytest" },
 ]
@@ -640,6 +649,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-xdist" },
+    { name = "rowx-postgres" },
     { name = "ruff" },
     { name = "rumdl" },
     { name = "shellcheck-py" },
@@ -649,8 +659,11 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.2.0" }]
-provides-extras = ["pytest"]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.2.0" },
+    { name = "rowx-postgres", marker = "extra == 'postgres'", editable = "packages/rowx-postgres" },
+]
+provides-extras = ["pytest", "postgres"]
 
 [package.metadata.requires-dev]
 bench = [{ name = "asyncpg", specifier = ">=0.31.0" }]
@@ -670,6 +683,7 @@ dev = [
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "pytest-asyncio", specifier = ">=1.4.1.post1" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "rowx-postgres", editable = "packages/rowx-postgres" },
     { name = "ruff", specifier = ">=0.17.3" },
     { name = "rumdl", specifier = ">=0.3.2" },
     { name = "shellcheck-py", specifier = "==0.11.0.1" },
@@ -677,6 +691,17 @@ dev = [
     { name = "ty", specifier = ">=0.0.95" },
     { name = "zizmor", specifier = "==1.32.0" },
 ]
+
+[[package]]
+name = "rowx-postgres"
+version = "0.2.0"
+source = { editable = "packages/rowx-postgres" }
+dependencies = [
+    { name = "rowx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "rowx", editable = "." }]
 
 [[package]]
 name = "ruff"

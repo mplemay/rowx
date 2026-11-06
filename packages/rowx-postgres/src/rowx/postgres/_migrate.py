@@ -4,9 +4,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx._core.postgres import Migrator as MigratorImpl
 from rowx.errors import InterfaceError, MigrationFailedError
 from rowx.postgres._connection import Connection
+from rowx.postgres._core import Migrator as MigratorImpl
 from rowx.postgres._pool import Pool
 from rowx.postgres._transaction import Transaction
 
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from os import PathLike
 
-    from rowx._core.postgres import (
+    from rowx.postgres._core import (
         Connection as ConnectionImpl,
         MigrationState,
         Pool as PoolImpl,

@@ -3,13 +3,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from rowx._core.postgres import Describe, connect_checker, describe
 from rowx.errors import DatabaseError
+from rowx.postgres._core import Describe, connect_checker, describe
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from rowx._core.postgres import Connection
+    from rowx.postgres._core import Connection
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 

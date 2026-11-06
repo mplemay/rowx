@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Install a built wheel into a fresh venv, then run the example app and `rowx check` against it.
-# Usage: smoke-wheel.sh dist/*.whl   (DATABASE_URL must point at a database with examples/app/schema.sql applied)
+# Usage: smoke-wheel.sh dist/*.whl   (the core wheel and the rowx-postgres wheel; DATABASE_URL must point at a database with examples/app/schema.sql applied)
 set -euo pipefail
 
-if (($# != 1)); then
-  echo "usage: $0 <wheel>" >&2
+if (($# < 1)); then
+  echo "usage: $0 <wheel>..." >&2
   exit 2
 fi
 if [[ -z "${DATABASE_URL:-}" ]]; then
@@ -13,16 +13,19 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-wheel="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+wheels=()
+for wheel in "$@"; do
+  wheels+=("$(cd "$(dirname "$wheel")" && pwd)/$(basename "$wheel")")
+done
 venv="$(mktemp -d)"
 trap 'rm -rf "$venv"' EXIT
 
 uv venv --python "${PYTHON:-python3}" "$venv"
-uv pip install --python "$venv/bin/python" "$wheel"
+uv pip install --python "$venv/bin/python" "${wheels[@]}"
 
-# run from a scratch directory so the source tree's src/rowx can't shadow the installed wheel
+# run from a scratch directory so the source tree's src/rowx can't shadow the installed wheels
 cd "$venv"
-"$venv/bin/python" -c "import rowx, rowx._core, rowx._core.postgres"
-"$venv/bin/python" -c "import importlib.resources as r; assert r.files('rowx').joinpath('_core', 'postgres.pyi').is_file()"
+"$venv/bin/python" -c "import rowx, rowx.postgres, rowx.postgres._core"
+"$venv/bin/python" -c "import importlib.resources as r; assert r.files('rowx.postgres').joinpath('_core.pyi').is_file()"
 "$venv/bin/python" "$root/examples/app/main.py"
 "$venv/bin/rowx" check "$root/examples/app"

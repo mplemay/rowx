@@ -3,9 +3,7 @@ resolver = "3"
 members = [
     "crates/rowx-core",
     "crates/rowx-postgres",
-    "crates/rowx-py-core",
-    "crates/rowx-postgres-py",
-    "crates/rowx-py",
+    "packages/rowx-postgres",
 ]
 # cargo-fuzz targets need nightly and unsafe code, so they stay out of the workspace and its lints
 exclude = ["fuzz"]
@@ -22,8 +20,7 @@ pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 rowx-core = { path = "crates/rowx-core" }
 rowx-postgres = { path = "crates/rowx-postgres" }
-rowx-py-core = { path = "crates/rowx-py-core" }
-rowx-postgres-py = { path = "crates/rowx-postgres-py" }
+rowx-py-core = { path = "." }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -41,3 +38,31 @@ dbg_macro = "deny"
 todo = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
+
+# the root package is rowx-py-core. `include` is what `cargo package` (and maturin sdist
+# vendoring) copies; without it the package root is the repo and the rowx-postgres sdist
+# vendors every workspace file.
+[package]
+name = "rowx-py-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+include = [
+    "Cargo.toml",
+    "src/lib.rs",
+    "src/errors.rs",
+    "src/runtime.rs",
+]
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+pyo3.workspace = true
+pyo3-async-runtimes.workspace = true
+rowx-core.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

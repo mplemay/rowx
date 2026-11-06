@@ -29,7 +29,7 @@ use rowx_py_core::runtime;
 // how often a running operation is asked again to stop while its connection is settled
 const SETTLE_RECANCEL: Duration = Duration::from_millis(100);
 
-#[pyclass(frozen, module = "rowx._core.postgres", name = "Connection")]
+#[pyclass(frozen, module = "rowx.postgres._core", name = "Connection")]
 #[derive(Debug)]
 pub struct Connection {
     pub(crate) cancel: Cancel,

@@ -297,7 +297,7 @@ fn on_pool<'py>(py: Python<'py>, pool: &PgPool, job: Job) -> PyResult<Bound<'py,
     Ok(future)
 }
 
-#[pyclass(frozen, module = "rowx._core.postgres", name = "Migrator")]
+#[pyclass(frozen, module = "rowx.postgres._core", name = "Migrator")]
 #[derive(Debug)]
 pub struct Migrator {
     migrations: Arc<Vec<Migration>>,
