@@ -88,7 +88,7 @@ def column(described: Describe) -> ColumnDesc:
 
 
 def finding_rules(described: Describe, leaf: str) -> list[str]:
-    row_type = RowType(kind="scalar", elements=(Elem(leaf=leaf, nullable=True),))  # ty: ignore[invalid-argument-type]
+    row_type = RowType(kind="scalar", elements=(Elem(leaf=leaf, nullable=True),))
     return [found.rule for found in compare(DescribeDesc(columns=(column(described),)), row_type)]
 
 

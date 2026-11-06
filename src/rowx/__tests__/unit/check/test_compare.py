@@ -244,7 +244,7 @@ def test_param_mismatch_names_both_types() -> None:
     ],
 )
 def test_param_not_flagged(key: str | None, evident: ParamType | None) -> None:
-    assert compare_param(0, "t", key, evident) is None  # ty: ignore[invalid-argument-type]
+    assert compare_param(0, "t", key, evident) is None
 
 
 @pytest.mark.parametrize(
@@ -261,7 +261,7 @@ def test_param_not_flagged(key: str | None, evident: ParamType | None) -> None:
     ],
 )
 def test_param_flagged(key: str, evident: ParamType) -> None:
-    assert compare_param(0, key, key, evident) is not None  # ty: ignore[invalid-argument-type]
+    assert compare_param(0, key, key, evident) is not None
 
 
 def test_array_param_checks_elements() -> None:
@@ -286,10 +286,10 @@ RANGE_LEAVES = {
 
 @pytest.mark.parametrize(("key", "leaf"), RANGE_LEAVES.items())
 def test_range_matches_only_its_subtype_leaf(key: str, leaf: str) -> None:
-    assert run(scalar(Elem(leaf, nullable=False)), col(key)) == []  # ty: ignore[invalid-argument-type]
+    assert run(scalar(Elem(leaf, nullable=False)), col(key)) == []
     others = {other for other in RANGE_LEAVES.values() if other != leaf}
     for other in others:
-        findings = run(scalar(Elem(other, nullable=False)), col(key))  # ty: ignore[invalid-argument-type]
+        findings = run(scalar(Elem(other, nullable=False)), col(key))
         assert rules(findings) == ["type-mismatch"], other
         assert findings[0].help is not None
         assert key in findings[0].help

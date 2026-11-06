@@ -172,7 +172,7 @@ def _is_private_name(name: str) -> bool:
     return name.startswith("_") and not _is_dunder(name)
 
 
-# `rowx._template`, `rowx.postgres._types`: a private module of this package, which may re-export `string.templatelib`
+# a private module of this package (for example `rowx._template`) may re-export `string.templatelib`
 def _is_private_rowx_module(module: str) -> bool:
     root, *rest = module.split(".")
     return root == ROWX_MODULE and any(_is_private_name(part) for part in rest)

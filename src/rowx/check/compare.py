@@ -2,9 +2,7 @@ from dataclasses import dataclass, replace
 from re import compile as re_compile
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx.postgres._core import map_columns
-from rowx.postgres._types import accepts, by_key, result_type, result_types
-from rowx.postgres._vocab import NullReasonName, TypeKey
+from rowx._backend import CheckerBackend, NullReason, ShapeIssue, default_backend
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -12,13 +10,12 @@ if TYPE_CHECKING:
     from rowx.check.model import Rule
     from rowx.check.params import ParamType
     from rowx.check.resolve import Elem, NamedField, RowType
-    from rowx.postgres._core import ShapeIssue
 
-JSON_KEYS: Final[frozenset[TypeKey]] = frozenset({"json", "jsonb"})
+JSON_KEYS: Final[frozenset[str]] = frozenset({"json", "jsonb"})
 USE_EXECUTE: Final[str] = "use .execute()"
 UNNAMED: Final[str] = "?column?"
 LOWERCASE_IDENTIFIER: Final = re_compile(r"[a-z_][a-z0-9_]*")
-type _Reason = NullReasonName | Literal[""]
+type _Reason = NullReason | Literal[""]
 
 
 # `type_key` is None for a type outside the table; an array column carries its innermost
@@ -27,11 +24,11 @@ type _Reason = NullReasonName | Literal[""]
 class ColumnDesc:
     name: str
     type_name: str
-    type_key: TypeKey | None
+    type_key: str | None
     nullable: bool
     reason: _Reason = ""
     reason_detail: str | None = None
-    element_key: TypeKey | None = None
+    element_key: str | None = None
     # the name as the server sent it, with the `!`/`?` suffix; it is what `map_columns` strips, once
     raw_name: str | None = None
 
@@ -56,15 +53,34 @@ class Finding:
     notes: tuple[str, ...] = ()
 
 
+def _rules(backend: CheckerBackend | None) -> CheckerBackend:
+    return backend if backend is not None else default_backend()
+
+
+def _py_result(rules: CheckerBackend, key: str) -> str:
+    return rules.types[key].py_result
+
+
+def _py_results(rules: CheckerBackend, key: str) -> frozenset[str]:
+    entry = rules.types[key]
+    return frozenset((entry.py_result, *entry.alternatives))
+
+
+def _accepts(rules: CheckerBackend, py_type_name: str, key: str) -> bool:
+    accepted = rules.types[key].accepted_params
+    # `object` (json/jsonb) takes any value; json.dumps is the arbiter at runtime
+    return "object" in accepted or py_type_name in accepted
+
+
 def _label(column: ColumnDesc, index: int) -> str:
     return f'column {index + 1} "{column.name}"'
 
 
-def _expected(column: ColumnDesc) -> str:
+def _expected(column: ColumnDesc, rules: CheckerBackend) -> str:
     if column.type_key == "array":
-        leaf = result_type(column.element_key) if column.element_key is not None else "?"
+        leaf = _py_result(rules, column.element_key) if column.element_key is not None else "?"
         return f"list[{leaf}]"
-    return "None" if column.type_key == "void" else result_type(column.type_key or "")
+    return "None" if column.type_key == "void" else _py_result(rules, column.type_key or "")
 
 
 def _shown(elem: Elem) -> str:
@@ -78,7 +94,7 @@ def _shown(elem: Elem) -> str:
     return elem.leaf
 
 
-def _array_matches(column: ColumnDesc, elem: Elem) -> bool:
+def _array_matches(column: ColumnDesc, elem: Elem, rules: CheckerBackend) -> bool:
     if column.element_key is None:
         return False
     # the declared type does not record dimensions, so any nesting depth is accepted (#112); an element at any
@@ -90,20 +106,20 @@ def _array_matches(column: ColumnDesc, elem: Elem) -> bool:
         item = item.item
     if item is None:
         return False
-    return item.leaf == "any" or column.element_key in JSON_KEYS or item.leaf in result_types(column.element_key)
+    return item.leaf == "any" or column.element_key in JSON_KEYS or item.leaf in _py_results(rules, column.element_key)
 
 
 # a range column's help names its subtype, since `Range[T]` is checked against it
-def _range_help(column: ColumnDesc) -> str | None:
+def _range_help(column: ColumnDesc, rules: CheckerBackend) -> str | None:
     key = column.element_key if column.type_key == "array" else column.type_key
-    if key is None or by_key(key).matcher != "range":
+    if key is None or rules.types[key].matcher != "range":
         return None
-    leaf = result_type(key)
+    leaf = _py_result(rules, key)
     name = column.type_name.removeprefix("_") if column.type_key == "array" else column.type_name
     return f"`{name}` is a range of `{leaf[leaf.index('[') + 1 : -1]}`, so annotate it `{leaf}`"
 
 
-def _leaf_matches(column: ColumnDesc, elem: Elem) -> bool:
+def _leaf_matches(column: ColumnDesc, elem: Elem, rules: CheckerBackend) -> bool:
     if elem.leaf == "any":
         return True
     # a bare `None` only ever matches `void`, so no wider rule below may accept it
@@ -113,11 +129,11 @@ def _leaf_matches(column: ColumnDesc, elem: Elem) -> bool:
         case None:
             return False
         case "array":
-            return _array_matches(column, elem)
+            return _array_matches(column, elem, rules)
         case key if key in JSON_KEYS:
             return True
         case key:
-            return elem.leaf in result_types(key)
+            return elem.leaf in _py_results(rules, key)
 
 
 def _unsupported(column: ColumnDesc, index: int, element: int | None) -> Finding:
@@ -170,11 +186,12 @@ def _nullability_finding(
 
 
 # `subject` is the field of a named row, such as `field "age" of `User``; a tuple element has none
-def _compare_element(
+def _compare_element(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     column: ColumnDesc,
     index: int,
     elem: Elem,
     element: int | None,
+    rules: CheckerBackend,
     subject: str | None = None,
 ) -> list[Finding]:
     if not _supported(column):
@@ -184,14 +201,21 @@ def _compare_element(
     # `Any` and `object` are the only annotations neutral to both type and nullability
     if elem.leaf == "any":
         return []
-    if not _leaf_matches(column, elem):
+    if not _leaf_matches(column, elem, rules):
         if subject is not None:
-            message = f"{_label(column, index)} is `{_expected(column)}` but {subject} is `{_shown(elem)}`"
+            message = f"{_label(column, index)} is `{_expected(column, rules)}` but {subject} is `{_shown(elem)}`"
         else:
-            message = (
-                f"{_label(column, index)}: column type is `{_expected(column)}` but the annotation is `{_shown(elem)}`"
-            )
-        return [Finding(rule="type-mismatch", message=message, column=index, element=element, help=_range_help(column))]
+            expected = _expected(column, rules)
+            message = f"{_label(column, index)}: column type is `{expected}` but the annotation is `{_shown(elem)}`"
+        return [
+            Finding(
+                rule="type-mismatch",
+                message=message,
+                column=index,
+                element=element,
+                help=_range_help(column, rules),
+            ),
+        ]
     return _nullability_finding(column, index, elem, element, subject)
 
 
@@ -293,11 +317,11 @@ def _order(finding: Finding) -> tuple[int, int, int]:
     return (0, 0, 0)
 
 
-def _compare_named(columns: Sequence[ColumnDesc], row_type: RowType) -> list[Finding]:
+def _compare_named(columns: Sequence[ColumnDesc], row_type: RowType, rules: CheckerBackend) -> list[Finding]:
     fields: list[NamedField] = list(row_type.fields)
     positional = row_type.matching == "positional"
     raw = [column.name if column.raw_name is None else column.raw_name for column in columns]
-    mapping, issues = map_columns(raw, [(field_.names, field_.required) for field_ in fields], positional)
+    mapping, issues = rules.map_columns(raw, [(field_.names, field_.required) for field_ in fields], positional)
     findings = [_issue_finding(issue, columns, row_type) for issue in issues]
     # a positional row stops at its first error; a by-name row still checks every column that mapped to one field
     skipped = {
@@ -309,7 +333,7 @@ def _compare_named(columns: Sequence[ColumnDesc], row_type: RowType) -> list[Fin
                 continue
             field_ = fields[target]
             subject = f'field "{field_.key}" of `{row_type.type_name}`'
-            for finding in _compare_element(column, index, field_.elem, None, subject):
+            for finding in _compare_element(column, index, field_.elem, None, rules, subject):
                 if finding.rule == "unsupported-type":
                     findings.append(finding)
                 else:
@@ -324,7 +348,12 @@ def _compare_named(columns: Sequence[ColumnDesc], row_type: RowType) -> list[Fin
     return sorted(findings, key=_order)
 
 
-def compare(describe: DescribeDesc, row_type: RowType) -> list[Finding]:
+def compare(
+    describe: DescribeDesc,
+    row_type: RowType,
+    backend: CheckerBackend | None = None,
+) -> list[Finding]:
+    rules = _rules(backend)
     columns: Sequence[ColumnDesc] = describe.columns
     match row_type.kind:
         case "none":
@@ -333,9 +362,9 @@ def compare(describe: DescribeDesc, row_type: RowType) -> list[Finding]:
             if len(columns) != 1:
                 message = f"a scalar row type needs exactly 1 column but the query returns {len(columns)}"
                 return [Finding(rule="arity-mismatch", message=message)]
-            return _compare_element(columns[0], 0, row_type.elements[0], None)
+            return _compare_element(columns[0], 0, row_type.elements[0], None, rules)
         case "named":
-            return _compare_named(columns, row_type)
+            return _compare_named(columns, row_type, rules)
         case "tuple":
             if len(columns) != len(row_type.elements):
                 message = (
@@ -344,7 +373,7 @@ def compare(describe: DescribeDesc, row_type: RowType) -> list[Finding]:
                 return [Finding(rule="arity-mismatch", message=message)]
             findings: list[Finding] = []
             for index, (column, elem) in enumerate(zip(columns, row_type.elements, strict=True)):
-                findings.extend(_compare_element(column, index, elem, index))
+                findings.extend(_compare_element(column, index, elem, index, rules))
             return findings
 
 
@@ -365,8 +394,15 @@ def _array_leaf(evident: ParamType) -> ParamType | None:
     return item
 
 
-def _param_finding(index: int, type_name: str, key: TypeKey, evident: ParamType, noun: str) -> Finding:
-    accepted = ", ".join(f"`{name}`" for name in by_key(key).accepted_params)
+def _param_finding(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
+    index: int,
+    type_name: str,
+    key: str,
+    evident: ParamType,
+    noun: str,
+    rules: CheckerBackend,
+) -> Finding:
+    accepted = ", ".join(f"`{name}`" for name in rules.types[key].accepted_params)
     message = (
         f'parameter ${index + 1} has type "{type_name}", {noun} accepts {accepted}, '
         f"but the interpolation is `{_shown_param(evident)}`"
@@ -374,24 +410,32 @@ def _param_finding(index: int, type_name: str, key: TypeKey, evident: ParamType,
     return Finding(rule="param-type-mismatch", message=message)
 
 
-def _element_finding(index: int, type_name: str, element_key: TypeKey, evident: ParamType) -> Finding | None:
-    leaf = _array_leaf(evident)
-    if leaf is None or leaf.name == "None" or accepts(leaf.name, element_key):
-        return None
-    return _param_finding(index, type_name, element_key, evident, "whose element")
-
-
-def compare_param(
+def _element_finding(
     index: int,
     type_name: str,
-    type_key: TypeKey | None,
+    element_key: str,
+    evident: ParamType,
+    rules: CheckerBackend,
+) -> Finding | None:
+    leaf = _array_leaf(evident)
+    if leaf is None or leaf.name == "None" or _accepts(rules, leaf.name, element_key):
+        return None
+    return _param_finding(index, type_name, element_key, evident, "whose element", rules)
+
+
+def compare_param(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
+    index: int,
+    type_name: str,
+    type_key: str | None,
     evident: ParamType | None,
-    element_key: TypeKey | None = None,
+    element_key: str | None = None,
+    backend: CheckerBackend | None = None,
 ) -> Finding | None:
     if evident is None or type_key is None or evident.name == "None":
         return None
-    if not accepts(evident.name, type_key):
-        return _param_finding(index, type_name, type_key, evident, "which")
+    rules = _rules(backend)
+    if not _accepts(rules, evident.name, type_key):
+        return _param_finding(index, type_name, type_key, evident, "which", rules)
     if type_key == "array" and element_key is not None:
-        return _element_finding(index, type_name, element_key, evident)
+        return _element_finding(index, type_name, element_key, evident, rules)
     return None
