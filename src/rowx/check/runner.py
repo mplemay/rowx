@@ -666,6 +666,9 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
                 stats.migrations = await hooks.gate(target)
             outcomes = await describe_all(target, statements, jobs, config.statement_timeout_ms, selected)
         for site in sites:
+            # collection inferred parameters before a backend existed; bind before they are compared
+            if site.inference is not None:
+                site.inference.bind(selected)
             reports.extend(_evaluate(site, outcomes[site.sourcemap.sql], selected))
     stats.by_rule.update(report.diagnostic.rule for report in reports)
     return RunResult(reports=reports, sources=sources, statistics=stats)

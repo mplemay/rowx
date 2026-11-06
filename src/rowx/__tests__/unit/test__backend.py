@@ -13,6 +13,17 @@ from rowx.check.resolve import HSTORE_LEAF, LEAVES, NETWORK_PAIRS
 from rowx.postgres._vocab import LeafName
 
 QUERY: Final[str] = 'from rowx import query\n\nquery[int](t"SELECT 1")\n'
+MONEY_QUERY: Final[str] = """\
+from rowx import query
+from rowx.postgres import Money
+
+query[Money](t"SELECT 1")
+"""
+MONEY_CONCAT: Final[str] = """\
+from rowx.postgres import Money
+
+x = t"a" + Money(1)
+"""
 MISSING_BACKEND: Final[str] = """\
 import sys
 from importlib.abc import MetaPathFinder
@@ -138,6 +149,50 @@ def test_migrate_project_without_a_url_names_the_missing_url(tmp_path: Path) -> 
     assert result.returncode == 2, result.stderr
     assert "no database URL" in result.stderr
     assert "install `rowx[postgres]`" not in result.stderr
+
+
+def test_money_query_without_a_url_names_the_missing_url(tmp_path: Path) -> None:
+    _migrate_project(tmp_path, MONEY_QUERY)
+    result = _run_blocked(tmp_path, ["check", "x.py"], "rowx.postgres")
+    assert result.returncode == 2, result.stderr
+    assert "no database URL" in result.stderr
+    assert "install `rowx[postgres]`" not in result.stderr
+
+
+def _mentions_template_construction(result: subprocess.CompletedProcess[str]) -> bool:
+    output = f"{result.stdout}\n{result.stderr}"
+    return "template-construction" in output or "a t-string can only be added" in output
+
+
+def test_template_concat_does_not_import_a_backend_for_a_postgres_url(tmp_path: Path) -> None:
+    (tmp_path / "x.py").write_text(MONEY_CONCAT, encoding="utf-8")
+    result = _run_blocked(
+        tmp_path,
+        ["check", "--database-url", "postgres://localhost/db", "x.py"],
+        "rowx.postgres",
+    )
+    assert result.returncode == 1, result.stderr
+    assert "Traceback" not in result.stderr
+    assert _mentions_template_construction(result)
+    assert "install `rowx[postgres]`" not in result.stderr
+
+
+def test_template_concat_with_an_unknown_scheme_stays_template_construction(tmp_path: Path) -> None:
+    (tmp_path / "x.py").write_text(MONEY_CONCAT, encoding="utf-8")
+    result = _run_blocked(tmp_path, ["check", "--database-url", "sqlite://x", "x.py"], "rowx.postgres")
+    assert result.returncode == 1, result.stderr
+    assert "Traceback" not in result.stderr
+    assert _mentions_template_construction(result)
+    assert "unknown database scheme" not in result.stderr
+    assert "rowx[postgres]" not in result.stderr
+
+
+def test_money_query_with_an_unknown_scheme_exits_two(tmp_path: Path) -> None:
+    (tmp_path / "x.py").write_text(MONEY_QUERY, encoding="utf-8")
+    result = _run_blocked(tmp_path, ["check", "--database-url", "sqlite://x", "x.py"])
+    assert result.returncode == 2, result.stderr
+    assert "unknown database scheme" in result.stderr
+    assert "rowx[postgres]" not in result.stderr
 
 
 def test_scratch_with_no_statement_does_not_import_scratch(tmp_path: Path) -> None:

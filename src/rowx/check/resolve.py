@@ -813,11 +813,19 @@ class _Resolver:
         self._paths: dict[tuple[ClassKey, ClassKey], tuple[_Rebind, ...]] = {}
         self._mros: dict[ClassKey, list[_Class]] = {}
 
-    def _selected(self) -> CheckerBackend:
+    def _selected(self) -> CheckerBackend | None:
         if self._backend is not None:
             return self._backend
+        # direct callers, including conformance, pass no DSN and use the default backend
+        if self._dsn is None:
+            selected = default_backend()
+            self._backend = selected
+            return selected
+        # a blank checker URL is not a scheme; a cached miss would block a later backend
+        if not self._dsn.strip():
+            return None
         # a failure is not stored, so a later lookup tries again
-        selected = backend_for(self._dsn) if self._dsn is not None and self._dsn.strip() else default_backend()
+        selected = backend_for(self._dsn)
         self._backend = selected
         return selected
 
@@ -1045,7 +1053,8 @@ class _Resolver:
                     return _Node((Elem("any", nullable=False),), none=False)
                 if (
                     normalized.startswith("rowx.")
-                    and (leaf := self._selected().value_leaves.get(normalized)) is not None
+                    and (selected := self._selected()) is not None
+                    and (leaf := selected.value_leaves.get(normalized)) is not None
                 ):
                     return _Node((Elem(leaf, nullable=False),), none=False)
                 raise _external_reject(qualname, in_field=self._in_field)
@@ -1259,11 +1268,14 @@ class _Resolver:
             return node
         if (
             qualname.startswith("rowx.")
-            and qualname in self._selected().range_classes
+            and (selected := self._selected()) is not None
+            and qualname in selected.range_classes
             and len(elts) == 1
             and not isinstance(slice_, ast.Tuple)
         ):
-            return self._eval_range(slice_, module, chain)
+            ranged = self._eval_range(slice_, module, chain)
+            if ranged is not None:
+                return ranged
         msg = f"`{base.qualname}` can't be subscripted this way in a row type"
         raise _invalid(msg, help_=PYDANTIC_HELP if self._in_field and qualname.startswith("pydantic.") else None)
 
@@ -1290,9 +1302,12 @@ class _Resolver:
             raise _invalid(msg)
         return _Node((Elem(HSTORE_LEAF, nullable=False),), none=False)
 
-    def _eval_range(self, subtype: ast.expr, module: _Module, chain: tuple[tuple[Path, str], ...]) -> _Node:
+    def _eval_range(self, subtype: ast.expr, module: _Module, chain: tuple[tuple[Path, str], ...]) -> _Node | None:
+        # no vocabulary is a miss: the subscript is an ordinary external type
+        if (selected := self._selected()) is None:
+            return None
         inner = _to_elem(self._eval(subtype, module, chain), allow_none=False)
-        leaves = self._selected().range_leaves
+        leaves = selected.range_leaves
         if inner.nullable or inner.leaf not in leaves:
             listed = ", ".join(f"`{leaf}`" for leaf in leaves)
             msg = f"`Range[{inner.leaf}]` isn't a range subtype; use one of {listed}"
@@ -1333,7 +1348,11 @@ class _Resolver:
         # `Generic[T]` only declares the type parameters, which `_params` reads
         if normalized == "typing.Generic":
             return "object"
-        if qualname.startswith("rowx.") and (value := self._selected().value_classes.get(qualname)) is not None:
+        if (
+            qualname.startswith("rowx.")
+            and (selected := self._selected()) is not None
+            and (value := selected.value_classes.get(qualname)) is not None
+        ):
             msg = f"a subclass of rowx.postgres.{value} is not a row type"
             raise _invalid(msg)
         if qualname == "pydantic.v1" or qualname.startswith("pydantic.v1."):

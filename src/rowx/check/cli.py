@@ -109,7 +109,7 @@ def _drift_hook(config: Config, state: _HookState) -> Callable[[str], Awaitable[
     async def _gate(url: str) -> int | None:
         from rowx.check.drift import DriftError, check_drift  # ruff: ignore[import-outside-top-level]
 
-        # captured before the call so the handler can re-raise this instance unredacted
+        # the class is recorded before check_drift so a DriftError is re-raised without redaction
         state.drift_error = DriftError
         return await check_drift(config, url)
 
