@@ -17,7 +17,7 @@ from rowx.check.cli import main
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
 
-    from rowx.postgres import Connection, ConnectOptions
+    from rowx.postgres import ConnectOptions
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
@@ -609,7 +609,7 @@ def watched_connects(monkeypatch: pytest.MonkeyPatch, on_failure: Callable[[], N
     attempts: list[bool] = []
     original = module.connect
 
-    async def spy(options: ConnectOptions) -> Connection:
+    async def spy(options: ConnectOptions):
         try:
             conn = await original(options)
         except Exception:

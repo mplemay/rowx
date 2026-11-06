@@ -85,7 +85,7 @@ def test_a_flag_beats_the_config_policy(
     def fake(_directory: Path, **kwargs: object) -> None:
         seen.append(kwargs)
 
-    monkeypatch.setattr("rowx.check.migrate.Migrator", fake)
+    monkeypatch.setattr("rowx.postgres._backend.Migrator", fake)
     target = Target(directory=tmp_path, migrate=MigrateConfig(ignore_missing=config, allow_out_of_order=config))
     _load(target, Namespace(ignore_missing=flag, allow_out_of_order=flag))
     assert [(call["ignore_missing"], call["allow_out_of_order"]) for call in seen] == [(expected, expected)]

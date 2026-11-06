@@ -1,17 +1,15 @@
 from collections import Counter
 from typing import TYPE_CHECKING, Final
 
+from rowx._backend import DatabaseConnection, MigrationStatus, Migrator, backend_for
 from rowx.check.migrate import load_migrator, resolve_target
 from rowx.check.runner import CheckError, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
-from rowx.postgres import Connection
-from rowx.postgres._core import connect_checker
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from rowx.check.config import Config
-    from rowx.postgres import MigrationStatus, Migrator
 
 DRIFT_STATES: Final[tuple[str, ...]] = ("pending", "modified", "missing", "dirty")
 MAX_VERSIONS: Final[int] = 5
@@ -55,7 +53,7 @@ def _grant_hint(table: str) -> str:
     return f"could not read the migration history: permission denied; grant SELECT on {table} to the checker role"
 
 
-async def read_history(migrator: Migrator, conn: Connection) -> tuple[MigrationStatus, ...]:
+async def read_history(migrator: Migrator, conn: DatabaseConnection) -> Sequence[MigrationStatus]:
     # `info` creates nothing, so it runs as is in the read-only checker session
     return await migrator.info(conn)
 
@@ -65,9 +63,9 @@ async def check_drift(config: Config, dsn: str) -> int | None:
     if config.migrate is None:
         return None
     target = resolve_target(config, None)
-    migrator = load_migrator(target)
+    migrator = load_migrator(target, dsn)
     try:
-        conn = Connection(await connect_checker(dsn, config.statement_timeout_ms / 1000))
+        conn = await backend_for(dsn).migrate.open_checker(dsn, config.statement_timeout_ms / 1000)
     except (InterfaceError, DatabaseError, OSError) as error:
         msg = f"could not connect to the database: {redact(str(error), dsn)}"
         raise CheckError(msg) from None

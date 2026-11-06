@@ -1,14 +1,45 @@
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from os import PathLike
 
 from rowx._backend import (
+    AdminBackend,
     CheckerBackend,
+    CloneDatabase,
+    Connect,
     ConnectChecker,
+    CreateDatabase,
+    DatabaseExists,
     DescribeQuery,
+    DropDatabase,
+    EnsureTemplate,
+    ListDatabases,
+    LoadMigrator,
     MapColumns,
+    MigrateBackend,
+    OpenChecker,
     ParseDsn,
+    PoolFactory,
+    TargetOptions,
+    TestingBackend,
     TypeEntry,
+    WithDatabase,
 )
+from rowx.postgres._admin import (
+    create_database,
+    database_exists,
+    drop_database,
+    list_databases,
+    with_database,
+)
+from rowx.postgres._connection import Connection, connect
 from rowx.postgres._core import connect_checker, describe, map_columns, parse_dsn, type_table
+from rowx.postgres._migrate import DEFAULT_TABLE, Migrator
+from rowx.postgres._options import ConnectOptions
+from rowx.postgres._pool import Pool
+from rowx.postgres._testing import clone, ensure_template
 
 VALUE_LEAVES: Final[dict[str, str]] = {
     "rowx.postgres.Money": "rowx.postgres.Money",
@@ -56,6 +87,32 @@ def _types() -> dict[str, TypeEntry]:
     }
 
 
+def load_migrator(
+    path: str | PathLike[str],
+    /,
+    *,
+    table: str = DEFAULT_TABLE,
+    create_schemas: Iterable[str] = (),
+    allow_out_of_order: bool = False,
+    ignore_missing: bool = False,
+) -> Migrator:
+    return Migrator(
+        path,
+        table=table,
+        create_schemas=create_schemas,
+        allow_out_of_order=allow_out_of_order,
+        ignore_missing=ignore_missing,
+    )
+
+
+async def open_checker(dsn: str, timeout_s: float) -> Connection:
+    return Connection(await connect_checker(dsn, timeout_s))
+
+
+def pool(dsn: str) -> Pool:
+    return Pool(dsn)
+
+
 def load() -> CheckerBackend:
     return CheckerBackend(
         connect_checker=cast("ConnectChecker", connect_checker),
@@ -68,4 +125,22 @@ def load() -> CheckerBackend:
         range_leaves=RANGE_LEAVES,
         range_classes=RANGE_CLASSES,
         value_classes=VALUE_CLASSES,
+        admin=AdminBackend(
+            database_exists=cast("DatabaseExists", database_exists),
+            create_database=cast("CreateDatabase", create_database),
+            drop_database=cast("DropDatabase", drop_database),
+            list_databases=cast("ListDatabases", list_databases),
+            with_database=cast("WithDatabase", with_database),
+        ),
+        migrate=MigrateBackend(
+            load_migrator=cast("LoadMigrator", load_migrator),
+            connect=cast("Connect", connect),
+            open_checker=cast("OpenChecker", open_checker),
+            options=cast("TargetOptions", ConnectOptions.from_dsn),
+        ),
+        testing=TestingBackend(
+            ensure_template=cast("EnsureTemplate", ensure_template),
+            clone=cast("CloneDatabase", clone),
+            pool=cast("PoolFactory", pool),
+        ),
     )

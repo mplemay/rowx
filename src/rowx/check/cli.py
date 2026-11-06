@@ -100,7 +100,7 @@ def _scratch_hook(config: Config, state: _HookState) -> Callable[[str], Abstract
         scratch = Scratch(url)
         # recorded before the session so an interrupted drop is still swept
         state.built = scratch
-        return scratch.session(load_migrator(resolve_target(config, None)))
+        return scratch.session(load_migrator(resolve_target(config, None), url))
 
     return _open
 
@@ -163,7 +163,7 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
 def _subcommand(handler: Callable[[Namespace], None], args: Namespace) -> int:
     try:
         handler(args)
-    except (ConfigError, CheckError) as error:
+    except (ConfigError, CheckError, BackendMissing, UnsupportedSchemeError) as error:
         print(f"error: {strip_controls(str(error))}", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
     except KeyboardInterrupt:

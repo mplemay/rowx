@@ -29,6 +29,9 @@ class ConnectOptions:
     def from_dsn(cls, dsn: str, /, **overrides: object) -> Self:
         return replace(cls(**parse_dsn_impl(dsn)), **overrides)
 
+    def with_connect_timeout(self, seconds: float) -> Self:
+        return replace(self, connect_timeout=seconds)
+
     # the dataclass repr, except that `extra` values (which can hold secrets such as `sslpassword`) are hidden
     @override
     def __repr__(self) -> str:
