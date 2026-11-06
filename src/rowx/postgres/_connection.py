@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, Final, Self
 
 from rowx.errors import ConnectionBusyError, InterfaceError
-from rowx.postgres._core import RowShape, connect as connect_impl
+from rowx.postgres._core import connect as connect_impl
 from rowx.postgres._options import ConnectOptions
 from rowx.postgres._shape import native_shape
 from rowx.postgres._transaction import TrackedStream, Transaction
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from rowx._executor import StreamHandle
     from rowx._rowplan import ShapeSpec
-    from rowx.postgres._core import Connection as ConnectionImpl
+    from rowx.postgres._core import Connection as ConnectionImpl, RowShape
     from rowx.postgres._pool import Pool
 
 
@@ -57,7 +57,7 @@ class Connection:
         shape: ShapeSpec | RowShape | None,
     ) -> list[object]:
         try:
-            return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity, _driver_shape(shape))  # ruff: ignore[private-member-access]
+            return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity, native_shape(shape))  # ruff: ignore[private-member-access]
         except ConnectionBusyError:
             # nothing ran, so a transaction is untouched
             raise
@@ -75,7 +75,7 @@ class Connection:
         batch_size: int,
         shape: ShapeSpec | RowShape | None,
     ) -> StreamHandle:
-        stream = self._impl._stream(sql, params, mask, scalar, arity, batch_size, _driver_shape(shape))  # ruff: ignore[private-member-access]
+        stream = self._impl._stream(sql, params, mask, scalar, arity, batch_size, native_shape(shape))  # ruff: ignore[private-member-access]
         # a plain connection keeps the bare stream, so only a transaction pays for the wrapper
         return TrackedStream(stream, self._note_failure) if self._tx is not None else stream
 
@@ -132,13 +132,6 @@ class Connection:
     @property
     def closed(self) -> bool:
         return self._inner is None or self._inner.closed
-
-
-def _driver_shape(shape: ShapeSpec | RowShape | None) -> RowShape | None:
-    # callers that already hold a native shape (the named-row driver tests) pass it through
-    if isinstance(shape, RowShape):
-        return shape
-    return native_shape(shape)
 
 
 async def connect(dsn_or_options: str | ConnectOptions, /) -> Connection:

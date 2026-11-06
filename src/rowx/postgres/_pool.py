@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, Final, Self
 
 from rowx.errors import InterfaceError
 from rowx.postgres._connection import RESET_QUERY, Connection
-from rowx.postgres._core import Pool as PoolImpl, RowShape
+from rowx.postgres._core import Pool as PoolImpl
 from rowx.postgres._options import ConnectOptions
 from rowx.postgres._shape import native_shape
 
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
     from rowx._executor import StreamHandle
     from rowx._rowplan import ShapeSpec
-    from rowx.postgres._core import Connection as ConnectionImpl, RowStream as RowStreamImpl
+    from rowx.postgres._core import Connection as ConnectionImpl, RowShape, RowStream as RowStreamImpl
     from rowx.postgres._transaction import Transaction
 
 type Hook = Callable[[Connection], Awaitable[None]]
@@ -339,7 +339,7 @@ class Pool:
         if self._hooked:
             async with self.acquire() as conn:
                 return await conn._fetch(sql, params, mask, scalar, limit_one, arity, shape)  # ruff: ignore[private-member-access]
-        return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity, _driver_shape(shape))  # ruff: ignore[private-member-access]
+        return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity, native_shape(shape))  # ruff: ignore[private-member-access]
 
     def _stream(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         self,
@@ -353,7 +353,7 @@ class Pool:
     ) -> RowStreamImpl | PooledStream:
         if self._hooked:
             return PooledStream(self, (sql, params, mask, scalar, arity, batch_size, shape))
-        return self._impl._stream(sql, params, mask, scalar, arity, batch_size, _driver_shape(shape))  # ruff: ignore[private-member-access]
+        return self._impl._stream(sql, params, mask, scalar, arity, batch_size, native_shape(shape))  # ruff: ignore[private-member-access]
 
     async def _execute(self, sql: str, params: list[object]) -> int:
         if self._hooked:
@@ -396,10 +396,3 @@ class Pool:
     @property
     def closed(self) -> bool:
         return self._impl.closed
-
-
-def _driver_shape(shape: ShapeSpec | RowShape | None) -> RowShape | None:
-    # a native shape is already built; the planner passes a ShapeSpec, converted once here
-    if isinstance(shape, RowShape):
-        return shape
-    return native_shape(shape)

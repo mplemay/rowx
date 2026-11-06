@@ -1,15 +1,15 @@
 from typing import TYPE_CHECKING, cast
 
 import rowx.postgres._core as postgres_core
+from rowx._rowplan import ShapeSpec
 
 if TYPE_CHECKING:
-    from rowx._rowplan import ShapeSpec
     from rowx.postgres._core import RowShape
 
 
-def native_shape(spec: ShapeSpec | None) -> RowShape | None:
-    if spec is None:
-        return None
+def native_shape(spec: ShapeSpec | RowShape | None) -> RowShape | None:
+    if not isinstance(spec, ShapeSpec):
+        return spec
     # looked up each call so a test can replace the constructor on the module
     row_shape = postgres_core.RowShape
     if (cached := spec.native.get(row_shape)) is not None:

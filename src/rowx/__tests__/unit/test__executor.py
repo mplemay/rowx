@@ -75,7 +75,7 @@ def _imported_name(module: str, names: list[str]) -> str | None:
     if module == "rowx" and any(name in {"postgres", "_core"} for name in names):
         return "from rowx import " + ", ".join(names)
     for name in names:
-        if name == "_core" or name.endswith("._core"):
+        if name == "_core":
             return name
     return None
 

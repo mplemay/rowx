@@ -23,3 +23,5 @@ def test_native_shape_is_cached_per_backend() -> None:
     assert native_shape(spec) is first
     assert spec.native[other] is other
     assert spec.native[RowShape] is first
+    assert native_shape(first) is first
+    assert native_shape(None) is None

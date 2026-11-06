@@ -86,11 +86,11 @@ class _ValueClass:
 
 
 # filled by a backend on import; `import rowx` never loads one
-_VALUE_CLASSES: dict[type, _ValueClass] = {}
+VALUE_CLASSES: Final[dict[type, _ValueClass]] = {}
 
 
 def register_value_class(cls: type, *, flags: int, label: str, subscripted: bool = False) -> None:
-    _VALUE_CLASSES[cls] = _ValueClass(flags=flags, label=label, subscripted=subscripted)
+    VALUE_CLASSES[cls] = _ValueClass(flags=flags, label=label, subscripted=subscripted)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -99,7 +99,7 @@ class FieldPlan:
     # the column names the field accepts; `None` is unknown (a pydantic `AliasChoices` or a before validator)
     names: tuple[str, ...] | None
     nullable: bool
-    # bits from the registered value class; bit 0 is nullability and stays on `nullable`
+    # `flags` is the value-class mask; bit 0 stays clear, and the driver mask is `int(nullable) | flags`
     flags: int
     required: bool
 
@@ -266,25 +266,25 @@ def _flatten(t: object, depth: int = 0) -> tuple[list[object], bool]:
 
 
 def _is_subscripted_value(origin: object) -> bool:
-    entry = _VALUE_CLASSES.get(origin) if isinstance(origin, type) else None
+    entry = VALUE_CLASSES.get(origin) if isinstance(origin, type) else None
     return entry is not None and entry.subscripted
 
 
 def _is_value_leaf(t: type) -> bool:
     if t in LEAVES:
         return True
-    entry = _VALUE_CLASSES.get(t)
+    entry = VALUE_CLASSES.get(t)
     return entry is not None and not entry.subscripted
 
 
 def _leaf_flags(t: object) -> int:
     if isinstance(t, type):
-        entry = _VALUE_CLASSES.get(t)
+        entry = VALUE_CLASSES.get(t)
         if entry is None or entry.subscripted:
             return 0
         return entry.flags
     origin = get_origin(t)
-    if isinstance(origin, type) and (entry := _VALUE_CLASSES.get(origin)) is not None and entry.subscripted:
+    if isinstance(origin, type) and (entry := VALUE_CLASSES.get(origin)) is not None and entry.subscripted:
         return entry.flags
     return 0
 
@@ -399,7 +399,7 @@ def _named_form(t: type) -> str | None:
     if _is_value_leaf(t) or _is_subscripted_value(t):
         return None
     for base in t.__mro__[1:]:
-        if (entry := _VALUE_CLASSES.get(base)) is not None:
+        if (entry := VALUE_CLASSES.get(base)) is not None:
             raise _reject(t, entry.label)
     return next((name for name, matches in NAMED_FORMS if matches(t)), None)
 
