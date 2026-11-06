@@ -13,18 +13,18 @@ import pytest
 
 from rowx import query
 from rowx.__tests__.integration.golden.test_table_coverage import DECODE_GOLDENS
-from rowx._core.postgres import Describe, type_table
 from rowx.check.compare import ColumnDesc, DescribeDesc, compare, compare_param
 from rowx.check.params import ParamInference
 from rowx.check.resolve import Elem, RowType
 from rowx.check.runner import describe_all
 from rowx.errors import EncodeError, Error, RowShapeError
 from rowx.postgres import Box, Circle, Cube, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range, connect
+from rowx.postgres._core import Describe, type_table
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from rowx._core.postgres import ColumnInfo
+    from rowx.postgres._core import ColumnInfo
     from rowx.postgres._vocab import LeafName
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]

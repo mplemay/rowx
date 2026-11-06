@@ -130,7 +130,7 @@ impl Shared {
     }
 }
 
-#[pyclass(frozen, module = "rowx._core.postgres", name = "RowStream")]
+#[pyclass(frozen, module = "rowx.postgres._core", name = "RowStream")]
 #[derive(Debug)]
 pub struct RowStream {
     // known from the start for a connection; a pool's stream learns it at its first `_next`

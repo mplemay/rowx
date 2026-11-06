@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, Final, Self
 
-from rowx._core.postgres import connect as connect_impl
 from rowx.errors import ConnectionBusyError, InterfaceError
+from rowx.postgres._core import connect as connect_impl
 from rowx.postgres._options import ConnectOptions
 from rowx.postgres._transaction import TrackedStream, Transaction
 
@@ -13,8 +13,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from types import TracebackType
 
-    from rowx._core.postgres import Connection as ConnectionImpl, RowShape
     from rowx._executor import StreamHandle
+    from rowx.postgres._core import Connection as ConnectionImpl, RowShape
     from rowx.postgres._pool import Pool
 
 

@@ -7,12 +7,12 @@ import pytest
 from rowx.__tests__.integration.describe.sqlx_cases import SQLX_CASES
 from rowx.__tests__.integration.describe.test_base import run_checker, run_describe, scalar
 from rowx.__tests__.integration.describe.test_base_nullability import execute
-from rowx._core.postgres import connect_checker, describe
 from rowx.errors import DatabaseError
 from rowx.postgres import connect
+from rowx.postgres._core import connect_checker, describe
 
 if TYPE_CHECKING:
-    from rowx._core.postgres import Connection
+    from rowx.postgres._core import Connection
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 

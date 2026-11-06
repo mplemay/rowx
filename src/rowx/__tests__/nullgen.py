@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import psycopg
 
-from rowx._core.postgres import connect_checker, describe
+from rowx.postgres._core import connect_checker, describe
 
 if TYPE_CHECKING:
     from collections.abc import Callable

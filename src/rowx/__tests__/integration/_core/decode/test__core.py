@@ -8,8 +8,8 @@ from typing import Final
 
 import pytest
 
-from rowx._core.postgres import TypeInfo, _decode, type_table
 from rowx.errors import DecodeError
+from rowx.postgres._core import TypeInfo, _decode, type_table
 
 pytestmark = pytest.mark.integration
 

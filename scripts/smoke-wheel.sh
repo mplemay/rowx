@@ -22,7 +22,7 @@ uv pip install --python "$venv/bin/python" "$wheel"
 
 # run from a scratch directory so the source tree's src/rowx can't shadow the installed wheel
 cd "$venv"
-"$venv/bin/python" -c "import rowx, rowx._core, rowx._core.postgres"
-"$venv/bin/python" -c "import importlib.resources as r; assert r.files('rowx').joinpath('_core', 'postgres.pyi').is_file()"
+"$venv/bin/python" -c "import rowx, rowx.postgres, rowx.postgres._core"
+"$venv/bin/python" -c "import importlib.resources as r; assert r.files('rowx.postgres').joinpath('_core.pyi').is_file()"
 "$venv/bin/python" "$root/examples/app/main.py"
 "$venv/bin/rowx" check "$root/examples/app"

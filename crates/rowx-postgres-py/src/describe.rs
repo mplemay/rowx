@@ -16,7 +16,7 @@ use rowx_py_core::runtime;
     frozen,
     get_all,
     skip_from_py_object,
-    module = "rowx._core.postgres",
+    module = "rowx.postgres._core",
     name = "ParamInfo"
 )]
 #[derive(Debug, Clone)]
@@ -31,7 +31,7 @@ pub struct ParamInfo {
     frozen,
     get_all,
     skip_from_py_object,
-    module = "rowx._core.postgres",
+    module = "rowx.postgres._core",
     name = "ColumnInfo"
 )]
 #[derive(Debug, Clone)]
@@ -53,7 +53,7 @@ pub struct ColumnInfo {
     frozen,
     get_all,
     skip_from_py_object,
-    module = "rowx._core.postgres",
+    module = "rowx.postgres._core",
     name = "Describe"
 )]
 #[derive(Debug, Clone)]

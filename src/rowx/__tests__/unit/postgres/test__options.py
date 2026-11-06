@@ -3,9 +3,9 @@ from typing import Any, Final, cast
 
 import pytest
 
-from rowx._core.postgres import parse_dsn
 from rowx.errors import InterfaceError
 from rowx.postgres import ConnectOptions, connect
+from rowx.postgres._core import parse_dsn
 
 PASSWORD = "hunter2-password"  # ruff: ignore[hardcoded-password-string]
 EXTRA_SECRET = "hunter2-sslpassword"  # ruff: ignore[hardcoded-password-string]

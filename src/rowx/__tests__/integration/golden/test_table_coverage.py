@@ -7,9 +7,9 @@ from uuid import UUID
 
 import pytest
 
-from rowx._core.postgres import type_table
 from rowx.errors import DatabaseError, DecodeError
 from rowx.postgres import Box, Circle, Cube, Line, LineSegment, Money, Path, Point, Polygon, Range, connect
+from rowx.postgres._core import type_table
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 

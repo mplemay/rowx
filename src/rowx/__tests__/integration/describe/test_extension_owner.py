@@ -15,7 +15,7 @@ from rowx.postgres import Cube, connect
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from rowx._core.postgres import Describe
+    from rowx.postgres._core import Describe
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 

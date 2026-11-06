@@ -59,15 +59,15 @@
     - When you want automatic `__eq__`, `__repr__`, `__hash__` implementations
 - Prefer importing using `from x import y` instead of `import x`
 - Import local modules using the full path (ex: `from rowx.my_module import MyClass`)
-- Internal compiled module (`._core`) imports:
-  - Prefer direct `from rowx._core import ...` when there is no name clash in that file.
+- Internal compiled module (`rowx.postgres._core`) imports:
+  - Prefer direct `from rowx.postgres._core import ...` when there is no name clash in that file.
   - When a symbol from `_core` would clash with a Python-defined name in the same module, import with a `*Impl` /
     `*_impl` alias, then assign or wrap as needed:
-    - Types/classes: `FooImpl` (e.g. `from rowx._core import Foo as FooImpl`, then `Foo = FooImpl` or a thin wrapper).
+    - Types/classes: `FooImpl` (e.g. `from rowx.postgres._core import Foo as FooImpl`, then `Foo = FooImpl` or a thin
+      wrapper).
     - Functions: `foo_impl` (snake_case with `_impl` suffix).
   - Do not use leading-underscore import aliases (`_Foo`, `_foo`) for this re-export pattern.
-  - Keep [`_core/__init__.pyi`](src/rowx/_core/__init__.pyi) and [`_core/postgres.pyi`](src/rowx/_core/postgres.pyi) in
-    sync with the rust modules.
+  - Keep [`postgres/_core.pyi`](src/rowx/postgres/_core.pyi) in sync with the rust module.
 - **Don't use** docstrings, instead add inline comments only in places where there is complex or easily breakable logic
 - **No file-wide suppressions** in source: do not use a first-line or module-wide pragma such as `# ruff: noqa: ...` for
   the whole file, a blanket `# type: ignore` on a module, or equivalent file-scoped ignores.
@@ -115,6 +115,7 @@ rowx is typesafe raw SQL for Python 3.14+ with no ORM. Queries are PEP 750 t-str
 validates every query against a live Postgres 18 database by preparing and describing it.
 
 - [Design](docs/design/README.md) is the contract. Never edit it in a feature PR.
+- `docs/design/` is frozen and non-normative until #253's docs work lands; PRs in #253 don't update it.
 - If the spec is ambiguous, don't guess silently: raise it in the PR description and propose a design change.
 
 ## Commands (`just`)
@@ -177,7 +178,7 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Row shape (pure) | `crates/rowx-core/src/row_shape.rs` (column-to-field mapping, `ShapeError`, `column_name` override stripping) |
 | Driver | `crates/rowx-postgres/src/{dsn,tls,conn,cancel,stmt_cache,exec}.rs` and its pool connector |
 | Describe | `crates/rowx-postgres/src/{describe,explain}.rs`, `crates/rowx-postgres-py/src/describe.rs` |
-| Bindings | `crates/rowx-postgres-py/src/{conn,exec,stream,pool,transaction,errors,types}.rs`, `crates/rowx-py-core/src/{runtime,errors}.rs`, `crates/rowx-py/src/lib.rs` |
+| Bindings | `crates/rowx-postgres-py/src/{conn,exec,stream,pool,transaction,errors,types}.rs`, `crates/rowx-py-core/src/{runtime,errors}.rs`, `crates/rowx-postgres-py/src/lib.rs` |
 | Python runtime (shared) | `src/rowx/{__init__,_query,_executor,errors,_template,_rowplan}.py` |
 | Python Postgres backend | `src/rowx/postgres/` (including `_types.py` and `_vocab.py`) |
 | Checker | `src/rowx/check/<module>.py`, one module each (including `migrate.py` and `database.py`, the CLI handlers, and `drift.py` and `scratch.py`, the migration checks) |

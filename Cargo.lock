@@ -827,16 +827,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rowx-py"
-version = "0.2.0"
-dependencies = [
- "pyo3",
- "rowx-postgres",
- "rowx-postgres-py",
- "rowx-py-core",
-]
-
-[[package]]
 name = "rowx-py-core"
 version = "0.2.0"
 dependencies = [

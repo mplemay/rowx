@@ -765,14 +765,18 @@ class N(NamedTuple):
 class Z(TypedDict):
     id: int
 
+def stdlib(name):
+    return name.partition(".")[0] in sys.stdlib_module_names
+
 before = set(sys.modules)
 for t in (int, tuple[int, str]):
     row_plan(t)
 assert set(sys.modules) == before, sorted(set(sys.modules) - before)
 for t in (D, N, Z):
     row_plan(t)
-# a named plan loads the backend, but nothing else
-assert not [m for m in set(sys.modules) - before if not m.startswith("rowx.")], "something was imported"
+# a named plan may import rowx modules and the stdlib that package init pulls in
+extra = sorted(m for m in set(sys.modules) - before if not m.startswith("rowx.") and not stdlib(m))
+assert not extra, extra
 assert "pydantic" not in sys.modules, "pydantic was imported"
 """
 

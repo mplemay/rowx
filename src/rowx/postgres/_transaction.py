@@ -6,9 +6,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from types import TracebackType
 
-    from rowx._core.postgres import RowShape, RowStream as RowStreamImpl
     from rowx._executor import StreamHandle
     from rowx.postgres._connection import Connection
+    from rowx.postgres._core import RowShape, RowStream as RowStreamImpl
 
 
 class TrackedStream:

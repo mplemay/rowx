@@ -55,7 +55,7 @@ jobs:
 
           version = read("pyproject.toml")["project"]["version"]
           versions = {"Cargo.toml": read("Cargo.toml")["workspace"]["package"]["version"]}
-          names = {"rowx-core", "rowx-postgres", "rowx-postgres-py", "rowx-py", "rowx-py-core"}
+          names = {"rowx-core", "rowx-postgres", "rowx-postgres-py", "rowx-py-core"}
           for package in read("Cargo.lock")["package"]:
               if package["name"] in names:
                   versions[package["name"]] = package["version"]
@@ -179,7 +179,7 @@ jobs:
           fi
           wheel="$GITHUB_WORKSPACE/${wheels[0]}"
           cd "$RUNNER_TEMP"
-          uv run --no-project --python 3.14 --with "$wheel" python -c 'import rowx, rowx._core, rowx._core.postgres'
+          uv run --no-project --python 3.14 --with "$wheel" python -c 'import rowx, rowx.postgres, rowx.postgres._core'
           uv run --no-project --python 3.14 --with "$wheel" rowx --help
 
   smoke:

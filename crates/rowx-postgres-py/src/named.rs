@@ -39,7 +39,7 @@ const fn matching_name(matching: Matching) -> &'static str {
 
 /// Everything the binding needs to map columns onto a named row type and build its rows. Python
 /// builds it once per plan, so nothing here is computed per row.
-#[pyclass(frozen, module = "rowx._core.postgres", name = "RowShape")]
+#[pyclass(frozen, module = "rowx.postgres._core", name = "RowShape")]
 #[derive(Debug)]
 pub struct RowShape {
     ctor: Py<PyAny>,
@@ -425,7 +425,7 @@ fn join(items: impl Iterator<Item = String>) -> String {
     frozen,
     get_all,
     skip_from_py_object,
-    module = "rowx._core.postgres",
+    module = "rowx.postgres._core",
     name = "ShapeIssue"
 )]
 #[derive(Debug, Clone)]

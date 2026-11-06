@@ -2,17 +2,17 @@ from dataclasses import dataclass, replace
 from re import compile as re_compile
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx._core.postgres import map_columns
+from rowx.postgres._core import map_columns
 from rowx.postgres._types import accepts, by_key, result_type, result_types
 from rowx.postgres._vocab import NullReasonName, TypeKey
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from rowx._core.postgres import ShapeIssue
     from rowx.check.model import Rule
     from rowx.check.params import ParamType
     from rowx.check.resolve import Elem, NamedField, RowType
+    from rowx.postgres._core import ShapeIssue
 
 JSON_KEYS: Final[frozenset[TypeKey]] = frozenset({"json", "jsonb"})
 USE_EXECUTE: Final[str] = "use .execute()"
