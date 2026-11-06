@@ -1,8 +1,13 @@
 import importlib
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, Self, cast
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from datetime import datetime, timedelta
+    from os import PathLike
+    from types import TracebackType
 
 type NullReason = Literal[
     "NotNullColumn",
@@ -105,6 +110,254 @@ type MapColumns = Callable[
 ]
 
 
+class ConnectTarget(Protocol):
+    @property
+    def database(self) -> str | None: ...
+    @property
+    def connect_timeout(self) -> float | None: ...
+    def with_connect_timeout(self, seconds: float) -> Self: ...
+
+
+class DatabaseInfo(Protocol):
+    @property
+    def name(self) -> str: ...
+    @property
+    def comment(self) -> str | None: ...
+    @property
+    def sessions(self) -> int: ...
+
+
+class Migration(Protocol):
+    @property
+    def version(self) -> int: ...
+    @property
+    def description(self) -> str: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def checksum(self) -> bytes: ...
+
+
+class MigrationResult(Protocol):
+    @property
+    def migration(self) -> Migration: ...
+    @property
+    def elapsed(self) -> timedelta | None: ...
+
+
+class MigrationStatus(Protocol):
+    @property
+    def version(self) -> int: ...
+    @property
+    def description(self) -> str: ...
+    @property
+    def state(self) -> str: ...
+    @property
+    def kind(self) -> str | None: ...
+    @property
+    def installed_on(self) -> datetime | None: ...
+    @property
+    def execution_time(self) -> timedelta | None: ...
+    @property
+    def local_checksum(self) -> bytes | None: ...
+    @property
+    def applied_checksum(self) -> bytes | None: ...
+
+
+class DatabaseConnection(Protocol):
+    async def close(self) -> None: ...
+    async def __aenter__(self) -> Self: ...
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None: ...
+
+
+class DatabasePool(Protocol):
+    async def open(self) -> None: ...
+    async def close(self) -> None: ...
+
+
+class Migrator(Protocol):
+    @property
+    def migrations(self) -> Sequence[Migration]: ...
+    # `Any` so the concrete migrator, which takes its own connection and pool, still satisfies this protocol
+    async def run(
+        self,
+        executor: Any,  # ruff: ignore[any-type]
+        /,
+        *,
+        target: int | None = None,
+        dry_run: bool = False,
+    ) -> Sequence[MigrationResult]: ...
+    async def revert(
+        self,
+        executor: Any,  # ruff: ignore[any-type]
+        /,
+        *,
+        target: int | None = None,
+        all: bool = False,  # ruff: ignore[builtin-argument-shadowing]
+        dry_run: bool = False,
+    ) -> Sequence[MigrationResult]: ...
+    async def skip(
+        self,
+        executor: Any,  # ruff: ignore[any-type]
+        /,
+        *,
+        target: int | None = None,
+        dry_run: bool = False,
+    ) -> Sequence[MigrationResult]: ...
+    async def info(
+        self,
+        executor: Any,  # ruff: ignore[any-type]
+        /,
+    ) -> Sequence[MigrationStatus]: ...
+
+
+class DatabaseExists(Protocol):
+    async def __call__(self, target: str | ConnectTarget, name: str | None = None) -> bool: ...
+
+
+class CreateDatabase(Protocol):
+    async def __call__(
+        self,
+        target: str | ConnectTarget,
+        name: str | None = None,
+        *,
+        template: str | None = None,
+        comment: str | None = None,
+    ) -> None: ...
+
+
+class DropDatabase(Protocol):
+    async def __call__(
+        self,
+        target: str | ConnectTarget,
+        name: str | None = None,
+        *,
+        force: bool = False,
+    ) -> None: ...
+
+
+class ListDatabases(Protocol):
+    async def __call__(self, target: str | ConnectTarget, prefix: str) -> Sequence[DatabaseInfo]: ...
+
+
+class WithDatabase(Protocol):
+    def __call__(self, dsn: str, name: str) -> str: ...
+
+
+class LoadMigrator(Protocol):
+    def __call__(
+        self,
+        path: str | PathLike[str],
+        /,
+        *,
+        table: str = ...,
+        create_schemas: Iterable[str] = (),
+        allow_out_of_order: bool = False,
+        ignore_missing: bool = False,
+    ) -> Migrator: ...
+
+
+class Connect(Protocol):
+    async def __call__(self, target: str | ConnectTarget, /) -> DatabaseConnection: ...
+
+
+class OpenChecker(Protocol):
+    async def __call__(self, dsn: str, timeout_s: float) -> DatabaseConnection: ...
+
+
+class TargetOptions(Protocol):
+    def __call__(self, dsn: str) -> ConnectTarget: ...
+
+
+class TemplateMaterialize(Protocol):
+    async def __call__(
+        self,
+        server_dsn: str,
+        lock: DatabaseConnection,
+        migrator: Migrator | None,
+        name: str,
+        /,
+    ) -> None: ...
+
+
+class TemplateBuild(Protocol):
+    async def __call__(
+        self,
+        server_dsn: str,
+        lock: DatabaseConnection,
+        migrator: Migrator | None,
+        name: str,
+        materialize: TemplateMaterialize,
+        /,
+    ) -> None: ...
+
+
+class EnsureTemplate(Protocol):
+    async def __call__(  # ruff: ignore[too-many-arguments]
+        self,
+        server_dsn: str,
+        migrator: Migrator | None,
+        name: str,
+        *,
+        keep_stale: bool,
+        lock_database: str,
+        lock_fallback_states: frozenset[str],
+        lock_key: int,
+        template_key: Callable[[str], int],
+        build_key: int,
+        project: str,
+        test_prefix: str,
+        template_prefix: str,
+        tmp_marker: str,
+        base_template: str,
+        build: TemplateBuild,
+    ) -> DatabaseConnection: ...
+
+
+class CloneDatabase(Protocol):
+    async def __call__(
+        self,
+        server_dsn: str,
+        template: str,
+        project: str,
+        *,
+        test_prefix: str,
+    ) -> str: ...
+
+
+class PoolFactory(Protocol):
+    def __call__(self, dsn: str) -> DatabasePool: ...
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class AdminBackend:
+    database_exists: DatabaseExists
+    create_database: CreateDatabase
+    drop_database: DropDatabase
+    list_databases: ListDatabases
+    with_database: WithDatabase
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class MigrateBackend:
+    load_migrator: LoadMigrator
+    connect: Connect
+    open_checker: OpenChecker
+    options: TargetOptions
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class TestingBackend:
+    ensure_template: EnsureTemplate
+    clone: CloneDatabase
+    pool: PoolFactory
+
+
 @dataclass(slots=True, kw_only=True, frozen=True)
 class TypeEntry:
     matcher: str
@@ -125,6 +378,9 @@ class CheckerBackend:
     range_leaves: Mapping[str, str]
     range_classes: frozenset[str]
     value_classes: Mapping[str, str]
+    admin: AdminBackend
+    migrate: MigrateBackend
+    testing: TestingBackend
 
 
 class _LoadedBackend(Protocol):

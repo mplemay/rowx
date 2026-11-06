@@ -1,27 +1,12 @@
 import ast
-import inspect
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 from io import StringIO
+from pathlib import Path
 from tokenize import COMMENT, TokenError, generate_tokens
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import rowx
-import rowx._backend
-import rowx._executor
-import rowx._query
-import rowx._rowplan
-import rowx._template
-import rowx.check.compare
-import rowx.check.discover
-import rowx.check.params
-import rowx.check.render
-import rowx.check.resolve
-import rowx.check.runner
-import rowx.errors
-
-if TYPE_CHECKING:
-    from types import ModuleType
 
 SCRIPT: Final[str] = (
     "import sys, rowx\n"
@@ -39,22 +24,6 @@ def test_backend_names_are_removed_from_rowx() -> None:
     assert not any(hasattr(rowx, name) for name in ("connect", "Connection", "ping"))
     assert hasattr(rowx, "Executor")
 
-
-CORE_RUNTIME_MODULES: Final[tuple[ModuleType, ...]] = (
-    rowx._query,
-    rowx._executor,
-    rowx._rowplan,
-    rowx._template,
-    rowx.errors,
-)
-CHECK_MODULES: Final[tuple[ModuleType, ...]] = (
-    rowx.check.compare,
-    rowx.check.params,
-    rowx.check.resolve,
-    rowx.check.runner,
-    rowx.check.render,
-    rowx.check.discover,
-)
 
 FORBIDDEN_BACKEND_SAMPLES: Final[tuple[str, ...]] = (
     "import rowx.postgres",
@@ -146,13 +115,48 @@ def _postgres_import(source: str) -> str | None:
     return None
 
 
-def test_core_runtime_modules_do_not_reference_a_backend() -> None:
-    for module in (*CORE_RUNTIME_MODULES, *CHECK_MODULES):
-        reason = _backend_reference(inspect.getsource(module))
-        assert reason is None, f"{module.__name__}: {reason}"
+# these are the modules this guard exists to keep off the native backend; the walk must actually see them
+GUARDED_MODULES: Final[frozenset[str]] = frozenset({
+    "rowx.testing",
+    "rowx.check.database",
+    "rowx.check.migrate",
+    "rowx.check.scratch",
+    "rowx.check.drift",
+    "rowx.check.cli",
+})
+
+
+def _module_name(root: Path, path: Path) -> str:
+    parts = path.relative_to(root).with_suffix("").parts
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    if not parts:
+        return "rowx"
+    return "rowx." + ".".join(parts)
+
+
+def _core_sources() -> list[tuple[str, str]]:
+    root = Path(rowx.__file__).resolve().parent
+    found: list[tuple[str, str]] = []
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if "postgres" in relative.parts or "__tests__" in relative.parts:
+            continue
+        found.append((_module_name(root, path), path.read_text(encoding="utf-8")))
+    return found
+
+
+def test_core_modules_do_not_reference_a_backend() -> None:
+    sources = _core_sources()
+    names = {name for name, _ in sources}
+    assert names >= GUARDED_MODULES
+    for name, source in sources:
+        reason = _postgres_import(source) if name == "rowx._backend" else _backend_reference(source)
+        assert reason is None, f"{name}: {reason}"
     for sample in FORBIDDEN_BACKEND_SAMPLES:
         assert _backend_reference(sample) is not None, sample
     assert _backend_reference("from rowx.errors import Error") is None
-    assert _postgres_import(inspect.getsource(rowx._backend)) is None
+    backend = next(source for name, source in sources if name == "rowx._backend")
+    assert _postgres_import(backend) is None
     assert _postgres_import("import rowx.postgres._backend") == "rowx.postgres._backend"
     assert _postgres_import('MODULE = "rowx.postgres._backend"\n') is None

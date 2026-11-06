@@ -196,6 +196,15 @@ def test_connect_rejects_the_field_forms_of_the_channel_binding_errors() -> None
         assert "Zq9" not in str(caught.value)
 
 
+def test_with_connect_timeout_replaces_only_the_timeout() -> None:
+    opts = ConnectOptions(host="h", database="db", connect_timeout=2)
+    updated = opts.with_connect_timeout(0.25)
+    assert updated is not opts
+    assert updated.connect_timeout == pytest.approx(0.25)
+    assert (updated.host, updated.database) == ("h", "db")
+    assert opts.connect_timeout == pytest.approx(2)
+
+
 def test_require_with_sslmode_disable_is_accepted_for_the_other_values() -> None:
     for value in ("disable", "prefer"):
         opts = ConnectOptions.from_dsn(f"host=h sslmode=disable channel_binding={value}")

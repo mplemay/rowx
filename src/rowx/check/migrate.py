@@ -2,23 +2,38 @@ import asyncio
 import json
 import sys
 from argparse import ArgumentTypeError, BooleanOptionalAction, Namespace
-from dataclasses import dataclass, replace
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Final
 
+from rowx._backend import (
+    BackendMissing,
+    Connect,
+    ConnectTarget,
+    DatabaseConnection,
+    Migration,
+    MigrationResult,
+    MigrationStatus,
+    Migrator,
+    UnsupportedSchemeError,
+    backend_for,
+    default_backend,
+)
 from rowx.check.config import Config, MigrateConfig, database_url, load_config
 from rowx.check.render import strip_controls
 from rowx.check.runner import CheckError, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
-from rowx.postgres import ConnectOptions, Migrator, connect
 
 if TYPE_CHECKING:
     from argparse import ArgumentParser, _SubParsersAction
     from collections.abc import Awaitable, Callable, Coroutine, Iterable
 
-    from rowx.postgres import Connection, Migration, MigrationResult, MigrationStatus
+# the connect-timeout tests wrap `connect`; a parsed target has no scheme, so the command records the backend it
+# selected from the URL before the attempts start
+_CONNECT: ContextVar[Connect | None] = ContextVar("rowx_migrate_connect", default=None)
 
 TIMESTAMP_FORMAT: Final[str] = "%Y%m%d%H%M%S"
 SEQUENTIAL_WIDTH: Final[int] = 4
@@ -117,30 +132,40 @@ def add_connect_timeout(parser: ArgumentParser) -> None:
     )
 
 
-def connect_options(dsn: str) -> ConnectOptions:
+def connect_options(dsn: str) -> ConnectTarget:
     try:
-        return ConnectOptions.from_dsn(dsn)
+        return backend_for(dsn).migrate.options(dsn)
+    except BackendMissing, UnsupportedSchemeError:
+        raise
     except Exception as error:
         # the parser's message can quote the DSN, so it is not repeated
         msg = "the database URL could not be parsed"
         raise CheckError(msg) from error
 
 
+# the connect-timeout tests wrap this name. A string selects its backend; a parsed target uses the one the command
+# recorded, because the target itself carries no scheme
+async def connect(target: str | ConnectTarget) -> DatabaseConnection:
+    if isinstance(target, str):
+        return await backend_for(target).migrate.connect(target)
+    selected = _CONNECT.get()
+    backend_connect = selected if selected is not None else default_backend().migrate.connect
+    return await backend_connect(target)
+
+
 # `options` with its connect timeout cut to the `remaining` seconds, keeping a shorter one from the URL
-def bounded(options: ConnectOptions, remaining: float) -> ConnectOptions:
+def bounded[C: ConnectTarget](options: C, remaining: float) -> C:
     limit = max(remaining, MIN_ATTEMPT)
     # zero is no timeout, as in libpq
     if options.connect_timeout is not None and options.connect_timeout > 0:
         limit = min(limit, options.connect_timeout)
-    return replace(options, connect_timeout=limit)
+    return options.with_connect_timeout(limit)
 
 
 # calls `attempt` until it succeeds, retrying connection failures and a starting-up server (57P03) until `seconds`
 # have passed. Each attempt is bounded by the time left, none starts after the deadline, and the last failure is the
 # error; `0` makes one attempt with the URL's own timeout
-async def wait_for_server[T](
-    attempt: Callable[[ConnectOptions], Awaitable[T]], options: ConnectOptions, seconds: float
-) -> T:
+async def wait_for_server[T, C: ConnectTarget](attempt: Callable[[C], Awaitable[T]], options: C, seconds: float) -> T:
     deadline = monotonic() + seconds
     delay = RETRY_FIRST
     while True:
@@ -201,8 +226,8 @@ def handle(args: Namespace) -> None:
 
 
 # `migrate run` with no flags, split so a caller can validate the files before any database IO
-def load_migrator(target: Target) -> Migrator:
-    return _load(target, Namespace())
+def load_migrator(target: Target, dsn: str | None = None) -> Migrator:
+    return _load(target, Namespace(), dsn)
 
 
 async def run_pending(migrator: Migrator, dsn: str) -> None:
@@ -215,10 +240,11 @@ def _describe(error: MigrateError) -> str:
     return f"{error}: {cause}" if cause is not None else str(error)
 
 
-def _load(target: Target, args: Namespace) -> Migrator:
+def _load(target: Target, args: Namespace, dsn: str | None = None) -> Migrator:
     migrate = target.migrate
+    selected = backend_for(dsn) if dsn is not None else default_backend()
     try:
-        return Migrator(
+        return selected.migrate.load_migrator(
             target.directory,
             table=migrate.table,
             create_schemas=migrate.create_schemas,
@@ -336,9 +362,14 @@ def _line(
 
 
 async def _database_command(target: Target, args: Namespace, dsn: str) -> None:
-    migrator = _load(target, args)
+    migrator = _load(target, args, dsn)
     # only the connection is retried, never the command, and it is the one the command uses
-    async with await wait_for_server(connect, connect_options(dsn), args.connect_timeout) as conn:
+    token = _CONNECT.set(backend_for(dsn).migrate.connect)
+    try:
+        opened = await wait_for_server(connect, connect_options(dsn), args.connect_timeout)
+    finally:
+        _CONNECT.reset(token)
+    async with opened as conn:
         match args.migrate_command:
             case "run":
                 await _run(migrator, conn, args)
@@ -350,7 +381,7 @@ async def _database_command(target: Target, args: Namespace, dsn: str) -> None:
                 await _info(migrator, conn, args.output_format)
 
 
-async def _run(migrator: Migrator, conn: Connection, args: Namespace) -> None:
+async def _run(migrator: Migrator, conn: DatabaseConnection, args: Namespace) -> None:
     for result in await migrator.run(conn, target=args.target_version, dry_run=args.dry_run):
         if args.dry_run:
             sys.stdout.write(_line("Would apply", result, "migrate", timed=False))
@@ -358,7 +389,7 @@ async def _run(migrator: Migrator, conn: Connection, args: Namespace) -> None:
             sys.stdout.write(_line("Applied", result, "migrate", result.elapsed))
 
 
-async def _revert(migrator: Migrator, conn: Connection, args: Namespace) -> None:
+async def _revert(migrator: Migrator, conn: DatabaseConnection, args: Namespace) -> None:
     # one revert, so the versions are chosen and reverted under one lock; without a target or `--all`, only the
     # latest applied migration is reverted, and `--target-version V` reverts every version above V
     for result in await migrator.revert(conn, target=args.target_version, all=args.all, dry_run=args.dry_run):
@@ -368,7 +399,7 @@ async def _revert(migrator: Migrator, conn: Connection, args: Namespace) -> None
             sys.stdout.write(_line("Reverted", result, "revert", result.elapsed))
 
 
-async def _skip(migrator: Migrator, conn: Connection, args: Namespace) -> None:
+async def _skip(migrator: Migrator, conn: DatabaseConnection, args: Namespace) -> None:
     for result in await migrator.skip(conn, target=args.target_version, dry_run=args.dry_run):
         verb = "Would skip" if args.dry_run else "Skipped"
         sys.stdout.write(_line(verb, result, "skip", timed=False))
@@ -392,7 +423,7 @@ def _status_json(status: MigrationStatus) -> dict[str, object]:
     }
 
 
-async def _info(migrator: Migrator, conn: Connection, output_format: str) -> None:
+async def _info(migrator: Migrator, conn: DatabaseConnection, output_format: str) -> None:
     statuses = await migrator.info(conn)
     if output_format == "json":
         sys.stdout.write(json.dumps([_status_json(status) for status in statuses], indent=2) + "\n")

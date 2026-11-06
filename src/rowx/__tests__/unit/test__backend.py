@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 import pytest
 
 from rowx._backend import UnsupportedSchemeError, backend_for, module_for
+from rowx.check.cli import main
 from rowx.check.resolve import HSTORE_LEAF, LEAVES, NETWORK_PAIRS
 from rowx.postgres._vocab import LeafName
 
@@ -212,6 +213,45 @@ def test_scratch_with_no_statement_does_not_import_scratch(tmp_path: Path) -> No
 )
 def test_postgres_dsns_select_the_postgres_backend(dsn: str) -> None:
     assert module_for(dsn) == "rowx.postgres._backend"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["migrate", "info", "--database-url", "sqlite://x"],
+        ["migrate", "run", "--database-url", "mysql://x"],
+        ["database", "create", "--database-url", "sqlite://x"],
+        ["database", "setup", "--database-url", "mysql://x"],
+    ],
+)
+def test_unknown_scheme_on_migrate_and_database_exits_two(tmp_path: Path, argv: list[str]) -> None:
+    result = _run_blocked(tmp_path, [*argv, "--connect-timeout", "0"])
+    assert result.returncode == 2, result.stderr
+    assert "unknown database scheme" in result.stderr
+    assert "rowx[postgres]" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["migrate", "info", "--database-url", "postgresql://u:pw@127.0.0.1:1/app"],
+        ["database", "create", "--database-url", "postgres://u:pw@127.0.0.1:1/app"],
+    ],
+)
+def test_postgres_url_on_migrate_and_database_is_not_an_unknown_scheme(
+    tmp_path: Path, argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # info reads the migration directory before it connects, so the directory has to exist
+    if argv[0] == "migrate":
+        (tmp_path / "migrations").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    code = main([*argv, "--connect-timeout", "0"])
+    err = capsys.readouterr().err
+    assert code == 2, err
+    assert "unknown database scheme" not in err
+    assert "could not reach the database" in err
+    assert "rowx[postgres]" not in err
 
 
 @pytest.mark.parametrize("dsn", ["sqlite://x", "embedded://x"])

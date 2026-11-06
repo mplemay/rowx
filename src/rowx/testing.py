@@ -1,28 +1,22 @@
 import asyncio
 import os
-import secrets
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from time import time
-from typing import TYPE_CHECKING, Any, Final, NoReturn
+from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol
 
 import pytest
 
-from rowx import query_unchecked
+from rowx._backend import DatabaseConnection, DatabasePool, Migrator, TemplateMaterialize, backend_for
 from rowx.check.config import DEFAULT_MIGRATE_TABLE, ConfigError, load_config
 from rowx.check.migrate import CheckError, load_migrator, resolve_target
 from rowx.check.runner import redact
-from rowx.check.scratch import ORPHAN_AGE_SECONDS, make_tag, tag_age
-from rowx.errors import DatabaseError, Error, InterfaceError, MigrateError
-from rowx.postgres import Connection, Migrator, Pool, connect
-from rowx.postgres._admin import create_database, drop_database, list_databases, with_database
+from rowx.errors import DatabaseError, InterfaceError, MigrateError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Coroutine, Iterable, Iterator
+    from collections.abc import Coroutine, Iterable, Iterator, Sequence
 
     from rowx.check.config import Config
 
@@ -77,8 +71,20 @@ def project_prefix(directory: Path) -> str:
     return sha256(str(directory.resolve()).encode()).hexdigest()[:PROJECT_LENGTH]
 
 
+class MigrationIdentity(Protocol):
+    @property
+    def version(self) -> int: ...
+    @property
+    def checksum(self) -> bytes: ...
+
+
+class MigrationSource(Protocol):
+    @property
+    def migrations(self) -> Sequence[MigrationIdentity]: ...
+
+
 def template_name(
-    migrator: Migrator | None,
+    migrator: MigrationSource | None,
     *,
     directory: Path,
     table: str = DEFAULT_MIGRATE_TABLE,
@@ -114,141 +120,42 @@ def build_key(name: str) -> int:
     return int.from_bytes(sha256(f"build:{name}".encode()).digest()[:8], signed=True)
 
 
-# a connection to the lock database, and the DSN it was opened with, so the session's other lock connections match it
-async def connect_lock(server_dsn: str) -> tuple[Connection, str]:
-    lock_dsn = with_database(server_dsn, LOCK_DATABASE)
-    try:
-        return await connect(lock_dsn), lock_dsn
-    except DatabaseError as error:
-        if error.sqlstate not in LOCK_FALLBACK_STATES:
-            raise
-    return await connect(server_dsn), server_dsn
+# the xdist test wraps this name; it forwards to the backend call that runs the template SQL
+async def build(
+    server_dsn: str,
+    lock: DatabaseConnection,
+    migrator: Migrator | None,
+    name: str,
+    materialize: TemplateMaterialize,
+    /,
+) -> None:
+    await materialize(server_dsn, lock, migrator, name)
 
 
-@asynccontextmanager
-async def locked(lock_dsn: str, key: int) -> AsyncGenerator[Connection]:
-    # a session lock on its own connection, released by closing it, so a crashed process never leaves it behind
-    async with await connect(lock_dsn) as conn:
-        await query_unchecked[tuple[()]](t"SELECT pg_catalog.pg_advisory_lock({key}::pg_catalog.int8)").execute(conn)
-        yield conn
-
-
-async def exists(conn: Connection, name: str) -> bool:
-    (found,) = await query_unchecked[tuple[bool]](
-        t"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname OPERATOR(pg_catalog.=) {name})"
-    ).one(conn)
-    return found
-
-
-async def stale_templates(conn: Connection, project: str, keep: str) -> list[str]:
-    prefix = f"{TEMPLATE_PREFIX}{project}_"
-    rows = await query_unchecked[tuple[str]](
-        t"SELECT datname FROM pg_catalog.pg_database WHERE pg_catalog.starts_with(datname, {prefix}) "
-        t"AND datname OPERATOR(pg_catalog.<>) {keep} "
-        t"AND position({TMP_MARKER} IN datname) OPERATOR(pg_catalog.=) 0 ORDER BY datname"
-    ).all(conn)
-    return [name for (name,) in rows]
-
-
-# a database left by a session that is gone (or killed): tagged over an hour ago, with no sessions. Best effort, as any
-# error (a listing that is refused, a database another role owns) is ignored
-async def sweep_orphans(server_dsn: str, project: str) -> None:
-    now = time()
-    with suppress(Error, OSError):
-        found = [
-            *await list_databases(server_dsn, f"{TEST_PREFIX}{project}_"),
-            *(
-                info
-                for info in await list_databases(server_dsn, f"{TEMPLATE_PREFIX}{project}_")
-                if TMP_MARKER in info.name
-            ),
-        ]
-        for info in found:
-            age = tag_age(info.comment, now)
-            if age is None or age <= ORPHAN_AGE_SECONDS or info.sessions > 0:
-                continue
-            with suppress(Error, OSError):
-                await drop_database(server_dsn, info.name)
-
-
-async def build(server_dsn: str, lock: Connection, migrator: Migrator | None, name: str) -> None:
-    tmp = f"{name}{TMP_MARKER}{secrets.token_hex(8)}"
-    await create_database(server_dsn, tmp, template=BASE_TEMPLATE, comment=make_tag())
-    try:
-        if migrator is not None:
-            # closed before the rename, so nothing is connected to the template when it is cloned
-            async with await connect(with_database(server_dsn, tmp)) as conn:
-                await migrator.run(conn)
-        # utility statements take no parameters, so the names are spliced as identifiers
-        await query_unchecked[tuple[()]](t"ALTER DATABASE {tmp:ident} RENAME TO {name:ident}").execute(lock)
-    except BaseException:
-        with suppress(Error, OSError):
-            await drop_database(server_dsn, tmp, force=True)
-        raise
-    # the name now exists, so a failure from here on is cleaned up under it
-    try:
-        await query_unchecked[tuple[()]](t"COMMENT ON DATABASE {name:ident} IS NULL").execute(lock)
-        await query_unchecked[tuple[()]](
-            t"ALTER DATABASE {name:ident} WITH IS_TEMPLATE true ALLOW_CONNECTIONS false"
-        ).execute(lock)
-    except BaseException:
-        with suppress(Error, OSError):
-            await drop_database(server_dsn, name, force=True)
-        raise
-
-
-async def drop_stale(server_dsn: str, lock: Connection, project: str, keep: str) -> None:
-    for stale in await stale_templates(lock, project, keep):
-        key = template_key(stale)
-        # a template another live session holds (its shared lock) is still in use, even while no clone is running
-        (free,) = await query_unchecked[tuple[bool]](
-            t"SELECT pg_catalog.pg_try_advisory_lock({LOCK_KEY}::pg_catalog.int4, {key}::pg_catalog.int4)"
-        ).one(lock)
-        if not free:
-            continue
-        try:
-            # best effort and never FORCE: a template of another role, or one in use, stays
-            with suppress(Error, OSError):
-                await query_unchecked[tuple[()]](t"ALTER DATABASE {stale:ident} WITH IS_TEMPLATE false").execute(lock)
-                await drop_database(server_dsn, stale)
-        finally:
-            await query_unchecked[tuple[()]](
-                t"SELECT pg_catalog.pg_advisory_unlock({LOCK_KEY}::pg_catalog.int4, {key}::pg_catalog.int4)"
-            ).execute(lock)
-
-
-# reuses the template or builds it, under the build lock (`lock`) taken before the lookup
-async def prepare(server_dsn: str, lock: Connection, migrator: Migrator | None, name: str, *, keep_stale: bool) -> None:
-    # a database under the final name is complete by construction: it is renamed there only once migrated
-    if await exists(lock, name):
-        return
-    await build(server_dsn, lock, migrator, name)
-    if not keep_stale:
-        await drop_stale(server_dsn, lock, project_of(name), name)
-
-
-# returns a connection that holds the session's claim on the template until it is closed. The claim is taken under the
-# build lock, so no other session's cleanup can drop the template between the lookup and the claim
-async def ensure_template(server_dsn: str, migrator: Migrator | None, name: str, *, keep_stale: bool) -> Connection:
-    await sweep_orphans(server_dsn, project_of(name))
-    hold, lock_dsn = await connect_lock(server_dsn)
-    key = template_key(name)
-    try:
-        async with locked(lock_dsn, build_key(name)) as lock:
-            await query_unchecked[tuple[()]](
-                t"SELECT pg_catalog.pg_advisory_lock_shared({LOCK_KEY}::pg_catalog.int4, {key}::pg_catalog.int4)"
-            ).execute(hold)
-            await prepare(server_dsn, lock, migrator, name, keep_stale=keep_stale)
-    except BaseException:
-        await hold.close()
-        raise
-    return hold
+async def ensure_template(
+    server_dsn: str, migrator: Migrator | None, name: str, *, keep_stale: bool
+) -> DatabaseConnection:
+    return await backend_for(server_dsn).testing.ensure_template(
+        server_dsn,
+        migrator,
+        name,
+        keep_stale=keep_stale,
+        lock_database=LOCK_DATABASE,
+        lock_fallback_states=LOCK_FALLBACK_STATES,
+        lock_key=LOCK_KEY,
+        template_key=template_key,
+        build_key=build_key(name),
+        project=project_of(name),
+        test_prefix=TEST_PREFIX,
+        template_prefix=TEMPLATE_PREFIX,
+        tmp_marker=TMP_MARKER,
+        base_template=BASE_TEMPLATE,
+        build=build,
+    )
 
 
 async def clone(server_dsn: str, template: str, project: str) -> str:
-    name = f"{TEST_PREFIX}{project}_{secrets.token_hex(8)}"
-    await create_database(server_dsn, name, template=template, comment=make_tag())
-    return name
+    return await backend_for(server_dsn).testing.clone(server_dsn, template, project, test_prefix=TEST_PREFIX)
 
 
 def fail(message: str, server_dsn: str) -> NoReturn:
@@ -300,7 +207,7 @@ def rowx_template(request: pytest.FixtureRequest) -> Iterator[Session]:
     if rowx_config.migrate is not None or ini:
         target = resolve_target(rowx_config, rootdir / ini if ini else None)
         try:
-            migrator = load_migrator(target)
+            migrator = load_migrator(target, server_dsn)
         except CheckError as error:
             fail(f"rowx: {error}", server_dsn)
         directory = target.directory
@@ -331,17 +238,17 @@ def rowx_database_url(rowx_template: Session) -> Iterator[str]:
     except (DatabaseError, InterfaceError, OSError, ValueError) as error:
         fail(f"rowx: could not clone the template database: {error}", server_dsn)
     try:
-        yield with_database(server_dsn, name)
+        yield backend_for(server_dsn).admin.with_database(server_dsn, name)
     finally:
         try:
-            blocking(drop_database(server_dsn, name, force=True))
+            blocking(backend_for(server_dsn).admin.drop_database(server_dsn, name, force=True))
         except (DatabaseError, InterfaceError, OSError) as error:
             fail(f"rowx: could not drop the test database {name}: {error}", server_dsn)
 
 
 @pytest.fixture
-def rowx_connection(rowx_database_url: str) -> Iterator[Connection]:
-    conn = blocking(connect(rowx_database_url))
+def rowx_connection(rowx_database_url: str) -> Iterator[DatabaseConnection]:
+    conn = blocking(backend_for(rowx_database_url).migrate.connect(rowx_database_url))
     try:
         yield conn
     finally:
@@ -349,8 +256,8 @@ def rowx_connection(rowx_database_url: str) -> Iterator[Connection]:
 
 
 @pytest.fixture
-def rowx_pool(rowx_database_url: str) -> Iterator[Pool]:
-    pool = Pool(rowx_database_url)
+def rowx_pool(rowx_database_url: str) -> Iterator[DatabasePool]:
+    pool = backend_for(rowx_database_url).testing.pool(rowx_database_url)
     blocking(pool.open())
     try:
         yield pool
