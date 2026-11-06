@@ -33,43 +33,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           TAG_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == push ]]; then
-            if [[ ! "$TAG_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-              echo '::error::Release tag must be a stable vX.Y.Z version.'
-              exit 1
-            fi
-            if ! git merge-base --is-ancestor HEAD origin/main; then
-              echo '::error::Release tag must point to a commit on main.'
-              exit 1
-            fi
-          fi
-          python - <<'PY'
-          import os
-          import tomllib
-          from pathlib import Path
-
-          def read(path):
-              return tomllib.loads(Path(path).read_text(encoding="utf-8"))
-
-          version = read("pyproject.toml")["project"]["version"]
-          versions = {"Cargo.toml": read("Cargo.toml")["workspace"]["package"]["version"]}
-          names = {"rowx-core", "rowx-postgres", "rowx-postgres-py", "rowx-py", "rowx-py-core"}
-          for package in read("Cargo.lock")["package"]:
-              if package["name"] in names:
-                  versions[package["name"]] = package["version"]
-          if not names <= versions.keys():
-              raise SystemExit("Missing workspace packages in Cargo.lock")
-          versions["uv.lock"] = next(p["version"] for p in read("uv.lock")["package"] if p["name"] == "rowx")
-          if os.environ["EVENT_NAME"] == "push":
-              versions["tag"] = os.environ["TAG_NAME"][1:]
-          if any(value != version for value in versions.values()):
-              raise SystemExit(f"Release version mismatch: expected {version}, got {versions}")
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-              print(f"version={version}", file=output)
-          PY
-          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+        run: scripts/validate-release.sh
 
   build-wheels:
     name: Wheel (${{ matrix.name }})
@@ -158,6 +122,10 @@ jobs:
           - { name: macos-x86_64, os: macos-15-intel }
           - { name: windows-x86_64, os: windows-latest }
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.14"
@@ -170,17 +138,7 @@ jobs:
 
       - name: Install and check wheel
         shell: bash
-        run: |
-          set -euo pipefail
-          wheels=(dist/*.whl)
-          if [[ ${#wheels[@]} != 1 || ! -f ${wheels[0]} ]]; then
-            echo '::error::Expected exactly one wheel.'
-            exit 1
-          fi
-          wheel="$GITHUB_WORKSPACE/${wheels[0]}"
-          cd "$RUNNER_TEMP"
-          uv run --no-project --python 3.14 --with "$wheel" python -c 'import rowx, rowx._core, rowx._core.postgres'
-          uv run --no-project --python 3.14 --with "$wheel" rowx --help
+        run: scripts/smoke-install-wheel.sh
 
   smoke:
     name: Smoke test (${{ matrix.name }}, ${{ matrix.python-version }})
@@ -220,12 +178,7 @@ jobs:
           path: dist/
 
       - name: Start postgres
-        run: |
-          docker run -d --name pg -p 5432:5432 \
-            -e POSTGRES_USER=rowx -e POSTGRES_PASSWORD=rowx -e POSTGRES_DB=rowx \
-            --health-cmd "pg_isready -U rowx -d rowx" --health-interval 2s --health-retries 30 \
-            postgres:18
-          until [ "$(docker inspect -f '{{.State.Health.Status}}' pg)" = healthy ]; do sleep 1; done
+        run: scripts/start-smoke-postgres.sh
 
       - name: Apply the example schema
         run: docker exec -i pg psql -U rowx -d rowx -v ON_ERROR_STOP=1 < examples/app/schema.sql
@@ -245,6 +198,10 @@ jobs:
       id-token: write # PyPI trusted publishing (OIDC)
 
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist/
@@ -257,24 +214,6 @@ jobs:
       - name: Validate distributions
         env:
           VERSION: ${{ needs.validate.outputs.version }}
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          version = os.environ["VERSION"]
-          files = list(Path("dist").iterdir())
-          wheels = [p.name for p in files if p.name.startswith(f"rowx-{version}-") and p.suffix == ".whl"]
-          expected = (
-              ("manylinux", "x86_64"), ("manylinux", "aarch64"),
-              ("macosx", "x86_64"), ("macosx", "arm64"), ("win_amd64",),
-          )
-          if len(files) != 6 or len(wheels) != 5 or not all(
-              sum(all(tag in name for tag in target) for name in wheels) == 1 for target in expected
-          ):
-              raise SystemExit(f"Unexpected distributions: {[p.name for p in files]}")
-          if not (Path("dist") / f"rowx-{version}.tar.gz").is_file():
-              raise SystemExit("Source distribution is missing or has the wrong version")
-          PY
+        run: python scripts/validate-distributions.py
 
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

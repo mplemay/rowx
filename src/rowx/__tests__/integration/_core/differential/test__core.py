@@ -17,9 +17,9 @@ from psycopg.types.hstore import register_hstore
 from psycopg.types.range import Range as PsycopgRange
 
 from rowx import postgres
-from rowx._core.postgres import type_table
 from rowx.errors import DecodeError
 from rowx.postgres import Money, Range, connect
+from rowx.postgres._core import type_table
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 

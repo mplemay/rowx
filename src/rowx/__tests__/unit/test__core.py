@@ -7,22 +7,22 @@ from typing import Final
 
 import pytest
 
-from rowx._core.postgres import Connection, _param_formats, map_columns
 from rowx.postgres import Box, Circle, Line, LineSegment, Money, Path, Point, Polygon, Range
+from rowx.postgres._core import Connection, _param_formats, map_columns
 
 
 def test_postgres_submodule_imports_with_from_import() -> None:
-    assert Connection.__module__ == "rowx._core.postgres"
+    assert Connection.__module__ == "rowx.postgres._core"
 
 
 def test_postgres_submodule_imports_with_importlib() -> None:
-    module = importlib.import_module("rowx._core.postgres")
-    assert module.Connection.__module__ == "rowx._core.postgres"
+    module = importlib.import_module("rowx.postgres._core")
+    assert module.Connection.__module__ == "rowx.postgres._core"
     assert module.Connection is Connection
 
 
 def test_postgres_submodule_is_registered_in_sys_modules() -> None:
-    assert sys.modules["rowx._core.postgres"] is importlib.import_module("rowx._core.postgres")
+    assert sys.modules["rowx.postgres._core"] is importlib.import_module("rowx.postgres._core")
 
 
 type FieldSpec = tuple[tuple[str, ...] | None, bool]

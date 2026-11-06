@@ -6,7 +6,7 @@ import rowx
 
 SCRIPT: Final[str] = (
     "import sys, rowx\n"
-    "loaded = [m for m in ('rowx.postgres', 'rowx._core', 'rowx._core.postgres') if m in sys.modules]\n"
+    "loaded = [m for m in ('rowx.postgres', 'rowx.postgres._core') if m in sys.modules]\n"
     "assert not loaded, loaded\n"
 )
 

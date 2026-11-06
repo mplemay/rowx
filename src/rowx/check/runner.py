@@ -7,14 +7,6 @@ from re import DOTALL, IGNORECASE, VERBOSE, Pattern, compile as re_compile, esca
 from typing import TYPE_CHECKING, Final
 from urllib.parse import quote, unquote
 
-from rowx._core.postgres import (
-    ColumnInfo,
-    Connection,
-    Describe,
-    connect_checker,
-    describe as describe_impl,
-    parse_dsn as parse_dsn_impl,
-)
 from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
 from rowx.check.construction import template_reports
 from rowx.check.discover import discover_source, too_deep
@@ -24,6 +16,14 @@ from rowx.check.render import Report, null_reason_note
 from rowx.check.resolve import ModuleGraph, RowType, resolve_row_type, roots_for
 from rowx.check.sourcemap import SourceMap, SourceMapper
 from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError
+from rowx.postgres._core import (
+    ColumnInfo,
+    Connection,
+    Describe,
+    connect_checker,
+    describe as describe_impl,
+    parse_dsn as parse_dsn_impl,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator

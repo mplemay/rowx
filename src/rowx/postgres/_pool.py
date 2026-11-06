@@ -2,16 +2,16 @@ import asyncio
 from collections.abc import Awaitable, Callable, Generator, Sequence
 from typing import TYPE_CHECKING, Any, Final, Self
 
-from rowx._core.postgres import Pool as PoolImpl
 from rowx.errors import InterfaceError
 from rowx.postgres._connection import RESET_QUERY, Connection
+from rowx.postgres._core import Pool as PoolImpl
 from rowx.postgres._options import ConnectOptions
 
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from rowx._core.postgres import Connection as ConnectionImpl, RowShape, RowStream as RowStreamImpl
     from rowx._executor import StreamHandle
+    from rowx.postgres._core import Connection as ConnectionImpl, RowShape, RowStream as RowStreamImpl
     from rowx.postgres._transaction import Transaction
 
 type Hook = Callable[[Connection], Awaitable[None]]

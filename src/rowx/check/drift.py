@@ -1,11 +1,11 @@
 from collections import Counter
 from typing import TYPE_CHECKING, Final
 
-from rowx._core.postgres import connect_checker
 from rowx.check.migrate import load_migrator, resolve_target
 from rowx.check.runner import CheckError, redact
 from rowx.errors import DatabaseError, InterfaceError, MigrateError
 from rowx.postgres import Connection
+from rowx.postgres._core import connect_checker
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

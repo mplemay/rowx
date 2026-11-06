@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 
-import rowx._core.postgres as core_postgres
+import rowx.postgres._core as core_postgres
 from rowx import query
 from rowx.__tests__.conformance.row_types import (
     IMPORTED_TYPE_VARIABLE_CASES,
@@ -19,10 +19,10 @@ from rowx.__tests__.conformance.row_types import (
     NamedPlan,
     Plan,
 )
-from rowx._core.postgres import RowShape
 from rowx._rowplan import row_plan
 from rowx.errors import InterfaceError
 from rowx.postgres import Connection, connect
+from rowx.postgres._core import RowShape
 
 if TYPE_CHECKING:
     from collections.abc import Callable

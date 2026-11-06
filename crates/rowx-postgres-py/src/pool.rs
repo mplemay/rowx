@@ -28,7 +28,7 @@ fn optional_seconds(name: &str, secs: Option<f64>) -> PyResult<Option<Duration>>
     secs.map(|secs| seconds(name, secs)).transpose()
 }
 
-#[pyclass(frozen, module = "rowx._core.postgres", name = "Pool")]
+#[pyclass(frozen, module = "rowx.postgres._core", name = "Pool")]
 #[derive(Debug)]
 pub struct Pool {
     inner: PgPool,

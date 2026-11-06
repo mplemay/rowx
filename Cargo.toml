@@ -5,7 +5,6 @@ members = [
     "crates/rowx-postgres",
     "crates/rowx-py-core",
     "crates/rowx-postgres-py",
-    "crates/rowx-py",
 ]
 # cargo-fuzz targets need nightly and unsafe code, so they stay out of the workspace and its lints
 exclude = ["fuzz"]
@@ -23,7 +22,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 rowx-core = { path = "crates/rowx-core" }
 rowx-postgres = { path = "crates/rowx-postgres" }
 rowx-py-core = { path = "crates/rowx-py-core" }
-rowx-postgres-py = { path = "crates/rowx-postgres-py" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

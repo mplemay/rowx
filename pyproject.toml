@@ -17,9 +17,9 @@ pytest = ["pytest>=9.2.0"]
 rowx = "rowx.check.cli:main"
 
 [tool.maturin]
-manifest-path = "crates/rowx-py/Cargo.toml"
+manifest-path = "crates/rowx-postgres-py/Cargo.toml"
 features = ["pyo3/extension-module"]
-module-name = "rowx._core"
+module-name = "rowx.postgres._core"
 python-packages = ["rowx"]
 python-source = "src"
 

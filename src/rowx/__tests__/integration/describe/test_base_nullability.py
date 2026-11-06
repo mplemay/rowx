@@ -5,7 +5,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from rowx.__tests__.integration.describe.test_base import run_checker, run_describe
-from rowx._core.postgres import _catalog_queries, describe
+from rowx.postgres._core import _catalog_queries, describe
 
 pytestmark = [pytest.mark.integration, pytest.mark.db]
 
