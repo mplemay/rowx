@@ -572,22 +572,23 @@ def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Re
     ]
 
 
-def _file_sites(
+def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     graph: ModuleGraph,
     roots: tuple[Path, ...],
     path: Path,
     result: FileResult,
     backend: CheckerBackend | None,
+    dsn: str | None = None,
 ) -> tuple[list[Report], list[_Site]]:
     reports: list[Report] = []
     sites: list[_Site] = []
-    inference = ParamInference(result.tree, backend) if result.tree is not None else None
+    inference = ParamInference(result.tree, backend, dsn) if result.tree is not None else None
     mapper = SourceMapper(result.source or "")
     reports.extend(template_reports(path, result.templates, mapper, inference))
     for call in result.calls:
         if call.template is None:
             continue
-        resolution = resolve_row_type(graph, call, roots, backend)
+        resolution = resolve_row_type(graph, call, roots, backend, dsn)
         if resolution.diagnostic is not None:
             reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
         sites.append(
@@ -607,6 +608,7 @@ def _collect(
     files: Iterable[Path],
     stats: Statistics,
     backend: CheckerBackend | None,
+    dsn: str | None = None,
 ) -> tuple[list[_Site], list[Report], dict[Path, str]]:
     graph = ModuleGraph()
     sites: list[_Site] = []
@@ -621,7 +623,7 @@ def _collect(
         if result.source is None:
             continue
         try:
-            file_reports, file_sites = _file_sites(graph, roots, path, result, backend)
+            file_reports, file_sites = _file_sites(graph, roots, path, result, backend, dsn)
         except RecursionError:
             # fail closed for this file only: nothing else it produced is trusted
             reports.extend(Report(diagnostic=diagnostic) for diagnostic in too_deep(path).diagnostics)
@@ -645,9 +647,7 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
     hooks = hooks or Hooks()
     stats = Statistics()
     selected = backend
-    if selected is None and dsn is not None and dsn.strip():
-        selected = backend_for(dsn)
-    sites, reports, sources = _collect(config, files, stats, selected)
+    sites, reports, sources = _collect(config, files, stats, selected, dsn)
     statements = sorted({site.sourcemap.sql for site in sites})
     stats.distinct_sql = len(statements)
     if statements:

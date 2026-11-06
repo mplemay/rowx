@@ -2,12 +2,12 @@ import asyncio
 import os
 import sys
 from argparse import ArgumentParser, Namespace
-from functools import partial
+from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
-from rowx._backend import BackendMissing, CheckerBackend, UnsupportedSchemeError, backend_for
+from rowx._backend import BackendMissing, UnsupportedSchemeError
 from rowx.check.config import Config, ConfigError, database_url, load_config
 from rowx.check.render import render_json, render_text, strip_controls
 from rowx.check.runner import CheckError, Hooks, RunResult, redact, run_check
@@ -86,49 +86,42 @@ class _Built(Protocol):
     def sweep(self) -> None: ...
 
 
-def _scratch_hooks(
-    config: Config, dsn: str
-) -> tuple[_Built, Callable[[str], AbstractAsyncContextManager[ScratchBuild]]]:
-    from rowx.check.migrate import load_migrator, resolve_target  # ruff: ignore[import-outside-top-level]
-    from rowx.check.scratch import Scratch  # ruff: ignore[import-outside-top-level]
-
-    built = Scratch(dsn)
-    migrator = load_migrator(resolve_target(config, None))
-
-    def _open(_opened: str) -> AbstractAsyncContextManager[ScratchBuild]:
-        return built.session(migrator)
-
-    return built, _open
+@dataclass(slots=True, kw_only=True)
+class _HookState:
+    built: _Built | None = None
+    drift_error: type[CheckError] | None = None
 
 
-def _drift_hooks(config: Config) -> tuple[type[CheckError], Callable[[str], Awaitable[int | None]]]:
-    from rowx.check.drift import DriftError, check_drift  # ruff: ignore[import-outside-top-level]
+def _scratch_hook(config: Config, state: _HookState) -> Callable[[str], AbstractAsyncContextManager[ScratchBuild]]:
+    def _open(url: str) -> AbstractAsyncContextManager[ScratchBuild]:
+        from rowx.check.migrate import load_migrator, resolve_target  # ruff: ignore[import-outside-top-level]
+        from rowx.check.scratch import Scratch  # ruff: ignore[import-outside-top-level]
 
-    return DriftError, partial(check_drift, config)
+        scratch = Scratch(url)
+        # recorded before the session so an interrupted drop is still swept
+        state.built = scratch
+        return scratch.session(load_migrator(resolve_target(config, None)))
+
+    return _open
 
 
-def _check_hooks(
-    config: Config,
-    dsn: str,
-    *,
-    scratch: bool,
-    drift: bool,
-) -> tuple[
-    CheckerBackend | None,
-    _Built | None,
-    Callable[[str], AbstractAsyncContextManager[ScratchBuild]] | None,
-    Callable[[str], Awaitable[int | None]] | None,
-    type[CheckError] | None,
-]:
-    use_drift = drift and not scratch and config.migrate is not None
-    backend = backend_for(dsn) if scratch or use_drift else None
+def _drift_hook(config: Config, state: _HookState) -> Callable[[str], Awaitable[int | None]]:
+    async def _gate(url: str) -> int | None:
+        from rowx.check.drift import DriftError, check_drift  # ruff: ignore[import-outside-top-level]
+
+        # captured before the call so the handler can re-raise this instance unredacted
+        state.drift_error = DriftError
+        return await check_drift(config, url)
+
+    return _gate
+
+
+def _check_hooks(config: Config, state: _HookState, *, scratch: bool, drift: bool) -> Hooks:
     if scratch:
-        built, session = _scratch_hooks(config, dsn)
-        return backend, built, session, None, None
-    if use_drift:
-        drift_error, gate = _drift_hooks(config)
-        return backend, None, None, gate, drift_error
-    return None, None, None, None, None
+        return Hooks(scratch=_scratch_hook(config, state))
+    if drift and config.migrate is not None:
+        return Hooks(gate=_drift_hook(config, state))
+    return Hooks()
 
 
 def _check(args: Namespace) -> tuple[RunResult, Path]:
@@ -140,16 +133,19 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
         raise CheckError(msg)
     files = discover_files(config, cwd, args.paths)
     dsn = database_url(config, args.database_url)
-    backend, built, session, gate, drift_error = _check_hooks(
-        config,
-        dsn,
-        scratch=scratch,
-        drift=not args.no_drift_check,
-    )
+    state = _HookState()
     try:
-        checked = asyncio.run(run_check(config, files, dsn, args.jobs, Hooks(gate=gate, scratch=session), backend))
+        checked = asyncio.run(
+            run_check(
+                config,
+                files,
+                dsn,
+                args.jobs,
+                _check_hooks(config, state, scratch=scratch, drift=not args.no_drift_check),
+            ),
+        )
     except CheckError as error:
-        if drift_error is not None and isinstance(error, drift_error):
+        if state.drift_error is not None and isinstance(error, state.drift_error):
             raise
         raise CheckError(strip_controls(redact(str(error), dsn))) from None
     except BackendMissing, UnsupportedSchemeError:
@@ -160,8 +156,8 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
     else:
         return checked, config.root
     finally:
-        if built is not None:
-            built.sweep()
+        if state.built is not None:
+            state.built.sweep()
 
 
 def _subcommand(handler: Callable[[Namespace], None], args: Namespace) -> int:

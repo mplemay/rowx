@@ -7,7 +7,7 @@ from sys import stdlib_module_names
 from tokenize import detect_encoding
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx._backend import CheckerBackend, default_backend
+from rowx._backend import CheckerBackend, backend_for, default_backend
 from rowx.check.model import Diagnostic, QueryCall, Rule, Span
 
 if TYPE_CHECKING:
@@ -793,10 +793,12 @@ class _Resolver:
         graph: ModuleGraph,
         roots: tuple[Path, ...],
         backend: CheckerBackend | None = None,
+        dsn: str | None = None,
     ) -> None:
         self._graph = graph
         self._roots = roots
         self._backend = backend
+        self._dsn = dsn
         self.alias: AliasSite | None = None
         # set while a named type's field annotation is evaluated: a string is parsed, and a name imported only under
         # `TYPE_CHECKING` is rejected, because `get_type_hints` would fail on it
@@ -812,9 +814,12 @@ class _Resolver:
         self._mros: dict[ClassKey, list[_Class]] = {}
 
     def _selected(self) -> CheckerBackend:
-        if self._backend is None:
-            self._backend = default_backend()
-        return self._backend
+        if self._backend is not None:
+            return self._backend
+        # a failure is not stored, so a later lookup tries again
+        selected = backend_for(self._dsn) if self._dsn is not None and self._dsn.strip() else default_backend()
+        self._backend = selected
+        return selected
 
     def _find(self, module: _Module, level: int, dotted: str | None) -> _Module | None:
         if level == 0:
@@ -2388,8 +2393,9 @@ def resolve_row_type(
     call: QueryCall,
     roots: tuple[Path, ...],
     backend: CheckerBackend | None = None,
+    dsn: str | None = None,
 ) -> Resolution:
-    resolver = _Resolver(graph, roots, backend)
+    resolver = _Resolver(graph, roots, backend, dsn)
     try:
         return Resolution(row_type=resolver.resolve(call))
     except RejectError as reject:

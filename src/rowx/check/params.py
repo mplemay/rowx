@@ -2,7 +2,7 @@ import ast
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from rowx._backend import CheckerBackend, default_backend
+from rowx._backend import CheckerBackend, backend_for, default_backend
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -155,8 +155,9 @@ def _type_params_scope(
 
 
 class ParamInference:
-    def __init__(self, tree: ast.Module, backend: CheckerBackend | None = None) -> None:
+    def __init__(self, tree: ast.Module, backend: CheckerBackend | None = None, dsn: str | None = None) -> None:
         self._backend = backend
+        self._dsn = dsn
         self._classes: dict[str, ParamName] | None = None
         self._module = _Scope("module", None)
         self._scopes: dict[int, _Scope] = {}
@@ -338,11 +339,18 @@ class ParamInference:
                 return None if name is None else ParamType(name)
         return None
 
+    def _selected(self) -> CheckerBackend:
+        if self._backend is not None:
+            return self._backend
+        # a failure is not stored, so a later lookup tries again
+        selected = backend_for(self._dsn) if self._dsn is not None and self._dsn.strip() else default_backend()
+        self._backend = selected
+        return selected
+
     def _value_classes(self) -> Mapping[str, ParamName]:
         if self._classes is not None:
             return self._classes
-        backend = self._backend if self._backend is not None else default_backend()
-        classes = {key: cast("ParamName", value) for key, value in backend.param_classes.items()}
+        classes = {key: cast("ParamName", value) for key, value in self._selected().param_classes.items()}
         self._classes = classes
         return classes
 
@@ -357,7 +365,7 @@ class ParamInference:
         return self._backend_name(qualified)
 
     def _backend_name(self, qualified: str) -> ParamName | None:
-        # value classes live on the backend; a builtin call such as `str(1)` is not one
+        # param_classes live on the backend; a builtin call such as `str(1)` is not one
         if not qualified.startswith("rowx."):
             return None
         return self._value_classes().get(qualified)

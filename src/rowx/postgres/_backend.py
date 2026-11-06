@@ -10,30 +10,6 @@ from rowx._backend import (
 )
 from rowx.postgres._core import connect_checker, describe, map_columns, parse_dsn, type_table
 
-PARAM_CLASSES: Final[dict[str, str]] = {
-    "rowx.postgres.Range": "Range",
-    "rowx.postgres._range.Range": "Range",
-    "rowx.postgres.Money": "Money",
-    "rowx.postgres._money.Money": "Money",
-    "rowx.postgres.Interval": "Interval",
-    "rowx.postgres._interval.Interval": "Interval",
-    "rowx.postgres.Point": "Point",
-    "rowx.postgres._geometric.Point": "Point",
-    "rowx.postgres.Line": "Line",
-    "rowx.postgres._geometric.Line": "Line",
-    "rowx.postgres.LineSegment": "LineSegment",
-    "rowx.postgres._geometric.LineSegment": "LineSegment",
-    "rowx.postgres.Box": "Box",
-    "rowx.postgres._geometric.Box": "Box",
-    "rowx.postgres.Path": "Path",
-    "rowx.postgres._geometric.Path": "Path",
-    "rowx.postgres.Polygon": "Polygon",
-    "rowx.postgres._geometric.Polygon": "Polygon",
-    "rowx.postgres.Circle": "Circle",
-    "rowx.postgres._geometric.Circle": "Circle",
-    "rowx.postgres.Cube": "Cube",
-    "rowx.postgres._cube.Cube": "Cube",
-}
 VALUE_LEAVES: Final[dict[str, str]] = {
     "rowx.postgres.Money": "rowx.postgres.Money",
     "rowx.postgres._money.Money": "rowx.postgres.Money",
@@ -87,7 +63,7 @@ def load() -> CheckerBackend:
         parse_dsn=cast("ParseDsn", parse_dsn),
         map_columns=cast("MapColumns", map_columns),
         types=_types(),
-        param_classes=PARAM_CLASSES,
+        param_classes=VALUE_CLASSES,
         value_leaves=VALUE_LEAVES,
         range_leaves=RANGE_LEAVES,
         range_classes=RANGE_CLASSES,
