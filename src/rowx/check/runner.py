@@ -2,11 +2,20 @@ import ast
 import asyncio
 from collections import Counter, deque
 from contextlib import AsyncExitStack, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from re import DOTALL, IGNORECASE, VERBOSE, Pattern, compile as re_compile, escape as re_escape, sub
 from typing import TYPE_CHECKING, Final
 from urllib.parse import quote, unquote
 
+from rowx._backend import (
+    CheckerBackend,
+    ColumnInfo,
+    Connection,
+    Describe,
+    UnsupportedSchemeError,
+    backend_for,
+)
 from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
 from rowx.check.construction import template_reports
 from rowx.check.discover import discover_source, too_deep
@@ -16,14 +25,6 @@ from rowx.check.render import Report, null_reason_note
 from rowx.check.resolve import ModuleGraph, RowType, resolve_row_type, roots_for
 from rowx.check.sourcemap import SourceMap, SourceMapper
 from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError
-from rowx.postgres._core import (
-    ColumnInfo,
-    Connection,
-    Describe,
-    connect_checker,
-    describe as describe_impl,
-    parse_dsn as parse_dsn_impl,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator
@@ -68,6 +69,7 @@ PASSWORD_PARAM_KV: Final = re_compile(
 )
 URL_SCHEME: Final = re_compile(r"\s*postgres(?:ql)?://")
 USERINFO: Final = re_compile(r"(?P<key>://[^/?#\s:@]*:)(?P<value>[^/?#\s]*)@")
+_SELECTED: ContextVar[CheckerBackend | None] = ContextVar("rowx_checker_backend", default=None)
 
 
 class CheckError(Exception):
@@ -138,9 +140,11 @@ def _spellings(raw: str) -> set[str]:
 
 # the decoded values the options parser finds, which covers a spelling the syntax scan above doesn't know
 def _parsed_secrets(dsn: str) -> set[str]:
+    if not dsn.strip():
+        return set()
     try:
-        options = parse_dsn_impl(dsn)
-    except InterfaceError:
+        options = backend_for(dsn).parse_dsn(dsn)
+    except InterfaceError, UnsupportedSchemeError:
         return set()
     found: set[str] = {str(options.get("password") or "")}
     found.update(str(value) for key, value in options.get("extra", {}).items() if "password" in key)
@@ -195,12 +199,26 @@ def redact(text: str, dsn: str) -> str:
     return _mask_syntax("".join(out))
 
 
+def _selected_backend(dsn: str) -> CheckerBackend:
+    if (backend := _SELECTED.get()) is not None:
+        return backend
+    return backend_for(dsn)
+
+
 async def _connect(dsn: str, timeout_ms: int) -> Connection:
     try:
-        return await connect_checker(dsn, timeout_ms / 1000)
+        return await _selected_backend(dsn).connect_checker(dsn, timeout_ms / 1000)
     except (InterfaceError, DatabaseError, OSError) as error:
         msg = f"could not connect to the database: {redact(str(error), dsn)}"
         raise CheckError(msg) from None
+
+
+async def describe_impl(conn: Connection, sql: str) -> Describe:
+    backend = _SELECTED.get()
+    if backend is None:
+        msg = "checker backend is not selected"
+        raise CheckError(msg)
+    return await backend.describe(conn, sql)
 
 
 def _is_lost(error: DatabaseError) -> bool:
@@ -253,7 +271,15 @@ class _Worker:
         return outcome
 
 
-async def describe_all(dsn: str, statements: list[str], jobs: int, timeout_ms: int) -> dict[str, Outcome]:
+async def describe_all(
+    dsn: str,
+    statements: list[str],
+    jobs: int,
+    timeout_ms: int,
+    backend: CheckerBackend | None = None,
+) -> dict[str, Outcome]:
+    selected = backend if backend is not None else backend_for(dsn)
+    token = _SELECTED.set(selected)
     pending = deque(statements)
     results: dict[str, Outcome] = {}
 
@@ -273,6 +299,8 @@ async def describe_all(dsn: str, statements: list[str], jobs: int, timeout_ms: i
                 group.create_task(run())
     except* CheckError as errors:
         raise min(errors.exceptions, key=str) from None
+    finally:
+        _SELECTED.reset(token)
     return results
 
 
@@ -351,7 +379,7 @@ def _report(  # ruff: ignore[too-many-arguments]
     return Report(diagnostic=diagnostic, help=help, label=label, column_index=column_index, field=field, order=order)
 
 
-def _param_reports(site: _Site, described: Describe) -> list[Report]:
+def _param_reports(site: _Site, described: Describe, backend: CheckerBackend) -> list[Report]:
     holes = site.sourcemap.holes
     reports: list[Report] = []
     if (count := len(described.params)) != len(holes):
@@ -367,11 +395,11 @@ def _param_reports(site: _Site, described: Describe) -> list[Report]:
             message = f'parameter ${index + 1} has unsupported type "{param.type_name}"'
             help_ = "cast the parameter to a supported type, such as `{x}::text`"
             reports.append(_report(site, "unsupported-type", message, holes[index], help=help_))
-    reports.extend(_param_type_reports(site, described))
+    reports.extend(_param_type_reports(site, described, backend))
     return reports
 
 
-def _param_type_reports(site: _Site, described: Describe) -> list[Report]:
+def _param_type_reports(site: _Site, described: Describe, backend: CheckerBackend) -> list[Report]:
     holes = site.sourcemap.holes
     # with a count mismatch the interpolations no longer line up with `$n`
     if site.inference is None or len(described.params) != len(holes):
@@ -384,7 +412,9 @@ def _param_type_reports(site: _Site, described: Describe) -> list[Report]:
         return []
     reports: list[Report] = []
     for index, (param, found) in enumerate(zip(described.params, evident, strict=True)):
-        if (finding := compare_param(index, param.type_name, param.type_key, found, param.element_key)) is not None:
+        if (
+            finding := compare_param(index, param.type_name, param.type_key, found, param.element_key, backend)
+        ) is not None:
             reports.append(_report(site, finding.rule, finding.message, holes[index]))
     return reports
 
@@ -461,7 +491,7 @@ def _override_reports(site: _Site, described: Describe) -> list[Report]:
     return reports
 
 
-def _row_reports(site: _Site, described: Describe) -> list[Report]:
+def _row_reports(site: _Site, described: Describe, backend: CheckerBackend) -> list[Report]:
     row_type = site.row_type
     if row_type is None:
         return []
@@ -481,7 +511,7 @@ def _row_reports(site: _Site, described: Describe) -> list[Report]:
     descs = tuple(_column_desc(column) for column in columns)
     return [
         _finding_report(site, finding, descs, order)
-        for order, finding in enumerate(compare(DescribeDesc(columns=descs), row_type))
+        for order, finding in enumerate(compare(DescribeDesc(columns=descs), row_type, backend))
     ]
 
 
@@ -532,10 +562,14 @@ def _finding_report(
     )
 
 
-def _evaluate(site: _Site, outcome: Outcome) -> list[Report]:
+def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Report]:
     if isinstance(outcome, DatabaseError):
         return [_sql_error(site, outcome)]
-    return [*_param_reports(site, outcome), *_row_reports(site, outcome), *_override_reports(site, outcome)]
+    return [
+        *_param_reports(site, outcome, backend),
+        *_row_reports(site, outcome, backend),
+        *_override_reports(site, outcome),
+    ]
 
 
 def _file_sites(
@@ -543,16 +577,17 @@ def _file_sites(
     roots: tuple[Path, ...],
     path: Path,
     result: FileResult,
+    backend: CheckerBackend | None,
 ) -> tuple[list[Report], list[_Site]]:
     reports: list[Report] = []
     sites: list[_Site] = []
-    inference = ParamInference(result.tree) if result.tree is not None else None
+    inference = ParamInference(result.tree, backend) if result.tree is not None else None
     mapper = SourceMapper(result.source or "")
     reports.extend(template_reports(path, result.templates, mapper, inference))
     for call in result.calls:
         if call.template is None:
             continue
-        resolution = resolve_row_type(graph, call, roots)
+        resolution = resolve_row_type(graph, call, roots, backend)
         if resolution.diagnostic is not None:
             reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
         sites.append(
@@ -571,6 +606,7 @@ def _collect(
     config: Config,
     files: Iterable[Path],
     stats: Statistics,
+    backend: CheckerBackend | None,
 ) -> tuple[list[_Site], list[Report], dict[Path, str]]:
     graph = ModuleGraph()
     sites: list[_Site] = []
@@ -585,7 +621,7 @@ def _collect(
         if result.source is None:
             continue
         try:
-            file_reports, file_sites = _file_sites(graph, roots, path, result)
+            file_reports, file_sites = _file_sites(graph, roots, path, result, backend)
         except RecursionError:
             # fail closed for this file only: nothing else it produced is trusted
             reports.extend(Report(diagnostic=diagnostic) for diagnostic in too_deep(path).diagnostics)
@@ -598,22 +634,28 @@ def _collect(
     return sites, reports, sources
 
 
-async def run_check(
+async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     config: Config,
     files: Iterable[Path],
     dsn: str | None,
     jobs: int,
     hooks: Hooks | None = None,
+    backend: CheckerBackend | None = None,
 ) -> RunResult:
     hooks = hooks or Hooks()
     stats = Statistics()
-    sites, reports, sources = _collect(config, files, stats)
+    selected = backend
+    if selected is None and dsn is not None and dsn.strip():
+        selected = backend_for(dsn)
+    sites, reports, sources = _collect(config, files, stats, selected)
     statements = sorted({site.sourcemap.sql for site in sites})
     stats.distinct_sql = len(statements)
     if statements:
         if dsn is None or not dsn.strip():
             msg = f"no database URL; pass --database-url or set ${config.database_url_env}"
             raise CheckError(msg)
+        if selected is None:
+            selected = backend_for(dsn)
         target = dsn
         async with AsyncExitStack() as stack:
             if hooks.scratch is not None:
@@ -622,8 +664,8 @@ async def run_check(
                 stats.scratch_seconds = built.seconds
             if hooks.gate is not None:
                 stats.migrations = await hooks.gate(target)
-            outcomes = await describe_all(target, statements, jobs, config.statement_timeout_ms)
+            outcomes = await describe_all(target, statements, jobs, config.statement_timeout_ms, selected)
         for site in sites:
-            reports.extend(_evaluate(site, outcomes[site.sourcemap.sql]))
+            reports.extend(_evaluate(site, outcomes[site.sourcemap.sql], selected))
     stats.by_rule.update(report.diagnostic.rule for report in reports)
     return RunResult(reports=reports, sources=sources, statistics=stats)

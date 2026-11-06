@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from rowx.check.model import Diagnostic, Span
-    from rowx.postgres._vocab import NullReasonName
 
 TAB_WIDTH: Final[int] = 4
 # kept: newline and tab, the joiners that real text needs (ZWNJ, ZWJ) and the soft hyphen
@@ -39,15 +38,18 @@ class Report:
 
 
 type _TemplateReason = Literal[
-    "NullableColumn",
     "NotNullColumn",
+    "NullableColumn",
     "NotValidatedConstraint",
     "ForeignOrView",
     "ViewColumn",
+    "OuterJoin",
     "GroupingSets",
+    "ScanBoundary",
     "ReturningOldNew",
     "SetOperation",
     "ComputedExpr",
+    "Computed",
     "ExplainFailed",
     "OverrideBang",
     "OverrideQuestion",
@@ -70,7 +72,7 @@ NULL_NOTES: Final[dict[_TemplateReason, str]] = {
 }
 
 
-def null_reason_note(reason: NullReasonName, detail: str | None = None, *, column: str | None = None) -> str:
+def null_reason_note(reason: _TemplateReason, detail: str | None = None, *, column: str | None = None) -> str:
     match reason:
         case "Computed":
             return f'computed expression; add AS "{column or "col"}!"'

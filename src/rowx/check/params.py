@@ -1,9 +1,11 @@
 import ast
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, cast
+
+from rowx._backend import CheckerBackend, default_backend
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 type ParamName = Literal[
     "bool",
@@ -102,35 +104,12 @@ CLASS_NAMES: Final[dict[str, ParamName]] = {
     "ipaddress.IPv6Address": "IPv6Address",
     "ipaddress.IPv4Network": "IPv4Network",
     "ipaddress.IPv6Network": "IPv6Network",
-    "rowx.postgres.Range": "Range",
-    "rowx.postgres._range.Range": "Range",
-    "rowx.postgres.Money": "Money",
-    "rowx.postgres._money.Money": "Money",
-    "rowx.postgres.Interval": "Interval",
-    "rowx.postgres._interval.Interval": "Interval",
-    "rowx.postgres.Point": "Point",
-    "rowx.postgres._geometric.Point": "Point",
-    "rowx.postgres.Line": "Line",
-    "rowx.postgres._geometric.Line": "Line",
-    "rowx.postgres.LineSegment": "LineSegment",
-    "rowx.postgres._geometric.LineSegment": "LineSegment",
-    "rowx.postgres.Box": "Box",
-    "rowx.postgres._geometric.Box": "Box",
-    "rowx.postgres.Path": "Path",
-    "rowx.postgres._geometric.Path": "Path",
-    "rowx.postgres.Polygon": "Polygon",
-    "rowx.postgres._geometric.Polygon": "Polygon",
-    "rowx.postgres.Circle": "Circle",
-    "rowx.postgres._geometric.Circle": "Circle",
-    "rowx.postgres.Cube": "Cube",
-    "rowx.postgres._cube.Cube": "Cube",
     "datetime.date": "date",
     "datetime.datetime": "datetime",
     "datetime.timedelta": "timedelta",
     "datetime.time": "time",
 }
 CALL_NAMES: Final[dict[str, ParamName]] = {
-    **CLASS_NAMES,
     "bytearray": "bytearray",
     "memoryview": "memoryview",
     "datetime.datetime.now": "datetime",
@@ -176,7 +155,9 @@ def _type_params_scope(
 
 
 class ParamInference:
-    def __init__(self, tree: ast.Module) -> None:
+    def __init__(self, tree: ast.Module, backend: CheckerBackend | None = None) -> None:
+        self._backend = backend
+        self._classes: dict[str, ParamName] | None = None
         self._module = _Scope("module", None)
         self._scopes: dict[int, _Scope] = {}
         # a name declared `global` or `nonlocal` anywhere can be rebound from another scope
@@ -353,13 +334,37 @@ class ParamInference:
                 return self._subscript_type(value, item, scope)
             case ast.Name() | ast.Attribute():
                 qualified = self._qualify(node, scope)
-                name = None if qualified is None else BUILTIN_NAMES.get(qualified) or CLASS_NAMES.get(qualified)
+                name = None if qualified is None else self._param_name(qualified)
                 return None if name is None else ParamType(name)
         return None
 
+    def _value_classes(self) -> Mapping[str, ParamName]:
+        if self._classes is not None:
+            return self._classes
+        backend = self._backend if self._backend is not None else default_backend()
+        classes = {key: cast("ParamName", value) for key, value in backend.param_classes.items()}
+        self._classes = classes
+        return classes
+
+    def _param_name(self, qualified: str) -> ParamName | None:
+        if (found := BUILTIN_NAMES.get(qualified) or CLASS_NAMES.get(qualified)) is not None:
+            return found
+        return self._backend_name(qualified)
+
+    def _call_name(self, qualified: str) -> ParamName | None:
+        if (found := CALL_NAMES.get(qualified) or CLASS_NAMES.get(qualified)) is not None:
+            return found
+        return self._backend_name(qualified)
+
+    def _backend_name(self, qualified: str) -> ParamName | None:
+        # value classes live on the backend; a builtin call such as `str(1)` is not one
+        if not qualified.startswith("rowx."):
+            return None
+        return self._value_classes().get(qualified)
+
     def _subscript_type(self, value: ast.expr, item: ast.expr, scope: _Scope) -> ParamType | None:
         qualified = self._qualify(value, scope)
-        if qualified is not None and CLASS_NAMES.get(qualified) == "Range":
+        if qualified is not None and self._param_name(qualified) == "Range":
             return ParamType("Range")
         element = self._annotation_type(item, scope) if qualified == "list" else None
         if element is None:
@@ -416,6 +421,6 @@ class ParamInference:
                 return self._name_type(name, scope)
             case ast.Call(func=func):
                 qualified = self._qualify(func, scope)
-                name = CALL_NAMES.get(qualified) if qualified is not None else None
+                name = None if qualified is None else self._call_name(qualified)
                 return None if name is None else ParamType(name)
         return self._literal_type(node, scope)

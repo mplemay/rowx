@@ -5,10 +5,10 @@ from io import BytesIO
 from pathlib import Path
 from sys import stdlib_module_names
 from tokenize import detect_encoding
-from typing import TYPE_CHECKING, Final, Literal, get_args
+from typing import TYPE_CHECKING, Final, Literal
 
+from rowx._backend import CheckerBackend, default_backend
 from rowx.check.model import Diagnostic, QueryCall, Rule, Span
-from rowx.postgres._vocab import LeafName
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -19,7 +19,7 @@ MAX_HOPS: Final[int] = 16
 INIT_FILE: Final[str] = "__init__.py"
 TYPING_MODULES: Final[frozenset[str]] = frozenset({"typing", "typing_extensions"})
 BUILTIN_NAMES: Final[frozenset[str]] = frozenset(dir(builtins))
-LEAVES: Final[dict[str, LeafName]] = {
+LEAVES: Final[dict[str, str]] = {
     "builtins.int": "int",
     "builtins.float": "float",
     "builtins.str": "str",
@@ -35,63 +35,22 @@ LEAVES: Final[dict[str, LeafName]] = {
     "ipaddress.IPv6Interface": "ipaddress.IPv6Interface",
     "ipaddress.IPv4Network": "ipaddress.IPv4Network",
     "ipaddress.IPv6Network": "ipaddress.IPv6Network",
-    "rowx.postgres.Money": "rowx.postgres.Money",
-    "rowx.postgres._money.Money": "rowx.postgres.Money",
-    "rowx.postgres.Interval": "rowx.postgres.Interval",
-    "rowx.postgres._interval.Interval": "rowx.postgres.Interval",
-    "rowx.postgres.Point": "rowx.postgres.Point",
-    "rowx.postgres._geometric.Point": "rowx.postgres.Point",
-    "rowx.postgres.Line": "rowx.postgres.Line",
-    "rowx.postgres._geometric.Line": "rowx.postgres.Line",
-    "rowx.postgres.LineSegment": "rowx.postgres.LineSegment",
-    "rowx.postgres._geometric.LineSegment": "rowx.postgres.LineSegment",
-    "rowx.postgres.Box": "rowx.postgres.Box",
-    "rowx.postgres._geometric.Box": "rowx.postgres.Box",
-    "rowx.postgres.Path": "rowx.postgres.Path",
-    "rowx.postgres._geometric.Path": "rowx.postgres.Path",
-    "rowx.postgres.Polygon": "rowx.postgres.Polygon",
-    "rowx.postgres._geometric.Polygon": "rowx.postgres.Polygon",
-    "rowx.postgres.Circle": "rowx.postgres.Circle",
-    "rowx.postgres._geometric.Circle": "rowx.postgres.Circle",
-    "rowx.postgres.Cube": "rowx.postgres.Cube",
-    "rowx.postgres._cube.Cube": "rowx.postgres.Cube",
 }
 # `dict[str, str | None]` is the one dict leaf (hstore)
-HSTORE_LEAF: Final[LeafName] = "dict[str, str | None]"
+HSTORE_LEAF: Final[str] = "dict[str, str | None]"
 # a pair of classes is ONE leaf, and a member alone is not a leaf
-NETWORK_PAIRS: Final[dict[frozenset[str], LeafName]] = {
+NETWORK_PAIRS: Final[dict[frozenset[str], str]] = {
     frozenset({"ipaddress.IPv4Interface", "ipaddress.IPv6Interface"}): (
         "ipaddress.IPv4Interface | ipaddress.IPv6Interface"
     ),
     frozenset({"ipaddress.IPv4Network", "ipaddress.IPv6Network"}): "ipaddress.IPv4Network | ipaddress.IPv6Network",
 }
 NETWORK_MEMBERS: Final[frozenset[str]] = frozenset(member for pair in NETWORK_PAIRS for member in pair)
-# `Range[T]` is one leaf per subtype leaf a range column can have
-RANGE_LEAVES: Final[dict[str, LeafName]] = {
-    "int": "rowx.postgres.Range[int]",
-    "decimal.Decimal": "rowx.postgres.Range[decimal.Decimal]",
-    "datetime.date": "rowx.postgres.Range[datetime.date]",
-    "datetime.datetime": "rowx.postgres.Range[datetime.datetime]",
-}
-RANGE_CLASSES: Final[frozenset[str]] = frozenset({"rowx.postgres.Range", "rowx.postgres._range.Range"})
-# `LeafName` is these maps plus the three structural markers; keep them in lockstep
-assert (  # ruff: ignore[assert]
-    set(LEAVES.values())
-    | set(NETWORK_PAIRS.values())
-    | set(RANGE_LEAVES.values())
-    | {HSTORE_LEAF, "list", "any", "none"}
-    == set(get_args(LeafName.__value__))
-)
 FUNCTIONAL: Final[frozenset[str]] = frozenset({"typing.NamedTuple", "typing.TypedDict"})
 NEUTRAL: Final[frozenset[str]] = frozenset({"typing.Any", "builtins.object"})
 # names from these roots that aren't a supported row type or base are `invalid-row-type`; any other root is outside
 # the project and can't be looked at, so it is `unresolved-row-type`
 KNOWN_ROOTS: Final[frozenset[str]] = stdlib_module_names | {"typing_extensions", "rowx", "pydantic"}
-VALUE_CLASSES: Final[dict[str, str]] = {
-    qualname: qualname.rsplit(".", 1)[-1]
-    for qualname in (*LEAVES, *RANGE_CLASSES)
-    if qualname.startswith("rowx.postgres.")
-}
 FIELD_QUALIFIERS: Final[frozenset[str]] = frozenset({"typing.Required", "typing.NotRequired", "typing.ReadOnly"})
 TYPED_DICT_KEYWORDS: Final[frozenset[str]] = frozenset({"total", "closed", "extra_items"})
 DECORATOR_HELP: Final[str] = "remove the decorator, or use `@dataclass`"
@@ -155,10 +114,10 @@ DEF_TYPES: Final = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 MIN_ANNOTATED: Final[int] = 2
 
 
-# `leaf` is a LEAVES value, "list" (with `item`), "any" (`Any` and `object`) or "none" (a tuple element `None`)
+# `leaf` is a supported leaf, "list" (with `item`), "any" (`Any` and `object`) or "none" (a tuple element `None`)
 @dataclass(slots=True, frozen=True)
 class Elem:
-    leaf: LeafName
+    leaf: str
     nullable: bool
     item: Elem | None = None
 
@@ -829,9 +788,15 @@ def _c3_merge(sequences: list[list[ClassKey]]) -> list[ClassKey] | None:
 
 
 class _Resolver:
-    def __init__(self, graph: ModuleGraph, roots: tuple[Path, ...]) -> None:
+    def __init__(
+        self,
+        graph: ModuleGraph,
+        roots: tuple[Path, ...],
+        backend: CheckerBackend | None = None,
+    ) -> None:
         self._graph = graph
         self._roots = roots
+        self._backend = backend
         self.alias: AliasSite | None = None
         # set while a named type's field annotation is evaluated: a string is parsed, and a name imported only under
         # `TYPE_CHECKING` is rejected, because `get_type_hints` would fail on it
@@ -845,6 +810,11 @@ class _Resolver:
         self._free: set[tuple[Path, str]] = set()
         self._paths: dict[tuple[ClassKey, ClassKey], tuple[_Rebind, ...]] = {}
         self._mros: dict[ClassKey, list[_Class]] = {}
+
+    def _selected(self) -> CheckerBackend:
+        if self._backend is None:
+            self._backend = default_backend()
+        return self._backend
 
     def _find(self, module: _Module, level: int, dotted: str | None) -> _Module | None:
         if level == 0:
@@ -1068,6 +1038,11 @@ class _Resolver:
                     return _Node((Elem(leaf, nullable=False),), none=False)
                 if normalized in NEUTRAL:
                     return _Node((Elem("any", nullable=False),), none=False)
+                if (
+                    normalized.startswith("rowx.")
+                    and (leaf := self._selected().value_leaves.get(normalized)) is not None
+                ):
+                    return _Node((Elem(leaf, nullable=False),), none=False)
                 raise _external_reject(qualname, in_field=self._in_field)
             case _Class():
                 return _Node((_NamedRef(value),), none=False)
@@ -1264,8 +1239,6 @@ class _Resolver:
         slice_ = expr.slice
         elts = slice_.elts if isinstance(slice_, ast.Tuple) else [slice_]
         qualname = self._normalize(base.qualname)
-        if qualname in RANGE_CLASSES and len(elts) == 1 and not isinstance(slice_, ast.Tuple):
-            return self._eval_range(slice_, module, chain)
         match qualname:
             case "typing.Optional" if len(elts) == 1 and not isinstance(slice_, ast.Tuple):
                 return _union(self._eval(slice_, module, chain), _Node((), none=True))
@@ -1279,6 +1252,13 @@ class _Resolver:
                 return self._eval(elts[0], module, chain)
         if (node := self._eval_container(qualname, slice_, module, chain)) is not None:
             return node
+        if (
+            qualname.startswith("rowx.")
+            and qualname in self._selected().range_classes
+            and len(elts) == 1
+            and not isinstance(slice_, ast.Tuple)
+        ):
+            return self._eval_range(slice_, module, chain)
         msg = f"`{base.qualname}` can't be subscripted this way in a row type"
         raise _invalid(msg, help_=PYDANTIC_HELP if self._in_field and qualname.startswith("pydantic.") else None)
 
@@ -1307,10 +1287,12 @@ class _Resolver:
 
     def _eval_range(self, subtype: ast.expr, module: _Module, chain: tuple[tuple[Path, str], ...]) -> _Node:
         inner = _to_elem(self._eval(subtype, module, chain), allow_none=False)
-        if inner.nullable or inner.leaf not in RANGE_LEAVES:
-            msg = f"`Range[{inner.leaf}]` isn't a range subtype; use one of {', '.join(f'`{leaf}`' for leaf in RANGE_LEAVES)}"
+        leaves = self._selected().range_leaves
+        if inner.nullable or inner.leaf not in leaves:
+            listed = ", ".join(f"`{leaf}`" for leaf in leaves)
+            msg = f"`Range[{inner.leaf}]` isn't a range subtype; use one of {listed}"
             raise _invalid(msg)
-        return _Node((Elem(RANGE_LEAVES[inner.leaf], nullable=False),), none=False)
+        return _Node((Elem(leaves[inner.leaf], nullable=False),), none=False)
 
     # ---- named row types ----
 
@@ -1339,15 +1321,14 @@ class _Resolver:
         msg = f"a base of `{klass.name}` isn't a class"
         raise _invalid(msg)
 
-    @staticmethod
-    def _external_base(normalized: str, qualname: str, *, subscripted: bool) -> str:
+    def _external_base(self, normalized: str, qualname: str, *, subscripted: bool) -> str:
         if normalized == "typing.Protocol":
             msg = "a Protocol is not a row type"
             raise _invalid(msg)
         # `Generic[T]` only declares the type parameters, which `_params` reads
         if normalized == "typing.Generic":
             return "object"
-        if (value := VALUE_CLASSES.get(qualname)) is not None:
+        if qualname.startswith("rowx.") and (value := self._selected().value_classes.get(qualname)) is not None:
             msg = f"a subclass of rowx.postgres.{value} is not a row type"
             raise _invalid(msg)
         if qualname == "pydantic.v1" or qualname.startswith("pydantic.v1."):
@@ -2402,8 +2383,13 @@ class _Resolver:
         return RowType(kind="tuple", elements=member.elems, alias=self.alias)
 
 
-def resolve_row_type(graph: ModuleGraph, call: QueryCall, roots: tuple[Path, ...]) -> Resolution:
-    resolver = _Resolver(graph, roots)
+def resolve_row_type(
+    graph: ModuleGraph,
+    call: QueryCall,
+    roots: tuple[Path, ...],
+    backend: CheckerBackend | None = None,
+) -> Resolution:
+    resolver = _Resolver(graph, roots, backend)
     try:
         return Resolution(row_type=resolver.resolve(call))
     except RejectError as reject:
