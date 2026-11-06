@@ -751,7 +751,9 @@ def test_a_stdlib_dataclass_is_not_taken_for_a_pydantic_one(evaluate: Evaluate) 
 
 NEVER_IMPORTS_PYDANTIC: Final[str] = """
 import sys
+import sysconfig
 from dataclasses import dataclass
+from pathlib import Path
 from typing import NamedTuple, TypedDict
 from rowx._rowplan import row_plan
 
@@ -766,7 +768,14 @@ class Z(TypedDict):
     id: int
 
 def stdlib(name):
-    return name.partition(".")[0] in sys.stdlib_module_names
+    # 3.15 omits some stdlib modules from the name set; a file under that directory still counts
+    if name.partition(".")[0] in sys.stdlib_module_names:
+        return True
+    root = sysconfig.get_path("stdlib")
+    if root is None:
+        return False
+    file = getattr(sys.modules.get(name), "__file__", None)
+    return isinstance(file, str) and Path(file).is_relative_to(root)
 
 before = set(sys.modules)
 for t in (int, tuple[int, str]):
