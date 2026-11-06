@@ -1,8 +1,12 @@
 from dataclasses import KW_ONLY, dataclass
+from typing import ClassVar
+
+from rowx._rowplan import ValueClass
 
 
 @dataclass(frozen=True, slots=True)
-class Range[T]:
+class Range[T](ValueClass):
+    _rowx_subscripted: ClassVar[bool] = True
     lower: T | None = None
     upper: T | None = None
     _: KW_ONLY

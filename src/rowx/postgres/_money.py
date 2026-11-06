@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
+from rowx._rowplan import ValueClass
+
 
 @dataclass(frozen=True, slots=True)
-class Money:
+class Money(ValueClass):
     # the int8 the server sends; the scale comes from lc_monetary, which can change mid-session, so none is held
     minor_units: int
 

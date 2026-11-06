@@ -120,7 +120,9 @@ def build_shape_arguments(monkeypatch: pytest.MonkeyPatch, t: object) -> tuple[s
         return original(*args, validate=validate)  # ty: ignore[invalid-argument-type]
 
     monkeypatch.setattr(core_postgres, "RowShape", spy)
-    row_plan(t)
+    impl = FakeImpl()
+    conn = Connection(impl)  # ty: ignore[invalid-argument-type]
+    asyncio.run(query[t](t"SELECT 1").all(conn))  # ty: ignore[invalid-type-form]
     (args,) = captured
     return args
 

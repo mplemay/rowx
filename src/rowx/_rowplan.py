@@ -38,8 +38,6 @@ from rowx.errors import InterfaceError
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from rowx.postgres._core import RowShape
-
 MAX_ALIAS_DEPTH: Final[int] = 16
 
 LEAVES: Final[frozenset[type]] = frozenset(
@@ -79,17 +77,12 @@ FIELD_QUALIFIERS: Final[dict[str, object]] = {"Required": Required, "NotRequired
 # the text of a `ClassVar` annotation that stayed a string (`from __future__ import annotations`)
 CLASSVAR_TEXT: Final[re.Pattern[str]] = re.compile(r"^\s*(?:\w+\.)*ClassVar\b")
 
-# the names `rowx.postgres` value classes are looked up by, as `(module, class)`
-VALUE_CLASSES: Final[tuple[tuple[str, str], ...]] = (
-    ("rowx.postgres._range", "Range"),
-    ("rowx.postgres._interval", "Interval"),
-    ("rowx.postgres._money", "Money"),
-    ("rowx.postgres._cube", "Cube"),
-    *(
-        ("rowx.postgres._geometric", name)
-        for name in ("Point", "Line", "LineSegment", "Box", "Path", "Polygon", "Circle")
-    ),
-)
+
+class ValueClass:
+    # empty so a slotted dataclass subclass does not grow a __dict__
+    __slots__ = ()
+    _rowx_flags: ClassVar[int] = 0
+    _rowx_subscripted: ClassVar[bool] = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -98,8 +91,21 @@ class FieldPlan:
     # the column names the field accepts; `None` is unknown (a pydantic `AliasChoices` or a before validator)
     names: tuple[str, ...] | None
     nullable: bool
-    interval: bool
+    # `flags` is the value-class mask; bit 0 stays clear, and the driver mask is `int(nullable) | flags`
+    flags: int
     required: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ShapeSpec:
+    ctor: object
+    form: RowForm
+    matching: Matching
+    type_name: str
+    fields: tuple[FieldPlan, ...]
+    validate: bool = True
+    # native shapes, keyed by the backend's row-shape class; a second key does not evict the first
+    native: dict[object, object] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -107,22 +113,21 @@ class RowPlan:
     kind: PlanKind
     arity: int
     nullable_mask: tuple[bool, ...]
-    # per element, whether it is `rowx.postgres.Interval`, which reads an `interval` losslessly
-    # (left out of equality so a plan compares by its shape and nullability)
-    interval_mask: tuple[bool, ...] = field(default=(), compare=False)
+    # registered value-class flags; excluded from equality, same as the shape
+    class_flags: tuple[int, ...] = field(default=(), compare=False)
     # a named plan only
     fields: tuple[FieldPlan, ...] = ()
     form: RowForm | None = None
     matching: Matching | None = None
     type_name: str | None = None
-    # the `rowx.postgres._core.RowShape` the driver maps columns and builds rows with, built once with the plan
-    shape: RowShape | None = field(default=None, compare=False)
+    # pure-Python shape; the backend builds and caches the native shape from this
+    shape: ShapeSpec | None = field(default=None, compare=False)
 
     @property
     def flags(self) -> list[int]:
-        # one int per column for the driver: bit 0 is nullable, bit 1 is the `Interval` leaf
-        spans = self.interval_mask or (False,) * len(self.nullable_mask)
-        return [int(null) | (int(span) << 1) for null, span in zip(self.nullable_mask, spans, strict=True)]
+        # one int per column for the driver: bit 0 is nullable, the rest come from the value class
+        spans = self.class_flags or (0,) * len(self.nullable_mask)
+        return [int(null) | span for null, span in zip(self.nullable_mask, spans, strict=True)]
 
 
 NO_ROWS: Final[RowPlan] = RowPlan(kind="none", arity=0, nullable_mask=())
@@ -252,39 +257,69 @@ def _flatten(t: object, depth: int = 0) -> tuple[list[object], bool]:
     return members, has_none
 
 
-# `rowx.postgres.Range` is looked up only when it was imported, because importing it loads the backend, and a
-# row type can only mention it after the user's own import
-def _is_range(origin: object) -> bool:
-    module = sys.modules.get("rowx.postgres._range")
-    return module is not None and origin is module.Range
+def _value_marker(cls: type[ValueClass]) -> tuple[int, bool]:
+    return (cls._rowx_flags, cls._rowx_subscripted)
 
 
-def _is_value_class(t: object, module_name: str, name: str) -> bool:
-    module = sys.modules.get(module_name)
-    return module is not None and t is getattr(module, name)
+def _value_leaves(t: type) -> list[type]:
+    return [base for base in t.__mro__ if base is not ValueClass and ValueClass in base.__bases__]
 
 
-def _is_interval(t: object) -> bool:
-    return _is_value_class(t, "rowx.postgres._interval", "Interval")
+def _direct_leaf(t: type) -> type[ValueClass] | None:
+    return cast("type[ValueClass]", t) if _value_leaves(t) == [t] else None
 
 
-def _is_money(t: object) -> bool:
-    return _is_value_class(t, "rowx.postgres._money", "Money")
+def _public_name(cls: type) -> str:
+    parts = cls.__module__.split(".")
+    while len(parts) > 1 and parts[-1].startswith("_"):
+        parts.pop()
+    return f"{'.'.join(parts)}.{cls.__qualname__}"
 
 
-GEOMETRIC_CLASSES: Final[tuple[str, ...]] = ("Point", "Line", "LineSegment", "Box", "Path", "Polygon", "Circle")
+def _marker_flags(t: object, leaf: type[ValueClass]) -> int:
+    flags, _ = _value_marker(leaf)
+    if flags & 1:
+        raise _reject(t, "a value class flag uses bit 0, which is reserved for nullability")
+    return flags
 
 
-def _is_geometric(t: object) -> bool:
-    return any(_is_value_class(t, "rowx.postgres._geometric", name) for name in GEOMETRIC_CLASSES)
-
-
-def _is_cube(t: object) -> bool:
-    return _is_value_class(t, "rowx.postgres._cube", "Cube")
+def _is_subscripted_value(origin: object) -> bool:
+    if not isinstance(origin, type) or (leaf := _direct_leaf(origin)) is None:
+        return False
+    _, subscripted = _value_marker(leaf)
+    return subscripted
 
 
 def _is_value_leaf(t: type) -> bool:
-    return t in LEAVES or _is_interval(t) or _is_money(t) or _is_geometric(t) or _is_cube(t)
+    if t in LEAVES:
+        return True
+    if (leaf := _direct_leaf(t)) is None:
+        return False
+    _, subscripted = _value_marker(leaf)
+    return not subscripted
+
+
+def _leaf_flags(t: object) -> int:
+    if isinstance(t, type):
+        leaf = _direct_leaf(t)
+        if leaf is None or _value_marker(leaf)[1]:
+            return 0
+        return _marker_flags(t, leaf)
+    origin = get_origin(t)
+    if isinstance(origin, type) and (leaf := _direct_leaf(origin)) is not None and _value_marker(leaf)[1]:
+        return _marker_flags(t, leaf)
+    return 0
+
+
+def _value_flags(t: object) -> int:
+    # flags of the one leaf, also inside lists, since the codec choice covers array elements
+    members, _ = _flatten(_unwrap(t))
+    if len(members) != 1:
+        return 0
+    (member,) = members
+    if get_origin(member) is list:
+        return _value_flags(get_args(member)[0])
+    return _leaf_flags(member)
 
 
 # the one dict leaf: an hstore, `dict[str, str | None]`
@@ -326,7 +361,7 @@ def _elem(t: object) -> bool:
         raise _reject(t, "a dict must be `dict[str, str | None]`, the hstore leaf")
     if origin is dict:
         return False
-    if _is_range(origin):
+    if _is_subscripted_value(origin):
         (subtype,) = get_args(t)
         if _unwrap(subtype) not in RANGE_SUBTYPES:
             raise _reject(t, "a range subtype must be int, Decimal, date or datetime")
@@ -336,18 +371,6 @@ def _elem(t: object) -> bool:
     if isinstance(t, type) and _named_form(t) is not None:
         raise _reject(t, "a named row type is only allowed as the row, not inside a tuple, list, union or field")
     raise _not_derivable(t)
-
-
-def _is_interval_elem(t: object) -> bool:
-    # `Interval` and `Interval | None`, also inside lists, since the codec choice covers array elements
-    members, _ = _flatten(_unwrap(t))
-    if len(members) != 1:
-        return False
-    # flatten first so `list[Interval] | None` is seen as the list it wraps
-    (member,) = members
-    if get_origin(member) is list:
-        return _is_interval_elem(get_args(member)[0])
-    return _is_interval(member)
 
 
 # `typing_extensions.TypedDict` is only looked up when it was imported, as `typing.is_typeddict` misses it
@@ -392,21 +415,14 @@ NAMED_FORMS: Final[tuple[tuple[str, Callable[[type], bool]], ...]] = (
 )
 
 
-def _value_base(t: type) -> str | None:
-    for module_name, name in VALUE_CLASSES:
-        module = sys.modules.get(module_name)
-        if module is not None and issubclass(t, base := getattr(module, name)) and t is not base:
-            return name
-    return None
-
-
 # which named form a class is, or `None` for any other class; the value leaves are frozen dataclasses and
 # are never named, so this is only asked of a class that is not a leaf
 def _named_form(t: type) -> str | None:
-    if _is_value_leaf(t) or _is_range(t):
+    if _is_value_leaf(t) or _is_subscripted_value(t):
         return None
-    if (base := _value_base(t)) is not None:
-        raise _reject(t, f"a subclass of rowx.postgres.{base} is not a row type")
+    if leaves := _value_leaves(t):
+        owner = next(leaf for leaf in leaves if leaf is not t)
+        raise _reject(t, f"a subclass of {_public_name(owner)} is not a row type")
     return next((name for name, matches in NAMED_FORMS if matches(t)), None)
 
 
@@ -588,24 +604,6 @@ def _typeddict_specs(t: type, hints: dict[str, object]) -> list[Spec]:
     return [Spec(key=key, required=_typeddict_required(t, key, hint), names=(key,)) for key, hint in hints.items()]
 
 
-def _build_shape(
-    ctor: object, type_name: str, form: RowForm, fields: tuple[FieldPlan, ...], *, validate: bool = True
-) -> RowShape:
-    # `rowx.postgres._core` is the backend, which `import rowx` must not load, so it is imported when a plan needs it
-    from rowx.postgres._core import RowShape as RowShapeImpl  # ruff: ignore[import-outside-top-level]
-
-    flags = [(int(f.nullable) | (int(f.interval) << 1)) for f in fields]
-    return RowShapeImpl(
-        ctor,
-        form,
-        # only a tuple is matched by position
-        "positional" if form == "positional" else "by_name",
-        type_name,
-        [(f.key, f.names, f.required, flag) for f, flag in zip(fields, flags, strict=True)],
-        validate=validate,
-    )
-
-
 def _pydantic_rebuild(t: type, *, dataclass: bool, raise_errors: bool) -> None:
     # an explicit empty namespace stops pydantic using this frame's locals (`t`, `dataclass`) as the parent namespace;
     # the class still resolves names from its own module
@@ -741,7 +739,7 @@ def _field_plan(t: type, type_name: str, spec: Spec, hints: dict[str, object]) -
     try:
         annotation = _unwrap_field(hints[spec.key])
         nullable = _elem(annotation)
-        interval = _is_interval_elem(annotation)
+        flags = _value_flags(annotation)
     except _NameUnavailableError as err:
         msg = (
             f"{type_name}: field {spec.key!r} names {err.name!r}, which is not available at runtime; "
@@ -751,7 +749,7 @@ def _field_plan(t: type, type_name: str, spec: Spec, hints: dict[str, object]) -
     except InterfaceError as err:
         msg = f"{err} (field {spec.key!r} of {type_name})"
         raise InterfaceError(msg) from err
-    return FieldPlan(key=spec.key, names=spec.names, nullable=nullable, interval=interval, required=spec.required)
+    return FieldPlan(key=spec.key, names=spec.names, nullable=nullable, flags=flags, required=spec.required)
 
 
 def _named(t: type, kind: str, args: tuple[object, ...] | None = None) -> RowPlan:
@@ -783,12 +781,19 @@ def _named(t: type, kind: str, args: tuple[object, ...] | None = None) -> RowPla
         kind="named",
         arity=len(fields),
         nullable_mask=tuple(f.nullable for f in fields),
-        interval_mask=tuple(f.interval for f in fields),
+        class_flags=tuple(f.flags for f in fields),
         fields=fields,
         form=form,
         matching=matching,
         type_name=type_name,
-        shape=_build_shape(ctor, type_name, form, fields, validate=validate),
+        shape=ShapeSpec(
+            ctor=ctor,
+            form=form,
+            matching=matching,
+            type_name=type_name,
+            fields=fields,
+            validate=validate,
+        ),
     )
 
 
@@ -809,7 +814,7 @@ def _scalar(t: object) -> RowPlan:
         kind="scalar",
         arity=1,
         nullable_mask=(_elem(t),),
-        interval_mask=(_is_interval_elem(t),),
+        class_flags=(_value_flags(t),),
     )
 
 
@@ -822,10 +827,11 @@ def _build(t: object) -> RowPlan:
         if not args or Ellipsis in args:
             raise _reject(t, "a tuple needs fixed arity of at least 1")
         mask = tuple(_elem(a) for a in args)
-        spans = tuple(_is_interval_elem(a) for a in args)
-        return RowPlan(kind="tuple", arity=len(mask), nullable_mask=mask, interval_mask=spans)
+        spans = tuple(_value_flags(a) for a in args)
+        return RowPlan(kind="tuple", arity=len(mask), nullable_mask=mask, class_flags=spans)
     # the leaves come before the named forms, so a value class that is a dataclass stays a scalar
-    if (isinstance(t, type) and (_is_value_leaf(t) or _is_range(t))) or _is_range(get_origin(t)):
+    value_leaf = isinstance(t, type) and (_is_value_leaf(t) or _is_subscripted_value(t))
+    if value_leaf or _is_subscripted_value(get_origin(t)):
         return _scalar(t)
     # a class reached through the full alias depth is one hop too deep, as the checker counts it
     if isinstance(t, type) and (kind := _named_form(t)) is not None:

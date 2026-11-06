@@ -1,9 +1,8 @@
-from typing import TYPE_CHECKING, Final, Self, override
+from typing import TYPE_CHECKING, Final, Protocol, Self, override
 
 if TYPE_CHECKING:
+    from datetime import timedelta
     from pathlib import Path
-
-    from rowx.postgres import MigrationResult
 
 __all__: Final[list[str]] = [
     "ConnectionBusyError",
@@ -185,12 +184,25 @@ class DirtyMigrationError(MigrateError):
         return type(self), (str(self), self.version)
 
 
+class _VersionedMigration(Protocol):
+    @property
+    def version(self) -> int: ...
+
+
+class _AppliedMigration(Protocol):
+    @property
+    def migration(self) -> _VersionedMigration: ...
+
+    @property
+    def elapsed(self) -> timedelta | None: ...
+
+
 # `__cause__` is `error`; pickling drops it, so `error` is the copy that survives
 class MigrationFailedError(MigrateError):
     version: int
     path: Path | None
     dirty: bool
-    applied: tuple[MigrationResult, ...]
+    applied: tuple[_AppliedMigration, ...]
     error: DatabaseError
 
     def __init__(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
@@ -199,7 +211,7 @@ class MigrationFailedError(MigrateError):
         version: int,
         path: Path | None,
         dirty: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
-        applied: tuple[MigrationResult, ...],
+        applied: tuple[_AppliedMigration, ...],
         error: DatabaseError,
     ) -> None:
         super().__init__(message)
@@ -212,5 +224,5 @@ class MigrationFailedError(MigrateError):
     @override
     def __reduce__(
         self,
-    ) -> tuple[type[Self], tuple[str, int, Path | None, bool, tuple[MigrationResult, ...], DatabaseError]]:
+    ) -> tuple[type[Self], tuple[str, int, Path | None, bool, tuple[_AppliedMigration, ...], DatabaseError]]:
         return type(self), (str(self), self.version, self.path, self.dirty, self.applied, self.error)
