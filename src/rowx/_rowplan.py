@@ -78,19 +78,11 @@ FIELD_QUALIFIERS: Final[dict[str, object]] = {"Required": Required, "NotRequired
 CLASSVAR_TEXT: Final[re.Pattern[str]] = re.compile(r"^\s*(?:\w+\.)*ClassVar\b")
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _ValueClass:
-    flags: int
-    label: str
-    subscripted: bool
-
-
-# filled by a backend on import; `import rowx` never loads one
-VALUE_CLASSES: Final[dict[type, _ValueClass]] = {}
-
-
-def register_value_class(cls: type, *, flags: int, label: str, subscripted: bool = False) -> None:
-    VALUE_CLASSES[cls] = _ValueClass(flags=flags, label=label, subscripted=subscripted)
+class ValueClass:
+    # empty so a slotted dataclass subclass does not grow a __dict__
+    __slots__ = ()
+    _rowx_flags: ClassVar[int] = 0
+    _rowx_subscripted: ClassVar[bool] = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -265,27 +257,57 @@ def _flatten(t: object, depth: int = 0) -> tuple[list[object], bool]:
     return members, has_none
 
 
+def _value_marker(cls: type[ValueClass]) -> tuple[int, bool]:
+    return (cls._rowx_flags, cls._rowx_subscripted)
+
+
+def _value_leaves(t: type) -> list[type]:
+    return [base for base in t.__mro__ if base is not ValueClass and ValueClass in base.__bases__]
+
+
+def _direct_leaf(t: type) -> type[ValueClass] | None:
+    return cast("type[ValueClass]", t) if _value_leaves(t) == [t] else None
+
+
+def _public_name(cls: type) -> str:
+    parts = cls.__module__.split(".")
+    while len(parts) > 1 and parts[-1].startswith("_"):
+        parts.pop()
+    return f"{'.'.join(parts)}.{cls.__qualname__}"
+
+
+def _marker_flags(t: object, leaf: type[ValueClass]) -> int:
+    flags, _ = _value_marker(leaf)
+    if flags & 1:
+        raise _reject(t, "a value class flag uses bit 0, which is reserved for nullability")
+    return flags
+
+
 def _is_subscripted_value(origin: object) -> bool:
-    entry = VALUE_CLASSES.get(origin) if isinstance(origin, type) else None
-    return entry is not None and entry.subscripted
+    if not isinstance(origin, type) or (leaf := _direct_leaf(origin)) is None:
+        return False
+    _, subscripted = _value_marker(leaf)
+    return subscripted
 
 
 def _is_value_leaf(t: type) -> bool:
     if t in LEAVES:
         return True
-    entry = VALUE_CLASSES.get(t)
-    return entry is not None and not entry.subscripted
+    if (leaf := _direct_leaf(t)) is None:
+        return False
+    _, subscripted = _value_marker(leaf)
+    return not subscripted
 
 
 def _leaf_flags(t: object) -> int:
     if isinstance(t, type):
-        entry = VALUE_CLASSES.get(t)
-        if entry is None or entry.subscripted:
+        leaf = _direct_leaf(t)
+        if leaf is None or _value_marker(leaf)[1]:
             return 0
-        return entry.flags
+        return _marker_flags(t, leaf)
     origin = get_origin(t)
-    if isinstance(origin, type) and (entry := VALUE_CLASSES.get(origin)) is not None and entry.subscripted:
-        return entry.flags
+    if isinstance(origin, type) and (leaf := _direct_leaf(origin)) is not None and _value_marker(leaf)[1]:
+        return _marker_flags(t, leaf)
     return 0
 
 
@@ -398,9 +420,9 @@ NAMED_FORMS: Final[tuple[tuple[str, Callable[[type], bool]], ...]] = (
 def _named_form(t: type) -> str | None:
     if _is_value_leaf(t) or _is_subscripted_value(t):
         return None
-    for base in t.__mro__[1:]:
-        if (entry := VALUE_CLASSES.get(base)) is not None:
-            raise _reject(t, entry.label)
+    if leaves := _value_leaves(t):
+        owner = next(leaf for leaf in leaves if leaf is not t)
+        raise _reject(t, f"a subclass of {_public_name(owner)} is not a row type")
     return next((name for name, matches in NAMED_FORMS if matches(t)), None)
 
 

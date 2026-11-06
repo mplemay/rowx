@@ -1,13 +1,14 @@
 import importlib
+import re
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 import types
-from typing import TYPE_CHECKING, Final, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Final, TypeVar
 
 import pytest
 
 from rowx.__tests__.conformance.row_types import PRELUDE, ROWS, NamedPlan, Plan
-from rowx._rowplan import MAX_ALIAS_DEPTH, NO_ROWS, RowPlan, _type_text, register_value_class, row_plan
+from rowx._rowplan import MAX_ALIAS_DEPTH, NO_ROWS, RowPlan, ValueClass, _type_text, row_plan
 from rowx.errors import InterfaceError
 
 if TYPE_CHECKING:
@@ -141,15 +142,46 @@ def test_flags_pack_nullability_and_the_interval_leaf(evaluate: Evaluate) -> Non
     assert plan.flags == [0b10, 0b01, 0b11, 0b00]
 
 
-def test_a_registered_class_is_a_leaf_and_carries_its_flags() -> None:
-    class Marker:
-        pass
+def test_a_value_class_is_a_leaf_and_carries_its_flags() -> None:
+    class Marker(ValueClass):
+        _rowx_flags: ClassVar[int] = 0b100
 
-    register_value_class(Marker, flags=0b100, label="a subclass of example.Marker is not a row type")
     plan = row_plan(Marker)
     assert plan.kind == "scalar"
     assert plan.class_flags == (0b100,)
     assert plan.flags == [0b100]
+
+
+def test_a_subclass_of_a_local_value_class_names_that_class() -> None:
+    class Marker(ValueClass):
+        pass
+
+    class Child(Marker):
+        pass
+
+    clause = f"a subclass of {Marker.__module__}.{Marker.__qualname__} is not a row type"
+    with pytest.raises(InterfaceError, match=re.escape(clause)):
+        row_plan(Child)
+
+
+def test_a_class_that_also_lists_value_class_is_not_a_leaf() -> None:
+    class Marker(ValueClass):
+        pass
+
+    class Both(Marker, ValueClass):
+        pass
+
+    clause = f"a subclass of {Marker.__module__}.{Marker.__qualname__} is not a row type"
+    with pytest.raises(InterfaceError, match=re.escape(clause)):
+        row_plan(Both)
+
+
+def test_a_value_class_flag_cannot_use_the_nullability_bit() -> None:
+    class Bad(ValueClass):
+        _rowx_flags: ClassVar[int] = 0b11
+
+    with pytest.raises(InterfaceError, match="bit 0"):
+        row_plan(Bad)
 
 
 def test_interval_and_money_are_rejected_in_unions(evaluate: Evaluate) -> None:

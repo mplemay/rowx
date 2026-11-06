@@ -1,10 +1,12 @@
 from dataclasses import KW_ONLY, dataclass
+from typing import ClassVar
 
-from rowx._rowplan import register_value_class
+from rowx._rowplan import ValueClass
 
 
 @dataclass(frozen=True, slots=True)
-class Range[T]:
+class Range[T](ValueClass):
+    _rowx_subscripted: ClassVar[bool] = True
     lower: T | None = None
     upper: T | None = None
     _: KW_ONLY
@@ -39,11 +41,3 @@ class Range[T]:
         if self.empty:
             return "empty"
         return ("[" if self.lower_inc else "(") + ("]" if self.upper_inc else ")")
-
-
-register_value_class(
-    Range,
-    flags=0,
-    label="a subclass of rowx.postgres.Range is not a row type",
-    subscripted=True,
-)
