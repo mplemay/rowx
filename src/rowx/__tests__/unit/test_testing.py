@@ -1,12 +1,23 @@
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from rowx_core.migrations import Migration, discover_migrations
+
 from rowx.check.config import DEFAULT_MIGRATE_TABLE
-from rowx.postgres import Migrator
 from rowx.testing import TEMPLATE_PREFIX, project_prefix, template_name
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
+
+
+@dataclass(slots=True, frozen=True)
+class MigrationFiles:
+    migrations: tuple[Migration, ...]
+
+
+def source(path: Path) -> MigrationFiles:
+    return MigrationFiles(discover_migrations(path))
 
 
 def migrations(path: Path) -> Path:
@@ -16,23 +27,23 @@ def migrations(path: Path) -> Path:
 
 
 def name_of(path: Path, *, table: str = DEFAULT_MIGRATE_TABLE, create_schemas: Iterable[str] = ()) -> str:
-    return template_name(Migrator(path), directory=path, table=table, create_schemas=create_schemas)
+    return template_name(source(path), directory=path, table=table, create_schemas=create_schemas)
 
 
 def test_template_name_changes_with_the_rowx_version(tmp_path: Path) -> None:
     path = migrations(tmp_path / "migrations")
-    first = template_name(Migrator(path), directory=path, rowx="1.0.0")
-    assert template_name(Migrator(path), directory=path, rowx="1.0.0") == first
-    assert template_name(Migrator(path), directory=path, rowx="1.0.1") != first
+    first = template_name(source(path), directory=path, rowx="1.0.0")
+    assert template_name(source(path), directory=path, rowx="1.0.0") == first
+    assert template_name(source(path), directory=path, rowx="1.0.1") != first
     # only the `<h>` half changes: the project prefix is the path alone
-    assert template_name(Migrator(path), directory=path, rowx="1.0.1").split("_")[2] == first.split("_")[2]
+    assert template_name(source(path), directory=path, rowx="1.0.1").split("_")[2] == first.split("_")[2]
 
 
 def test_template_name_changes_with_the_path(tmp_path: Path) -> None:
     first = migrations(tmp_path / "one")
     second = migrations(tmp_path / "two")
-    one = template_name(Migrator(first), directory=first, rowx="1.0.0")
-    two = template_name(Migrator(second), directory=second, rowx="1.0.0")
+    one = template_name(source(first), directory=first, rowx="1.0.0")
+    two = template_name(source(second), directory=second, rowx="1.0.0")
     # identical files, different paths: a different project prefix and a different hash
     assert one != two
     assert one.split("_")[2] != two.split("_")[2]

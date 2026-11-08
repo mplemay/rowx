@@ -7,11 +7,13 @@ from sys import stdlib_module_names
 from tokenize import detect_encoding
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx._backend import CheckerBackend, backend_for, default_backend
+from rowx._backend import backend_for
 from rowx.check.model import Diagnostic, QueryCall, Rule, Span
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    from rowx_core.backend import CheckerBackend
 
     from rowx.check.config import Config
 
@@ -50,7 +52,12 @@ FUNCTIONAL: Final[frozenset[str]] = frozenset({"typing.NamedTuple", "typing.Type
 NEUTRAL: Final[frozenset[str]] = frozenset({"typing.Any", "builtins.object"})
 # names from these roots that aren't a supported row type or base are `invalid-row-type`; any other root is outside
 # the project and can't be looked at, so it is `unresolved-row-type`
-KNOWN_ROOTS: Final[frozenset[str]] = stdlib_module_names | {"typing_extensions", "rowx", "pydantic"}
+KNOWN_ROOTS: Final[frozenset[str]] = stdlib_module_names | {
+    "typing_extensions",
+    "rowx",
+    "rowx_core",
+    "pydantic",
+}
 FIELD_QUALIFIERS: Final[frozenset[str]] = frozenset({"typing.Required", "typing.NotRequired", "typing.ReadOnly"})
 TYPED_DICT_KEYWORDS: Final[frozenset[str]] = frozenset({"total", "closed", "extra_items"})
 DECORATOR_HELP: Final[str] = "remove the decorator, or use `@dataclass`"
@@ -421,9 +428,11 @@ def _unresolved(message: str, *, help_: str | None = None) -> RejectError:
     return RejectError("unresolved-row-type", message, help_=help_)
 
 
-def _external_reject(qualname: str, *, in_field: bool = False) -> RejectError:
+def _external_reject(
+    qualname: str, *, in_field: bool = False, known_roots: frozenset[str] = KNOWN_ROOTS
+) -> RejectError:
     root = qualname.split(".", maxsplit=1)[0]
-    if root in KNOWN_ROOTS:
+    if root in known_roots:
         # a pydantic-only type or constraint alias in a field is fixed by annotating the column's Python type
         help_ = PYDANTIC_HELP if in_field and root == "pydantic" else None
         return _invalid(f"`{qualname}` isn't a supported row type", help_=help_)
@@ -816,21 +825,24 @@ class _Resolver:
     def _selected(self) -> CheckerBackend | None:
         if self._backend is not None:
             return self._backend
-        # direct callers, including conformance, pass no DSN and use the default backend
-        if self._dsn is None:
-            selected = default_backend()
-            self._backend = selected
-            return selected
         # a blank checker URL is not a scheme; a cached miss would block a later backend
-        if not self._dsn.strip():
+        if self._dsn is None or not self._dsn.strip():
             return None
         # a failure is not stored, so a later lookup tries again
-        selected = backend_for(self._dsn)
+        selected = backend_for(self._dsn).checker()
         self._backend = selected
         return selected
 
+    def _known_roots(self) -> frozenset[str]:
+        selected = self._selected()
+        if selected is None:
+            return KNOWN_ROOTS
+        return KNOWN_ROOTS | {name.partition(".")[0] for name in selected.value_classes}
+
     def _find(self, module: _Module, level: int, dotted: str | None) -> _Module | None:
         if level == 0:
+            if dotted is not None and dotted.partition(".")[0] in self._known_roots():
+                return None
             return None if dotted is None else self._graph.find_absolute(dotted, self._roots)
         parts = [] if dotted is None else dotted.split(".")
         base = module.directory or module.path.parent
@@ -1051,13 +1063,11 @@ class _Resolver:
                     return _Node((Elem(leaf, nullable=False),), none=False)
                 if normalized in NEUTRAL:
                     return _Node((Elem("any", nullable=False),), none=False)
-                if (
-                    normalized.startswith("rowx.")
-                    and (selected := self._selected()) is not None
-                    and (leaf := selected.value_leaves.get(normalized)) is not None
-                ):
+                if (selected := self._selected()) is not None and (
+                    leaf := selected.value_leaves.get(normalized)
+                ) is not None:
                     return _Node((Elem(leaf, nullable=False),), none=False)
-                raise _external_reject(qualname, in_field=self._in_field)
+                raise _external_reject(qualname, in_field=self._in_field, known_roots=self._known_roots())
             case _Class():
                 return _Node((_NamedRef(value),), none=False)
             case _TypeVar():
@@ -1267,8 +1277,7 @@ class _Resolver:
         if (node := self._eval_container(qualname, slice_, module, chain)) is not None:
             return node
         if (
-            qualname.startswith("rowx.")
-            and (selected := self._selected()) is not None
+            (selected := self._selected()) is not None
             and qualname in selected.range_classes
             and len(elts) == 1
             and not isinstance(slice_, ast.Tuple)
@@ -1348,12 +1357,12 @@ class _Resolver:
         # `Generic[T]` only declares the type parameters, which `_params` reads
         if normalized == "typing.Generic":
             return "object"
-        if (
-            qualname.startswith("rowx.")
-            and (selected := self._selected()) is not None
-            and (value := selected.value_classes.get(qualname)) is not None
-        ):
-            msg = f"a subclass of rowx.postgres.{value} is not a row type"
+        if (selected := self._selected()) is not None and (value := selected.value_classes.get(qualname)) is not None:
+            public_name = min(
+                (name for name, leaf in selected.value_classes.items() if leaf == value),
+                key=lambda name: (name.count("."), name),
+            )
+            msg = f"a subclass of {public_name} is not a row type"
             raise _invalid(msg)
         if qualname == "pydantic.v1" or qualname.startswith("pydantic.v1."):
             msg = "a pydantic v1 model is not supported"
@@ -1368,10 +1377,10 @@ class _Resolver:
             return "BaseModel"
         if normalized in {"typing.NamedTuple", "typing.TypedDict", "builtins.object"}:
             return normalized.rsplit(".", maxsplit=1)[-1]
-        if qualname.split(".", maxsplit=1)[0] in KNOWN_ROOTS:
+        if qualname.split(".", maxsplit=1)[0] in self._known_roots():
             msg = f"`{qualname}` isn't a supported row type"
             raise _invalid(msg, help_=BASE_HELP)
-        raise _external_reject(qualname)
+        raise _external_reject(qualname, known_roots=self._known_roots())
 
     @staticmethod
     def _literal_bool(keyword: ast.keyword, what: str) -> bool:

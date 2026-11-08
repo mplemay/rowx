@@ -59,15 +59,15 @@
     - When you want automatic `__eq__`, `__repr__`, `__hash__` implementations
 - Prefer importing using `from x import y` instead of `import x`
 - Import local modules using the full path (ex: `from rowx.my_module import MyClass`)
-- Internal compiled module (`rowx.postgres._core`) imports:
-  - Prefer direct `from rowx.postgres._core import ...` when there is no name clash in that file.
+- Internal compiled module (`rowx_postgres._core`) imports:
+  - Prefer direct `from rowx_postgres._core import ...` when there is no name clash in that file.
   - When a symbol from `_core` would clash with a Python-defined name in the same module, import with a `*Impl` /
     `*_impl` alias, then assign or wrap as needed:
-    - Types/classes: `FooImpl` (e.g. `from rowx.postgres._core import Foo as FooImpl`, then `Foo = FooImpl` or a thin
+    - Types/classes: `FooImpl` (e.g. `from rowx_postgres._core import Foo as FooImpl`, then `Foo = FooImpl` or a thin
       wrapper).
     - Functions: `foo_impl` (snake_case with `_impl` suffix).
   - Do not use leading-underscore import aliases (`_Foo`, `_foo`) for this re-export pattern.
-  - Keep [`postgres/_core.pyi`](src/rowx/postgres/_core.pyi) in sync with the rust module.
+  - Keep [`_core.pyi`](packages/rowx-postgres/src/rowx_postgres/_core.pyi) in sync with the rust module.
 - **Don't use** docstrings, instead add inline comments only in places where there is complex or easily breakable logic
 - **No file-wide suppressions** in source: do not use a first-line or module-wide pragma such as `# ruff: noqa: ...` for
   the whole file, a blanket `# type: ignore` on a module, or equivalent file-scoped ignores.
@@ -104,9 +104,9 @@
 - Test files are named `test_<module>.py` to match the source module they test (e.g. tests for `core.py` go in
   `test_core.py`, tests for `_core` go in `test__core.py`)
 - Do not name test files by functionality
-- Tests live under `src/rowx/__tests__/` with `unit/` and `integration/` subdirectories. Group tests by domain in
-  subfolders.
-- Integration tests are marked with `@pytest.mark.integration`
+- Each Python package owns `<import_root>/__tests__/` with `unit/` and `integration/` subdirectories, mirroring its
+  modules. Core and CLI tests use fake executors or services and need no database.
+- Database tests belong to `rowx_postgres`; markers are `db` and `timing`.
 
 ## Project
 
@@ -126,11 +126,11 @@ validates every query against a live Postgres 18 database by preparing and descr
 | `just fmt` | Format rust, python, and shell through the prek hooks |
 | `just test-rust` | `cargo test --workspace` (DB tests run if `ROWX_TEST_DSN` is set) |
 | `just test-py` | `uv run pytest` |
-| `just db-up` / `just db-down` | Start or stop `postgres:18` (lands in T03) |
-| `just bench` | Release build plus `bench/fetch_100k.py` (lands in T24) |
+| `just db-up` / `just db-down` | Start or stop `postgres:18` |
+| `just bench` | Release build plus `bench/fetch_100k.py` |
 
 - Never run a plain `cargo build` of the cdylib, because it doesn't link on macOS. Use `uv run ...` or
-  `uv run maturin develop`, and add `--release` for benchmarks.
+  `uv run maturin develop -m packages/rowx-postgres/Cargo.toml`, and add `--release` for benchmarks.
 - DB tests skip when `ROWX_TEST_DSN` is unset; with `ROWX_REQUIRE_DB=1`, as CI sets, they fail instead.
 
 ## Definition of done
@@ -141,7 +141,7 @@ validates every query against a live Postgres 18 database by preparing and descr
    fine and must be called out in the PR.
 4. Errors use `thiserror` in `rowx-core` and `rowx-postgres`. They are mapped to Python exceptions only in an
    `errors.rs`: the shared exception-class registry is in `crates/rowx-py-core/src/errors.rs`, and each backend maps its
-   own enum (`crates/rowx-postgres-py/src/errors.rs`).
+   own enum (`packages/rowx-postgres/src/errors.rs`).
 5. Public Python is fully typed, and the `_core` stubs are updated with any new binding.
 
 ## Architecture conventions
@@ -150,7 +150,10 @@ validates every query against a live Postgres 18 database by preparing and descr
   over bytes with unit tests.
 - The GIL is released around all IO (`Python::detach`), and IO runs on the shared tokio runtime in
   `rowx-py-core/src/runtime.rs`.
-- Python has no runtime dependencies. The checker never imports or executes user code.
+- `rowx-core` has no runtime dependencies. `rowx-postgres` depends only on `rowx-core`; `rowx` depends on `rowx-core`
+  and installs `rowx-postgres` through its `postgres` extra. The checker never imports or executes user code.
+- Runtime queries use the supplied executor's compiler. Checking selects its backend from an explicit database
+  target; backend resources and services are passed explicitly, never through ambient context variables.
 - DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked
   `@pytest.mark.timing` and synchronise by polling `pg_stat_activity`, never with `sleep`.
 
@@ -173,16 +176,16 @@ validates every query against a live Postgres 18 database by preparing and descr
 |---|---|
 | Type-table metadata | `crates/rowx-postgres/src/types.rs` (append-only after T05) |
 | Wire codecs (pure) | `crates/rowx-postgres/src/wire/<family>.rs` |
-| PyObject codecs | `crates/rowx-postgres-py/src/codec/<family>.rs`; `codec/mod.rs` is dispatch only |
+| PyObject codecs | `packages/rowx-postgres/src/codec/<family>.rs`; `codec/mod.rs` is dispatch only |
 | Shared core (pure) | `crates/rowx-core/src/` (`state.rs` claim/settle state machine, `cancel.rs` plumbing, shared errors, pool) |
 | Row shape (pure) | `crates/rowx-core/src/row_shape.rs` (column-to-field mapping, `ShapeError`, `column_name` override stripping) |
 | Driver | `crates/rowx-postgres/src/{dsn,tls,conn,cancel,stmt_cache,exec}.rs` and its pool connector |
-| Describe | `crates/rowx-postgres/src/{describe,explain}.rs`, `crates/rowx-postgres-py/src/describe.rs` |
-| Bindings | `crates/rowx-postgres-py/src/{conn,exec,stream,pool,transaction,errors,types}.rs`, `crates/rowx-py-core/src/{runtime,errors}.rs`, `crates/rowx-postgres-py/src/lib.rs` |
-| Python runtime (shared) | `src/rowx/{__init__,_query,_executor,errors,_template,_rowplan}.py` |
-| Python Postgres backend | `src/rowx/postgres/` (including `_types.py` and `_vocab.py`) |
+| Describe | `crates/rowx-postgres/src/{describe,explain}.rs`, `packages/rowx-postgres/src/describe.rs` |
+| Bindings | `packages/rowx-postgres/src/{conn,exec,stream,pool,transaction,errors,types}.rs`, `crates/rowx-py-core/src/{runtime,errors}.rs`, `packages/rowx-postgres/src/lib.rs` |
+| Python runtime (shared) | `packages/rowx-core/src/rowx_core/` |
+| Python Postgres backend | `packages/rowx-postgres/src/rowx_postgres/` (including `_compiler.py`, `_types.py` and `_vocab.py`) |
 | Checker | `src/rowx/check/<module>.py`, one module each (including `migrate.py` and `database.py`, the CLI handlers, and `drift.py` and `scratch.py`, the migration checks) |
 | Migrations (pure) | `crates/rowx-core/src/migrate/` (filename grammar, source resolution, checksums, plan) |
-| Migrations (Postgres) | `crates/rowx-postgres/src/{migrate,admin}.rs`, `crates/rowx-postgres-py/src/{migrate,admin}.rs` |
-| Python migrations | `Migrator`, `Migration` and `MigrationStatus` in `src/rowx/postgres/`; `MigrateError` and its subclasses in `src/rowx/errors.py` |
+| Migrations (Postgres) | `crates/rowx-postgres/src/{migrate,admin}.rs`, `packages/rowx-postgres/src/{migrate,admin}.rs` |
+| Python migrations | Shared contracts, source metadata and errors in `rowx_core`; concrete `Migrator` and bound services in `rowx_postgres` |
 | Test plugin | `src/rowx/testing.py` (opt-in pytest plugin) |

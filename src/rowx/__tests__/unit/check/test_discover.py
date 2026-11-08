@@ -60,10 +60,31 @@ def test_aliased_imports() -> None:
     assert result.unchecked_count == 2
 
 
-def test_dotted_import_binds_root() -> None:
-    result = run('import rowx.errors\nrowx.query[int](t"select 1")\n')
+@pytest.mark.parametrize("module", ["rowx", "rowx_core"])
+def test_dotted_import_binds_root(module: str) -> None:
+    result = run(f'import {module}.errors\n{module}.query[int](t"select 1")\n')
     assert not result.diagnostics
     assert len(result.calls) == 1
+
+
+@pytest.mark.parametrize("module", ["rowx", "rowx_core"])
+def test_core_query_import_aliases(module: str) -> None:
+    result = run(
+        f"import {module} as rx\n"
+        f"from {module} import query as q, query_unchecked as qu\n"
+        'q[int](t"select 1")\nrx.query[int](t"select 2")\n'
+        'qu[int](t"select 3")\nrx.query_unchecked(t"select 4")\n'
+    )
+    assert not result.diagnostics
+    assert [call.kind for call in result.calls] == ["query", "query", "query_unchecked", "query_unchecked"]
+    assert result.unchecked_count == 2
+
+
+@pytest.mark.parametrize("module", ["rowx", "rowx_core"])
+def test_core_query_import_is_shadowed_by_argument(module: str) -> None:
+    result = run(f'from {module} import query\ndef f(query):\n    return query[int](t"select 1")\n')
+    assert not result.calls
+    assert not result.diagnostics
 
 
 def test_function_local_import() -> None:

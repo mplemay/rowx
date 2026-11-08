@@ -3,7 +3,7 @@ name = "rowx-example-app"
 version = "0.0.0"
 description = "A small app whose queries are checked by rowx in CI"
 requires-python = ">=3.14"
-dependencies = ["rowx", "pydantic>=2.11"]
+dependencies = ["rowx[postgres]", "pydantic>=2.11"]
 
 [tool.rowx]
 include = ["."]

@@ -1,0 +1,5 @@
+error[sql-error]: syntax error at or near "id"
+ --> app/users.py:5:10
+  |
+5 |     wher id = 1
+  |          ^

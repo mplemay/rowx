@@ -1,27 +1,24 @@
 import os
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
-from typing import TYPE_CHECKING, Final, get_args
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 import pytest
 
-from rowx._backend import UnsupportedSchemeError, backend_for, module_for
-from rowx.check.cli import main
-from rowx.check.resolve import HSTORE_LEAF, LEAVES, NETWORK_PAIRS
-from rowx.postgres._vocab import LeafName
+from rowx._backend import UnsupportedSchemeError, module_for
 
 QUERY: Final[str] = 'from rowx import query\n\nquery[int](t"SELECT 1")\n'
 MONEY_QUERY: Final[str] = """\
 from rowx import query
-from rowx.postgres import Money
+from rowx_postgres import Money
 
 query[Money](t"SELECT 1")
 """
 MONEY_CONCAT: Final[str] = """\
-from rowx.postgres import Money
+from rowx_postgres import Money
 
 x = t"a" + Money(1)
 """
@@ -32,17 +29,17 @@ from importlib.abc import MetaPathFinder
 
 class _BlockPostgres(MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
-        if fullname == "rowx.postgres" or fullname.startswith("rowx.postgres."):
+        if fullname == "rowx_postgres" or fullname.startswith("rowx_postgres."):
             message = f"no module named {fullname}"
             raise ModuleNotFoundError(message, name=fullname)
         return None
 
 
 sys.meta_path.insert(0, _BlockPostgres())
-assert "rowx.postgres" not in sys.modules
+assert "rowx_postgres" not in sys.modules
 from rowx.check.cli import main
 
-assert "rowx.postgres" not in sys.modules
+assert "rowx_postgres" not in sys.modules
 assert "rowx.check.migrate" not in sys.modules
 assert "rowx.check.database" not in sys.modules
 assert "rowx.check.drift" not in sys.modules
@@ -62,7 +59,7 @@ from importlib.abc import MetaPathFinder
 
 class _BlockPostgres(MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
-        if fullname == "rowx.postgres" or fullname.startswith("rowx.postgres."):
+        if fullname == "rowx_postgres" or fullname.startswith("rowx_postgres."):
             message = f"no module named {fullname}"
             raise ModuleNotFoundError(message, name=fullname)
         return None
@@ -137,7 +134,7 @@ def test_migrate_project_with_no_statement_does_not_import_a_backend(tmp_path: P
     result = _run_blocked(
         tmp_path,
         ["check", "x.py"],
-        "rowx.postgres",
+        "rowx_postgres",
         "rowx.check.drift",
         "rowx.check.scratch",
     )
@@ -154,7 +151,7 @@ def test_migrate_project_without_a_url_names_the_missing_url(tmp_path: Path) -> 
 
 def test_money_query_without_a_url_names_the_missing_url(tmp_path: Path) -> None:
     _migrate_project(tmp_path, MONEY_QUERY)
-    result = _run_blocked(tmp_path, ["check", "x.py"], "rowx.postgres")
+    result = _run_blocked(tmp_path, ["check", "x.py"], "rowx_postgres")
     assert result.returncode == 2, result.stderr
     assert "no database URL" in result.stderr
     assert "install `rowx[postgres]`" not in result.stderr
@@ -170,7 +167,7 @@ def test_template_concat_does_not_import_a_backend_for_a_postgres_url(tmp_path: 
     result = _run_blocked(
         tmp_path,
         ["check", "--database-url", "postgres://localhost/db", "x.py"],
-        "rowx.postgres",
+        "rowx_postgres",
     )
     assert result.returncode == 1, result.stderr
     assert "Traceback" not in result.stderr
@@ -180,7 +177,7 @@ def test_template_concat_does_not_import_a_backend_for_a_postgres_url(tmp_path: 
 
 def test_template_concat_with_an_unknown_scheme_stays_template_construction(tmp_path: Path) -> None:
     (tmp_path / "x.py").write_text(MONEY_CONCAT, encoding="utf-8")
-    result = _run_blocked(tmp_path, ["check", "--database-url", "sqlite://x", "x.py"], "rowx.postgres")
+    result = _run_blocked(tmp_path, ["check", "--database-url", "sqlite://x", "x.py"], "rowx_postgres")
     assert result.returncode == 1, result.stderr
     assert "Traceback" not in result.stderr
     assert _mentions_template_construction(result)
@@ -198,7 +195,7 @@ def test_money_query_with_an_unknown_scheme_exits_two(tmp_path: Path) -> None:
 
 def test_scratch_with_no_statement_does_not_import_scratch(tmp_path: Path) -> None:
     _migrate_project(tmp_path, ASSIGNMENT)
-    result = _run_blocked(tmp_path, ["check", "--scratch", "x.py"], "rowx.postgres", "rowx.check.scratch")
+    result = _run_blocked(tmp_path, ["check", "--scratch", "x.py"], "rowx_postgres", "rowx.check.scratch")
     assert result.returncode == 0, result.stderr
 
 
@@ -212,7 +209,7 @@ def test_scratch_with_no_statement_does_not_import_scratch(tmp_path: Path) -> No
     ],
 )
 def test_postgres_dsns_select_the_postgres_backend(dsn: str) -> None:
-    assert module_for(dsn) == "rowx.postgres._backend"
+    assert module_for(dsn) == "rowx_postgres._backend"
 
 
 @pytest.mark.parametrize(
@@ -231,29 +228,6 @@ def test_unknown_scheme_on_migrate_and_database_exits_two(tmp_path: Path, argv: 
     assert "rowx[postgres]" not in result.stderr
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["migrate", "info", "--database-url", "postgresql://u:pw@127.0.0.1:1/app"],
-        ["database", "create", "--database-url", "postgres://u:pw@127.0.0.1:1/app"],
-    ],
-)
-def test_postgres_url_on_migrate_and_database_is_not_an_unknown_scheme(
-    tmp_path: Path, argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # info reads the migration directory before it connects, so the directory has to exist
-    if argv[0] == "migrate":
-        (tmp_path / "migrations").mkdir()
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    code = main([*argv, "--connect-timeout", "0"])
-    err = capsys.readouterr().err
-    assert code == 2, err
-    assert "unknown database scheme" not in err
-    assert "could not reach the database" in err
-    assert "rowx[postgres]" not in err
-
-
 @pytest.mark.parametrize("dsn", ["sqlite://x", "embedded://x"])
 def test_unknown_scheme_does_not_ask_for_the_postgres_extra(dsn: str) -> None:
     with pytest.raises(UnsupportedSchemeError, match="unknown database scheme") as raised:
@@ -261,14 +235,14 @@ def test_unknown_scheme_does_not_ask_for_the_postgres_extra(dsn: str) -> None:
     assert "rowx[postgres]" not in str(raised.value)
 
 
-def test_value_class_leaves_cover_the_vocabulary() -> None:
-    backend = backend_for("host=localhost dbname=app")
-    assert backend.param_classes is backend.value_classes
-    found = (
-        set(LEAVES.values())
-        | set(NETWORK_PAIRS.values())
-        | set(backend.value_leaves.values())
-        | set(backend.range_leaves.values())
-        | {HSTORE_LEAF, "list", "any", "none"}
+def test_migrate_add_existing_directory_does_not_import_a_backend(tmp_path: Path) -> None:
+    directory = tmp_path / "migrations"
+    directory.mkdir()
+    (directory / "001_first.sql").write_text("SELECT 1;", encoding="utf-8")
+    result = _run_blocked(
+        tmp_path,
+        ["migrate", "add", "next change", "--sequential", "--source", "migrations"],
+        "rowx_postgres",
     )
-    assert found == set(get_args(LeafName.__value__))
+    assert result.returncode == 0, result.stderr
+    assert (directory / "0002_next_change.sql").is_file()

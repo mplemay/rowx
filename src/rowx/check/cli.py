@@ -7,7 +7,9 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
-from rowx._backend import BackendMissing, UnsupportedSchemeError
+from rowx_core.backend import UnsupportedCapabilityError
+
+from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
 from rowx.check.config import Config, ConfigError, database_url, load_config
 from rowx.check.render import render_json, render_text, strip_controls
 from rowx.check.runner import CheckError, Hooks, RunResult, redact, run_check
@@ -97,10 +99,11 @@ def _scratch_hook(config: Config, state: _HookState) -> Callable[[str], Abstract
         from rowx.check.migrate import load_migrator, resolve_target  # ruff: ignore[import-outside-top-level]
         from rowx.check.scratch import Scratch  # ruff: ignore[import-outside-top-level]
 
-        scratch = Scratch(url)
+        backend = backend_for(url)
+        scratch = Scratch(url, backend.admin(url))
         # recorded before the session so an interrupted drop is still swept
         state.built = scratch
-        return scratch.session(load_migrator(resolve_target(config, None), url))
+        return scratch.session(load_migrator(resolve_target(config, None), url, backend))
 
     return _open
 
@@ -148,7 +151,7 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
         if state.drift_error is not None and isinstance(error, state.drift_error):
             raise
         raise CheckError(strip_controls(redact(str(error), dsn))) from None
-    except BackendMissing, UnsupportedSchemeError:
+    except BackendMissing, UnsupportedSchemeError, UnsupportedCapabilityError:
         raise
     except Exception as error:  # ruff: ignore[blind-except]
         msg = f"internal error: {type(error).__name__}: {strip_controls(redact(str(error), dsn))}"
@@ -163,7 +166,7 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
 def _subcommand(handler: Callable[[Namespace], None], args: Namespace) -> int:
     try:
         handler(args)
-    except (ConfigError, CheckError, BackendMissing, UnsupportedSchemeError) as error:
+    except (ConfigError, CheckError, BackendMissing, UnsupportedSchemeError, UnsupportedCapabilityError) as error:
         print(f"error: {strip_controls(str(error))}", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
     except KeyboardInterrupt:
@@ -188,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("-j must be at least 1")
     try:
         result, root = _check(args)
-    except (ConfigError, CheckError, BackendMissing, UnsupportedSchemeError) as error:
+    except (ConfigError, CheckError, BackendMissing, UnsupportedSchemeError, UnsupportedCapabilityError) as error:
         print(f"error: {strip_controls(str(error))}", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
     except KeyboardInterrupt:

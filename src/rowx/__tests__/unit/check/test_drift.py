@@ -1,11 +1,12 @@
+from rowx_core.migrations import MigrationStatus
+
 from rowx.check.cli import _parser
 from rowx.check.drift import summarize
-from rowx.postgres import MigrationStatus
 
 
 def statuses(**states: list[int]) -> list[MigrationStatus]:
     return [
-        MigrationStatus(version=version, description="d", state=state)  # ty: ignore[invalid-argument-type]
+        MigrationStatus(version=version, description="d", state=state)
         for state, versions in states.items()
         for version in versions
     ]

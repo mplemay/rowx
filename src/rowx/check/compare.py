@@ -2,7 +2,7 @@ from dataclasses import dataclass, replace
 from re import compile as re_compile
 from typing import TYPE_CHECKING, Final, Literal
 
-from rowx._backend import CheckerBackend, NullReason, ShapeIssue, default_backend
+from rowx_core.backend import CheckerBackend, NullReason, ShapeIssue
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -54,7 +54,10 @@ class Finding:
 
 
 def _rules(backend: CheckerBackend | None) -> CheckerBackend:
-    return backend if backend is not None else default_backend()
+    if backend is None:
+        msg = "checker rules require an explicit backend"
+        raise ValueError(msg)
+    return backend
 
 
 def _py_result(rules: CheckerBackend, key: str) -> str:

@@ -1,33 +1,85 @@
 import asyncio
+from dataclasses import dataclass, replace
 from time import perf_counter
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, override
 
 import pytest
+from rowx_core import Compiler
+from rowx_core.backend import CheckerBackend, CheckerSession
+from rowx_core.errors import DatabaseError, InterfaceError
 
-from rowx.check import runner
 from rowx.check.cli import main
-from rowx.check.runner import CheckError, describe_all, quoted_aliases, redact
-from rowx.errors import DatabaseError, InterfaceError
+from rowx.check.runner import CheckError, describe_all, redact
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
+    from rowx_core import Compiled, TemplatePlan
+    from rowx_core.backend import ColumnInfo, Describe, Failure, ParamInfo, ShapeIssue
 
-class FakeConnection:
+
+class UnusedCompiler(Compiler):
+    @override
+    def compile(self, _plan: TemplatePlan, /) -> tuple[Compiled, list[object]]:
+        message = "describe workers do not compile templates"
+        raise AssertionError(message)
+
+    @override
+    def compile_parts(self, _strings: Sequence[str], /) -> Compiled:
+        message = "describe workers do not compile templates"
+        raise AssertionError(message)
+
+
+def unused_mapping(
+    *_args: object,
+) -> tuple[Sequence[int | None], Sequence[ShapeIssue]]:
+    message = "describe workers do not map row fields"
+    raise AssertionError(message)
+
+
+class FakeConnection(CheckerSession):
     closed_count = 0
 
+    @override
     async def close(self) -> None:
         type(self).closed_count += 1
 
+    @override
+    async def describe(self, sql: str) -> Describe:
+        message = "the test must supply describe outcomes"
+        raise AssertionError(message)
 
-@pytest.fixture(autouse=True)  # ruff: ignore[pytest-fixture-autouse]
-def fake_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    @override
+    def classify(self, error: Exception) -> Failure:
+        if isinstance(error, InterfaceError):
+            return "lost"
+        if isinstance(error, DatabaseError):
+            if error.sqlstate == "57014":
+                return "timeout"
+            if error.sqlstate == "57P01" or error.sqlstate.startswith("08"):
+                return "lost"
+        return "other"
+
+
+@pytest.fixture
+def fake_backend() -> CheckerBackend:
     FakeConnection.closed_count = 0
 
-    async def connect(_dsn: str, _timeout_ms: int) -> Any:  # ruff: ignore[any-type, unused-async]
+    async def connect(_dsn: str, _timeout_s: float) -> FakeConnection:  # ruff: ignore[unused-async]
         return FakeConnection()
 
-    monkeypatch.setattr(runner, "_connect", connect)
+    return CheckerBackend(
+        connect_checker=connect,
+        compiler=UnusedCompiler(),
+        map_columns=unused_mapping,
+        types={},
+        param_classes={},
+        value_leaves={},
+        range_leaves={},
+        range_classes=frozenset(),
+        value_classes={},
+    )
 
 
 def _describe_with(monkeypatch: pytest.MonkeyPatch, *outcomes: object) -> list[str]:
@@ -41,48 +93,110 @@ def _describe_with(monkeypatch: pytest.MonkeyPatch, *outcomes: object) -> list[s
             raise outcome
         return outcome
 
-    monkeypatch.setattr(runner, "describe_impl", fake)
+    monkeypatch.setattr(FakeConnection, "describe", fake)
     return seen
 
 
-def test_lost_connection_is_retried_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lost_connection_is_retried_once(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     seen = _describe_with(monkeypatch, DatabaseError("57P01", "terminating connection"), "described")
-    results = asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000))
+    results = asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend))
     assert results == {"SELECT 1": "described"}
     assert seen == ["SELECT 1", "SELECT 1"]
     assert FakeConnection.closed_count == 2
 
 
-def test_connection_class_errors_are_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connection_class_errors_are_retried(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     _describe_with(monkeypatch, DatabaseError("08006", "connection failure"), InterfaceError("closed"), "described")
     with pytest.raises(CheckError, match="lost the database connection"):
-        asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000))
+        asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend))
 
 
-def test_second_loss_fails_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_second_loss_fails_the_run(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     _describe_with(monkeypatch, InterfaceError("closed"), DatabaseError("57P01", "gone"))
     with pytest.raises(CheckError, match="lost the database connection"):
-        asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000))
+        asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend))
 
 
-def test_timeout_fails_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_timeout_fails_the_run(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     _describe_with(monkeypatch, DatabaseError("57014", "canceling statement due to statement timeout"))
     with pytest.raises(CheckError, match="timed out"):
-        asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000))
+        asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend))
 
 
-def test_sql_errors_are_outcomes_not_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sql_errors_are_outcomes_not_failures(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     error = DatabaseError("42P01", "relation does not exist")
     _describe_with(monkeypatch, error)
-    assert asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000)) == {"SELECT 1": error}
+    assert asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend)) == {
+        "SELECT 1": error
+    }
 
 
-def test_each_sql_is_described_once_across_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_each_sql_is_described_once_across_workers(
+    monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend
+) -> None:
     sqls = [f"SELECT {n}" for n in range(9)]
     seen = _describe_with(monkeypatch, *[f"d{n}" for n in range(9)])
-    results = asyncio.run(describe_all("postgresql://x", sqls, 4, 1000))
+    results = asyncio.run(describe_all("postgresql://x", sqls, 4, 1000, backend=fake_backend))
     assert sorted(seen) == sorted(sqls)
     assert set(results) == set(sqls)
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class FakeDescribe:
+    owner: str
+    params: tuple[ParamInfo, ...] = ()
+    columns: tuple[ColumnInfo, ...] = ()
+
+
+@dataclass(slots=True, kw_only=True)
+class OwnedSession(CheckerSession):
+    owner: str
+    started: list[str]
+    both_started: asyncio.Event
+    closed: bool = False
+
+    @override
+    async def describe(self, sql: str) -> FakeDescribe:
+        self.started.append(self.owner)
+        if len(self.started) == 2:
+            self.both_started.set()
+        await self.both_started.wait()
+        return FakeDescribe(owner=self.owner)
+
+    @override
+    async def close(self) -> None:
+        self.closed = True
+
+    @override
+    def classify(self, error: Exception) -> Failure:
+        return "other"
+
+
+def test_concurrent_backend_sessions_cannot_cross_route(fake_backend: CheckerBackend) -> None:
+    async def run() -> None:
+        started: list[str] = []
+        both_started = asyncio.Event()
+        first = OwnedSession(owner="first", started=started, both_started=both_started)
+        second = OwnedSession(owner="second", started=started, both_started=both_started)
+
+        async def connect_first(_dsn: str, _timeout: float) -> OwnedSession:  # ruff: ignore[unused-async]
+            return first
+
+        async def connect_second(_dsn: str, _timeout: float) -> OwnedSession:  # ruff: ignore[unused-async]
+            return second
+
+        outcomes = await asyncio.gather(
+            describe_all("fake://first", ["SELECT 1"], 1, 1000, replace(fake_backend, connect_checker=connect_first)),
+            describe_all("fake://second", ["SELECT 1"], 1, 1000, replace(fake_backend, connect_checker=connect_second)),
+        )
+        for outcome, owner in zip(outcomes, ("first", "second"), strict=True):
+            described = outcome["SELECT 1"]
+            assert isinstance(described, FakeDescribe)
+            assert described.owner == owner
+        assert first.closed
+        assert second.closed
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -137,15 +251,6 @@ def test_redact_masks_userinfo_and_password_tokens_by_syntax() -> None:
 
 def test_redact_skips_empty_secrets() -> None:
     assert redact("plain text", "host=h password=") == "plain text"
-
-
-def test_aliases_come_only_from_as_clauses() -> None:
-    sql = (
-        'SELECT 1 AS "one!", 2 AS /* c */ "two?", "t"."col", \'AS "str!"\' AS x, $$ AS "dollar!" $$ AS y, '
-        '3 -- AS "line!"\n AS "three!" /* AS "block!" /* nested */ AS "inner!" */, 4 AS "fo""ur!"'
-    )
-    assert [ident for _, ident in quoted_aliases(sql)] == ["one!", "two?", "three!", 'fo"ur!']
-    assert [sql[offset] for offset, _ in quoted_aliases(sql)] == ['"'] * 4
 
 
 def test_redact_merges_overlapping_secrets_before_masking() -> None:

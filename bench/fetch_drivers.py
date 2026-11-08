@@ -9,11 +9,11 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 
 import asyncpg
 import psycopg
+from rowx_postgres import connect
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import rowx
-from rowx.postgres import connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

@@ -12,7 +12,7 @@ use crate::conn::Connection;
 use crate::dsn::{ConnectOptions, ParsedDsn};
 use crate::error::Error;
 
-/// The reset a pool runs on release; the same text as `rowx.postgres.RESET_QUERY`.
+/// The reset a pool runs on release; the same text as `rowx_postgres.RESET_QUERY`.
 pub const RESET_QUERY: &str = "RESET SESSION AUTHORIZATION; RESET ALL; SELECT pg_catalog.pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; DISCARD TEMP;";
 
 /// Fails unless the session is idle.

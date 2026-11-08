@@ -70,10 +70,10 @@ jobs:
         run: uv tool install rust-just
 
       - name: Install the dependencies
-        run: uv sync --all-groups --no-install-project
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
-        run: uv run maturin develop
+        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
 
       - name: Check
         if: matrix.python-version == '3.14'
@@ -89,6 +89,23 @@ jobs:
 
       - name: Test python
         run: just test-py
+
+      - name: Build package wheels
+        if: matrix.python-version == '3.14'
+        run: uv build --all-packages --wheel --out-dir dist
+
+      - name: Verify standalone package boundaries
+        if: matrix.python-version == '3.14'
+        run: |
+          uv run python scripts/validate-distributions.py --contents-only
+          bash scripts/smoke-package-boundaries.sh dist
+
+      - name: Type-check installed wheel interfaces
+        if: matrix.python-version == '3.14'
+        run: |
+          uv venv --python 3.14 "$RUNNER_TEMP/rowx-wheel-types"
+          uv pip install --refresh --python "$RUNNER_TEMP/rowx-wheel-types/bin/python" --no-index --find-links dist 'rowx[postgres]'
+          ROWX_TYPING_PYTHON="$RUNNER_TEMP/rowx-wheel-types/bin/python" uv run pytest packages/rowx-postgres/src/rowx_postgres/__tests__/unit/test__executor.py
 
   macos:
     name: macOS
@@ -118,10 +135,10 @@ jobs:
         run: uv tool install rust-just
 
       - name: Install the dependencies
-        run: uv sync --all-groups --no-install-project
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
-        run: uv run maturin develop
+        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
 
       - name: Check
         run: just check
@@ -169,10 +186,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-groups --no-install-project
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
-        run: uv run maturin develop
+        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
 
       - name: Apply the example schema
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f examples/app/schema.sql

@@ -5,12 +5,12 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING, Final
 
 import pytest
+from rowx_core.errors import InterfaceError
 
 from rowx.check import cli
 from rowx.check.cli import main
 from rowx.check.migrate import format_duration, run_guarded
 from rowx.check.runner import CheckError
-from rowx.errors import InterfaceError
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -1,12 +1,12 @@
-from rowx._executor import Executor
-from rowx._query import QueryResult, RowStream, query, query_unchecked
-from rowx.errors import (
+from rowx_core import (
+    Connection,
     ConnectionBusyError,
     DatabaseError,
     DecodeError,
     DirtyMigrationError,
     EncodeError,
     Error,
+    Executor,
     InterfaceError,
     IrreversibleMigrationError,
     MigrateError,
@@ -15,13 +15,20 @@ from rowx.errors import (
     MigrationMissingError,
     MigrationOrderError,
     MigrationSourceError,
+    Pool,
     PoolTimeoutError,
+    QueryResult,
     RowConstructError,
     RowNotFound,
     RowShapeError,
+    RowStream,
+    Transaction,
+    query,
+    query_unchecked,
 )
 
 __all__ = [
+    "Connection",
     "ConnectionBusyError",
     "DatabaseError",
     "DecodeError",
@@ -37,12 +44,14 @@ __all__ = [
     "MigrationMissingError",
     "MigrationOrderError",
     "MigrationSourceError",
+    "Pool",
     "PoolTimeoutError",
     "QueryResult",
     "RowConstructError",
     "RowNotFound",
     "RowShapeError",
     "RowStream",
+    "Transaction",
     "query",
     "query_unchecked",
 ]

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 import pytest
+from rowx_core.backend import Backend
 
 from rowx.check.cli import _parser, main
 from rowx.check.database import _confirmed
@@ -77,22 +78,13 @@ def test_no_database_url_exits_two(
     assert "no database URL" in capsys.readouterr().err
 
 
-def test_unreachable_database_exits_two_without_the_password(
+def test_unavailable_admin_capability_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    url = "postgresql://role:hunter2pw@127.0.0.1:1/app"
-    assert main(["database", "create", "--database-url", url, "--connect-timeout", "0"]) == 2
+    monkeypatch.setattr("rowx.check.database.backend_for", lambda _dsn: Backend())
+    assert main(["database", "create", "--database-url", "fake://example"]) == 2
     captured = capsys.readouterr()
-    assert "hunter2pw" not in captured.out + captured.err
-    assert url not in captured.out + captured.err
-
-
-def test_url_without_a_database_name_exits_two(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    assert main(["database", "drop", "-y", "--database-url", "postgresql://role:pw@127.0.0.1:1/"]) == 2
-    assert "names no database" in capsys.readouterr().err
+    assert not captured.out
+    assert "does not support database administration" in captured.err
+    assert "Traceback" not in captured.err

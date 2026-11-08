@@ -2,20 +2,15 @@ import ast
 import asyncio
 from collections import Counter, deque
 from contextlib import AsyncExitStack, suppress
-from contextvars import ContextVar
 from dataclasses import dataclass, field
-from re import DOTALL, IGNORECASE, VERBOSE, Pattern, compile as re_compile, escape as re_escape, sub
+from re import DOTALL, IGNORECASE, Pattern, compile as re_compile, escape as re_escape, sub
 from typing import TYPE_CHECKING, Final
-from urllib.parse import quote, unquote
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
-from rowx._backend import (
-    CheckerBackend,
-    ColumnInfo,
-    Connection,
-    Describe,
-    UnsupportedSchemeError,
-    backend_for,
-)
+from rowx_core.backend import CheckerBackend, CheckerSession, ColumnInfo, Describe
+from rowx_core.errors import ConnectionBusyError, DatabaseError, InterfaceError
+
+from rowx._backend import backend_for
 from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
 from rowx.check.construction import template_reports
 from rowx.check.discover import discover_source, too_deep
@@ -24,10 +19,9 @@ from rowx.check.params import ParamInference
 from rowx.check.render import Report, null_reason_note
 from rowx.check.resolve import ModuleGraph, RowType, resolve_row_type, roots_for
 from rowx.check.sourcemap import SourceMap, SourceMapper
-from rowx.errors import ConnectionBusyError, DatabaseError, InterfaceError
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Iterator
+    from collections.abc import Awaitable, Callable, Iterable
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
@@ -36,28 +30,6 @@ if TYPE_CHECKING:
 
 type Outcome = Describe | DatabaseError
 
-IDENT_MAX_BYTES: Final[int] = 63
-TIMEOUT_SQLSTATE: Final[str] = "57014"
-SHUTDOWN_SQLSTATE: Final[str] = "57P01"
-CONNECTION_CLASS: Final[str] = "08"
-CAST_HELP: Final[dict[str, str]] = {
-    "42P18": "cast the parameter: `{x}::int`",
-    "42P08": "cast the parameter: `{x}::int`",
-    "42501": "grant the checker's role the privileges this query needs, or run the check as a role that has them",
-}
-SQL_TOKEN: Final = re_compile(
-    r"""
-    (?P<space>\s+)
-    |(?P<line_comment>--[^\n]*)
-    |(?P<block_open>/\*)
-    |(?P<string>[eE]?'(?:[^'\\]|\\.|'')*')
-    |(?P<dollar>\$(?:[^\W\d]\w*)?\$)
-    |(?P<quoted>"(?:[^"]|"")*")
-    |(?P<word>[^\W\d]\w*)
-    |(?P<other>.)
-    """,
-    flags=VERBOSE | DOTALL,
-)
 PASSWORD_PARAM: Final = re_compile(
     r"(?P<key>password\s*=\s*)(?P<value>'(?:[^'\\]|\\.)*'?|[^\s&]+)",
     flags=IGNORECASE | DOTALL,
@@ -67,9 +39,8 @@ PASSWORD_PARAM_KV: Final = re_compile(
     r"(?P<key>password\s*=\s*)(?P<value>'(?:[^'\\]|\\.)*'?|(?:\\.|[^\s\\])+)",
     flags=IGNORECASE | DOTALL,
 )
-URL_SCHEME: Final = re_compile(r"\s*postgres(?:ql)?://")
+URL_SCHEME: Final = re_compile(r"\s*[A-Za-z][A-Za-z0-9+.-]*://")
 USERINFO: Final = re_compile(r"(?P<key>://[^/?#\s:@]*:)(?P<value>[^/?#\s]*)@")
-_SELECTED: ContextVar[CheckerBackend | None] = ContextVar("rowx_checker_backend", default=None)
 
 
 class CheckError(Exception):
@@ -140,15 +111,14 @@ def _spellings(raw: str) -> set[str]:
 
 # the decoded values the options parser finds, which covers a spelling the syntax scan above doesn't know
 def _parsed_secrets(dsn: str) -> set[str]:
-    if not dsn.strip():
-        return set()
     try:
-        options = backend_for(dsn).parse_dsn(dsn)
-    except InterfaceError, UnsupportedSchemeError:
+        parts = urlsplit(dsn)
+        found = {parts.password or ""}
+        found.update(value for key, value in parse_qsl(parts.query) if "password" in key.lower())
+    except ValueError:
         return set()
-    found: set[str] = {str(options.get("password") or "")}
-    found.update(str(value) for key, value in options.get("extra", {}).items() if "password" in key)
-    return found
+    else:
+        return found
 
 
 def _password_param(text: str) -> Pattern[str]:
@@ -199,30 +169,12 @@ def redact(text: str, dsn: str) -> str:
     return _mask_syntax("".join(out))
 
 
-def _selected_backend(dsn: str) -> CheckerBackend:
-    if (backend := _SELECTED.get()) is not None:
-        return backend
-    return backend_for(dsn)
-
-
-async def _connect(dsn: str, timeout_ms: int) -> Connection:
+async def _connect(dsn: str, timeout_ms: int, backend: CheckerBackend) -> CheckerSession:
     try:
-        return await _selected_backend(dsn).connect_checker(dsn, timeout_ms / 1000)
+        return await backend.connect_checker(dsn, timeout_ms / 1000)
     except (InterfaceError, DatabaseError, OSError) as error:
         msg = f"could not connect to the database: {redact(str(error), dsn)}"
         raise CheckError(msg) from None
-
-
-async def describe_impl(conn: Connection, sql: str) -> Describe:
-    backend = _SELECTED.get()
-    if backend is None:
-        msg = "checker backend is not selected"
-        raise CheckError(msg)
-    return await backend.describe(conn, sql)
-
-
-def _is_lost(error: DatabaseError) -> bool:
-    return error.sqlstate == SHUTDOWN_SQLSTATE or error.sqlstate.startswith(CONNECTION_CLASS)
 
 
 @dataclass(slots=True, frozen=True)
@@ -234,10 +186,11 @@ class _Lost:
 class _Worker:
     dsn: str
     timeout_ms: int
-    conn: Connection | None = None
+    backend: CheckerBackend
+    conn: CheckerSession | None = None
 
-    async def _open(self) -> Connection:
-        self.conn = await _connect(self.dsn, self.timeout_ms)
+    async def _open(self) -> CheckerSession:
+        self.conn = await _connect(self.dsn, self.timeout_ms, self.backend)
         return self.conn
 
     async def close(self) -> None:
@@ -247,17 +200,22 @@ class _Worker:
                 await conn.close()
 
     async def _try(self, sql: str) -> Outcome | _Lost:
+        session = self.conn or await self._open()
         try:
-            return await describe_impl(self.conn or await self._open(), sql)
+            return await session.describe(sql)
         except ConnectionBusyError:
             raise
-        except DatabaseError as error:
-            if error.sqlstate == TIMEOUT_SQLSTATE:
-                msg = f"describe timed out (statement_timeout): {error.message}"
-                raise CheckError(msg) from None
-            return error if not _is_lost(error) else _Lost(error)
-        except InterfaceError as error:
-            return _Lost(error)
+        except (DatabaseError, InterfaceError) as error:
+            match session.classify(error):
+                case "timeout":
+                    msg = f"describe timed out: {error}"
+                    raise CheckError(msg) from None
+                case "lost":
+                    return _Lost(error)
+                case _:
+                    if isinstance(error, DatabaseError):
+                        return error
+                    raise
 
     async def describe(self, sql: str) -> Outcome:
         # a lost connection is retried once on a fresh one
@@ -278,13 +236,12 @@ async def describe_all(
     timeout_ms: int,
     backend: CheckerBackend | None = None,
 ) -> dict[str, Outcome]:
-    selected = backend if backend is not None else backend_for(dsn)
-    token = _SELECTED.set(selected)
+    selected = backend if backend is not None else backend_for(dsn).checker()
     pending = deque(statements)
     results: dict[str, Outcome] = {}
 
     async def run() -> None:
-        worker = _Worker(dsn, timeout_ms)
+        worker = _Worker(dsn, timeout_ms, selected)
         try:
             await worker._open()  # ruff: ignore[private-member-access]
             while pending:
@@ -299,8 +256,6 @@ async def describe_all(
                 group.create_task(run())
     except* CheckError as errors:
         raise min(errors.exceptions, key=str) from None
-    finally:
-        _SELECTED.reset(token)
     return results
 
 
@@ -332,7 +287,7 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" + ("" if count == 1 else "s")
 
 
-def _sql_error(site: _Site, error: DatabaseError) -> Report:
+def _sql_error(site: _Site, error: DatabaseError, backend: CheckerBackend) -> Report:
     span = site.sourcemap.locate(error.position) if error.position is not None else site.mapper.span(_template(site))
     notes = tuple(
         note
@@ -350,7 +305,7 @@ def _sql_error(site: _Site, error: DatabaseError) -> Report:
             span=span,
             notes=notes,
         ),
-        help=CAST_HELP.get(error.sqlstate),
+        help=backend.sql_error_help.get(error.sqlstate),
         sqlstate=error.sqlstate,
         sql=site.sourcemap.sql,
     )
@@ -432,63 +387,13 @@ def _column_desc(column: ColumnInfo) -> ColumnDesc:
     )
 
 
-def _skip_block_comment(sql: str, start: int) -> int:
-    depth = 0
-    index = start
-    while index < len(sql):
-        if sql.startswith("/*", index):
-            depth += 1
-            index += 2
-        elif sql.startswith("*/", index):
-            depth -= 1
-            index += 2
-            if depth == 0:
-                return index
-        else:
-            index += 1
-    return len(sql)
-
-
-# quoted identifiers that follow `AS`, so text in comments, string literals and dollar quotes is never read as an alias
-def quoted_aliases(sql: str) -> Iterator[tuple[int, str]]:
-    index = 0
-    previous = ""
-    while (match := SQL_TOKEN.match(sql, index)) is not None:
-        kind = match.lastgroup
-        index = match.end()
-        if kind == "block_open":
-            index = _skip_block_comment(sql, match.start())
-        elif kind == "dollar":
-            index = len(sql) if (close := sql.find(match[0], index)) == -1 else close + len(match[0])
-        elif kind == "quoted" and previous == "as":
-            yield match.start(), match[0][1:-1].replace('""', '"')
-        if kind not in {"space", "line_comment", "block_open"}:
-            previous = match[0].lower() if kind == "word" else ""
-
-
-def _truncated_alias(sql: str, column: ColumnInfo) -> int | None:
-    # a described name that is a prefix of a longer `AS "…!"` alias lost its suffix to truncation
-    # a cut at a character boundary can leave up to three bytes of room
-    if not IDENT_MAX_BYTES - 4 < len(column.raw_name.encode()) <= IDENT_MAX_BYTES:
-        return None
-    for offset, ident in quoted_aliases(sql):
-        if ident.endswith(("!", "?")) and len(ident.encode()) > IDENT_MAX_BYTES and ident.startswith(column.raw_name):
-            return offset
-    return None
-
-
-def _override_reports(site: _Site, described: Describe) -> list[Report]:
-    reports: list[Report] = []
-    for index, column in enumerate(described.columns):
-        if (offset := _truncated_alias(site.sourcemap.sql, column)) is None:
-            continue
-        message = (
-            f'column {index + 1} "{column.raw_name}" was truncated at {IDENT_MAX_BYTES} bytes, '
-            'so its "!" or "?" override is lost'
-        )
-        help_ = "shorten the alias so the name and its suffix fit in 63 bytes"
-        reports.append(_report(site, "invalid-override", message, site.sourcemap.locate(offset + 1), help=help_))
-    return reports
+def _override_reports(site: _Site, described: Describe, backend: CheckerBackend) -> list[Report]:
+    if backend.override_issues is None:
+        return []
+    return [
+        _report(site, "invalid-override", issue.message, site.sourcemap.locate(issue.offset + 1), help=issue.help)
+        for issue in backend.override_issues(site.sourcemap.sql, described.columns)
+    ]
 
 
 def _row_reports(site: _Site, described: Describe, backend: CheckerBackend) -> list[Report]:
@@ -564,11 +469,11 @@ def _finding_report(
 
 def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Report]:
     if isinstance(outcome, DatabaseError):
-        return [_sql_error(site, outcome)]
+        return [_sql_error(site, outcome, backend)]
     return [
         *_param_reports(site, outcome, backend),
         *_row_reports(site, outcome, backend),
-        *_override_reports(site, outcome),
+        *_override_reports(site, outcome, backend),
     ]
 
 
@@ -583,7 +488,7 @@ def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-argumen
     reports: list[Report] = []
     sites: list[_Site] = []
     inference = ParamInference(result.tree, backend, dsn) if result.tree is not None else None
-    mapper = SourceMapper(result.source or "")
+    mapper = SourceMapper(result.source or "", None if backend is None else backend.compiler)
     reports.extend(template_reports(path, result.templates, mapper, inference))
     for call in result.calls:
         if call.template is None:
@@ -609,7 +514,7 @@ def _collect(
     stats: Statistics,
     backend: CheckerBackend | None,
     dsn: str | None = None,
-) -> tuple[list[_Site], list[Report], dict[Path, str]]:
+) -> tuple[list[_Site], list[Report], dict[Path, str], CheckerBackend | None]:
     graph = ModuleGraph()
     sites: list[_Site] = []
     reports: list[Report] = []
@@ -622,8 +527,15 @@ def _collect(
         roots = roots_for(config, path)
         if result.source is None:
             continue
+        selected = backend
+        if selected is None and any(call.template is not None for call in result.calls):
+            if dsn is None or not dsn.strip():
+                msg = f"no database URL; pass --database-url or set ${config.database_url_env}"
+                raise CheckError(msg)
+            selected = backend_for(dsn).checker()
+            backend = selected
         try:
-            file_reports, file_sites = _file_sites(graph, roots, path, result, backend, dsn)
+            file_reports, file_sites = _file_sites(graph, roots, path, result, selected, dsn)
         except RecursionError:
             # fail closed for this file only: nothing else it produced is trusted
             reports.extend(Report(diagnostic=diagnostic) for diagnostic in too_deep(path).diagnostics)
@@ -633,7 +545,7 @@ def _collect(
         stats.checked += len(file_sites)
         reports.extend(file_reports)
         sites.extend(file_sites)
-    return sites, reports, sources
+    return sites, reports, sources, backend
 
 
 async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
@@ -647,7 +559,7 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
     hooks = hooks or Hooks()
     stats = Statistics()
     selected = backend
-    sites, reports, sources = _collect(config, files, stats, selected, dsn)
+    sites, reports, sources, selected = _collect(config, files, stats, selected, dsn)
     statements = sorted({site.sourcemap.sql for site in sites})
     stats.distinct_sql = len(statements)
     if statements:
@@ -655,7 +567,7 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
             msg = f"no database URL; pass --database-url or set ${config.database_url_env}"
             raise CheckError(msg)
         if selected is None:
-            selected = backend_for(dsn)
+            selected = backend_for(dsn).checker()
         target = dsn
         async with AsyncExitStack() as stack:
             if hooks.scratch is not None:
