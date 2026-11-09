@@ -72,6 +72,30 @@ def test_ok_basic_matches_its_markers() -> None:
     assert check_case(OK_BASIC, _dsn()) == []
 
 
+def test_postgres_reexports_match_checker_types(
+    schema: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write(
+        tmp_path,
+        "postgres_types.py",
+        """\
+from rowx import query
+from rowx.postgres import Point, Range
+
+query[Point](t'SELECT {Point(1.0, 2.0)}::point AS "point!"')
+query[Range[int]](t'SELECT {Range(1, 5)}::int4range AS "range!"')
+query[int](t'SELECT {Point(1.0, 2.0)}::int AS "number!"')
+""",
+    )
+    code, out, err = _run(capsys, str(path), "--database-url", schema)
+    assert code == 1
+    assert out.count("error[") == 1
+    assert "error[param-type-mismatch]" in out
+    assert not err
+
+
 def test_unreachable_database_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
     url = "postgresql://nobody:hunter2secret@127.0.0.1:1/nope?connect_timeout=2"
     code, out, err = _run(capsys, str(OK_BASIC), "--database-url", url)

@@ -8,6 +8,16 @@ from rowx_postgres._core import map_columns, type_table
 from rowx_postgres._services import PostgresAdmin, PostgresMigrations, PostgresProvisioner, open_checker
 
 VALUE_LEAVES: Final[dict[str, str]] = {
+    "rowx.postgres.Money": "rowx_postgres.Money",
+    "rowx.postgres.Interval": "rowx_postgres.Interval",
+    "rowx.postgres.Point": "rowx_postgres.Point",
+    "rowx.postgres.Line": "rowx_postgres.Line",
+    "rowx.postgres.LineSegment": "rowx_postgres.LineSegment",
+    "rowx.postgres.Box": "rowx_postgres.Box",
+    "rowx.postgres.Path": "rowx_postgres.Path",
+    "rowx.postgres.Polygon": "rowx_postgres.Polygon",
+    "rowx.postgres.Circle": "rowx_postgres.Circle",
+    "rowx.postgres.Cube": "rowx_postgres.Cube",
     "rowx_postgres.Money": "rowx_postgres.Money",
     "rowx_postgres._money.Money": "rowx_postgres.Money",
     "rowx_postgres.Interval": "rowx_postgres.Interval",
@@ -35,7 +45,9 @@ RANGE_LEAVES: Final[dict[str, str]] = {
     "datetime.date": "rowx_postgres.Range[datetime.date]",
     "datetime.datetime": "rowx_postgres.Range[datetime.datetime]",
 }
-RANGE_CLASSES: Final[frozenset[str]] = frozenset({"rowx_postgres.Range", "rowx_postgres._range.Range"})
+RANGE_CLASSES: Final[frozenset[str]] = frozenset(
+    {"rowx.postgres.Range", "rowx_postgres.Range", "rowx_postgres._range.Range"},
+)
 VALUE_CLASSES: Final[dict[str, str]] = {
     qualname: qualname.rsplit(".", 1)[-1] for qualname in (*VALUE_LEAVES, *RANGE_CLASSES)
 }

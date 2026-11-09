@@ -30,7 +30,7 @@ def invalid(value: object) -> Connection:
     return value
 """
 CONTRACTS: Final[str] = """from rowx_core import Connection, Executor, Pool, Transaction
-from rowx_postgres import Connection as PostgresConnection, Pool as PostgresPool, Transaction as PostgresTransaction
+from rowx.postgres import Connection as PostgresConnection, Pool as PostgresPool, Transaction as PostgresTransaction
 
 def contracts(
     conn: PostgresConnection, pool: PostgresPool, tx: PostgresTransaction

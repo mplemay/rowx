@@ -71,21 +71,33 @@ uv venv --python "${PYTHON:-3.14}" cli
 uv pip install --refresh --python cli/bin/python --no-index --find-links "$distributions" rowx
 cli/bin/python - <<'PY'
 from pathlib import Path
+from sys import modules
 from rowx import query
 from rowx_core import query as core_query
 from rowx.check.cli import main
 
 assert query is core_query
+assert "rowx_postgres" not in modules
+try:
+    from rowx.postgres import connect
+except ImportError as error:
+    assert "rowx[postgres]" in str(error)
+    assert isinstance(error.__cause__, ModuleNotFoundError)
+    assert error.__cause__.name == "rowx_postgres"
+else:
+    raise AssertionError("rowx.postgres must require the optional backend")
 Path("queries.py").write_text('from rowx_core import query\nquery[int](t"SELECT 1")\n')
 assert main(["check", "--database-url", "postgresql://localhost/example", "queries.py"]) == 2
 PY
 uv pip install --refresh --python cli/bin/python --no-index --find-links "$distributions" 'rowx[postgres]'
 cli/bin/python - <<'PY'
-from rowx import InterfaceError, query
+import rowx_postgres
+from rowx import InterfaceError, postgres, query
 from rowx_core import InterfaceError as CoreInterfaceError, query as core_query
-from rowx_postgres import connect
 
 assert query is core_query
 assert InterfaceError is CoreInterfaceError
-assert connect is not None
+assert set(postgres.__all__) == set(rowx_postgres.__all__)
+for name in postgres.__all__:
+    assert getattr(postgres, name) is getattr(rowx_postgres, name), name
 PY
