@@ -6,11 +6,12 @@ from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING, TypedDict
 
+from rowx_postgres import connect
+
 from rowx import query
-from rowx.postgres import connect
 
 if TYPE_CHECKING:
-    from rowx.postgres import Connection
+    from rowx_postgres import Connection
 
 type AuthorRow = tuple[int, str, str | None]
 type BookRow = tuple[int, str, Decimal, date | None, list[str]]

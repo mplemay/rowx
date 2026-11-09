@@ -10,14 +10,14 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple, TypedDict
 import asyncpg
 from pydantic import BaseModel
 from pydantic.dataclasses import dataclass as pydantic_dataclass
+from rowx_postgres import connect
 
 import rowx
-from rowx.postgres import connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from rowx.postgres import Connection
+    from rowx_postgres import Connection
 
 ROWS: Final[int] = 100_000
 RUNS: Final[int] = 7

@@ -15,12 +15,13 @@ from tokenize import (
 from typing import TYPE_CHECKING, Final
 from unicodedata import lookup
 
-from rowx._template import _is_ident_char as is_ident_char, compile_parts
 from rowx.check.model import Span
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from tokenize import TokenInfo
+
+    from rowx_core import Compiler
 
 LINE_PATTERN: Final = re_compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 SIMPLE_ESCAPES: Final[dict[str, str]] = {
@@ -79,10 +80,11 @@ class _Segment:
 
 
 class SourceMapper:
-    def __init__(self, source: str) -> None:
+    def __init__(self, source: str, compiler: Compiler | None = None) -> None:
         self._lines = [line.encode() for line in LINE_PATTERN.findall(source)]
         self._source = source
         self._tokens: list[TokenInfo] | None = None
+        self._compiler = compiler
 
     def _col(self, line: int, byte_col: int) -> int:
         if not 1 <= line <= len(self._lines):
@@ -105,6 +107,9 @@ class SourceMapper:
         )
 
     def build(self, node: ast.TemplateStr) -> SourceMap:
+        if self._compiler is None:
+            msg = "a selected compiler is required to map SQL"
+            raise ValueError(msg)
         start = (node.lineno, self._col(node.lineno, node.col_offset))
         end_line = node.end_lineno or node.lineno
         end = (end_line, self._col(end_line, node.end_col_offset or 0))
@@ -114,7 +119,7 @@ class SourceMapper:
             # the token stream disagrees with the AST, so no position can be trusted
             segments = [_Segment([], start=start, end=end) for _ in expected]
             holes = [_span(start, end)] * (len(expected) - 1)
-        return _assemble(expected, segments, holes)
+        return _assemble(expected, segments, holes, self._compiler)
 
 
 def _constants(node: ast.TemplateStr) -> list[str]:
@@ -274,14 +279,14 @@ def _fill(
     return ok
 
 
-def _assemble(expected: list[str], segments: list[_Segment], holes: list[Span]) -> SourceMap:
-    compiled = compile_parts(expected)
+def _assemble(expected: list[str], segments: list[_Segment], holes: list[Span], compiler: Compiler) -> SourceMap:
+    compiled = compiler.compile_parts(expected)
     sql = compiled.sql
     spans: list[Span | None] = [None] * len(sql)
     exact: list[bool] = []
     for index, (text, segment) in enumerate(zip(expected, segments, strict=True)):
-        # the adjacency rule may pad a segment with a space on either side
-        lead = int(index > 0 and bool(text) and is_ident_char(text[0]))
+        # Padding comes from the same dialect compiler used by runtime queries.
+        lead, _trail = compiled.padding[index]
         before = holes[index - 1] if index > 0 else None
         after = holes[index] if index < len(holes) else None
         exact.append(_fill(spans, compiled.segments[index], text, segment, (lead, before, after)))

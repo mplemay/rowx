@@ -1,0 +1,7 @@
+error[sql-error]: spans lines
+ --> app/users.py:3:5
+  |
+3 |     select id
+  |     ^^^^^^^^^
+4 |     from users
+  |     ^^^^^^^^^^

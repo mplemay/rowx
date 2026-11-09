@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 ROWX_MODULE: Final[str] = "rowx"
+ROWX_MODULES: Final[frozenset[str]] = frozenset({ROWX_MODULE, "rowx_core"})
 STRING_MODULE: Final[str] = "string"
 DUNDER: Final[str] = "__"
 TEMPLATELIB_ATTR: Final[str] = "templatelib"
@@ -175,11 +176,11 @@ def _is_private_name(name: str) -> bool:
 # a private module of this package (for example `rowx._template`) may re-export `string.templatelib`
 def _is_private_rowx_module(module: str) -> bool:
     root, *rest = module.split(".")
-    return root == ROWX_MODULE and any(_is_private_name(part) for part in rest)
+    return root in ROWX_MODULES and any(_is_private_name(part) for part in rest)
 
 
 def _rowx_private_tag(module: str, name: str) -> Tag:
-    if module.split(".", maxsplit=1)[0] != ROWX_MODULE:
+    if module.split(".", maxsplit=1)[0] not in ROWX_MODULES:
         return "other"
     # a name imported from a private module is a function or class unless it re-exports `Template` or `Interpolation`
     if _is_private_rowx_module(module):
@@ -188,7 +189,7 @@ def _rowx_private_tag(module: str, name: str) -> Tag:
 
 
 def _import_tag(module: str, name: str) -> Tag:
-    if module == ROWX_MODULE and name in QUERY_KINDS:
+    if module in ROWX_MODULES and name in QUERY_KINDS:
         return "query" if name == "query" else "query_unchecked"
     if module in TYPING_MODULES and name in TYPING_TAGS:
         return TYPING_TAGS[name]
@@ -201,7 +202,7 @@ def _import_tag(module: str, name: str) -> Tag:
 
 def _module_tag(alias: ast.alias) -> Tag:
     root = alias.name.split(".")[0]
-    if root == ROWX_MODULE and (alias.asname is None or alias.name == ROWX_MODULE):
+    if root in ROWX_MODULES and (alias.asname is None or alias.name in ROWX_MODULES):
         return "module"
     # `import string.templatelib` binds `string`; with an alias the alias is the submodule
     if root == STRING_MODULE and (alias.asname is None or alias.name == STRING_MODULE):
@@ -763,7 +764,7 @@ class _Finder(ast.NodeVisitor):
                     self._indirect_uses.append(
                         IndirectUse(kind="private", name=alias.name, span=self._lines.span(alias)),
                     )
-            elif module == ROWX_MODULE and alias.name == "*":
+            elif module in ROWX_MODULES and alias.name == "*":
                 self._indirect(node, "`from rowx import *`")
 
     @override

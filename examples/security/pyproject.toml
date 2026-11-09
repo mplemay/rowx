@@ -3,7 +3,7 @@ name = "rowx-example-security"
 version = "0.0.0"
 description = "A filtered, sortable listing that builds dynamic SQL without string concatenation"
 requires-python = ">=3.14"
-dependencies = ["rowx"]
+dependencies = ["rowx[postgres]"]
 
 [tool.rowx]
 include = ["."]

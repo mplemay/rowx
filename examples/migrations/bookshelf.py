@@ -5,8 +5,9 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from rowx_postgres import Migrator, Pool
+
 from rowx import query
-from rowx.postgres import Migrator, Pool
 
 if TYPE_CHECKING:
     from rowx import Executor

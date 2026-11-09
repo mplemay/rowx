@@ -6,8 +6,12 @@ use std::hash::{BuildHasher, Hasher};
 
 use tokio_postgres::{Client, Config, NoTls};
 
-const SCHEMA_SQL: &str = include_str!("../../../../tests/schema.sql");
-const SEED_SQL: &str = include_str!("../../../../tests/seed_data.sql");
+const SCHEMA_SQL: &str = include_str!(
+    "../../../../packages/rowx-postgres/src/rowx_postgres/__tests__/support/schema.sql"
+);
+const SEED_SQL: &str = include_str!(
+    "../../../../packages/rowx-postgres/src/rowx_postgres/__tests__/support/seed_data.sql"
+);
 
 pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

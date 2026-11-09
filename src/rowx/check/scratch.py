@@ -1,52 +1,29 @@
 import asyncio
-import os
 import secrets
-import socket
 import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from time import perf_counter, time
 from typing import TYPE_CHECKING, Final
 
+from rowx_core.errors import DatabaseError, Error, InterfaceError, MigrateError
+from rowx_core.lifecycle import ORPHAN_AGE_SECONDS, make_tag, tag_age
+
 from rowx.check.runner import CheckError, ScratchBuild, redact
-from rowx.errors import DatabaseError, Error, InterfaceError, MigrateError
-from rowx.postgres import connect
-from rowx.postgres._admin import create_database, drop_database, list_databases, with_database
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from contextlib import AbstractAsyncContextManager
 
-    from rowx.postgres import Migrator
+    from rowx_core.backend import AdminService, MigrationService
 
 PREFIX: Final[str] = "rowx_check_"
-TEMPLATE: Final[str] = "template0"
-INSUFFICIENT_PRIVILEGE: Final[str] = "42501"
-CREATEDB_HELP: Final[str] = "`--scratch` needs a role with CREATEDB"
-TAG_PREFIX: Final[str] = "rowx:"
-# a database tagged longer ago than this belongs to a run that is gone
-ORPHAN_AGE_SECONDS: Final[int] = 3600
-
-
-# `rowx:<pid>@<host>:<unix-ts>`
-def make_tag() -> str:
-    return f"{TAG_PREFIX}{os.getpid()}@{socket.gethostname()}:{int(time())}"
-
-
-def tag_age(comment: str | None, now: float) -> float | None:
-    if comment is None or not comment.startswith(TAG_PREFIX):
-        return None
-    # the host may contain a colon, so the timestamp is whatever follows the last one
-    _, _, stamp = comment.rpartition(":")
-    try:
-        return now - int(stamp)
-    except ValueError:
-        return None
 
 
 @dataclass(slots=True)
 class Scratch:
     server_dsn: str
+    admin: AdminService
     name: str = field(default_factory=lambda: f"{PREFIX}{secrets.token_hex(8)}")
     # set before the create is attempted and cleared only by a drop that succeeded
     pending_drop: bool = False
@@ -59,17 +36,17 @@ class Scratch:
     @property
     def url(self) -> str:
         try:
-            return with_database(self.server_dsn, self.name)
+            return self.admin.with_database(self.name)
         except InterfaceError, ValueError:
             # the parser's message can quote the DSN, so it is not repeated
             msg = "the database URL could not be parsed"
             raise CheckError(msg) from None
 
-    def session(self, migrator: Migrator) -> AbstractAsyncContextManager[ScratchBuild]:
+    def session(self, migrator: MigrationService) -> AbstractAsyncContextManager[ScratchBuild]:
         return self._session(migrator)
 
     @asynccontextmanager
-    async def _session(self, migrator: Migrator) -> AsyncGenerator[ScratchBuild]:
+    async def _session(self, migrator: MigrationService) -> AsyncGenerator[ScratchBuild]:
         started = perf_counter()
         # resolved before anything is created, so a URL that can't name the scratch database fails first
         url = self.url
@@ -86,33 +63,27 @@ class Scratch:
     # sessions is dropped, and any error (a listing that is refused, a database another role owns) is ignored
     async def sweep_orphans(self) -> None:
         with suppress(Error, OSError):
-            found = await list_databases(self.server_dsn, PREFIX)
+            admin = self.admin
+            found = await admin.list(PREFIX)
             now = time()
             for info in found:
                 age = tag_age(info.comment, now)
                 if info.name == self.name or age is None or age <= ORPHAN_AGE_SECONDS or info.sessions > 0:
                     continue
                 with suppress(Error, OSError):
-                    await drop_database(self.server_dsn, info.name)
+                    await admin.drop(info.name)
 
     async def _create(self) -> None:
         try:
-            await create_database(self.server_dsn, self.name, template=TEMPLATE, comment=make_tag())
-        except DatabaseError as error:
-            if error.sqlstate == INSUFFICIENT_PRIVILEGE:
-                msg = f"could not create the scratch database: {error.message}\nhelp: {CREATEDB_HELP}"
-            else:
-                msg = f"could not create the scratch database: {error}"
-            raise CheckError(redact(msg, self.server_dsn)) from None
-        except (InterfaceError, OSError) as error:
+            await self.admin.create_scratch(self.name, comment=make_tag())
+        except (DatabaseError, InterfaceError, OSError) as error:
             msg = f"could not create the scratch database: {error}"
             raise CheckError(redact(msg, self.server_dsn)) from None
 
-    async def _migrate(self, migrator: Migrator, url: str) -> None:
+    async def _migrate(self, migrator: MigrationService, url: str) -> None:
         try:
             # a normal (writable) connection that is closed before the checker session opens; nothing is printed
-            async with await connect(url) as conn:
-                await migrator.run(conn)
+            await migrator.run_on(url)
         except MigrateError as error:
             cause = error.__cause__
             msg = f"the migrations failed on the scratch database: {error}" + (f": {cause}" if cause else "")
@@ -124,7 +95,7 @@ class Scratch:
     # a failed drop is recorded, not raised, so it never hides the error that ended the run
     async def drop(self) -> None:
         try:
-            await drop_database(self.server_dsn, self.name, force=True)
+            await self.admin.drop(self.name, force=True)
         except (DatabaseError, InterfaceError, OSError) as error:
             self.drop_error = redact(str(error), self.server_dsn)
             return

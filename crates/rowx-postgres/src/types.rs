@@ -286,7 +286,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
         &["timedelta", "Interval"],
         Format::Binary,
     )
-    .also_result(&["rowx.postgres.Interval"])
+    .also_result(&["rowx_postgres.Interval"])
     .codecs(Codec::Temporal, Codec::Temporal),
     row(
         "uuid",
@@ -342,7 +342,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "int4range",
         Matcher::RangeKind(23),
-        "rowx.postgres.Range[int]",
+        "rowx_postgres.Range[int]",
         TzRule::None,
         RANGE,
         Format::Binary,
@@ -351,7 +351,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "int8range",
         Matcher::RangeKind(20),
-        "rowx.postgres.Range[int]",
+        "rowx_postgres.Range[int]",
         TzRule::None,
         RANGE,
         Format::Binary,
@@ -360,7 +360,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "numrange",
         Matcher::RangeKind(1700),
-        "rowx.postgres.Range[decimal.Decimal]",
+        "rowx_postgres.Range[decimal.Decimal]",
         TzRule::None,
         RANGE,
         Format::Text,
@@ -369,7 +369,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "daterange",
         Matcher::RangeKind(1082),
-        "rowx.postgres.Range[datetime.date]",
+        "rowx_postgres.Range[datetime.date]",
         TzRule::None,
         RANGE,
         Format::Binary,
@@ -378,7 +378,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "tsrange",
         Matcher::RangeKind(1114),
-        "rowx.postgres.Range[datetime.datetime]",
+        "rowx_postgres.Range[datetime.datetime]",
         TzRule::Naive,
         RANGE,
         Format::Binary,
@@ -387,7 +387,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "tstzrange",
         Matcher::RangeKind(1184),
-        "rowx.postgres.Range[datetime.datetime]",
+        "rowx_postgres.Range[datetime.datetime]",
         TzRule::Aware,
         RANGE,
         Format::Binary,
@@ -396,7 +396,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "money",
         Matcher::Oid(790),
-        "rowx.postgres.Money",
+        "rowx_postgres.Money",
         TzRule::None,
         &["Money"],
         Format::Binary,
@@ -478,7 +478,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "point",
         Matcher::Oid(600),
-        "rowx.postgres.Point",
+        "rowx_postgres.Point",
         TzRule::None,
         &["Point"],
         Format::Binary,
@@ -487,7 +487,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "line",
         Matcher::Oid(628),
-        "rowx.postgres.Line",
+        "rowx_postgres.Line",
         TzRule::None,
         &["Line"],
         Format::Binary,
@@ -496,7 +496,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "lseg",
         Matcher::Oid(601),
-        "rowx.postgres.LineSegment",
+        "rowx_postgres.LineSegment",
         TzRule::None,
         &["LineSegment"],
         Format::Binary,
@@ -505,7 +505,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "box",
         Matcher::Oid(603),
-        "rowx.postgres.Box",
+        "rowx_postgres.Box",
         TzRule::None,
         &["Box"],
         Format::Binary,
@@ -514,7 +514,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "path",
         Matcher::Oid(602),
-        "rowx.postgres.Path",
+        "rowx_postgres.Path",
         TzRule::None,
         &["Path"],
         Format::Binary,
@@ -523,7 +523,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "polygon",
         Matcher::Oid(604),
-        "rowx.postgres.Polygon",
+        "rowx_postgres.Polygon",
         TzRule::None,
         &["Polygon"],
         Format::Binary,
@@ -532,7 +532,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "circle",
         Matcher::Oid(718),
-        "rowx.postgres.Circle",
+        "rowx_postgres.Circle",
         TzRule::None,
         &["Circle"],
         Format::Binary,
@@ -568,7 +568,7 @@ pub static TYPE_TABLE: &[TypeInfo] = &[
     row(
         "cube",
         Matcher::ExtNamed("cube", "cube"),
-        "rowx.postgres.Cube",
+        "rowx_postgres.Cube",
         TzRule::None,
         &["Cube"],
         Format::Binary,

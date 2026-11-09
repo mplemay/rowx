@@ -1,0 +1,55 @@
+error[template-construction]: `Template` used as a value, so the calls to it can't be seen
+ --> app/build.py:6:6
+  |
+6 | T2 = Template
+  |      ^^^^^^^^
+  |
+  = help: build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL
+
+error[template-construction]: `Template(...)` takes only `str` literals, t-strings and `Interpolation(...)` calls
+  --> app/build.py:10:14
+   |
+10 |     Template(x)
+   |              ^
+   |
+   = help: build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL
+
+error[template-construction]: a starred argument to `Template(...)` can hold raw SQL
+  --> app/build.py:11:14
+   |
+11 |     Template(*parts)
+   |              ^^^^^^
+   |
+   = help: build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL
+
+error[template-construction]: `Template(...)` takes only `str` literals, t-strings and `Interpolation(...)` calls
+  --> app/build.py:12:21
+   |
+12 |     t"a" + Template(x)
+   |                     ^
+   |
+   = help: build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL
+
+error[template-construction]: `Template(...)` takes only `str` literals, t-strings and `Interpolation(...)` calls
+  --> app/build.py:13:7
+   |
+13 |     T(x)
+   |       ^
+   |
+   = help: build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL
+
+error[template-construction]: the `conversion` and `format_spec` of `Interpolation(...)` must be literals
+  --> app/build.py:14:33
+   |
+14 |     Interpolation(x, "x", None, spec)
+   |                                 ^^^^
+   |
+   = help: build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL
+
+error[template-construction]: a t-string can only be added to a t-string or a `Template`, not an unknown operand
+  --> app/build.py:15:12
+   |
+15 |     t"a" + x
+   |            ^
+   |
+   = help: build dynamic SQL from t-string literals; `Template(...)` with a non-literal string is raw SQL

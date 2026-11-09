@@ -1,13 +1,33 @@
-from rowx.postgres._connection import RESET_QUERY, Connection, connect
-from rowx.postgres._cube import Cube
-from rowx.postgres._geometric import Box, Circle, Line, LineSegment, Path, Point, Polygon
-from rowx.postgres._interval import Interval
-from rowx.postgres._migrate import Migration, MigrationResult, MigrationStatus, Migrator
-from rowx.postgres._money import Money
-from rowx.postgres._options import ConnectOptions
-from rowx.postgres._pool import Pool
-from rowx.postgres._range import Range
-from rowx.postgres._transaction import Transaction
+# Importing the facade should explain how to install its optional dependency.
+try:  # ruff: ignore[non-empty-init-module]
+    from rowx_postgres import (
+        RESET_QUERY,
+        Box,
+        Circle,
+        Connection,
+        ConnectOptions,
+        Cube,
+        Interval,
+        Line,
+        LineSegment,
+        Migration,
+        MigrationResult,
+        MigrationStatus,
+        Migrator,
+        Money,
+        Path,
+        Point,
+        Polygon,
+        Pool,
+        Range,
+        Transaction,
+        connect,
+    )
+except ModuleNotFoundError as error:
+    if error.name != "rowx_postgres":
+        raise
+    msg = 'Install "rowx[postgres]" to use rowx.postgres.'
+    raise ImportError(msg) from error
 
 __all__ = [
     "RESET_QUERY",

@@ -1,0 +1,37 @@
+[project]
+name = "rowx-postgres"
+version = "0.2.0"
+description = "PostgreSQL driver and database services for rowx"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = ["rowx-core==0.2.0"]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "rowx_postgres._core"
+python-packages = ["rowx_postgres"]
+python-source = "src"
+exclude = [
+    { path = "**/__tests__/**", format = "wheel" },
+    { path = "**/__pycache__/**", format = "wheel" },
+    { path = "**/*.pyc", format = "wheel" },
+]
+
+[tool.uv.sources]
+rowx-core = { workspace = true }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "src/**/*.rs" },
+    { file = "Cargo.toml" },
+    { file = "../../crates/**/*.rs" },
+    { file = "../../crates/**/Cargo.toml" },
+    { file = "../../Cargo.toml" },
+    { file = "../../Cargo.lock" },
+    { file = "../../rust-toolchain.toml" },
+]

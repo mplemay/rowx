@@ -6,12 +6,12 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, Field
+from rowx_postgres import connect
 
 from rowx import query
-from rowx.postgres import connect
 
 if TYPE_CHECKING:
-    from rowx.postgres import Connection
+    from rowx_postgres import Connection
 
 
 # a pydantic model is validated as `Book.model_validate` would; it lives apart from main.py so that

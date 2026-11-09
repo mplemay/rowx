@@ -7,7 +7,7 @@ from bookshelf import add_author, add_book, books_by, list_authors
 from rowx import query
 
 if TYPE_CHECKING:
-    from rowx.postgres import Pool
+    from rowx_postgres import Pool
 
 # The fixtures are synchronous, so these tests drive the async code with `asyncio.run`. With pytest-asyncio (or anyio
 # on its asyncio backend) the tests can be `async def` instead.

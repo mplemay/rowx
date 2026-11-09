@@ -4,7 +4,7 @@ members = [
     "crates/rowx-core",
     "crates/rowx-postgres",
     "crates/rowx-py-core",
-    "crates/rowx-postgres-py",
+    "packages/rowx-postgres",
 ]
 # cargo-fuzz targets need nightly and unsafe code, so they stay out of the workspace and its lints
 exclude = ["fuzz"]

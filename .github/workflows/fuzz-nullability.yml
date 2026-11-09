@@ -68,10 +68,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-groups --no-install-project
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
-        run: uv run maturin develop
+        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
 
       # a random seed per run: the report and any failure print it, and ROWX_FUZZ_SEED replays it
       - name: Fuzz and report precision
@@ -79,4 +79,4 @@ jobs:
           ROWX_FUZZ_REPORT: "1"
           ROWX_FUZZ_SEED: random
           ROWX_FUZZ_COUNT: ${{ inputs.count || '5000' }}
-        run: uv run pytest src/rowx/__tests__/integration/describe/test_nullability_fuzz.py -s
+        run: uv run pytest packages/rowx-postgres/src/rowx_postgres/__tests__/integration/describe/test_nullability_fuzz.py -s

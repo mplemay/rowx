@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Install a built wheel into a fresh venv, then run the example app and `rowx check` against it.
-# Usage: smoke-wheel.sh dist/*.whl   (DATABASE_URL must point at a database with examples/app/schema.sql applied)
+# Install the built distributions into a fresh venv, then run the example and checker.
+# Usage: smoke-wheel.sh dist/   (DATABASE_URL must name a database with examples/app/schema.sql applied)
 set -euo pipefail
 
 if (($# != 1)); then
-  echo "usage: $0 <wheel>" >&2
+  echo "usage: $0 <distribution-directory>" >&2
   exit 2
 fi
 if [[ -z "${DATABASE_URL:-}" ]]; then
@@ -13,16 +13,16 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-wheel="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+distributions="$(cd "$1" && pwd)"
 venv="$(mktemp -d)"
 trap 'rm -rf "$venv"' EXIT
 
 uv venv --python "${PYTHON:-python3}" "$venv"
-uv pip install --python "$venv/bin/python" "$wheel"
+uv pip install --refresh --python "$venv/bin/python" --no-index --find-links "$distributions" 'rowx[postgres]'
 
 # run from a scratch directory so the source tree's src/rowx can't shadow the installed wheel
 cd "$venv"
-"$venv/bin/python" -c "import rowx, rowx.postgres, rowx.postgres._core"
-"$venv/bin/python" -c "import importlib.resources as r; assert r.files('rowx.postgres').joinpath('_core.pyi').is_file()"
+"$venv/bin/python" -c "import rowx, rowx_postgres, rowx_postgres._core"
+"$venv/bin/python" -c "import importlib.resources as r; assert r.files('rowx_postgres').joinpath('_core.pyi').is_file()"
 "$venv/bin/python" "$root/examples/app/main.py"
 "$venv/bin/rowx" check "$root/examples/app"

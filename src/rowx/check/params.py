@@ -2,10 +2,10 @@ import ast
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from rowx._backend import CheckerBackend, default_backend
-
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from rowx_core.backend import CheckerBackend
 
 type ParamName = Literal[
     "bool",
@@ -347,11 +347,6 @@ class ParamInference:
     def _selected(self) -> CheckerBackend | None:
         if self._backend is not None:
             return self._backend
-        if self._dsn is None:
-            # a failure is not stored, so a later lookup tries again
-            selected = default_backend()
-            self._backend = selected
-            return selected
         # a DSN is not a backend; run_check binds one after it decides to describe
         return None
 
@@ -379,7 +374,7 @@ class ParamInference:
 
     def _backend_name(self, qualified: str) -> ParamName | None:
         # param_classes live on the backend; a builtin call such as `str(1)` is not one
-        if not qualified.startswith("rowx.") or self._selected() is None:
+        if self._selected() is None:
             return None
         return self._value_classes().get(qualified)
 

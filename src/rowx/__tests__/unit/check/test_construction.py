@@ -206,14 +206,14 @@ def test_class_pattern_is_an_inspection() -> None:
 @pytest.mark.parametrize(
     "use",
     [
-        "from rowx._template import Template as T\nT(x)",
-        "import rowx._template as m\nm.Template(x)",
-        "from rowx._template import Interpolation\nInterpolation(1, 'a', None, s)",
-        "import rowx._template\nrowx._template.Template(x)",
-        "from rowx import _template\n_template.Template(x)",
-        "from rowx import _template\ny = _template",
-        "from rowx.postgres import _types\nT = _types.Template",
-        "from rowx._template import *",
+        "from rowx_core._template import Template as T\nT(x)",
+        "import rowx_core._template as m\nm.Template(x)",
+        "from rowx_core._template import Interpolation\nInterpolation(1, 'a', None, s)",
+        "import rowx_core._template\nrowx_core._template.Template(x)",
+        "from rowx_core import _template\n_template.Template(x)",
+        "from rowx_core import _template\ny = _template",
+        "from rowx_core import _query\nT = _query.Template",
+        "from rowx_core._template import *",
     ],
 )
 def test_private_rowx_modules_are_templatelib_reexports(use: str) -> None:
@@ -221,12 +221,12 @@ def test_private_rowx_modules_are_templatelib_reexports(use: str) -> None:
 
 
 def test_private_rowx_names_that_are_not_templatelib_are_fine() -> None:
-    assert not reports("from rowx._query import helper\nfrom rowx import _core\nhelper(_core.foo)\n")
+    assert not reports("from rowx_core._query import helper\nfrom rowx import _core\nhelper(_core.foo)\n")
 
 
 def test_a_function_imported_from_a_private_module_is_ordinary() -> None:
-    assert not reports("from rowx._template import _is_ident_char as ok\nok('a')\ny = ok\n")
-    assert not reports("from rowx._template import helper, _helper\nhelper(1)\n_helper(2)\n")
+    assert not reports("from rowx_postgres._compiler import _is_ident_char as ok\nok('a')\ny = ok\n")
+    assert not reports("from rowx_core._template import helper, _helper\nhelper(1)\n_helper(2)\n")
 
 
 @pytest.mark.parametrize(

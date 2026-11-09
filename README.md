@@ -6,11 +6,13 @@ a live Postgres 18 database before you ship.
 
 ## Quickstart
 
+Install the checker and PostgreSQL backend with `uv add "rowx[postgres]"`.
+
 ```python test
 import asyncio
 
-from rowx.postgres import Pool
 from rowx import query
+from rowx.postgres import Pool
 
 type UserRow = tuple[int, str, str | None]  # id, name, email
 
@@ -45,8 +47,8 @@ Rows can also be a dataclass, `NamedTuple`, `TypedDict` or pydantic model, match
 import asyncio
 from dataclasses import dataclass
 
-from rowx.postgres import connect
 from rowx import query
+from rowx.postgres import connect
 
 
 @dataclass(slots=True)
@@ -73,6 +75,12 @@ rowx check src --database-url postgresql://app@localhost/app
 
 `rowx check` exits 0 when every query matches the database, 1 when it reports diagnostics, and 2 on a usage or
 connection error.
+
+`rowx-core` provides backend-independent query and executor primitives through `rowx_core`. The `rowx` package
+re-exports its query API and supplies the CLI. The `postgres` extra exposes the backend's public API as
+`rowx.postgres`. The `rowx-postgres` distribution can also be installed on its own and imported as `rowx_postgres`.
+Runtime queries use their supplied connection or pool. The checker uses `--database-url` or `DATABASE_URL`
+without importing your application.
 
 ## Documentation
 

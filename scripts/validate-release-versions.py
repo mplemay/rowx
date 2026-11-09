@@ -7,6 +7,7 @@ from typing import Final
 ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 PUSH_EVENT: Final[str] = "push"
 PACKAGE_NAME: Final[str] = "rowx"
+PYTHON_PACKAGES: Final[tuple[str, ...]] = ("rowx", "rowx-core", "rowx-postgres")
 WORKSPACE_PACKAGES: Final[frozenset[str]] = frozenset({
     "rowx-core",
     "rowx-postgres",
@@ -23,7 +24,24 @@ def main() -> int:
         message = "Missing workspace packages in Cargo.lock"
         raise SystemExit(message)
     versions.update(locked)
-    versions["uv.lock"] = _named_version(ROOT / "uv.lock", PACKAGE_NAME)
+    versions.update({f"uv.lock:{name}": _named_version(ROOT / "uv.lock", name) for name in PYTHON_PACKAGES})
+    for name in PYTHON_PACKAGES[1:]:
+        versions[f"{name}/pyproject.toml"] = _version(
+            ROOT / "packages" / name / "pyproject.toml", ("project", "version")
+        )
+    root_project = _read(ROOT / "pyproject.toml")["project"]
+    postgres_project = _read(ROOT / "packages/rowx-postgres/pyproject.toml")["project"]
+    required_core = f"rowx-core=={version}"
+    if not isinstance(root_project, dict) or required_core not in root_project.get("dependencies", []):
+        message = "rowx must pin rowx-core to its own version"
+        raise SystemExit(message)
+    if not isinstance(postgres_project, dict) or postgres_project.get("dependencies") != [required_core]:
+        message = "rowx-postgres must depend only on the matching rowx-core"
+        raise SystemExit(message)
+    extras = root_project.get("optional-dependencies")
+    if not isinstance(extras, dict) or extras.get("postgres") != [f"rowx-postgres=={version}"]:
+        message = "rowx[postgres] must pin the matching rowx-postgres"
+        raise SystemExit(message)
     if _required("EVENT_NAME") == PUSH_EVENT:
         versions["tag"] = _required("TAG_NAME")[1:]
     if any(value != version for value in versions.values()):

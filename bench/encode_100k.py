@@ -8,8 +8,9 @@ from ipaddress import IPv4Address
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Final
 
+from rowx_postgres import Range, connect
+
 import rowx
-from rowx.postgres import Range, connect
 
 if TYPE_CHECKING:
     from collections.abc import Callable

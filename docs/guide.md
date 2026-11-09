@@ -11,7 +11,7 @@ The `python test` blocks on this page are executed against a seeded database (us
 ```python test
 import asyncio
 
-from rowx.postgres import connect
+from rowx_postgres import connect
 from rowx import query
 
 type UserRow = tuple[int, str, str | None]
@@ -45,7 +45,7 @@ Use a tuple row type (`query[tuple[int | None]]`) when the difference matters. T
 ```python test
 import asyncio
 
-from rowx.postgres import connect
+from rowx_postgres import connect
 from rowx import query
 
 
@@ -76,7 +76,7 @@ Use `all()` when the result is known to be small, and `fetch` when it is large o
 ```python test
 import asyncio
 
-from rowx.postgres import connect
+from rowx_postgres import connect
 from rowx import query
 
 
@@ -117,9 +117,9 @@ asyncio.run(main())
 ```python test
 import asyncio
 
-from rowx.postgres import connect
+from rowx_postgres import connect
 from rowx import query
-from rowx.errors import ConnectionBusyError
+from rowx_core.errors import ConnectionBusyError
 
 
 async def main() -> None:
@@ -143,7 +143,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`rowx.postgres.connect(dsn)` returns a `Connection`. Use it as an async context manager, or call `close()`. Pass a
+`rowx_postgres.connect(dsn)` returns a `Connection`. Use it as an async context manager, or call `close()`. Pass a
 `ConnectOptions` instead of a DSN to set `connect_timeout`, `statement_cache_size`, `server_settings` and more
 (`ConnectOptions.from_dsn(dsn, connect_timeout=5)`).
 
@@ -165,7 +165,7 @@ nullability. `type` aliases and `Annotated[...]` are followed.
 import asyncio
 from decimal import Decimal
 
-from rowx.postgres import connect
+from rowx_postgres import connect
 from rowx import query
 
 type OrderRow = tuple[int, Decimal, str | None]
@@ -210,7 +210,7 @@ from decimal import Decimal
 from typing import NamedTuple, TypedDict
 
 from rowx import query
-from rowx.postgres import connect
+from rowx_postgres import connect
 
 
 @dataclass(slots=True, frozen=True)
@@ -315,7 +315,7 @@ from typing import Annotated
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from rowx import query
-from rowx.postgres import connect
+from rowx_postgres import connect
 
 
 def lower(value: str) -> str:
@@ -385,7 +385,7 @@ from typing import Annotated
 from pydantic import AfterValidator, BaseModel, ValidationError
 
 from rowx import RowConstructError, query
-from rowx.postgres import connect
+from rowx_postgres import connect
 
 
 def not_bob(name: str) -> str:
@@ -429,7 +429,7 @@ import asyncio
 from dataclasses import dataclass
 
 from rowx import query
-from rowx.postgres import connect
+from rowx_postgres import connect
 
 
 @dataclass
@@ -475,7 +475,7 @@ so every interpolation is a bound parameter. Use `query_unchecked` for dynamic S
 ```python test
 import asyncio
 
-from rowx.postgres import connect
+from rowx_postgres import connect
 from rowx import query, query_unchecked
 
 
@@ -540,7 +540,7 @@ truncates identifiers at 63 bytes, which would drop the suffix; the checker repo
 ```python test
 import asyncio
 
-from rowx.postgres import connect
+from rowx_postgres import connect
 from rowx import query
 
 
@@ -557,9 +557,15 @@ asyncio.run(main())
 
 ## Pools
 
-`rowx.postgres` holds the Postgres backend (`connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`). The
-shared pieces (`query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor` and the errors) stay in `rowx`, and
-`import rowx` loads no backend.
+`rowx_postgres` holds the Postgres backend (`connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`). The
+shared pieces (`query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor` and the errors) belong to
+`rowx_core` and are re-exported by `rowx`. `import rowx` loads no backend. Install `rowx[postgres]` for both the CLI
+and PostgreSQL, or `rowx-postgres` to use the backend and core without the CLI.
+
+A query captures its template without selecting a database. The connection, pool or transaction passed to a query
+supplies its compiler and execution behavior. Generic template errors are reported at construction; PostgreSQL
+quoting, lexical and parameter-limit errors are reported when the query is used. Static checking separately selects
+its backend from the configured database URL, without importing or executing application code.
 
 A `Pool` is an `Executor`, so every query method takes it in place of a connection. The constructor does no IO, so a
 pool is safe to create at module level. `async with pool` warms it to `min_size` and closes it on exit; the first
@@ -568,7 +574,7 @@ acquire also opens it.
 ```python test
 import asyncio
 
-from rowx.postgres import Pool
+from rowx_postgres import Pool
 from rowx import query
 
 
@@ -613,9 +619,9 @@ metrics.
 ```python test
 import asyncio
 
-from rowx.postgres import Pool
+from rowx_postgres import Pool
 from rowx import query
-from rowx.errors import PoolTimeoutError
+from rowx_core.errors import PoolTimeoutError
 
 
 async def main() -> None:
@@ -658,7 +664,7 @@ are part of the startup options) while a `SET` run in `init` does not: put setti
 ```python test
 import asyncio
 
-from rowx.postgres import ConnectOptions, Connection, Pool
+from rowx_postgres import ConnectOptions, Connection, Pool
 from rowx import query
 
 
@@ -734,7 +740,7 @@ rolls back. `commit()` and `rollback()` end it early, and using the transaction 
 ```python test
 import asyncio
 
-from rowx.postgres import Pool
+from rowx_postgres import Pool
 from rowx import query
 
 
@@ -823,7 +829,7 @@ import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from rowx.postgres import Migrator, Pool
+from rowx_postgres import Migrator, Pool
 
 FILES = {
     "0001_create_accounts.up.sql": "CREATE TABLE accounts (id int PRIMARY KEY, name text NOT NULL);\n",
@@ -874,7 +880,7 @@ with TemporaryDirectory() as tmp:
 At startup, in the application, or as a deploy step. The lock makes both safe when several instances start together.
 
 ```python
-from rowx.postgres import Migrator, Pool
+from rowx_postgres import Migrator, Pool
 
 migrator = Migrator("migrations")
 
@@ -1012,8 +1018,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from rowx import query_unchecked
-from rowx.errors import DirtyMigrationError, MigrationChecksumError, MigrationFailedError, MigrationOrderError
-from rowx.postgres import Migrator, connect
+from rowx_core.errors import DirtyMigrationError, MigrationChecksumError, MigrationFailedError, MigrationOrderError
+from rowx_postgres import Migrator, connect
 
 TABLE = "_rowx_migrations"
 
@@ -1125,7 +1131,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from rowx import query_unchecked
-from rowx.postgres import Migrator, connect
+from rowx_postgres import Migrator, connect
 
 # sqlx stores the SHA-384 of the file bytes: `printf 'CREATE TABLE people (id int PRIMARY KEY);\n' | shasum -a 384`
 CHECKSUM = bytes.fromhex(
@@ -1252,7 +1258,7 @@ the job if the database and the directory disagree.
 name the plugin in a `conftest.py`.
 
 ```sh
-pip install "rowx[pytest]"
+uv add "rowx[postgres,pytest]"
 ```
 
 ```python
@@ -1275,7 +1281,7 @@ its asyncio backend, and Trio does not.
 ```python
 # test_signup.py
 from rowx import query
-from rowx.postgres import Pool
+from rowx_postgres import Pool
 
 
 async def test_signup(rowx_pool: Pool) -> None:  # with pytest-asyncio or anyio's asyncio backend
@@ -1423,8 +1429,8 @@ include roots**, not only on files with queries, because a helper can build a te
   `query_unchecked` reports it as `dynamic-query` instead, so one interpolation is never reported twice.
 
 Aliased imports (`from string.templatelib import Template as T`) are followed, and so are the `Template` and
-`Interpolation` that private modules of this package re-export (`from rowx._template import Template`). A subscript is
-type-level only when it subscripts a name (`list[Template]`), so `[Template][0](x)` is reported. A class pattern
+`Interpolation` that private modules of this package re-export (`from rowx_core._template import Template`). A subscript
+is type-level only when it subscripts a name (`list[Template]`), so `[Template][0](x)` is reported. A class pattern
 (`case Template(strings=s)`) and a name assigned once from an evident `Template` are accepted. Build dynamic SQL by
 nesting t-string literals instead (`t"WHERE {cond}"`), which keeps every value a parameter.
 
@@ -1518,7 +1524,7 @@ server connection than the one that prepared it. Either connect with `statement_
 newer with `max_prepared_statements` set.
 
 ```python
-from rowx.postgres import ConnectOptions, Pool
+from rowx_postgres import ConnectOptions, Pool
 
 pool = Pool(ConnectOptions.from_dsn("postgresql://app@pooler:6432/app", statement_cache_size=0), max_size=5)
 ```
@@ -1562,7 +1568,7 @@ in [Security and safety](design/security.md); this section is what it asks of yo
 import asyncio
 
 from rowx import query
-from rowx.postgres import connect
+from rowx_postgres import connect
 
 
 async def main() -> None:
@@ -1603,7 +1609,7 @@ import asyncio
 from decimal import Decimal
 
 from rowx import query, query_unchecked
-from rowx.postgres import Connection, connect
+from rowx_postgres import Connection, connect
 
 
 async def by_id(conn: Connection, ids: list[int]) -> list[str]:
@@ -1679,7 +1685,7 @@ from string.templatelib import Template
 from typing import Literal, assert_never
 
 from rowx import query, query_unchecked
-from rowx.postgres import Connection, connect
+from rowx_postgres import Connection, connect
 
 
 class SortColumn(StrEnum):
@@ -1792,7 +1798,7 @@ every part you rely on.
 import asyncio
 
 from rowx import query
-from rowx.postgres import Connection, Pool
+from rowx_postgres import Connection, Pool
 
 type Leftovers = tuple[str | None, bool, int, int]
 
@@ -1869,8 +1875,8 @@ or ECDSA-with-SHA-512 server certificate `channel_binding=require` fails to conn
 offer `SCRAM-SHA-256-PLUS` (`trust`, `md5`, `password` or plain `scram-sha-256` authentication). Use `prefer` there.
 
 ```python test
-from rowx.errors import InterfaceError
-from rowx.postgres import ConnectOptions
+from rowx_core.errors import InterfaceError
+from rowx_postgres import ConnectOptions
 
 # the DSN above, parsed into typed fields; nothing connects
 options = ConnectOptions.from_dsn(
@@ -1907,8 +1913,8 @@ protection for arrays and ranges, which are always sent in binary format. See "S
 import asyncio
 
 from rowx import query
-from rowx.errors import InterfaceError
-from rowx.postgres import Pool
+from rowx_core.errors import InterfaceError
+from rowx_postgres import Pool
 
 
 async def pid(pool: Pool) -> int:
@@ -1960,8 +1966,8 @@ diagnostic, whichever form of DSN carried it, and `ConnectOptions.__repr__` hide
 ```python test
 import asyncio
 
-from rowx.errors import InterfaceError
-from rowx.postgres import ConnectOptions, connect
+from rowx_core.errors import InterfaceError
+from rowx_postgres import ConnectOptions, connect
 
 
 async def main() -> None:

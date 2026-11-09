@@ -5,13 +5,14 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, assert_never
 
+from rowx_postgres import connect
+
 from rowx import query, query_unchecked
-from rowx.postgres import connect
 
 if TYPE_CHECKING:
     from string.templatelib import Template
 
-    from rowx.postgres import Connection
+    from rowx_postgres import Connection
 
 type ProductRow = tuple[int, str, str, Decimal, int]
 type Direction = Literal["asc", "desc"]

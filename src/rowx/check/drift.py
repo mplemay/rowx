@@ -1,21 +1,20 @@
 from collections import Counter
 from typing import TYPE_CHECKING, Final
 
+from rowx_core.errors import DatabaseError, InterfaceError, MigrateError
+
 from rowx.check.migrate import load_migrator, resolve_target
 from rowx.check.runner import CheckError, redact
-from rowx.errors import DatabaseError, InterfaceError, MigrateError
-from rowx.postgres import Connection
-from rowx.postgres._core import connect_checker
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from rowx_core.backend import Backend, MigrationSession, MigrationStatus
+
     from rowx.check.config import Config
-    from rowx.postgres import MigrationStatus, Migrator
 
 DRIFT_STATES: Final[tuple[str, ...]] = ("pending", "modified", "missing", "dirty")
 MAX_VERSIONS: Final[int] = 5
-INSUFFICIENT_PRIVILEGE: Final[str] = "42501"
 HELP: Final[str] = "run `rowx migrate run`, or `rowx check --scratch`"
 
 
@@ -46,46 +45,36 @@ def summarize(statuses: Sequence[MigrationStatus], directory: str, *, ignore_mis
     return "\n".join(lines)
 
 
-def _denied(error: BaseException | None) -> bool:
-    return isinstance(error, DatabaseError) and error.sqlstate == INSUFFICIENT_PRIVILEGE
-
-
-# the table is named as configured, so it is not a secret and the message is not redacted
-def _grant_hint(table: str) -> str:
-    return f"could not read the migration history: permission denied; grant SELECT on {table} to the checker role"
-
-
-async def read_history(migrator: Migrator, conn: Connection) -> tuple[MigrationStatus, ...]:
+async def read_history(session: MigrationSession) -> Sequence[MigrationStatus]:
     # `info` creates nothing, so it runs as is in the read-only checker session
-    return await migrator.info(conn)
+    return await session.info()
 
 
 # returns the number of migrations checked, or None when the project has no `[tool.rowx.migrate]`
-async def check_drift(config: Config, dsn: str) -> int | None:
+async def check_drift(config: Config, dsn: str, backend: Backend | None = None) -> int | None:
     if config.migrate is None:
         return None
     target = resolve_target(config, None)
-    migrator = load_migrator(target)
+    migrator = load_migrator(target, dsn, backend)
     try:
-        conn = Connection(await connect_checker(dsn, config.statement_timeout_ms / 1000))
+        session = await migrator.open(readonly=True, statement_timeout=config.statement_timeout_ms / 1000)
     except (InterfaceError, DatabaseError, OSError) as error:
         msg = f"could not connect to the database: {redact(str(error), dsn)}"
         raise CheckError(msg) from None
     try:
-        statuses = await read_history(migrator, conn)
+        statuses = await read_history(session)
+    except PermissionError as error:
+        # The backend supplies a credential-free history permission diagnostic.
+        raise CheckError(str(error)) from None
     except MigrateError as error:
         cause = error.__cause__
-        if _denied(error) or _denied(cause):
-            raise CheckError(_grant_hint(target.migrate.table)) from None
         msg = f"could not read the migration history: {error}" + (f": {cause}" if cause is not None else "")
         raise CheckError(redact(msg, dsn)) from None
     except (InterfaceError, DatabaseError, OSError) as error:
-        if _denied(error):
-            raise CheckError(_grant_hint(target.migrate.table)) from None
         msg = f"could not read the migration history: {redact(str(error), dsn)}"
         raise CheckError(msg) from None
     finally:
-        await conn.close()
+        await session.close()
     if (summary := summarize(statuses, target.migrate.dir, ignore_missing=target.migrate.ignore_missing)) is not None:
         raise DriftError(summary)
     return len(statuses)

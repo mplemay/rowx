@@ -6,9 +6,9 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Final
 
 import asyncpg
+from rowx_postgres import Pool, connect
 
 import rowx
-from rowx.postgres import Pool, connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

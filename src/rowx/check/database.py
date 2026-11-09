@@ -1,26 +1,20 @@
 import sys
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
+from rowx_core import InterfaceError
+
+from rowx._backend import backend_for
 from rowx.check.config import load_config
-from rowx.check.migrate import (
-    add_connect_timeout,
-    connect_options,
-    load_migrator,
-    require_url,
-    resolve_target,
-    run_guarded,
-    run_pending,
-    wait_for_server,
-)
+from rowx.check.migrate import add_connect_timeout, load_migrator, require_url, resolve_target, run_guarded, run_pending
 from rowx.check.runner import CheckError
-from rowx.postgres._admin import create_database, database_exists, drop_database
 
 if TYPE_CHECKING:
     from argparse import ArgumentParser, Namespace, _SubParsersAction
-    from collections.abc import Coroutine
+    from collections.abc import Awaitable, Callable
 
-    from rowx.postgres import Migrator
+    from rowx_core.backend import AdminService, MigrationService
 
 
 def add_parsers(subparsers: _SubParsersAction[ArgumentParser]) -> None:
@@ -43,8 +37,8 @@ def add_parsers(subparsers: _SubParsersAction[ArgumentParser]) -> None:
         parser.add_argument("--source", type=Path, metavar="DIR")
 
 
-def _name(dsn: str) -> str:
-    name = connect_options(dsn).database
+def _name(admin: AdminService) -> str:
+    name = admin.database
     if name is None or not name.strip():
         msg = "the database URL names no database"
         raise CheckError(msg)
@@ -65,58 +59,55 @@ def _confirmed(verb: str, name: str, *, yes: bool) -> bool:
     return False
 
 
-async def _create(dsn: str, name: str) -> None:
-    if await database_exists(dsn, name):
+async def _create(admin: AdminService, name: str) -> None:
+    if await admin.exists(name):
         sys.stdout.write(f"Database {name!r} already exists\n")
         return
-    await create_database(dsn, name)
+    await admin.create(name)
     sys.stdout.write(f"Created database {name!r}\n")
 
 
-async def _drop(dsn: str, name: str, *, force: bool) -> None:
-    await drop_database(dsn, name, force=force)
+async def _drop(admin: AdminService, name: str, *, force: bool) -> None:
+    await admin.drop(name, force=force)
     sys.stdout.write(f"Dropped database {name!r}\n")
 
 
-# waits for the server (through the maintenance database), then runs `work`
-async def _ready(dsn: str, name: str, args: Namespace, work: Coroutine[Any, Any, None]) -> None:
-    try:
-        # a probe through the maintenance database: the work opens its own connections, and is never retried
-        await wait_for_server(
-            lambda options: database_exists(options, name), connect_options(dsn), args.connect_timeout
-        )
-    except BaseException:
-        work.close()
-        raise
-    await work
+async def _ready(admin: AdminService, args: Namespace, work: Callable[[], Awaitable[None]]) -> None:
+    await admin.ready(args.connect_timeout)
+    await work()
 
 
 def handle(args: Namespace) -> None:
     config = load_config(Path.cwd(), args.config)
     dsn = require_url(config, args.database_url)
-    name = _name(dsn)
+    backend = backend_for(dsn)
+    try:
+        admin = backend.admin(dsn)
+    except InterfaceError, ValueError:
+        msg = "the database URL could not be parsed"
+        raise CheckError(msg) from None
+    name = _name(admin)
     match args.database_command:
         case "create":
-            run_guarded(dsn, _ready(dsn, name, args, _create(dsn, name)))
+            run_guarded(dsn, _ready(admin, args, partial(_create, admin, name)))
         case "drop":
             if _confirmed("drop", name, yes=args.yes):
-                run_guarded(dsn, _ready(dsn, name, args, _drop(dsn, name, force=args.force)))
+                run_guarded(dsn, _ready(admin, args, partial(_drop, admin, name, force=args.force)))
         case "reset":
-            # the migrations are read first, so a broken directory fails before anything is dropped
-            migrator = load_migrator(resolve_target(config, args.source))
+            migrator = load_migrator(resolve_target(config, args.source), dsn, backend)
             if _confirmed("reset", name, yes=args.yes):
-                run_guarded(dsn, _ready(dsn, name, args, _reset(migrator, dsn, name, force=args.force)))
+                run_guarded(dsn, _ready(admin, args, partial(_reset, migrator, admin, dsn, name, force=args.force)))
         case _:
-            migrator = load_migrator(resolve_target(config, args.source))
-            run_guarded(dsn, _ready(dsn, name, args, _setup(migrator, dsn, name)))
+            migrator = load_migrator(resolve_target(config, args.source), dsn, backend)
+            run_guarded(dsn, _ready(admin, args, partial(_setup, migrator, admin, dsn, name)))
 
 
-async def _reset(migrator: Migrator, dsn: str, name: str, *, force: bool) -> None:
-    await _drop(dsn, name, force=force)
-    await _create(dsn, name)
+async def _reset(migrator: MigrationService, admin: AdminService, dsn: str, name: str, *, force: bool) -> None:
+    await _drop(admin, name, force=force)
+    await _create(admin, name)
     await run_pending(migrator, dsn)
 
 
-async def _setup(migrator: Migrator, dsn: str, name: str) -> None:
-    await _create(dsn, name)
+async def _setup(migrator: MigrationService, admin: AdminService, dsn: str, name: str) -> None:
+    await _create(admin, name)
     await run_pending(migrator, dsn)

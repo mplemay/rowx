@@ -1,0 +1,8 @@
+error[nullability-mismatch]: column 3 "email" may be NULL but tuple element 3 is `str`
+ --> app/users.py:2:43
+  |
+2 |     user = await query[tuple[int, str, str]](
+  |                                           ^^^ element 3
+  |
+  = note: nullable because users.email has no NOT NULL constraint
+  = help: annotate `str | None`, or alias the column as "email!" if it can't be NULL

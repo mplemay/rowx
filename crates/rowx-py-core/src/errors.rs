@@ -30,7 +30,7 @@ fn class<'py>(
 ) -> PyResult<&'py Bound<'py, PyType>> {
     let cls = cell.get_or_try_init(py, || {
         Ok::<_, PyErr>(
-            py.import("rowx.errors")?
+            py.import("rowx_core.errors")?
                 .getattr(name)?
                 .cast_into::<PyType>()?
                 .unbind(),
@@ -39,10 +39,10 @@ fn class<'py>(
     Ok(cls.bind(py))
 }
 
-/// Imports the `rowx.errors` classes so a missing or renamed class fails at module init.
+/// Imports the `rowx_core.errors` classes so a missing or renamed class fails at module init.
 ///
 /// # Errors
-/// An import or attribute error when `rowx.errors` lacks a class.
+/// An import or attribute error when `rowx_core.errors` lacks a class.
 pub fn init(py: Python<'_>) -> PyResult<()> {
     class(py, &INTERFACE_ERROR, "InterfaceError")?;
     class(py, &DATABASE_ERROR, "DatabaseError")?;
