@@ -2,7 +2,7 @@
 from argparse import ArgumentParser
 from email.parser import Parser
 from os import environ
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final
 from zipfile import ZipFile
 
@@ -22,7 +22,8 @@ WHEEL_TAGS: Final[tuple[tuple[str, ...], ...]] = (
     ("win_amd64",),
 )
 MIT_LICENSE: Final[str] = "MIT"
-LICENSE_PATH_MARKER: Final[str] = ".dist-info/licenses/"
+LICENSE_ENTRY_SUFFIX: Final[str] = ".dist-info/licenses/LICENSE"
+LICENSE_FILE_NAME: Final[str] = "LICENSE"
 METADATA_SUFFIX: Final[str] = ".dist-info/METADATA"
 WHEEL_PARTS_WITHOUT_BUILD: Final[int] = 5
 WHEEL_PARTS_WITH_BUILD: Final[int] = 6
@@ -54,7 +55,16 @@ EXPECTED_URLS: Final[dict[str, str]] = {
     "Issues": "https://github.com/mplemay/rowx/issues",
     "Changelog": "https://github.com/mplemay/rowx/blob/main/docs/changelog.md",
 }
-FORBIDDEN_CORE_REQUIREMENTS: Final[frozenset[str]] = frozenset({ROWX, POSTGRES_DISTRIBUTION})
+DISTRIBUTION_NAMES: Final[dict[str, str]] = {
+    ROWX: ROWX,
+    ROWX_CORE: CORE_DISTRIBUTION,
+    ROWX_POSTGRES: POSTGRES_DISTRIBUTION,
+}
+LICENSE_SOURCES: Final[dict[str, Path]] = {
+    ROWX: ROOT / "LICENSE",
+    ROWX_CORE: ROOT / "packages" / "rowx-core" / "LICENSE",
+    ROWX_POSTGRES: ROOT / "packages" / "rowx-postgres" / "LICENSE",
+}
 
 type Requirement = tuple[str, str | None]
 
@@ -97,8 +107,9 @@ def validate_wheel(path: Path) -> None:
     with ZipFile(path) as wheel:
         names = wheel.namelist()
         metadata = _read_metadata(path, wheel)
+        license_bytes = _read_packaged_license(path, wheel, names)
     _reject_development_files(path, namespace, names)
-    _validate_metadata(path, namespace, names, metadata)
+    _validate_metadata(path, namespace, metadata, license_bytes)
 
 
 def _reject_development_files(path: Path, namespace: str, names: list[str]) -> None:
@@ -118,10 +129,11 @@ def _reject_development_files(path: Path, namespace: str, names: list[str]) -> N
         raise SystemExit(message)
 
 
-def _validate_metadata(path: Path, namespace: str, names: list[str], metadata: Message) -> None:
+def _validate_metadata(path: Path, namespace: str, metadata: Message, license_bytes: bytes) -> None:
     version = _wheel_version(path)
+    _validate_identity(path, namespace, version, metadata)
     _validate_license(path, metadata)
-    _validate_license_file(path, names)
+    _validate_license_file(path, namespace, metadata, license_bytes)
     _validate_classifiers(path, metadata)
     _validate_keywords(path, metadata)
     _validate_urls(path, metadata)
@@ -144,6 +156,21 @@ def _wheel_version(path: Path) -> str:
     return parts[VERSION_INDEX]
 
 
+def _validate_identity(path: Path, namespace: str, version: str, metadata: Message) -> None:
+    expected_name = DISTRIBUTION_NAMES.get(namespace)
+    if expected_name is None:
+        message = f"{path.name} has an unexpected distribution name"
+        raise SystemExit(message)
+    name = metadata.get("Name")
+    if name != expected_name:
+        message = f"{path.name} Name is {name!r}, expected {expected_name!r}"
+        raise SystemExit(message)
+    found_version = metadata.get("Version")
+    if found_version != version:
+        message = f"{path.name} Version is {found_version!r}, expected {version!r}"
+        raise SystemExit(message)
+
+
 def _validate_license(path: Path, metadata: Message) -> None:
     expression = metadata.get("License-Expression")
     legacy = metadata.get("License")
@@ -153,13 +180,31 @@ def _validate_license(path: Path, metadata: Message) -> None:
     raise SystemExit(message)
 
 
-def _validate_license_file(path: Path, names: list[str]) -> None:
-    packaged = [name for name in names if LICENSE_PATH_MARKER in name and not name.endswith("/")]
-    if packaged:
-        return
-    present = [name for name in names if "LICENSE" in name.upper()]
-    message = f"{path.name} license file is not under {LICENSE_PATH_MARKER}: {present}"
-    raise SystemExit(message)
+def _read_packaged_license(path: Path, wheel: ZipFile, names: list[str]) -> bytes:
+    packaged = [
+        name
+        for name in names
+        if not name.endswith("/") and PurePosixPath(name).full_match("*.dist-info/licenses/LICENSE")
+    ]
+    if len(packaged) != MATCH_COUNT:
+        present = [name for name in names if not name.endswith("/") and "LICENSE" in name.upper()]
+        message = f"{path.name} license file is not {LICENSE_ENTRY_SUFFIX}: {present}"
+        raise SystemExit(message)
+    return wheel.read(packaged[0])
+
+
+def _validate_license_file(path: Path, namespace: str, metadata: Message, license_bytes: bytes) -> None:
+    headers = metadata.get_all("License-File", [])
+    if headers != [LICENSE_FILE_NAME]:
+        message = f"{path.name} License-File is {headers}, expected [{LICENSE_FILE_NAME}]"
+        raise SystemExit(message)
+    source = LICENSE_SOURCES.get(namespace)
+    if source is None:
+        message = f"{path.name} has an unexpected distribution name"
+        raise SystemExit(message)
+    if license_bytes != source.read_bytes():
+        message = f"{path.name} license bytes do not match {source.relative_to(ROOT)}"
+        raise SystemExit(message)
 
 
 def _validate_classifiers(path: Path, metadata: Message) -> None:
@@ -240,10 +285,11 @@ def _validate_rowx_requires(path: Path, version: str, requirements: list[Require
 
 
 def _validate_core_requires(path: Path, requirements: list[Requirement]) -> None:
-    for requirement, _marker in requirements:
-        if _distribution_name(requirement) in FORBIDDEN_CORE_REQUIREMENTS:
-            message = f"{path.name} must not require {requirement}"
-            raise SystemExit(message)
+    if not requirements:
+        return
+    found = [requirement if marker is None else f"{requirement}; {marker}" for requirement, marker in requirements]
+    message = f"{path.name} must not declare Requires-Dist, found {found}"
+    raise SystemExit(message)
 
 
 def _validate_postgres_requires(path: Path, version: str, requirements: list[Requirement]) -> None:
