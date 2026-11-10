@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 type NullReason = Literal[
     "NotNullColumn",
     "NullableColumn",
+    "ScanFilterNotNull",
     "NotValidatedConstraint",
     "ForeignOrView",
     "ViewColumn",

@@ -81,6 +81,66 @@ pub fn walk(
     promotions
 }
 
+// Only the entire deparsed predicate on a single physical scan is a proof. Restrict identifiers to
+// unquoted lower-case PostgreSQL identifiers, so spelling cannot conceal a different expression.
+// only a plain unquoted lowercase identifier is trusted to be the attribute name
+fn is_plain_ident(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+#[must_use]
+pub(crate) fn scan_filter_not_null(
+    plan: &Value,
+    column_count: usize,
+    origins: &[Option<Origin>],
+) -> Vec<bool> {
+    let mut proven = vec![false; column_count];
+    let Some(root) = plan.get(0).and_then(|entry| entry.get("Plan")) else {
+        return proven;
+    };
+    if !matches!(
+        str_key(root, "Node Type"),
+        Some("Seq Scan" | "Index Scan" | "Index Only Scan")
+    ) || children(root).next().is_some()
+    {
+        return proven;
+    }
+    let (Some(schema), Some(relation), Some(alias), Some(filter)) = (
+        str_key(root, "Schema"),
+        str_key(root, "Relation Name"),
+        str_key(root, "Alias"),
+        str_key(root, "Filter"),
+    ) else {
+        return proven;
+    };
+    if !is_plain_ident(alias) {
+        return proven;
+    }
+    let Some(output) = root.get("Output").and_then(Value::as_array) else {
+        return proven;
+    };
+    if output.len() != column_count || origins.len() != column_count {
+        return proven;
+    }
+    for ((slot, expr), origin) in proven.iter_mut().zip(output).zip(origins) {
+        let (Some(expr), Some(origin)) = (expr.as_str(), origin.as_ref()) else {
+            continue;
+        };
+        if origin.schema != schema || origin.relation != relation || !is_plain_ident(&origin.column)
+        {
+            continue;
+        }
+        let qualified = format!("{alias}.{}", origin.column);
+        *slot = (expr == origin.column || expr == qualified)
+            && filter == format!("({qualified} IS NOT NULL)");
+    }
+    proven
+}
+
 fn children(node: &Value) -> impl Iterator<Item = &Value> {
     node.get("Plans")
         .and_then(Value::as_array)
@@ -488,6 +548,25 @@ mod join {
             mapped("scan_boundary_union_all", &[Some(origin("posts", "title"))]),
             [Some(boundary("x"))]
         );
+    }
+
+    #[test]
+    fn scan_filter_requires_exact_identity_and_shape() {
+        let plan = json!([{ "Plan": { "Node Type": "Seq Scan", "Schema": "public",
+            "Relation Name": "users", "Alias": "u", "Output": ["u.email"],
+            "Filter": "(u.email IS NOT NULL)" } }]);
+        let origins = [Some(origin("users", "email"))];
+        assert_eq!(super::scan_filter_not_null(&plan, 1, &origins), [true]);
+        let mut other = plan.clone();
+        other[0]["Plan"]["Filter"] = json!("((u.email IS NOT NULL) OR (u.email IS NULL))");
+        assert_eq!(super::scan_filter_not_null(&other, 1, &origins), [false]);
+        assert_eq!(
+            super::scan_filter_not_null(&plan, 1, &[Some(origin("posts", "email"))]),
+            [false]
+        );
+        other = plan;
+        other[0]["Plan"]["Plans"] = json!([{ "Node Type": "Result" }]);
+        assert_eq!(super::scan_filter_not_null(&other, 1, &origins), [false]);
     }
 
     #[test]
