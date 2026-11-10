@@ -2059,3 +2059,28 @@ asyncio.run(main())
 - **Named row types** support dataclasses, NamedTuple, TypedDict and pydantic. attrs, msgspec, nested row classes and
   type overrides (`"col: Type"`) are not supported. See [What isn't supported](#what-isnt-supported).
 - **`float` parameters.** An `int` above 2^53 bound to a `float4`/`float8` parameter loses precision.
+
+### Checking rollout compatibility
+
+Use a disposable PostgreSQL server and trusted migration files to check both rollout orders:
+
+```sh
+rowx check-compat --against BASE --head HEAD --database-url "$ROWX_DATABASE_URL"
+```
+
+The command independently replays each revision's migrations in scratch databases. Those databases share the
+server's roles and other cluster resources. It checks each revision on its own schema before checking baseline
+source on the head schema (migrate first) and head source on the baseline schema (deploy first). It reports
+recognized and skipped sites for each revision. Exit status 0 means the checked subset is compatible, 1 means a
+cross-schema incompatibility was found, and 2 means the check was incomplete.
+
+The checker never executes checked queries. PostgreSQL 18.3 accepts Parse/Describe and EXPLAIN for an INSERT that
+omits a newly added NOT NULL column without a default, although executing that INSERT fails. Runtime constraints,
+production data and permissions are outside this check's coverage.
+
+For example, start a disposable server with `docker run --rm -e POSTGRES_PASSWORD=example -p 5432:5432 postgres:18`
+and point `ROWX_DATABASE_URL` at it. The workflow rejects symbolic links and Git submodules in snapshots.
+
+An undetected example is an existing `INSERT INTO t (id) VALUES (1)` followed by the migration
+`ALTER TABLE t ADD COLUMN required text NOT NULL`. PostgreSQL accepts describing and explaining the INSERT but
+rejects it when executed.

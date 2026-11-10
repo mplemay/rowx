@@ -124,6 +124,10 @@ class SiteCoverage:
     row_comparison: RowComparison = "not compared"
     parameters_aligned: bool = False
     parameters: tuple[ParameterCoverage, ...] = ()
+    sql_failed: bool = False
+    row_failed: bool = False
+    row_unresolved: bool = False
+    parameters_failed: bool = False
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -398,9 +402,18 @@ def _report(  # ruff: ignore[too-many-arguments]
     column_index: int | None = None,
     field: str | None = None,
     order: int = 0,
+    wider_nullability: bool = False,
 ) -> Report:
     diagnostic = Diagnostic(rule=rule, message=message, path=site.call.path, span=span, notes=notes)
-    return Report(diagnostic=diagnostic, help=help, label=label, column_index=column_index, field=field, order=order)
+    return Report(
+        diagnostic=diagnostic,
+        help=help,
+        label=label,
+        column_index=column_index,
+        field=field,
+        order=order,
+        wider_nullability=wider_nullability,
+    )
 
 
 def _param_reports(site: _Site, described: Describe, backend: CheckerBackend) -> list[Report]:
@@ -504,6 +517,7 @@ def _row_reports(site: _Site, described: Describe, backend: CheckerBackend) -> l
     incomplete = any(finding.rule in ROW_INCOMPLETE_RULES for finding in findings) or (
         row_type.kind == "named" and any(field.names is None for field in row_type.fields)
     )
+    site.coverage.row_unresolved = row_type.kind == "named" and any(field.names is None for field in row_type.fields)
     site.coverage.row_comparison = "partially compared" if incomplete else "compared"
     return [_finding_report(site, finding, descs, order) for order, finding in enumerate(findings)]
 
@@ -552,16 +566,22 @@ def _finding_report(
         column_index=finding.column,
         field=field_key,
         order=order if named else 0,
+        wider_nullability=finding.wider_nullability,
     )
 
 
 def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Report]:
     if isinstance(outcome, DatabaseError):
+        site.coverage.sql_failed = True
         return [_sql_error(site, outcome, backend)]
     site.coverage.described = True
+    params = _param_reports(site, outcome, backend)
+    rows = _row_reports(site, outcome, backend)
+    site.coverage.parameters_failed = any(report.diagnostic.rule == "param-count-mismatch" for report in params)
+    site.coverage.row_failed = any(not report.wider_nullability for report in rows)
     return [
-        *_param_reports(site, outcome, backend),
-        *_row_reports(site, outcome, backend),
+        *params,
+        *rows,
         *_override_reports(site, outcome, backend),
     ]
 
@@ -649,8 +669,9 @@ def _collect(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     backend: CheckerBackend | None,
     dsn: str | None = None,
     coverage: list[SiteCoverage] | None = None,
+    boundary: Path | None = None,
 ) -> tuple[list[_Site], list[Report], dict[Path, str], CheckerBackend | None]:
-    graph = ModuleGraph()
+    graph = ModuleGraph(boundary)
     sites: list[_Site] = []
     reports: list[Report] = []
     sources: dict[Path, str] = {}
@@ -695,13 +716,14 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
     backend: CheckerBackend | None = None,
     *,
     inspect: bool = False,
+    boundary: Path | None = None,
 ) -> RunResult:
     hooks = hooks or Hooks()
     stats = Statistics()
     selected = backend
     coverage: list[SiteCoverage] = []
     inspection: list[InspectedSite] = []
-    sites, reports, sources, selected = _collect(config, files, stats, selected, dsn, coverage)
+    sites, reports, sources, selected = _collect(config, files, stats, selected, dsn, coverage, boundary)
     statements = sorted({site.sourcemap.sql for site in sites})
     stats.distinct_sql = len(statements)
     target = dsn

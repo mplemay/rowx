@@ -28,6 +28,7 @@ class Scratch:
     # set before the create is attempted and cleared only by a drop that succeeded
     pending_drop: bool = False
     drop_error: str | None = None
+    sweep_previous: bool = True
 
     @property
     def leaked(self) -> bool:
@@ -52,12 +53,13 @@ class Scratch:
         url = self.url
         self.pending_drop = True
         try:
-            await self.sweep_orphans()
+            if self.sweep_previous:
+                await self.sweep_orphans()
             await self._create()
             await self._migrate(migrator, url)
             yield ScratchBuild(url=url, seconds=perf_counter() - started)
         finally:
-            await self.drop()
+            await self._drop_pending()
 
     # best effort: a run that was SIGKILLed or cancelled by CI leaves its database behind; only an old tag with no
     # sessions is dropped, and any error (a listing that is refused, a database another role owns) is ignored
@@ -77,6 +79,8 @@ class Scratch:
         try:
             await self.admin.create_scratch(self.name, comment=make_tag())
         except (DatabaseError, InterfaceError, OSError) as error:
+            if isinstance(error, DatabaseError) and error.sqlstate == "42P04":
+                self.pending_drop = False
             msg = f"could not create the scratch database: {error}"
             raise CheckError(redact(msg, self.server_dsn)) from None
 
@@ -91,6 +95,10 @@ class Scratch:
         except (DatabaseError, InterfaceError, OSError) as error:
             msg = f"could not migrate the scratch database: {error}"
             raise CheckError(redact(redact(msg, url), self.server_dsn)) from None
+
+    async def _drop_pending(self) -> None:
+        if self.pending_drop:
+            await self.drop()
 
     # a failed drop is recorded, not raised, so it never hides the error that ended the run
     async def drop(self) -> None:

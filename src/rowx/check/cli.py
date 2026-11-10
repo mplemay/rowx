@@ -71,6 +71,11 @@ def _parser() -> ArgumentParser:
     _add_check(subparsers)
     add_parsers(subparsers)
     add_database_parsers(subparsers)
+    compat = subparsers.add_parser("check-compat")
+    compat.add_argument("--against", required=True)
+    compat.add_argument("--head", required=True)
+    compat.add_argument("--database-url", metavar="URL")
+    compat.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1), metavar="N")
     return parser
 
 
@@ -266,10 +271,27 @@ def _subcommand(handler: Callable[[Namespace], None], args: Namespace) -> int:
     return EXIT_CLEAN
 
 
+def _compat(args: Namespace) -> int:
+    from rowx.check.compat import handle  # ruff: ignore[import-outside-top-level]
+
+    try:
+        return handle(args)
+    except (ConfigError, CheckError, BackendMissing, UnsupportedSchemeError, UnsupportedCapabilityError) as error:
+        print(f"error: {strip_controls(str(error))}", file=sys.stderr)  # ruff: ignore[print]
+        return EXIT_FAILURE
+    except KeyboardInterrupt:
+        print("error: interrupted", file=sys.stderr)  # ruff: ignore[print]
+        return EXIT_FAILURE
+
+
 def main(argv: list[str] | None = None) -> int:
     selected = sys.argv[1:] if argv is None else argv
     parser = _check_parser() if selected[:1] == ["check"] else _parser()
     args = parser.parse_args(argv)
+    if args.command == "check-compat":
+        if args.jobs < 1:
+            parser.error("-j must be at least 1")
+        return _compat(args)
     if args.command == "migrate":
         from rowx.check.migrate import handle as handle_migrate  # ruff: ignore[import-outside-top-level]
 

@@ -51,6 +51,7 @@ class Finding:
     # the indices into a named row's fields that the finding concerns, for the field notes and the JSON `field`
     fields: tuple[int, ...] = ()
     notes: tuple[str, ...] = ()
+    wider_nullability: bool = False
 
 
 def _rules(backend: CheckerBackend | None) -> CheckerBackend:
@@ -184,6 +185,7 @@ def _nullability_finding(
             help=help_,
             reason=column.reason,
             reason_detail=column.reason_detail,
+            wider_nullability=not column.nullable,
         ),
     ]
 
