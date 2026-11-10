@@ -1264,7 +1264,7 @@ class ShiftyList(list[int]):  # ruff: ignore[subclass-builtin]
         return 5
 
     @override
-    def __getitem__(self, _index: object) -> int:  # ty: ignore[invalid-method-override]
+    def __getitem__(self, _index: object) -> int:  # ty: ignore[incompatible-method-override]
         return 8
 
 
@@ -1955,7 +1955,7 @@ def stream(conn: ConnectionImpl, sql: str, row_shape: RowShape, batch_size: int 
 async def drain(handle: object) -> tuple[list[object], BaseException | None]:
     rows: list[object] = []
     try:
-        while batch := await handle._next():  # ty: ignore[unresolved-attribute]
+        while batch := await handle._next():  # ty: ignore[missing-attribute]
             rows.extend(batch)
     except BaseException as err:  # ruff: ignore[blind-except]
         return rows, err
@@ -3073,7 +3073,7 @@ def test_inet_decodes_to_an_interface(schema: str, literal: str, expected: objec
     got = read(schema, f"SELECT '{literal}'::inet")
     assert type(got) is type(expected)
     assert got == expected
-    assert got.network.prefixlen == expected.network.prefixlen  # ty: ignore[unresolved-attribute]
+    assert got.network.prefixlen == expected.network.prefixlen  # ty: ignore[missing-attribute]
 
 
 @pytest.mark.parametrize("literal", ["10.0.0.0/8", "0.0.0.0/0", "2001:db8::/32", "::/0", "1.2.3.4/32"])

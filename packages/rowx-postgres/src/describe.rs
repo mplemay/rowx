@@ -9,7 +9,7 @@ use rowx_postgres::describe::{self as pg, TypeKey};
 
 use crate::conn::Connection;
 use crate::errors::{PgError, interface_error};
-use crate::exec::{fail, settle_claim, watch};
+use crate::exec::{Access, fail, watch};
 use rowx_py_core::runtime;
 
 #[pyclass(
@@ -118,18 +118,19 @@ pub fn describe<'py>(
         .state
         .claim()
         .map_err(|e| rowx_py_core::errors::core_to_py_err(py, e))?;
-    let hook = Hook::default();
+    let hook = Hook::new(claim);
     let watched = hook.clone();
     let future = future_into_py(py, async move {
-        let claim = settle_claim(&cancel.state, claim).await?;
+        Access::default().reserve(&cancel.state, &hook).await?;
         let inner = Arc::clone(&cancel.backend.conn);
-        let pending = cancel::spawn(&cancel, claim, &hook, async move {
+        let pending = cancel::spawn(&cancel, &hook, async move {
             let guard = inner.lock().await;
             match guard.client() {
                 Ok(client) => pg::describe(client, &sql).await,
                 Err(e) => Err(e),
             }
-        });
+        })
+        .map_err(|e| PgError(e.into()))?;
         let described = pending
             .wait()
             .await

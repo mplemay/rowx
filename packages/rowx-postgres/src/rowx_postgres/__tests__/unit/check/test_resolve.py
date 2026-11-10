@@ -85,7 +85,7 @@ def test_star_import_uses_all(tmp_path: Path) -> None:
         },
     )
     assert leaves(resolve(tmp_path, "main.py")) == [("int", False)]
-    assert resolve(tmp_path, "hidden.py").diagnostic.rule == "unresolved-row-type"  # ty: ignore[unresolved-attribute]
+    assert rejected(resolve(tmp_path, "hidden.py")) == "unresolved-row-type"
 
 
 def test_src_layout_root(tmp_path: Path) -> None:
@@ -236,7 +236,7 @@ def test_plain_alias_of_constructor_is_subscriptable(tmp_path: Path) -> None:
     resolution = resolve(tmp_path, "main.py")
     assert row_type(resolution).elements[0].leaf == "list"
     write(tmp_path, {"typed.py": "type L = list\n" + QUERY.format(t="L[int]")})
-    assert resolve(tmp_path, "typed.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+    assert rejected(resolve(tmp_path, "typed.py")) == "invalid-row-type"
 
 
 def test_network_pair_is_one_leaf_in_either_order(tmp_path: Path) -> None:
@@ -297,15 +297,15 @@ def test_range_through_its_defining_module_and_a_list(tmp_path: Path) -> None:
 def test_range_of_an_unsupported_subtype_is_invalid(tmp_path: Path, subtype: str) -> None:
     source = "from rowx_postgres import Range\n"
     write(tmp_path, {"main.py": source + QUERY.format(t=f"Range[{subtype}]")})
-    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+    assert rejected(resolve(tmp_path, "main.py")) == "invalid-row-type"
 
 
 def test_bare_range_and_a_range_with_two_arguments_are_invalid(tmp_path: Path) -> None:
     source = "from rowx_postgres import Range\n"
     write(tmp_path, {"main.py": source + QUERY.format(t="Range")})
-    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+    assert rejected(resolve(tmp_path, "main.py")) == "invalid-row-type"
     write(tmp_path, {"main.py": source + QUERY.format(t="Range[int, int]")})
-    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+    assert rejected(resolve(tmp_path, "main.py")) == "invalid-row-type"
 
 
 def test_money_and_interval_leaves_through_aliases_and_optional(tmp_path: Path) -> None:
@@ -332,13 +332,13 @@ def test_money_and_interval_through_their_defining_modules_and_a_list(tmp_path: 
 def test_money_and_interval_cannot_be_unioned_with_another_leaf(tmp_path: Path, annotation: str) -> None:
     source = "import datetime\nfrom rowx_postgres import Interval, Money\n"
     write(tmp_path, {"main.py": source + QUERY.format(t=annotation)})
-    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+    assert rejected(resolve(tmp_path, "main.py")) == "invalid-row-type"
 
 
 def test_money_and_interval_cannot_be_subscripted(tmp_path: Path) -> None:
     source = "from rowx_postgres import Interval\n"
     write(tmp_path, {"main.py": source + QUERY.format(t="Interval[int]")})
-    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+    assert rejected(resolve(tmp_path, "main.py")) == "invalid-row-type"
 
 
 def test_geometric_leaves_through_aliases_optional_and_a_list(tmp_path: Path) -> None:
@@ -366,7 +366,7 @@ def test_geometric_leaves_through_their_defining_module(tmp_path: Path) -> None:
 def test_geometric_classes_cannot_be_unioned_or_subscripted(tmp_path: Path, annotation: str) -> None:
     source = "from rowx_postgres import Circle, Path, Point, Polygon\n"
     write(tmp_path, {"main.py": source + QUERY.format(t=annotation)})
-    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+    assert rejected(resolve(tmp_path, "main.py")) == "invalid-row-type"
 
 
 def test_hstore_leaf_through_aliases_and_a_list(tmp_path: Path) -> None:
@@ -392,7 +392,7 @@ def test_cube_leaf_through_its_defining_module(tmp_path: Path) -> None:
 def test_only_the_hstore_dict_and_a_plain_cube_are_leaves(tmp_path: Path, annotation: str) -> None:
     source = "from rowx_postgres import Cube\n"
     write(tmp_path, {"main.py": source + QUERY.format(t=annotation)})
-    assert resolve(tmp_path, "main.py").diagnostic.rule == "invalid-row-type"  # ty: ignore[unresolved-attribute]
+    assert rejected(resolve(tmp_path, "main.py")) == "invalid-row-type"
 
 
 def fields(resolution: Resolution) -> list[tuple[str, bool, bool]]:
@@ -687,7 +687,9 @@ def test_a_nullable_named_row_says_to_use_optional(tmp_path: Path) -> None:
 def test_a_subclass_of_a_value_class_is_rejected(tmp_path: Path, source: str) -> None:
     resolution = named(tmp_path, source)
     assert rejected(resolution) == "invalid-row-type"
-    assert "is not a row type" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert "is not a row type" in diagnostic.message
 
 
 def test_value_classes_stay_leaves(tmp_path: Path) -> None:
@@ -1175,7 +1177,9 @@ def test_an_unknown_field_next_to_known_ones_keeps_the_known_names(tmp_path: Pat
 def test_a_root_model_and_pydantic_v1_are_invalid(tmp_path: Path, source: str, message: str) -> None:
     resolution = pyd(tmp_path, source)
     assert rejected(resolution) == "invalid-row-type"
-    assert resolution.diagnostic.message == message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert diagnostic.message == message
 
 
 def test_another_pydantic_name_as_a_base_or_row_is_invalid(tmp_path: Path) -> None:
@@ -1205,7 +1209,9 @@ def test_pydantic_only_types_and_constraint_aliases_are_invalid_with_the_help(tm
     assert resolution.help == (
         "annotate the column's Python type (for example `str`) and validate with `Annotated[str, AfterValidator(...)]`"
     )
-    assert resolution.diagnostic.message.endswith('(field "x" of `T`)')  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert diagnostic.message.endswith('(field "x" of `T`)')
 
 
 def test_a_pydantic_only_type_in_a_pydantic_dataclass_is_invalid(tmp_path: Path) -> None:
@@ -1233,7 +1239,9 @@ def test_a_non_literal_pydantic_decorator_init_is_unresolved(tmp_path: Path) -> 
 def test_an_initvar_field_on_a_pydantic_dataclass_is_invalid(tmp_path: Path) -> None:
     resolution = pyd(tmp_path, "@pdc\nclass T:\n    id: int\n    scale: InitVar[int]\n")
     assert rejected(resolution) == "invalid-row-type"
-    assert "InitVar" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert "InitVar" in diagnostic.message
 
 
 def test_field_init_false_excludes_a_field_only_on_a_pydantic_dataclass(tmp_path: Path) -> None:
@@ -1284,7 +1292,9 @@ def test_a_field_with_double_star_arguments_is_unresolved(tmp_path: Path) -> Non
 def test_a_subclass_of_a_pydantic_dataclass_needs_the_decorator(tmp_path: Path) -> None:
     resolution = pyd(tmp_path, "@pdc\nclass A:\n    id: int\nclass T(A): ...\n")
     assert rejected(resolution) == "invalid-row-type"
-    assert "without the pydantic decorator" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert "without the pydantic decorator" in diagnostic.message
 
 
 @pytest.mark.parametrize(
@@ -1304,7 +1314,9 @@ def test_mixing_a_model_with_another_form_is_invalid(tmp_path: Path, source: str
 def test_a_model_with_no_fields_is_invalid(tmp_path: Path) -> None:
     resolution = pyd(tmp_path, "class T(BaseModel):\n    _x: int = 0\n    k: ClassVar[int] = 0\n")
     assert rejected(resolution) == "invalid-row-type"
-    assert "has no fields" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert "has no fields" in diagnostic.message
 
 
 def test_a_model_from_another_module_resolves_with_its_field_notes(tmp_path: Path) -> None:
@@ -1549,14 +1561,18 @@ def test_an_inconsistent_mro_is_unresolved(tmp_path: Path) -> None:
     )
     resolution = named(tmp_path, source)
     assert rejected(resolution) == "unresolved-row-type"
-    assert "method resolution order" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert "method resolution order" in diagnostic.message
 
 
 def test_a_class_that_inherits_from_itself_is_unresolved(tmp_path: Path) -> None:
     source = "from dataclasses import dataclass\n@dataclass\nclass A(B):\n    a: int\n@dataclass\nclass B(A):\n    b: int\nT = A\n"
     resolution = named(tmp_path, source)
     assert rejected(resolution) == "unresolved-row-type"
-    assert "inherits from itself" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert "inherits from itself" in diagnostic.message
 
 
 def test_an_inheritance_chain_has_no_depth_cap(tmp_path: Path) -> None:
@@ -1844,7 +1860,9 @@ def test_a_second_model_config_replaces_the_first(tmp_path: Path) -> None:
 def test_mixed_row_type_forms_are_rejected_with_help(tmp_path: Path, source: str) -> None:
     resolution = pyd(tmp_path, source)
     assert rejected(resolution) == "invalid-row-type"
-    assert "mixes row type forms" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert "mixes row type forms" in diagnostic.message
     assert resolution.help is not None
 
 
@@ -1899,7 +1917,9 @@ def test_a_generic_alias_is_rejected_for_an_unbound_parameter_a_wrong_count_or_a
 ) -> None:
     resolution = named(tmp_path, source)
     assert rejected(resolution) == "invalid-row-type"
-    assert message in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert message in diagnostic.message
 
 
 def test_an_unbound_parameter_has_a_help(tmp_path: Path) -> None:
@@ -2134,7 +2154,9 @@ def test_a_generic_alias_chain_is_followed_for_16_hops_and_rejected_at_17(tmp_pa
     assert leaves(named(tmp_path, alias_chain(16, "tuple[X, str]"))) == [("int", False), ("str", False)]
     resolution = named(tmp_path / "deep", alias_chain(17, "tuple[X, str]"))
     assert rejected(resolution) == "invalid-row-type"
-    assert "hops" in resolution.diagnostic.message  # ty: ignore[unresolved-attribute]
+    diagnostic = resolution.diagnostic
+    assert diagnostic is not None
+    assert "hops" in diagnostic.message
 
 
 def test_a_class_at_the_end_of_an_alias_chain_is_one_more_hop(tmp_path: Path) -> None:

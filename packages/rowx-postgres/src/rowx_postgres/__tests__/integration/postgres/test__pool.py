@@ -476,6 +476,22 @@ def test_a_hand_written_begin_through_the_pool_does_not_leak_a_transaction(schem
     assert asyncio.run(run()) == ("idle", "idle")
 
 
+def test_begin_stream_rolls_back_when_pool_reset_query_is_disabled(schema: str) -> None:
+    async def run() -> None:
+        async with Pool(schema, max_size=1, reset_query=None) as pool, await connect(schema) as observer:
+            pid = await query[int](t"SELECT pg_backend_pid()").one(pool)
+            rows = pool._stream("BEGIN", [], mask=None, scalar=False, arity=None, batch_size=1, shape=None)
+            try:
+                assert await rows._next() == []
+            finally:
+                rows.close()
+            async with pool.acquire() as conn:
+                assert await backend_pid(conn) == pid
+                assert await session_state(observer, pid) == "idle"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("hooked", [False, True])
 def test_a_detached_connection_survives_the_end_of_the_acquire_block(schema: str, *, hooked: bool) -> None:
     async def noop(_conn: Connection) -> None:

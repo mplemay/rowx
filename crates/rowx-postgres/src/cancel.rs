@@ -209,4 +209,4 @@ impl Backend for PgBackend {
 
 pub type Cancel = rowx_core::cancel::Cancel<PgBackend>;
 pub type Hook = rowx_core::cancel::Hook<PgBackend>;
-pub use rowx_core::cancel::{StreamHandle, spawn, spawn_stream};
+pub use rowx_core::cancel::{spawn, spawn_stream};
