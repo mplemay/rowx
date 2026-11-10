@@ -775,7 +775,7 @@ def test_optional_without_row_type_is_interface_error(schema: str) -> None:
 
 def test_orig_class_is_present() -> None:
     q = query[int](t"SELECT 1")
-    assert q.__orig_class__.__args__ == (int,)  # ty: ignore[missing-attribute]
+    assert q.__orig_class__.__args__ == (int,)  # ty: ignore[unresolved-attribute]
 
 
 def test_methods_are_coroutine_functions() -> None:

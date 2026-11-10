@@ -18,6 +18,7 @@ pytest = ["pytest>=9.2.0"]
 rowx = "rowx.check.cli:main"
 
 [tool.uv]
+exclude-newer = "7 days"
 
 [tool.uv.workspace]
 members = ["packages/rowx-core", "packages/rowx-postgres"]

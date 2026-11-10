@@ -563,12 +563,12 @@ def _is_initvar(t: type, key: str, declared: dict[str, tuple[type, object]]) -> 
 
 
 def _dataclass_specs(t: type) -> list[Spec]:
-    if not t.__dataclass_params__.init:  # ty: ignore[missing-attribute]
+    if not t.__dataclass_params__.init:  # ty: ignore[unresolved-attribute]
         raise _reject(t, "a dataclass with init=False is not supported")
     init_fields = fields(t)  # ty: ignore[invalid-argument-type]
     # `fields()` drops the `ClassVar` and `InitVar` pseudo-fields, which `__dataclass_fields__` still lists
     declared = _declared(t)
-    for key in t.__dataclass_fields__.keys() - {f.name for f in init_fields}:  # ty: ignore[missing-attribute]
+    for key in t.__dataclass_fields__.keys() - {f.name for f in init_fields}:  # ty: ignore[unresolved-attribute]
         if _is_initvar(t, key, declared):
             raise _reject(t, f"InitVar field {key!r} is not supported")
     return [
@@ -580,13 +580,13 @@ def _dataclass_specs(t: type) -> list[Spec]:
 
 def _namedtuple_specs(t: type) -> list[Spec]:
     defaults = getattr(t, "_field_defaults", {})
-    return [Spec(key=key, required=key not in defaults, names=(key,)) for key in t._fields]  # ty: ignore[missing-attribute]
+    return [Spec(key=key, required=key not in defaults, names=(key,)) for key in t._fields]  # ty: ignore[unresolved-attribute]
 
 
 def _typeddict_required(t: type, key: str, hint: object) -> bool:
     # `__required_keys__` is fixed at class creation from unresolved annotations, so it misses a qualifier written in a
     # quoted annotation or under `from __future__ import annotations`; the resolved qualifiers settle it
-    required = key in t.__required_keys__  # ty: ignore[missing-attribute]
+    required = key in t.__required_keys__  # ty: ignore[unresolved-attribute]
     for _ in range(MAX_ALIAS_DEPTH + 1):
         origin = get_origin(hint)
         qualifier = _qualifier(origin)
@@ -610,17 +610,17 @@ def _pydantic_rebuild(t: type, *, dataclass: bool, raise_errors: bool) -> None:
     if dataclass:
         sys.modules["pydantic.dataclasses"].rebuild_dataclass(t, raise_errors=raise_errors, _types_namespace={})
     else:
-        t.model_rebuild(raise_errors=raise_errors, _types_namespace={})  # ty: ignore[missing-attribute]
+        t.model_rebuild(raise_errors=raise_errors, _types_namespace={})  # ty: ignore[unresolved-attribute]
 
 
 # a model whose forward references resolved after it was defined is rebuilt once here; the plan then holds the rebuilt
 # validator
 def _pydantic_complete(t: type, *, dataclass: bool) -> None:
-    if t.__pydantic_complete__:  # ty: ignore[missing-attribute]
+    if t.__pydantic_complete__:  # ty: ignore[unresolved-attribute]
         return
     try:
         _pydantic_rebuild(t, dataclass=dataclass, raise_errors=False)
-        if t.__pydantic_complete__:  # ty: ignore[missing-attribute]
+        if t.__pydantic_complete__:  # ty: ignore[unresolved-attribute]
             return
         _pydantic_rebuild(t, dataclass=dataclass, raise_errors=True)
     except Exception as err:
@@ -675,10 +675,10 @@ def _pydantic_specs(t: type, bindings: Bindings, *, dataclass: bool) -> tuple[li
         # there is no `init=False` to reject here; only an `InitVar` is
         init_fields = {f.name for f in fields(t)}  # ty: ignore[invalid-argument-type]
         declared = _declared(t)
-        for key in t.__dataclass_fields__.keys() - init_fields:  # ty: ignore[missing-attribute]
+        for key in t.__dataclass_fields__.keys() - init_fields:  # ty: ignore[unresolved-attribute]
             if _is_initvar(t, key, declared):
                 raise _reject(t, f"InitVar field {key!r} is not supported")
-    infos = t.__pydantic_fields__ if dataclass else t.model_fields  # ty: ignore[missing-attribute]
+    infos = t.__pydantic_fields__ if dataclass else t.model_fields  # ty: ignore[unresolved-attribute]
     config = _pydantic_config(t, dataclass=dataclass)
     unknown = _pydantic_rewrites_input(t)
     specs: list[Spec] = []
@@ -770,7 +770,7 @@ def _named(t: type, kind: str, args: tuple[object, ...] | None = None) -> RowPla
         form, matching = "validator", "by_name"
         # a model is validated with its validator, but a pydantic dataclass's validator rejects a dict under
         # `strict=True`, so the class is called with the row as keywords instead
-        ctor, validate = (t, False) if dataclass else (t.__pydantic_validator__, True)  # ty: ignore[missing-attribute]
+        ctor, validate = (t, False) if dataclass else (t.__pydantic_validator__, True)  # ty: ignore[unresolved-attribute]
     else:
         specs, form, matching, hints = _specs(t, kind, bindings)
     if not specs:

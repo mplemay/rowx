@@ -475,7 +475,7 @@ def test_a_pydantic_model_is_a_validator_plan_over_its_validator(evaluate: Evalu
     plan = row_plan(t)
     assert (plan.kind, plan.form, plan.matching, plan.type_name) == ("named", "validator", "by_name", "T")
     assert plan.shape is not None
-    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[missing-attribute]
+    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[unresolved-attribute]
     assert plan.nullable_mask == (False, True)
 
 
@@ -629,7 +629,7 @@ def test_a_forward_reference_is_not_resolved_against_the_planners_locals(evaluat
     t = evaluate("class T(BaseModel):\n    id: 't'\nt = int")
     plan = row_plan(t)
     assert plan.kind == "named"
-    assert t.model_fields["id"].annotation is int  # ty: ignore[missing-attribute]
+    assert t.model_fields["id"].annotation is int  # ty: ignore[unresolved-attribute]
 
 
 def test_a_model_incomplete_for_a_reason_other_than_a_name_is_an_interface_error_with_its_cause(
@@ -719,18 +719,18 @@ def test_pydantic_defaults_are_not_required(evaluate: Evaluate) -> None:
 
 def test_a_model_with_a_forward_reference_resolved_later_is_rebuilt(evaluate: Evaluate) -> None:
     t = evaluate("class T(BaseModel):\n    id: 'Later'\nLater = int")
-    assert not t.__pydantic_complete__  # ty: ignore[missing-attribute]
+    assert not t.__pydantic_complete__  # ty: ignore[unresolved-attribute]
     plan = row_plan(t)
-    assert t.__pydantic_complete__  # ty: ignore[missing-attribute]
+    assert t.__pydantic_complete__  # ty: ignore[unresolved-attribute]
     assert plan.shape is not None
-    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[missing-attribute]
+    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[unresolved-attribute]
     assert plan.kind == "named"
 
 
 def test_a_pydantic_dataclass_with_a_forward_reference_resolved_later_is_rebuilt(evaluate: Evaluate) -> None:
     t = evaluate("@pydantic.dataclasses.dataclass\nclass T:\n    id: 'Later'\nLater = int")
     assert row_plan(t).kind == "named"
-    assert t.__pydantic_complete__  # ty: ignore[missing-attribute]
+    assert t.__pydantic_complete__  # ty: ignore[unresolved-attribute]
 
 
 @pytest.mark.parametrize(
