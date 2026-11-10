@@ -13,7 +13,8 @@ env:
   UV_NO_SYNC: "1"
 
 concurrency:
-  group: docs-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  # One group per ref so a main deploy waits instead of racing an older one.
+  group: docs-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

@@ -71,8 +71,10 @@ def test_snippet_runs(path: Path, index: int, body: str, schema: str, tmp_path: 
 
 
 def test_parametrization_runs_every_fence() -> None:
-    # pytest attaches marks at runtime; the function type does not declare them
-    raw = vars(test_snippet_runs)["pytestmark"]
+    # The decorator sets pytestmark at import. ty does not treat that attribute as declared.
+    raw = vars(test_snippet_runs).get("pytestmark")
+    assert raw is not None, "test_snippet_runs is missing pytestmark"
     marks = raw if isinstance(raw, list) else [raw]
-    parametrize = next(mark for mark in marks if mark.name == "parametrize")
+    parametrize = next((mark for mark in marks if mark.name == "parametrize"), None)
+    assert parametrize is not None, "test_snippet_runs is missing the parametrize mark"
     assert list(parametrize.args[1]) == _snippets()

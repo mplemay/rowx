@@ -5,13 +5,17 @@ import root.
 
 ## rowx-core
 
-The `rowx-core` distribution imports as `rowx_core`. It is pure Python and has no runtime dependencies. It holds the
-shared query and executor primitives, including `query`, `query_unchecked`, `QueryResult`, and `RowStream`.
+The `rowx-core` distribution's import root is `rowx_core`. It is pure Python and has no runtime dependencies. It holds
+the shared query and executor primitives, including `query`, `query_unchecked`, `QueryResult`, and `RowStream`.
+
+```python
+from rowx_core import query
+```
 
 ## rowx-postgres
 
-The `rowx-postgres` distribution imports as `rowx_postgres`. It depends only on the matching `rowx-core`. It is the
-PostgreSQL driver: connections, pools, transactions, migrations, and the Postgres value types.
+The `rowx-postgres` distribution's import root is `rowx_postgres`. It depends only on the matching `rowx-core`. It is
+the PostgreSQL driver: connections, pools, transactions, migrations, and the Postgres value types.
 
 The canonical connection imports are:
 
@@ -21,7 +25,7 @@ from rowx_postgres import Pool, connect
 
 ## rowx
 
-The `rowx` distribution imports as `rowx`. It is the command-line checker and depends on the matching `rowx-core`.
+The `rowx` distribution's import root is `rowx`. It is the command-line checker and depends on the matching `rowx-core`.
 The `postgres` extra adds the matching `rowx-postgres`:
 
 ```sh
