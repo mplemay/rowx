@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import FrozenInstanceError
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from rowx_core.errors import InterfaceError
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from rowx_postgres import Connection
 
 
-WORK_MEM = "3MB"
+WORK_MEM: Final[str] = "3MB"
 
 
 def run_with_conn[T](options: ConnectOptions, body: Callable[[Connection], Awaitable[T]]) -> T:

@@ -25,10 +25,11 @@ from rowx.check.runner import describe_all
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from rowx_core.backend import CheckerBackend
     from rowx_postgres._core import ColumnInfo
     from rowx_postgres._vocab import LeafName
 
-PG_RULES: Final = load().checker()
+PG_RULES: Final[CheckerBackend] = load().checker()
 
 pytestmark = [pytest.mark.db]
 

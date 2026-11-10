@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 pytestmark = [pytest.mark.db]
 
-UTC: Final = dt.UTC
+UTC: Final[dt.timezone] = dt.UTC
 RANGE_TYPES: Final[list[str]] = ["int4range", "int8range", "numrange", "daterange", "tsrange", "tstzrange"]
 
 

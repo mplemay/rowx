@@ -4,7 +4,7 @@ import sys
 import unicodedata
 from pathlib import Path
 from textwrap import dedent
-from typing import Final, get_args
+from typing import TYPE_CHECKING, Final, get_args
 
 import pytest
 from rowx_postgres._backend import load
@@ -17,7 +17,10 @@ from rowx.check.render import NULL_NOTES, Report, null_reason_note, render_json,
 from rowx.check.resolve import ModuleGraph, resolve_row_type
 from rowx.check.sourcemap import SourceMapper
 
-PG_RULES: Final = load().checker()
+if TYPE_CHECKING:
+    from rowx_core.backend import CheckerBackend
+
+PG_RULES: Final[CheckerBackend] = load().checker()
 
 EXPECTED: Final[Path] = Path(__file__).parent / "expected"
 PATH: Final[Path] = Path("app/users.py")

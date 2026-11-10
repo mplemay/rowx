@@ -30,17 +30,17 @@ if TYPE_CHECKING:
 
 type Outcome = Describe | DatabaseError
 
-PASSWORD_PARAM: Final = re_compile(
+PASSWORD_PARAM: Final[Pattern[str]] = re_compile(
     r"(?P<key>password\s*=\s*)(?P<value>'(?:[^'\\]|\\.)*'?|[^\s&]+)",
     flags=IGNORECASE | DOTALL,
 )
 # key=value form: a backslash escapes the next character and `&` is part of the value
-PASSWORD_PARAM_KV: Final = re_compile(
+PASSWORD_PARAM_KV: Final[Pattern[str]] = re_compile(
     r"(?P<key>password\s*=\s*)(?P<value>'(?:[^'\\]|\\.)*'?|(?:\\.|[^\s\\])+)",
     flags=IGNORECASE | DOTALL,
 )
-URL_SCHEME: Final = re_compile(r"\s*[A-Za-z][A-Za-z0-9+.-]*://")
-USERINFO: Final = re_compile(r"(?P<key>://[^/?#\s:@]*:)(?P<value>[^/?#\s]*)@")
+URL_SCHEME: Final[Pattern[str]] = re_compile(r"\s*[A-Za-z][A-Za-z0-9+.-]*://")
+USERINFO: Final[Pattern[str]] = re_compile(r"(?P<key>://[^/?#\s:@]*:)(?P<value>[^/?#\s]*)@")
 
 
 class CheckError(Exception):

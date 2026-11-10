@@ -6,8 +6,8 @@ from rowx_core.errors import InterfaceError
 from rowx_postgres import ConnectOptions, connect
 from rowx_postgres._core import parse_dsn
 
-PASSWORD = "hunter2-password"  # ruff: ignore[hardcoded-password-string]
-EXTRA_SECRET = "hunter2-sslpassword"  # ruff: ignore[hardcoded-password-string]
+PASSWORD: Final[str] = "hunter2-password"  # ruff: ignore[hardcoded-password-string]
+EXTRA_SECRET: Final[str] = "hunter2-sslpassword"  # ruff: ignore[hardcoded-password-string]
 
 
 def test_repr_never_shows_the_password_or_an_extra_value() -> None:
@@ -93,8 +93,8 @@ def test_connect_path_errors_never_carry_the_password(options: ConnectOptions) -
     assert "Zq9pw" not in repr(caught.value)
 
 
-SECRET: Final = "p@ss"  # ruff: ignore[hardcoded-password-string]
-ENCODED: Final = "p%40ss"
+SECRET: Final[str] = "p@ss"  # ruff: ignore[hardcoded-password-string]
+ENCODED: Final[str] = "p%40ss"
 SECRET_FORMS: Final[list[str]] = [
     f"postgresql://u:{ENCODED}@h:notaport/db",
     f"postgresql://u@h:notaport/db?password={ENCODED}",

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, replace
-from re import compile as re_compile
+from re import Pattern, compile as re_compile
 from typing import TYPE_CHECKING, Final, Literal
 
 from rowx_core.backend import CheckerBackend, NullReason, ShapeIssue
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 JSON_KEYS: Final[frozenset[str]] = frozenset({"json", "jsonb"})
 USE_EXECUTE: Final[str] = "use .execute()"
 UNNAMED: Final[str] = "?column?"
-LOWERCASE_IDENTIFIER: Final = re_compile(r"[a-z_][a-z0-9_]*")
+LOWERCASE_IDENTIFIER: Final[Pattern[str]] = re_compile(r"[a-z_][a-z0-9_]*")
 type _Reason = NullReason | Literal[""]
 
 

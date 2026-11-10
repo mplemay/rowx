@@ -104,7 +104,7 @@ def test_row_construct_error_pickles_without_its_cause() -> None:
     assert clone.__cause__ is None
 
 
-MIGRATION = Migration(
+MIGRATION: Final[Migration] = Migration(
     version=3,
     description="three",
     kind="reversible",
@@ -114,7 +114,7 @@ MIGRATION = Migration(
     down_checksum=b"down",
     no_transaction=False,
 )
-FAILURE_CAUSE = DatabaseError("23505", "duplicate key", detail="d")
+FAILURE_CAUSE: Final[DatabaseError] = DatabaseError("23505", "duplicate key", detail="d")
 MIGRATION_ERRORS: Final[list[MigrateError]] = [
     MigrationSourceError("bad name", Path("x.sql"), 7),
     MigrationSourceError("no directory"),

@@ -1,7 +1,7 @@
 import ast
 from dataclasses import dataclass, field
 from io import BytesIO
-from re import compile as re_compile
+from re import Pattern, compile as re_compile
 from tokenize import detect_encoding
 from typing import TYPE_CHECKING, Final, Literal, Self, override
 
@@ -31,11 +31,20 @@ STRING_MODULE: Final[str] = "string"
 DUNDER: Final[str] = "__"
 TEMPLATELIB_ATTR: Final[str] = "templatelib"
 TEMPLATELIB_MODULE: Final[str] = f"{STRING_MODULE}.{TEMPLATELIB_ATTR}"
-IDENTITY_OPERATORS: Final = (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)
+IDENTITY_OPERATORS: Final[tuple[type[ast.Is], type[ast.IsNot], type[ast.Eq], type[ast.NotEq]]] = (
+    ast.Is,
+    ast.IsNot,
+    ast.Eq,
+    ast.NotEq,
+)
 NAME_ATTRIBUTES: Final[frozenset[str]] = frozenset({"__name__", "__qualname__", "__module__"})
 TYPE_CHECK_FUNCTIONS: Final[frozenset[str]] = frozenset({"isinstance", "issubclass"})
-TYPE_PARAMS: Final = (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
-LINE_PATTERN: Final = re_compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
+TYPE_PARAMS: Final[tuple[type[ast.TypeVar], type[ast.ParamSpec], type[ast.TypeVarTuple]]] = (
+    ast.TypeVar,
+    ast.ParamSpec,
+    ast.TypeVarTuple,
+)
+LINE_PATTERN: Final[Pattern[str]] = re_compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
 # "private" is a `string.templatelib` name other than `Template`, `Interpolation` and `convert`
 type Tag = Literal[

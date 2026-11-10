@@ -3,7 +3,7 @@ import string
 from contextlib import suppress
 from dataclasses import dataclass
 from io import StringIO
-from re import compile as re_compile
+from re import Pattern, compile as re_compile
 from tokenize import (
     OP,
     TSTRING_END,
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from rowx_core import Compiler
 
-LINE_PATTERN: Final = re_compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
+LINE_PATTERN: Final[Pattern[str]] = re_compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 SIMPLE_ESCAPES: Final[dict[str, str]] = {
     "\\": "\\",
     "'": "'",

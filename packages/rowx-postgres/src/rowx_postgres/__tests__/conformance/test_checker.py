@@ -19,7 +19,9 @@ from rowx.check.resolve import ModuleGraph, resolve_row_type
 if TYPE_CHECKING:
     from pathlib import Path
 
-PG_RULES: Final = load().checker()
+    from rowx_core.backend import CheckerBackend
+
+PG_RULES: Final[CheckerBackend] = load().checker()
 
 
 @pytest.mark.parametrize(("source", "expected", "verdict"), ROWS)

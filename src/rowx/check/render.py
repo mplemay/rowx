@@ -13,12 +13,12 @@ if TYPE_CHECKING:
 
 TAB_WIDTH: Final[int] = 4
 # kept: newline and tab, the joiners that real text needs (ZWNJ, ZWJ) and the soft hyphen
-KEPT_CHARS: Final = frozenset("\n\t\u200c\u200d\u00ad")
+KEPT_CHARS: Final[frozenset[str]] = frozenset("\n\t\u200c\u200d\u00ad")
 # C1 bytes decoded with surrogateescape, which a terminal could act on once re-encoded
-ESCAPED_C1: Final = range(0xDC80, 0xDCA0)
+ESCAPED_C1: Final[range] = range(0xDC80, 0xDCA0)
 # Cc (controls), Zl and Zp (line and paragraph separators) and Cf (format characters: bidi overrides, isolates,
 # zero-width marks, BOM); built per character, since a compiled class of all of Unicode costs over 100 ms at import
-STRIPPED_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
+STRIPPED_CATEGORIES: Final[frozenset[str]] = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 # `Diagnostic` carries what every rule has; the rest is only known to some rules

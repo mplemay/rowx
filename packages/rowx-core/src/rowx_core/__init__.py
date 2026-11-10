@@ -1,6 +1,6 @@
 from rowx_core._executor import Acquire, Connection, Executor, Pool, StreamHandle, Transaction
 from rowx_core._query import QueryResult, RowStream, query, query_unchecked
-from rowx_core._rowplan import ShapeSpec, ValueClass
+from rowx_core._rowplan import FieldPlan, ShapeSpec, ValueClass
 from rowx_core._template import Compiled, Compiler, Identifier, Parameter, TemplatePlan, capture_template, iter_parts
 from rowx_core.errors import (
     ConnectionBusyError,
@@ -35,6 +35,7 @@ __all__ = [
     "EncodeError",
     "Error",
     "Executor",
+    "FieldPlan",
     "Identifier",
     "InterfaceError",
     "IrreversibleMigrationError",

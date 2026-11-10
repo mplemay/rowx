@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from re import compile as re_compile
+from re import Pattern, compile as re_compile
 from typing import TYPE_CHECKING, Final
 
 from rowx.check.config import load_config
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from rowx.check.render import Report
 
 CASES_DIR: Final[Path] = Path(__file__).resolve().parent / "cases"
-MARKER: Final = re_compile(r"#\s*error:\s*\[([^\]]*)\]")
+MARKER: Final[Pattern[str]] = re_compile(r"#\s*error:\s*\[([^\]]*)\]")
 
 
 @dataclass(slots=True, frozen=True, order=True)

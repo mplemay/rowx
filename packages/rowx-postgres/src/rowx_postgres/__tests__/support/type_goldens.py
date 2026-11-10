@@ -6,7 +6,7 @@ from uuid import UUID
 
 from rowx_postgres import Box, Circle, Cube, Line, LineSegment, Money, Path, Point, Polygon, Range
 
-UTC: Final = dt.UTC
+UTC: Final[dt.timezone] = dt.UTC
 
 # key -> (SQL type, SQL literal, expected Python value); one entry per supported row of the type table
 DECODE_GOLDENS: Final[dict[str, tuple[str, str, Any]]] = {

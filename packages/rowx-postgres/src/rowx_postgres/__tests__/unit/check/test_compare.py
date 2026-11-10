@@ -1,6 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from rowx_postgres._backend import load
@@ -11,7 +11,10 @@ from rowx.check.model import Span
 from rowx.check.params import ParamName, ParamType
 from rowx.check.resolve import Elem, NamedField, RowType
 
-PG_RULES: Final = load().checker()
+if TYPE_CHECKING:
+    from rowx_core.backend import CheckerBackend
+
+PG_RULES: Final[CheckerBackend] = load().checker()
 
 
 def col(key: str | None, *, nullable: bool = False, name: str = "c", **extra: object) -> ColumnDesc:
@@ -280,7 +283,7 @@ def test_array_param_checks_elements() -> None:
     assert compare_param(0, "_int4", "array", ParamType("list"), "int4", backend=PG_RULES) is None
 
 
-RANGE_LEAVES = {
+RANGE_LEAVES: Final[dict[str, str]] = {
     "int4range": "rowx_postgres.Range[int]",
     "int8range": "rowx_postgres.Range[int]",
     "numrange": "rowx_postgres.Range[decimal.Decimal]",

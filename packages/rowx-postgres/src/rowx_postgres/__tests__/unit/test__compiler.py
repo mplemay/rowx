@@ -5,8 +5,8 @@ from typing import Final
 import pytest
 from rowx_postgres._compiler import MAX_PARAMETERS, Compiled, compile_parts, compile_template
 
-X = 1
-Y = 2
+X: Final[int] = 1
+Y: Final[int] = 2
 
 
 def check(c: Compiled, sql: str, params: list[str], segments: list[str]) -> None:

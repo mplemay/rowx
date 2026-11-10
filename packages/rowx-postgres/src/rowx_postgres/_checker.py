@@ -1,4 +1,4 @@
-from re import DOTALL, VERBOSE, compile as re_compile
+from re import DOTALL, VERBOSE, Pattern, compile as re_compile
 from typing import TYPE_CHECKING, Final
 
 from rowx_core.backend import OverrideIssue
@@ -15,7 +15,7 @@ SQL_ERROR_HELP: Final[dict[str, str]] = {
     "42P08": "cast the parameter: `{x}::int`",
     "42501": "grant the checker's role the privileges this query needs, or run the check as a role that has them",
 }
-SQL_TOKEN: Final = re_compile(
+SQL_TOKEN: Final[Pattern[str]] = re_compile(
     r"""
     (?P<space>\s+)
     |(?P<line_comment>--[^\n]*)

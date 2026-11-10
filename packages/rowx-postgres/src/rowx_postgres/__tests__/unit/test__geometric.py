@@ -5,8 +5,8 @@ from typing import Final
 import pytest
 from rowx_postgres import Box, Circle, Line, LineSegment, Path, Point, Polygon
 
-ORIGIN = Point(0.0, 0.0)
-UNIT = Point(1.0, 1.0)
+ORIGIN: Final[Point] = Point(0.0, 0.0)
+UNIT: Final[Point] = Point(1.0, 1.0)
 
 type Shape = Point | Line | LineSegment | Box | Path | Polygon | Circle
 

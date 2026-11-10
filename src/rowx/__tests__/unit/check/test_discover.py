@@ -1,6 +1,6 @@
 from pathlib import Path
 from textwrap import dedent
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -9,7 +9,7 @@ from rowx.check.discover import discover_file, discover_source
 if TYPE_CHECKING:
     from rowx.check.model import FileResult
 
-PATH = Path("m.py")
+PATH: Final[Path] = Path("m.py")
 
 
 def run(source: str) -> FileResult:
@@ -1185,10 +1185,10 @@ def test_templatelib_method_annotation_sees_a_shadowing_class_body() -> None:
     assert not result.templates.indirect_uses
 
 
-MIXED_TEMPLATE_IMPORT = "from string.templatelib import Template as q\n"
-MIXED_QUERY_IMPORT = "from rowx import query as q\n"
+MIXED_TEMPLATE_IMPORT: Final[str] = "from string.templatelib import Template as q\n"
+MIXED_QUERY_IMPORT: Final[str] = "from rowx import query as q\n"
 # each usage with the diagnostics main reports when `q` is bound only by `from rowx import query as q`
-MIXED_USAGES = [
+MIXED_USAGES: Final[list[tuple[str, list[str]]]] = [
     ('q[int](t"select 1")\n', []),
     ('q(t"select 1")\n', []),
     ('q.__call__(t"select 1")\n', ["indirect-query"]),

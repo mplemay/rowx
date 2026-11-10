@@ -90,7 +90,18 @@ NAME_KEYS: Final[tuple[str, ...]] = ("populate_by_name", "validate_by_name", "va
 CONFIG_KEYS: Final[tuple[str, ...]] = (*NAME_KEYS, "alias_generator")
 PYDANTIC_FORMS: Final[frozenset[str]] = frozenset({"model", "pydantic_dataclass"})
 
-SCOPE_TYPES: Final = (
+SCOPE_TYPES: Final[
+    tuple[
+        type[ast.FunctionDef],
+        type[ast.AsyncFunctionDef],
+        type[ast.Lambda],
+        type[ast.ClassDef],
+        type[ast.ListComp],
+        type[ast.SetComp],
+        type[ast.DictComp],
+        type[ast.GeneratorExp],
+    ]
+] = (
     ast.FunctionDef,
     ast.AsyncFunctionDef,
     ast.Lambda,
@@ -117,7 +128,11 @@ FORMS: Final[dict[Form, tuple[RowForm, Matching]]] = {
 DIRECT_FORMS: Final[dict[str, Form]] = {"NamedTuple": "namedtuple", "TypedDict": "typeddict", "BaseModel": "model"}
 FUNCTIONAL_ARGS: Final[int] = 2
 type ClassKey = tuple[Path, int, int]
-DEF_TYPES: Final = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+DEF_TYPES: Final[tuple[type[ast.FunctionDef], type[ast.AsyncFunctionDef], type[ast.ClassDef]]] = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+)
 MIN_ANNOTATED: Final[int] = 2
 
 
