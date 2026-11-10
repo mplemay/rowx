@@ -104,7 +104,7 @@ def _coverage(result: RunResult, root: Path) -> str:
         state = "unchecked" if site.kind == "query_unchecked" else "described" if site.described else "not described"
         lines.append(f"  {location}: {state}")
         if site.described:
-            lines.append(f"    row contract compared: {'yes' if site.row_compared else 'no'}")
+            lines.append(f"    row contract: {site.row_comparison}")
             if not site.parameters_aligned:
                 lines.append("    parameters: not aligned or inference unavailable")
             for index, param in enumerate(site.parameters, 1):

@@ -804,5 +804,42 @@ def run(items: list, unknown):
     assert "Python list; no mismatch reported" in out
     assert "SQL _int4, Python unknown; not compared" in out
     assert "SQL int4, Python unknown; not compared" in out
-    assert out.count("row contract compared: yes") == 2
-    assert out.count("row contract compared: no") == 1
+    assert out.count("row contract: compared") == 2
+    assert out.count("row contract: not compared") == 1
+
+
+def test_coverage_partial_row_comparisons(
+    schema: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write(
+        tmp_path,
+        "row_coverage.py",
+        """\
+from pydantic import AliasChoices, BaseModel, Field
+from rowx import query
+
+class Row(BaseModel):
+    id: int = Field(validation_alias=AliasChoices("a", "b"))
+    name: int
+
+def run():
+    query[int](t'SELECT 1 AS "value!"')
+    query[Missing](t'SELECT 1 AS "value!"')
+    query[tuple[int, int]](t'SELECT 1 AS "value!"')
+    query[tuple[int, str]](t'''SELECT 1 AS "value!", '<a/>'::xml AS "p!"''')
+    query[Row](t'SELECT 1 AS "a!", 2 AS "name!"')
+""",
+    )
+    code, out, _ = _run(capsys, str(path), "--database-url", schema, "--coverage")
+    assert code == 1
+    assert [line.strip() for line in out.splitlines() if "row contract:" in line] == [
+        "row contract: compared",
+        "row contract: not compared",
+        "row contract: partially compared",
+        "row contract: partially compared",
+        "row contract: partially compared",
+    ]
+    assert "error[arity-mismatch]" in out
+    assert "error[unsupported-type]" in out

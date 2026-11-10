@@ -1454,6 +1454,10 @@ known PostgreSQL type while its Python type is unknown. A lack of a mismatch dia
 when a type is unknown or unsupported, or the parameters cannot be aligned. Calls rejected before description are
 listed as not described. Indirect or ambiguous uses retain their existing diagnostics.
 
+Row contracts are reported as compared, partially compared, or not compared. Partial comparison means that some row
+checks were skipped, for example because of a structural mismatch, an unsupported column type, or unavailable field
+names. An unresolved row contract is not compared.
+
 For CI, `--require-checked` requires at least one successfully described query, and `--disallow-unchecked` rejects
 recognized `query_unchecked` sites. Both are opt-in. Unchecked-only files need no database connection.
 

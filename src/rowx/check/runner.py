@@ -4,7 +4,7 @@ from collections import Counter, deque
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from re import DOTALL, IGNORECASE, Pattern, compile as re_compile, escape as re_escape, sub
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 from rowx_core.backend import CheckerBackend, CheckerSession, ColumnInfo, Describe
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from rowx.check.params import ParamType
 
 type Outcome = Describe | DatabaseError
+type RowComparison = Literal["compared", "partially compared", "not compared"]
 
 PASSWORD_PARAM: Final[Pattern[str]] = re_compile(
     r"(?P<key>password\s*=\s*)(?P<value>'(?:[^'\\]|\\.)*'?|[^\s&]+)",
@@ -42,6 +43,15 @@ PASSWORD_PARAM_KV: Final[Pattern[str]] = re_compile(
 )
 URL_SCHEME: Final[Pattern[str]] = re_compile(r"\s*[A-Za-z][A-Za-z0-9+.-]*://")
 USERINFO: Final[Pattern[str]] = re_compile(r"(?P<key>://[^/?#\s:@]*:)(?P<value>[^/?#\s]*)@")
+ROW_INCOMPLETE_RULES: Final[frozenset[Rule]] = frozenset({
+    "unsupported-type",
+    "arity-mismatch",
+    "unexpected-column",
+    "missing-column",
+    "duplicate-column",
+    "ambiguous-column",
+    "column-name-mismatch",
+})
 
 
 class CheckError(Exception):
@@ -93,7 +103,7 @@ class SiteCoverage:
     span: Span
     kind: QueryKind
     described: bool = False
-    row_compared: bool = False
+    row_comparison: RowComparison = "not compared"
     parameters_aligned: bool = False
     parameters: tuple[ParameterCoverage, ...] = ()
 
@@ -446,18 +456,22 @@ def _row_reports(site: _Site, described: Describe, backend: CheckerBackend) -> l
     span = _row_span(site)
     notes = _alias_note(row_type)
     if row_type.kind == "none":
+        site.coverage.row_comparison = "partially compared" if visible else "compared"
         if not visible:
             return []
         message = f"the query returns {_plural(len(visible), 'column')} but the row type is `None`"
         return [_report(site, "missing-row-type", message, span, notes=notes, help="annotate the row type")]
     if not visible:
+        site.coverage.row_comparison = "partially compared"
         message = "the query returns no columns but the row type is not `None`"
         return [_report(site, "unexpected-row-type", message, span, notes=notes, help="use .execute()")]
     descs = tuple(_column_desc(column) for column in columns)
-    return [
-        _finding_report(site, finding, descs, order)
-        for order, finding in enumerate(compare(DescribeDesc(columns=descs), row_type, backend))
-    ]
+    findings = compare(DescribeDesc(columns=descs), row_type, backend)
+    incomplete = any(finding.rule in ROW_INCOMPLETE_RULES for finding in findings) or (
+        row_type.kind == "named" and any(field.names is None for field in row_type.fields)
+    )
+    site.coverage.row_comparison = "partially compared" if incomplete else "compared"
+    return [_finding_report(site, finding, descs, order) for order, finding in enumerate(findings)]
 
 
 def _finding_report(
@@ -511,7 +525,6 @@ def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Re
     if isinstance(outcome, DatabaseError):
         return [_sql_error(site, outcome, backend)]
     site.coverage.described = True
-    site.coverage.row_compared = site.row_type is not None
     return [
         *_param_reports(site, outcome, backend),
         *_row_reports(site, outcome, backend),
