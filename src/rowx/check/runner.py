@@ -11,7 +11,7 @@ from rowx_core.backend import CheckerBackend, CheckerSession, ColumnInfo, Descri
 from rowx_core.errors import ConnectionBusyError, DatabaseError, InterfaceError
 
 from rowx._backend import backend_for
-from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
+from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param_result
 from rowx.check.construction import template_reports
 from rowx.check.discover import discover_source, too_deep
 from rowx.check.model import Diagnostic, Rule, Span
@@ -26,7 +26,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from rowx.check.config import Config
-    from rowx.check.model import FileResult, QueryCall
+    from rowx.check.model import FileResult, QueryCall, QueryKind
+    from rowx.check.params import ParamType
 
 type Outcome = Describe | DatabaseError
 
@@ -75,11 +76,34 @@ class Hooks:
     scratch: Callable[[str], AbstractAsyncContextManager[ScratchBuild]] | None = None
 
 
+@dataclass(slots=True, kw_only=True, frozen=True)
+class ParameterCoverage:
+    span: Span | None
+    sql_type: str
+    sql_type_key: str | None
+    sql_element_key: str | None
+    python_type: ParamType | None
+    # None means the available evidence cannot establish a complete comparison.
+    mismatch: bool | None
+
+
+@dataclass(slots=True, kw_only=True)
+class SiteCoverage:
+    path: Path
+    span: Span
+    kind: QueryKind
+    described: bool = False
+    row_compared: bool = False
+    parameters_aligned: bool = False
+    parameters: tuple[ParameterCoverage, ...] = ()
+
+
 @dataclass(slots=True, kw_only=True)
 class RunResult:
     reports: list[Report]
     sources: dict[Path, str]
     statistics: Statistics
+    coverage: list[SiteCoverage] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -89,6 +113,7 @@ class _Site:
     sourcemap: SourceMap
     row_type: RowType | None
     inference: ParamInference | None
+    coverage: SiteCoverage
 
 
 def _unescape(raw: str) -> str:
@@ -356,21 +381,36 @@ def _param_reports(site: _Site, described: Describe, backend: CheckerBackend) ->
 
 def _param_type_reports(site: _Site, described: Describe, backend: CheckerBackend) -> list[Report]:
     holes = site.sourcemap.holes
-    # with a count mismatch the interpolations no longer line up with `$n`
-    if site.inference is None or len(described.params) != len(holes):
-        return []
+    # Count mismatches make positional pairing unreliable.
     template = site.call.template
-    if template is None:
-        return []
-    evident = site.inference.interpolations(template)
-    if len(evident) != len(holes):
-        return []
+    evident = (
+        site.inference.interpolations(template)
+        if site.inference is not None and template is not None and len(described.params) == len(holes)
+        else None
+    )
+    aligned = evident is not None and len(described.params) == len(holes) == len(evident)
+    site.coverage.parameters_aligned = aligned
     reports: list[Report] = []
-    for index, (param, found) in enumerate(zip(described.params, evident, strict=True)):
-        if (
-            finding := compare_param(index, param.type_name, param.type_key, found, param.element_key, backend)
-        ) is not None:
-            reports.append(_report(site, finding.rule, finding.message, holes[index]))
+    facts: list[ParameterCoverage] = []
+    for index, param in enumerate(described.params):
+        found = evident[index] if aligned else None
+        finding, complete = compare_param_result(
+            index, param.type_name, param.type_key, found, param.element_key, backend
+        )
+        span = holes[index] if aligned else None
+        facts.append(
+            ParameterCoverage(
+                span=span,
+                sql_type=param.type_name,
+                sql_type_key=param.type_key,
+                sql_element_key=param.element_key,
+                python_type=found,
+                mismatch=(finding is not None) if complete else None,
+            )
+        )
+        if finding is not None and span is not None:
+            reports.append(_report(site, finding.rule, finding.message, span))
+    site.coverage.parameters = tuple(facts)
     return reports
 
 
@@ -470,6 +510,8 @@ def _finding_report(
 def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Report]:
     if isinstance(outcome, DatabaseError):
         return [_sql_error(site, outcome, backend)]
+    site.coverage.described = True
+    site.coverage.row_compared = site.row_type is not None
     return [
         *_param_reports(site, outcome, backend),
         *_row_reports(site, outcome, backend),
@@ -483,7 +525,8 @@ def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-argumen
     path: Path,
     result: FileResult,
     backend: CheckerBackend | None,
-    dsn: str | None = None,
+    dsn: str | None,
+    coverage: dict[Span, SiteCoverage],
 ) -> tuple[list[Report], list[_Site]]:
     reports: list[Report] = []
     sites: list[_Site] = []
@@ -503,17 +546,19 @@ def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-argumen
                 sourcemap=mapper.build(call.template),
                 row_type=resolution.row_type,
                 inference=inference,
+                coverage=coverage[call.span],
             ),
         )
     return reports, sites
 
 
-def _collect(
+def _collect(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     config: Config,
     files: Iterable[Path],
     stats: Statistics,
     backend: CheckerBackend | None,
     dsn: str | None = None,
+    coverage: list[SiteCoverage] | None = None,
 ) -> tuple[list[_Site], list[Report], dict[Path, str], CheckerBackend | None]:
     graph = ModuleGraph()
     sites: list[_Site] = []
@@ -524,6 +569,9 @@ def _collect(
         result = discover_source(path, path.read_bytes())
         reports.extend(Report(diagnostic=diagnostic) for diagnostic in result.diagnostics)
         stats.unchecked += result.unchecked_count
+        file_coverage = {span: SiteCoverage(path=path, span=span, kind=kind) for kind, span in result.recognized}
+        if coverage is not None:
+            coverage.extend(file_coverage.values())
         roots = roots_for(config, path)
         if result.source is None:
             continue
@@ -535,7 +583,7 @@ def _collect(
             selected = backend_for(dsn).checker()
             backend = selected
         try:
-            file_reports, file_sites = _file_sites(graph, roots, path, result, selected, dsn)
+            file_reports, file_sites = _file_sites(graph, roots, path, result, selected, dsn, file_coverage)
         except RecursionError:
             # fail closed for this file only: nothing else it produced is trusted
             reports.extend(Report(diagnostic=diagnostic) for diagnostic in too_deep(path).diagnostics)
@@ -559,7 +607,8 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
     hooks = hooks or Hooks()
     stats = Statistics()
     selected = backend
-    sites, reports, sources, selected = _collect(config, files, stats, selected, dsn)
+    coverage: list[SiteCoverage] = []
+    sites, reports, sources, selected = _collect(config, files, stats, selected, dsn, coverage)
     statements = sorted({site.sourcemap.sql for site in sites})
     stats.distinct_sql = len(statements)
     if statements:
@@ -583,4 +632,4 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
                 site.inference.bind(selected)
             reports.extend(_evaluate(site, outcomes[site.sourcemap.sql], selected))
     stats.by_rule.update(report.diagnostic.rule for report in reports)
-    return RunResult(reports=reports, sources=sources, statistics=stats)
+    return RunResult(reports=reports, sources=sources, statistics=stats, coverage=coverage)

@@ -426,6 +426,27 @@ def _element_finding(
     return _param_finding(index, type_name, element_key, evident, "whose element", rules)
 
 
+def compare_param_result(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
+    index: int,
+    type_name: str,
+    type_key: str | None,
+    evident: ParamType | None,
+    element_key: str | None = None,
+    backend: CheckerBackend | None = None,
+) -> tuple[Finding | None, bool]:
+    if evident is None or type_key is None or evident.name == "None":
+        return None, False
+    rules = _rules(backend)
+    if not _accepts(rules, evident.name, type_key):
+        return _param_finding(index, type_name, type_key, evident, "which", rules), True
+    if type_key == "array":
+        leaf = _array_leaf(evident)
+        if element_key is None or leaf is None or leaf.name == "None":
+            return None, False
+        return _element_finding(index, type_name, element_key, evident, rules), True
+    return None, True
+
+
 def compare_param(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     index: int,
     type_name: str,
@@ -434,11 +455,4 @@ def compare_param(  # ruff: ignore[too-many-arguments, too-many-positional-argum
     element_key: str | None = None,
     backend: CheckerBackend | None = None,
 ) -> Finding | None:
-    if evident is None or type_key is None or evident.name == "None":
-        return None
-    rules = _rules(backend)
-    if not _accepts(rules, evident.name, type_key):
-        return _param_finding(index, type_name, type_key, evident, "which", rules)
-    if type_key == "array" and element_key is not None:
-        return _element_finding(index, type_name, element_key, evident, rules)
-    return None
+    return compare_param_result(index, type_name, type_key, evident, element_key, backend)[0]

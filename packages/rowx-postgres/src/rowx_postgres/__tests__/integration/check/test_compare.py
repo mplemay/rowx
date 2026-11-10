@@ -17,8 +17,8 @@ from rowx_postgres._backend import load
 from rowx_postgres._core import Describe, type_table
 
 from rowx import query
-from rowx.check.compare import ColumnDesc, DescribeDesc, compare, compare_param
-from rowx.check.params import ParamInference
+from rowx.check.compare import ColumnDesc, DescribeDesc, compare, compare_param, compare_param_result
+from rowx.check.params import ParamInference, ParamType
 from rowx.check.resolve import Elem, RowType
 from rowx.check.runner import describe_all
 
@@ -595,3 +595,15 @@ def test_param_matrix(schema: str) -> None:
     for source in ('bytearray(b"\\x00")', 'memoryview(b"\\x00")', "datetime.time(1, 2, 3)"):
         assert evidence[source] is not None, source
     assert not problems, "\n".join(problems)
+
+
+def test_parameter_comparison_coverage_for_array_leaves() -> None:
+    assert compare_param_result(0, "int4[]", "array", ParamType("list", ParamType("int")), "int4", PG_RULES) == (
+        None,
+        True,
+    )
+    assert compare_param_result(0, "int4[]", "array", ParamType("list"), "int4", PG_RULES) == (None, False)
+    assert compare_param_result(0, "int4[]", "array", ParamType("list", ParamType("int")), None, PG_RULES) == (
+        None,
+        False,
+    )

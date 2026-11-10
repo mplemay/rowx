@@ -714,3 +714,95 @@ def test_scratch_check_session_is_read_only(
     monkeypatch.setattr("rowx.check.runner.describe_all", describe_all)
     assert _scratch(capsys, no_leftovers)[0] == 0
     assert states == ["on"]
+
+
+def test_coverage_descriptions_and_parameter_evidence(
+    schema: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write(
+        tmp_path,
+        "coverage.py",
+        """\
+from rowx import query, query_unchecked
+
+def run(unknown, known: int):
+    query[int](t'SELECT {unknown}::int AS "value!"')
+    query[int](t'SELECT {known}::int AS "value!"')
+    query[int](t'SELECT {known}::int AS "value!"')
+    query[int](t'SELECT {known}::text AS "value!"')
+    query[int](t'SELECT nope FROM missing_table')
+    query_unchecked(t'SELECT 1')
+""",
+    )
+    code, out, err = _run(capsys, str(path), "--database-url", schema, "--coverage", "--statistics")
+    assert code == 1
+    assert not err
+    assert "recognized query sites: 6" in out
+    assert out.count(": described") == 4
+    assert "coverage.py:5:5-5:51: described" in out
+    assert "coverage.py:6:5-6:51: described" in out
+    assert ": not described" in out
+    assert ": unchecked" in out
+    assert "Python unknown; not compared" in out
+    assert "Python int; no mismatch reported" in out
+    assert "Python int; mismatch" in out
+    assert "distinct SQL strings described: 3" in out
+    assert "error[sql-error]" in out
+
+
+def test_documented_order_branches_are_both_checked(
+    schema: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write(
+        tmp_path,
+        "order.py",
+        """\
+from rowx import query
+
+def ordered(descending: bool = False):
+    if descending:
+        return query[int](t'SELECT 1 AS "value!" ORDER BY 1 DESC')
+    return query[int](t'SELECT 1 AS "value!" ORDER BY 1 ASC')
+""",
+    )
+    code, out, _ = _run(capsys, str(path), "--database-url", schema, "--require-checked", "--coverage")
+    assert code == 0
+    assert out.count(": described") == 2
+    path.write_text(path.read_text().replace("ORDER BY 1 DESC", "ORDER BY missing DESC"), encoding="utf-8")
+    code, out, _ = _run(capsys, str(path), "--database-url", schema, "--require-checked", "--coverage")
+    assert code == 1
+    assert "error[sql-error]" in out
+    assert "order.py:5:" in out
+    assert "not described" in out
+    assert "order.py:6:" in out
+    assert ": described" in out
+
+
+def test_coverage_array_evidence_and_unresolved_rows(
+    schema: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write(
+        tmp_path,
+        "array_coverage.py",
+        """\
+from rowx import query
+
+def run(items: list, unknown):
+    query[list[int]](t'SELECT {[1, 2]}::int[] AS "value!"')
+    query[list[int]](t'SELECT {items}::int[] AS "value!"')
+    query[Missing](t'SELECT {unknown}::int AS "value!"')
+""",
+    )
+    code, out, _ = _run(capsys, str(path), "--database-url", schema, "--coverage")
+    assert code == 1
+    assert "Python list; no mismatch reported" in out
+    assert "SQL _int4, Python unknown; not compared" in out
+    assert "SQL int4, Python unknown; not compared" in out
+    assert out.count("row contract compared: yes") == 2
+    assert out.count("row contract compared: no") == 1

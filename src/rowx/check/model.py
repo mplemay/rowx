@@ -27,6 +27,8 @@ type Rule = Literal[
     "nullability-mismatch",
     "invalid-override",
     "param-type-mismatch",
+    "coverage-require-checked",
+    "coverage-unchecked",
 ]
 type QueryKind = Literal["query", "query_unchecked"]
 # "value": the class used as a value; "attribute": an attribute access other than a direct call (including any dunder
@@ -135,6 +137,7 @@ class FileResult:
     calls: list[QueryCall] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     unchecked_count: int = 0
+    recognized: list[tuple[QueryKind, Span]] = field(default_factory=list)
     templates: TemplateFacts = field(default_factory=TemplateFacts)
     # None when the file could not be decoded or parsed
     tree: ast.Module | None = None

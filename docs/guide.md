@@ -1384,7 +1384,7 @@ A complete project, with migrations, an application module, drift-checked querie
 ## The checker
 
 ```text
-rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json] [--statistics] [-j N] [--scratch] [--no-drift-check]
+rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json] [--statistics] [--coverage] [--require-checked] [--disallow-unchecked] [-j N] [--scratch] [--no-drift-check]
 ```
 
 The checker never imports or executes your code. It parses your files, finds every `query[T](t"...")` call, resolves `T`
@@ -1445,6 +1445,30 @@ untracked files are not. `exclude` entries are matched relative to the project, 
 A file nested too deeply to analyse (thousands of chained operators or attributes) is reported as a `syntax-error`
 and fails the run, without hiding the other files. There are no ignore comments: the only escape is to exclude the
 path in `[tool.rowx]`, such as `exclude = ["**/raw_sql.py"]`.
+
+### Query check coverage
+
+Use `rowx check --coverage` to list recognized direct query sites and their description and comparison evidence. The
+report goes to stderr with `--output-format json`; JSON diagnostics remain on stdout. A described parameter can have a
+known PostgreSQL type while its Python type is unknown. A lack of a mismatch diagnostic does not prove compatibility
+when a type is unknown or unsupported, or the parameters cannot be aligned. Calls rejected before description are
+listed as not described. Indirect or ambiguous uses retain their existing diagnostics.
+
+For CI, `--require-checked` requires at least one successfully described query, and `--disallow-unchecked` rejects
+recognized `query_unchecked` sites. Both are opt-in. Unchecked-only files need no database connection.
+
+For a finite choice of SQL syntax, write each alternative as a separate ordinary query so both are checked, even if
+one branch is not exercised at runtime:
+
+```python
+from rowx import query
+
+
+def ordered(descending: bool = False):
+    if descending:
+        return query[int](t'SELECT 1 AS "value!" ORDER BY 1 DESC')
+    return query[int](t'SELECT 1 AS "value!" ORDER BY 1 ASC')
+```
 
 ### Safety
 
