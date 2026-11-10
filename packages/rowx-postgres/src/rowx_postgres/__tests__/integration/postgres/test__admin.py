@@ -8,7 +8,7 @@ import pytest
 from psycopg.conninfo import make_conninfo
 from rowx_core.errors import DatabaseError, InterfaceError
 from rowx_postgres import ConnectOptions, connect
-from rowx_postgres._admin import create_database, database_exists, drop_database, list_databases
+from rowx_postgres._core import create_database, database_exists, drop_database, list_databases
 
 
 @pytest.fixture
