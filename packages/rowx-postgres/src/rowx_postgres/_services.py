@@ -5,16 +5,18 @@ from typing import TYPE_CHECKING, Final, Self, override
 from rowx_core.backend import CheckerSession, Provisioner
 from rowx_core.errors import DatabaseError, InterfaceError, MigrateError
 
-from rowx_postgres._admin import (
+from rowx_postgres._admin import with_database
+from rowx_postgres._connection import Connection, connect
+from rowx_postgres._core import (
+    Connection as ConnectionImpl,
     DatabaseInfo,
+    connect_checker,
     create_database,
     database_exists,
+    describe,
     drop_database,
     list_databases,
-    with_database,
 )
-from rowx_postgres._connection import Connection, connect
-from rowx_postgres._core import Connection as ConnectionImpl, connect_checker, describe
 from rowx_postgres._migrate import Migrator
 from rowx_postgres._options import ConnectOptions
 from rowx_postgres._pool import Pool

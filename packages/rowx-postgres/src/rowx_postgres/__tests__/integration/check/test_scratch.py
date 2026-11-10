@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
 from rowx_core.lifecycle import ORPHAN_AGE_SECONDS, make_tag
-from rowx_postgres._admin import create_database, drop_database, list_databases
+from rowx_postgres._core import create_database, drop_database, list_databases
 from rowx_postgres._services import PostgresAdmin, PostgresMigrations
 
 from rowx.check.scratch import PREFIX, Scratch
@@ -47,6 +47,14 @@ def planted_name() -> str:
     return f"{PREFIX}{secrets.token_hex(8)}"
 
 
+# the native future binds the running loop when it is created, so the call has to happen inside one
+def drop_now(server_dsn: str, name: str) -> None:
+    async def run() -> None:
+        await drop_database(server_dsn, name, force=True)
+
+    asyncio.run(run())
+
+
 @pytest.fixture
 def planted(server_dsn: str) -> Iterator[list[str]]:
     names: list[str] = []
@@ -54,7 +62,7 @@ def planted(server_dsn: str) -> Iterator[list[str]]:
         yield names
     finally:
         for name in names:
-            asyncio.run(drop_database(server_dsn, name, force=True))
+            drop_now(server_dsn, name)
 
 
 def test_the_scratch_tag_names_the_process_and_the_time() -> None:
@@ -142,7 +150,7 @@ def test_sigint_drops_the_scratch_database_and_exits_two(server_dsn: str, tmp_pa
             proc.kill()
             proc.communicate()
         for leaked in scratch_names(server_dsn) - before:
-            asyncio.run(drop_database(server_dsn, leaked, force=True))
+            drop_now(server_dsn, leaked)
     assert proc.returncode == 2
     assert not out
     assert "interrupted" in err

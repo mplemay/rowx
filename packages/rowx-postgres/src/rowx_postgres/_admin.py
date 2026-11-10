@@ -1,13 +1,6 @@
-from dataclasses import dataclass
 from typing import Final
 from urllib.parse import quote, unquote, urlencode, urlparse, urlunparse
 
-from rowx_postgres._core import (
-    create_database as create_database_impl,
-    database_exists as database_exists_impl,
-    drop_database as drop_database_impl,
-    list_databases as list_databases_impl,
-)
 from rowx_postgres._options import ConnectOptions
 
 URL_SCHEMES: Final[tuple[str, ...]] = ("postgres://", "postgresql://")
@@ -32,41 +25,3 @@ def with_database(dsn: str, name: str) -> str:
         msg = "the database URL could not be pointed at another database"
         raise ValueError(msg)
     return url
-
-
-# each connects to the maintenance database; `name` defaults to the database in `target`
-async def database_exists(target: str | ConnectOptions, name: str | None = None) -> bool:
-    return await database_exists_impl(target, name)
-
-
-async def create_database(
-    target: str | ConnectOptions,
-    name: str | None = None,
-    *,
-    template: str | None = None,
-    comment: str | None = None,
-) -> None:
-    await create_database_impl(target, name, template, comment)
-
-
-# a missing database is not an error
-async def drop_database(
-    target: str | ConnectOptions,
-    name: str | None = None,
-    *,
-    force: bool = False,
-) -> None:
-    await drop_database_impl(target, name, force)
-
-
-@dataclass(slots=True, kw_only=True, frozen=True)
-class DatabaseInfo:
-    name: str
-    comment: str | None
-    sessions: int
-
-
-# the databases whose name starts with `prefix`, by name; `sessions` counts the connections open right now
-async def list_databases(target: str | ConnectOptions, prefix: str) -> list[DatabaseInfo]:
-    rows = await list_databases_impl(target, prefix)
-    return [DatabaseInfo(name=name, comment=comment, sessions=sessions) for name, comment, sessions in rows]
