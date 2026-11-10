@@ -149,8 +149,8 @@ async fn cancel_stress_300() -> TestResult {
             .claim_settled_leased(pooled.lease())
             .await?;
         let inner = Arc::clone(&conn.cancel.backend.conn);
-        let hook = Hook::default();
-        let pending = spawn(&conn.cancel, claim, &hook, async move {
+        let hook = Hook::new(Some(claim));
+        let pending = spawn(&conn.cancel, &hook, async move {
             let guard = inner.lock().await;
             guard
                 .client()?
@@ -158,7 +158,7 @@ async fn cancel_stress_300() -> TestResult {
                 .await
                 .map(|_| ())
                 .map_err(Error::from)
-        });
+        })?;
         // cancelled at a random point: before the statement starts, mid-sleep, or after it finished
         let delay = Duration::from_micros(random_below(80_000));
         let _ = tokio::time::timeout(delay, pending.wait()).await;

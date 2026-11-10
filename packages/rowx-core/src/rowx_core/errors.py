@@ -126,7 +126,7 @@ class IrreversibleMigrationError(MigrationSourceError):
         super().__init__(message, None, version)
 
     @override
-    def __reduce__(self) -> tuple[type[Self], tuple[str, int | None]]:  # ty: ignore[invalid-method-override]
+    def __reduce__(self) -> tuple[type[Self], tuple[str, int | None]]:  # ty: ignore[incompatible-method-override]
         return type(self), (str(self), self.version)
 
 

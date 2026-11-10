@@ -111,6 +111,17 @@ impl Access {
         }
     }
 
+    /// Registers a deferred claim without leaving a window for cancellation to miss it.
+    ///
+    /// # Errors
+    /// The connection could not be claimed, or this operation was cancelled.
+    pub async fn reserve(&self, state: &Arc<State>, hook: &Hook) -> Result<(), PgError> {
+        while !hook.reserve(|| self.claim(state))? {
+            state.wait_settled().await?;
+        }
+        Ok(())
+    }
+
     /// `fail`, and a stale cached plan also bumps the pool's schema epoch.
     pub fn fail(&self, state: &State, err: Error) -> PgError {
         if is_stale_plan(&err)
@@ -138,30 +149,27 @@ pub fn fetch<'py>(
         .map_err(|e| to_py_err(py, &e.into()))?;
     let cancel = cancel.clone();
     let access = access.clone();
-    let hook = Hook::default();
+    let hook = Hook::new(claim);
     let watched = hook.clone();
     let future = future_into_py(py, async move {
-        run_fetch(cancel, claim, access, hook, params, args).await
+        run_fetch(cancel, access, hook, params, args).await
     })?;
     watch(&future, watched)?;
     Ok(future)
 }
 
-/// The asynchronous half of `fetch`; a pool calls it with `claim: None` once it holds a connection.
+/// The asynchronous half of `fetch`, also used by a pool after acquiring a connection.
 ///
 /// # Errors
 /// Any error the query raises, mapped to its Python exception.
 pub async fn run_fetch(
     cancel: Cancel,
-    claim: Option<Claim>,
     access: Access,
     hook: Hook,
     params: Vec<PyParam>,
     args: FetchArgs,
 ) -> PyResult<Py<PyAny>> {
-    let claim = access.settle_claim(&cancel.state, claim).await?;
-    // here and not in the callers, so a pool's fast path records a hand-written BEGIN as well
-    note_sql(&cancel.state, &args.sql);
+    access.reserve(&cancel.state, &hook).await?;
     let inner = Arc::clone(&cancel.backend.conn);
     let layout = Layout::new(args.scalar, args.mask.as_deref());
     let nullable = args.mask.as_deref().map(nullable_mask);
@@ -173,7 +181,9 @@ pub async fn run_fetch(
         .as_ref()
         .map(|shape| Python::attach(|py| shape.clone_ref(py)));
     // the operation owns the request; dropping this future while it runs cancels it
-    let pending = cancel::spawn(&cancel, claim, &hook, async move {
+    let state = Arc::clone(&cancel.state);
+    let pending = cancel::spawn(&cancel, &hook, async move {
+        note_sql(&state, &args.sql);
         let mut conn = inner.lock().await;
         let shape = driver_shape(
             io_shape.as_ref().map(Py::get),
@@ -193,7 +203,8 @@ pub async fn run_fetch(
         };
         // the response is consumed, so a drift it caused is seen; its rows may be mis-decoded
         conn.settled(result)
-    });
+    })
+    .map_err(|e| PgError(e.into()))?;
     let (rows, mapping) = pending
         .wait()
         .await
@@ -275,10 +286,10 @@ pub fn execute<'py>(
         .map_err(|e| to_py_err(py, &e.into()))?;
     let cancel = cancel.clone();
     let access = access.clone();
-    let hook = Hook::default();
+    let hook = Hook::new(claim);
     let watched = hook.clone();
     let future = future_into_py(py, async move {
-        run_execute(cancel, claim, access, hook, params, sql).await
+        run_execute(cancel, access, hook, params, sql).await
     })?;
     watch(&future, watched)?;
     Ok(future)
@@ -290,16 +301,16 @@ pub fn execute<'py>(
 /// Any error the statement raises, mapped to its Python exception.
 pub async fn run_execute(
     cancel: Cancel,
-    claim: Option<Claim>,
     access: Access,
     hook: Hook,
     params: Vec<PyParam>,
     sql: String,
 ) -> PyResult<u64> {
-    let claim = access.settle_claim(&cancel.state, claim).await?;
-    note_sql(&cancel.state, &sql);
+    access.reserve(&cancel.state, &hook).await?;
     let inner = Arc::clone(&cancel.backend.conn);
-    let pending = cancel::spawn(&cancel, claim, &hook, async move {
+    let state = Arc::clone(&cancel.state);
+    let pending = cancel::spawn(&cancel, &hook, async move {
+        note_sql(&state, &sql);
         let mut conn = inner.lock().await;
         let result = match conn.parts() {
             Ok((client, cache)) => {
@@ -311,7 +322,8 @@ pub async fn run_execute(
             Err(e) => Err(e),
         };
         conn.settled(result)
-    });
+    })
+    .map_err(|e| PgError(e.into()))?;
     let count = pending
         .wait()
         .await
@@ -337,13 +349,13 @@ pub fn simple<'py>(
         .map_err(|e| to_py_err(py, &e.into()))?;
     let cancel = cancel.clone();
     let access = access.clone();
-    let hook = Hook::default();
+    let hook = Hook::new(claim);
     let watched = hook.clone();
     let future = future_into_py(py, async move {
-        let claim = access.settle_claim(&cancel.state, claim).await?;
+        access.reserve(&cancel.state, &hook).await?;
         let inner = Arc::clone(&cancel.backend.conn);
         let state = Arc::clone(&cancel.state);
-        let pending = cancel::spawn(&cancel, claim, &hook, async move {
+        let pending = cancel::spawn(&cancel, &hook, async move {
             let conn = inner.lock().await;
             // an unconditional ROLLBACK would log a server WARNING on every idle reset
             let batches = if reset {
@@ -364,7 +376,8 @@ pub fn simple<'py>(
                 state.clear_maybe_in_txn();
             }
             Ok::<(), Error>(())
-        });
+        })
+        .map_err(|e| PgError(e.into()))?;
         pending
             .wait()
             .await
@@ -401,14 +414,15 @@ pub fn txn_step<'py>(
         .map_err(|e| to_py_err(py, &e.into()))?;
     let cancel = cancel.clone();
     let access = access.clone();
-    let hook = Hook::default();
+    let hook = Hook::new(claim);
     let watched = hook.clone();
     let future = future_into_py(py, async move {
-        let claim = access.settle_claim(&cancel.state, claim).await?;
+        access.reserve(&cancel.state, &hook).await?;
         let inner = Arc::clone(&cancel.backend.conn);
-        let pending = cancel::spawn(&cancel, claim, &hook, async move {
+        let pending = cancel::spawn(&cancel, &hook, async move {
             inner.lock().await.simple(&sql).await
-        });
+        })
+        .map_err(|e| PgError(e.into()))?;
         pending
             .wait()
             .await
@@ -527,14 +541,6 @@ pub fn watch_flag(future: &Bound<'_, PyAny>, flag: Arc<AtomicBool>) -> PyResult<
     })?;
     future.call_method1("add_done_callback", (callback,))?;
     Ok(())
-}
-
-/// A call that arrived while a cancelled operation was settling waits here, outside the GIL.
-///
-/// # Errors
-/// `InterfaceError` when the connection closed or broke while waiting.
-pub async fn settle_claim(state: &Arc<State>, claim: Option<Claim>) -> Result<Claim, PgError> {
-    Access::default().settle_claim(state, claim).await
 }
 
 // a dead connection stays dead; every other error leaves the state to the claim's drop (Idle)

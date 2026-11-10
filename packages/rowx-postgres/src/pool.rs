@@ -264,7 +264,7 @@ impl Pool {
                 lease: Some(pooled.lease()),
                 pool: Some(pool),
             };
-            let result = exec::run_fetch(cancel, None, access, hook, params, args).await;
+            let result = exec::run_fetch(cancel, access, hook, params, args).await;
             // released in the background, after the rows are on their way to the caller
             drop(pooled);
             result
@@ -298,7 +298,7 @@ impl Pool {
                 lease: Some(pooled.lease()),
                 pool: Some(pool),
             };
-            let result = exec::run_execute(cancel, None, access, hook, params, sql).await;
+            let result = exec::run_execute(cancel, access, hook, params, sql).await;
             drop(pooled);
             result
         })?;
