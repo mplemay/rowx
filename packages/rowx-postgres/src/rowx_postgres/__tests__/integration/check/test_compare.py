@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from rowx_core.errors import EncodeError, Error, RowShapeError
 from rowx_postgres import Box, Circle, Cube, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range, connect
-from rowx_postgres.__tests__.integration.codec.test_table_coverage import DECODE_GOLDENS
+from rowx_postgres.__tests__.support.type_goldens import DECODE_GOLDENS
 from rowx_postgres._backend import load
 from rowx_postgres._core import Describe, type_table
 
