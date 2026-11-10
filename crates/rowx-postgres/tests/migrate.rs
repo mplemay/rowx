@@ -1335,13 +1335,13 @@ async fn cancelled_run(db: &TestDb, file: &str) -> TestResult<(Vec<(i64, bool)>,
         .await?;
     let inner = Arc::clone(&conn.cancel.backend.conn);
     let local = vec![simple(1, file)];
-    let hook = Hook::default();
-    let pending = spawn(&conn.cancel, claim, &hook, async move {
+    let hook = Hook::new(Some(claim));
+    let pending = spawn(&conn.cancel, &hook, async move {
         let guard = inner.lock().await;
         run(&guard, &config(), &local, PlanOptions::default(), &LIVE)
             .await
             .map(|_| ())
-    });
+    })?;
 
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {

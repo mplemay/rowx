@@ -239,8 +239,9 @@ def test_named_plan_carries_the_form_the_type_name_and_a_shape(evaluate: Evaluat
     assert (plan.kind, plan.form, plan.matching, plan.type_name, plan.arity) == ("named", "keyword", "by_name", "T", 2)
     assert plan.nullable_mask == (False, True)
     assert plan.flags == [0, 1]
-    assert (plan.shape.form, plan.shape.matching, plan.shape.type_name) == ("keyword", "by_name", "T")  # ty: ignore[unresolved-attribute]
-    assert plan.shape.ctor is t  # ty: ignore[unresolved-attribute]
+    assert plan.shape is not None
+    assert (plan.shape.form, plan.shape.matching, plan.shape.type_name) == ("keyword", "by_name", "T")
+    assert plan.shape.ctor is t
 
 
 def test_named_plan_and_its_shape_are_cached_per_type(evaluate: Evaluate) -> None:
@@ -263,7 +264,8 @@ def test_named_plan_and_its_shape_are_cached_per_type(evaluate: Evaluate) -> Non
 def test_each_form_has_its_form_and_matching(source: str, form: str, matching: str, evaluate: Evaluate) -> None:
     plan = row_plan(evaluate(source))
     assert (plan.form, plan.matching) == (form, matching)
-    assert plan.shape.form == form  # ty: ignore[unresolved-attribute]
+    assert plan.shape is not None
+    assert plan.shape.form == form
 
 
 @pytest.mark.parametrize(
@@ -472,7 +474,8 @@ def test_a_pydantic_model_is_a_validator_plan_over_its_validator(evaluate: Evalu
     t = evaluate("class T(BaseModel):\n    id: int\n    name: str | None")
     plan = row_plan(t)
     assert (plan.kind, plan.form, plan.matching, plan.type_name) == ("named", "validator", "by_name", "T")
-    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[unresolved-attribute]
+    assert plan.shape is not None
+    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[missing-attribute]
     assert plan.nullable_mask == (False, True)
 
 
@@ -480,7 +483,8 @@ def test_a_pydantic_dataclass_is_called_with_keywords(evaluate: Evaluate) -> Non
     t = evaluate("@pydantic.dataclasses.dataclass\nclass T:\n    id: int\n    name: str = 'a'")
     plan = row_plan(t)
     assert (plan.form, plan.matching) == ("validator", "by_name")
-    assert plan.shape.ctor is t  # ty: ignore[unresolved-attribute]
+    assert plan.shape is not None
+    assert plan.shape.ctor is t
     assert [(f.key, f.required) for f in plan.fields] == [("id", True), ("name", False)]
 
 
@@ -625,7 +629,7 @@ def test_a_forward_reference_is_not_resolved_against_the_planners_locals(evaluat
     t = evaluate("class T(BaseModel):\n    id: 't'\nt = int")
     plan = row_plan(t)
     assert plan.kind == "named"
-    assert t.model_fields["id"].annotation is int  # ty: ignore[unresolved-attribute]
+    assert t.model_fields["id"].annotation is int  # ty: ignore[missing-attribute]
 
 
 def test_a_model_incomplete_for_a_reason_other_than_a_name_is_an_interface_error_with_its_cause(
@@ -715,17 +719,18 @@ def test_pydantic_defaults_are_not_required(evaluate: Evaluate) -> None:
 
 def test_a_model_with_a_forward_reference_resolved_later_is_rebuilt(evaluate: Evaluate) -> None:
     t = evaluate("class T(BaseModel):\n    id: 'Later'\nLater = int")
-    assert not t.__pydantic_complete__  # ty: ignore[unresolved-attribute]
+    assert not t.__pydantic_complete__  # ty: ignore[missing-attribute]
     plan = row_plan(t)
-    assert t.__pydantic_complete__  # ty: ignore[unresolved-attribute]
-    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[unresolved-attribute]
+    assert t.__pydantic_complete__  # ty: ignore[missing-attribute]
+    assert plan.shape is not None
+    assert plan.shape.ctor is t.__pydantic_validator__  # ty: ignore[missing-attribute]
     assert plan.kind == "named"
 
 
 def test_a_pydantic_dataclass_with_a_forward_reference_resolved_later_is_rebuilt(evaluate: Evaluate) -> None:
     t = evaluate("@pydantic.dataclasses.dataclass\nclass T:\n    id: 'Later'\nLater = int")
     assert row_plan(t).kind == "named"
-    assert t.__pydantic_complete__  # ty: ignore[unresolved-attribute]
+    assert t.__pydantic_complete__  # ty: ignore[missing-attribute]
 
 
 @pytest.mark.parametrize(

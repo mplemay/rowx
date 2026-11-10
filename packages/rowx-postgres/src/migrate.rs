@@ -13,7 +13,6 @@ use rowx_core::error::CoreError;
 use rowx_core::migrate::{
     Migration, MigrationStatus, PlanOptions, RevertTarget, SchemaName, TableName, resolve,
 };
-use rowx_core::state::Claim;
 use rowx_postgres::cancel::{self, Cancel, Hook};
 use rowx_postgres::conn::Connection as PgConnection;
 use rowx_postgres::error::Error;
@@ -149,14 +148,8 @@ impl<F> Drop for StopFirst<F> {
     }
 }
 
-async fn run_job(
-    cancel: Cancel,
-    claim: Option<Claim>,
-    access: Access,
-    hook: Hook,
-    job: Job,
-) -> PyResult<Py<PyAny>> {
-    let claim = access.settle_claim(&cancel.state, claim).await?;
+async fn run_job(cancel: Cancel, access: Access, hook: Hook, job: Job) -> PyResult<Py<PyAny>> {
+    access.reserve(&cancel.state, &hook).await?;
     let inner = Arc::clone(&cancel.backend.conn);
     let pool = access.pool.clone();
     let state = Arc::clone(&cancel.state);
@@ -164,7 +157,7 @@ async fn run_job(
     let migrations = Arc::clone(&job.migrations);
     let op = job.op;
     // the invalidation runs in the task, so it also happens when the caller is cancelled
-    let pending = cancel::spawn(&cancel, claim, &hook, async move {
+    let pending = cancel::spawn(&cancel, &hook, async move {
         let mut conn = inner.lock().await;
         let result = work(&conn, &job).await;
         // a rollback or unlock that failed may leave the lock or a transaction on the session; this
@@ -183,7 +176,8 @@ async fn run_job(
         }
         drop(conn);
         result
-    });
+    })
+    .map_err(|e| PgError(e.into()))?;
     let result = StopFirst {
         flag,
         finished: false,
@@ -259,11 +253,9 @@ fn on_connection<'py>(py: Python<'py>, conn: &Connection, job: Job) -> PyResult<
         .map_err(|e| to_py_err(py, &e.into()))?;
     let cancel = conn.cancel.clone();
     let access = conn.access.clone();
-    let hook = Hook::default();
+    let hook = Hook::new(claim);
     let watched = hook.clone();
-    let future = future_into_py(py, async move {
-        run_job(cancel, claim, access, hook, job).await
-    })?;
+    let future = future_into_py(py, async move { run_job(cancel, access, hook, job).await })?;
     // the flag first: done callbacks run in order, so it is set before the hook sends the cancel
     watch_flag(&future, flag)?;
     watch(&future, watched)?;
@@ -288,7 +280,7 @@ fn on_pool<'py>(py: Python<'py>, pool: &PgPool, job: Job) -> PyResult<Bound<'py,
             lease: Some(pooled.lease()),
             pool: Some(pool),
         };
-        let result = run_job(cancel, None, access, hook, job).await;
+        let result = run_job(cancel, access, hook, job).await;
         drop(pooled);
         result
     })?;
