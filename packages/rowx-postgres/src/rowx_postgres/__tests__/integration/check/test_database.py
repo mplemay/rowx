@@ -10,7 +10,7 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
-from rowx_postgres._admin import database_exists
+from rowx_postgres._core import database_exists
 
 from rowx.check.cli import main
 

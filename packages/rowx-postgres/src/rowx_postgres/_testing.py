@@ -10,8 +10,9 @@ from rowx_core.backend import MigrationService
 from rowx_core.errors import DatabaseError, Error
 from rowx_core.lifecycle import ORPHAN_AGE_SECONDS, make_tag, tag_age
 
-from rowx_postgres._admin import create_database, drop_database, list_databases, with_database
+from rowx_postgres._admin import with_database
 from rowx_postgres._connection import Connection, connect
+from rowx_postgres._core import create_database, drop_database, list_databases
 
 type Materialize = Callable[[str, Connection, MigrationService | None, str], Awaitable[None]]
 type Build = Callable[[str, Connection, MigrationService | None, str, Materialize], Awaitable[None]]

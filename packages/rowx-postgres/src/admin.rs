@@ -7,6 +7,46 @@ use rowx_py_core::runtime;
 use crate::conn::options_from_py;
 use crate::errors::{PgError, interface_error, to_py_err};
 
+#[pyclass(
+    frozen,
+    eq,
+    hash,
+    get_all,
+    skip_from_py_object,
+    module = "rowx_postgres._core",
+    name = "DatabaseInfo"
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DatabaseInfo {
+    name: String,
+    comment: Option<String>,
+    // sessions connected right now (`pg_stat_database.numbackends`, an int8)
+    sessions: i64,
+}
+
+impl From<pg::DatabaseInfo> for DatabaseInfo {
+    fn from(info: pg::DatabaseInfo) -> Self {
+        Self {
+            name: info.name,
+            comment: info.comment,
+            sessions: info.sessions,
+        }
+    }
+}
+
+#[pymethods]
+impl DatabaseInfo {
+    #[new]
+    #[pyo3(signature = (*, name, comment, sessions))]
+    const fn new(name: String, comment: Option<String>, sessions: i64) -> Self {
+        Self {
+            name,
+            comment,
+            sessions,
+        }
+    }
+}
+
 // accepts a DSN or a `rowx_postgres.ConnectOptions`; the name defaults to the options' own database
 fn resolve(
     py: Python<'_>,
@@ -29,13 +69,13 @@ fn resolve(
 /// # Errors
 /// `InterfaceError` for bad options or name; connection and server failures surface when awaited.
 #[pyfunction]
-#[pyo3(signature = (options, name=None))]
+#[pyo3(signature = (target, name=None))]
 pub fn database_exists<'py>(
     py: Python<'py>,
-    options: &Bound<'py, PyAny>,
+    target: &Bound<'py, PyAny>,
     name: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (options, name) = resolve(py, options, name)?;
+    let (options, name) = resolve(py, target, name)?;
     let handle = runtime::handle()?;
     future_into_py(py, async move {
         Ok(pg::database_exists(&options, &name, &handle)
@@ -47,15 +87,15 @@ pub fn database_exists<'py>(
 /// # Errors
 /// As `database_exists`; `DatabaseError` when the database exists already.
 #[pyfunction]
-#[pyo3(signature = (options, name=None, template=None, comment=None))]
+#[pyo3(signature = (target, name=None, *, template=None, comment=None))]
 pub fn create_database<'py>(
     py: Python<'py>,
-    options: &Bound<'py, PyAny>,
+    target: &Bound<'py, PyAny>,
     name: Option<String>,
     template: Option<String>,
     comment: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (options, name) = resolve(py, options, name)?;
+    let (options, name) = resolve(py, target, name)?;
     let handle = runtime::handle()?;
     future_into_py(py, async move {
         pg::create_database(
@@ -74,14 +114,14 @@ pub fn create_database<'py>(
 /// # Errors
 /// As `database_exists`; a missing database is not an error.
 #[pyfunction]
-#[pyo3(signature = (options, name=None, force=false))]
+#[pyo3(signature = (target, name=None, *, force=false))]
 pub fn drop_database<'py>(
     py: Python<'py>,
-    options: &Bound<'py, PyAny>,
+    target: &Bound<'py, PyAny>,
     name: Option<String>,
     force: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (options, name) = resolve(py, options, name)?;
+    let (options, name) = resolve(py, target, name)?;
     let handle = runtime::handle()?;
     future_into_py(py, async move {
         pg::drop_database(&options, &name, force, &handle)
@@ -92,15 +132,15 @@ pub fn drop_database<'py>(
 }
 
 /// # Errors
-/// As `database_exists`. Each row is `(name, comment, sessions)`.
+/// As `database_exists`. Each item is a `DatabaseInfo`.
 #[pyfunction]
-#[pyo3(signature = (options, prefix))]
+#[pyo3(signature = (target, prefix))]
 pub fn list_databases<'py>(
     py: Python<'py>,
-    options: &Bound<'py, PyAny>,
+    target: &Bound<'py, PyAny>,
     prefix: String,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (options, _) = resolve(py, options, Some(String::new()))?;
+    let (options, _) = resolve(py, target, Some(String::new()))?;
     let handle = runtime::handle()?;
     future_into_py(py, async move {
         let found = pg::list_databases(&options, &prefix, &handle)
@@ -108,7 +148,7 @@ pub fn list_databases<'py>(
             .map_err(PgError)?;
         Ok(found
             .into_iter()
-            .map(|d| (d.name, d.comment, d.sessions))
-            .collect::<Vec<_>>())
+            .map(DatabaseInfo::from)
+            .collect::<Vec<DatabaseInfo>>())
     })
 }

@@ -97,6 +97,7 @@ fn _decode<'py>(
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<admin::DatabaseInfo>()?;
     module.add_function(wrap_pyfunction!(admin::database_exists, module)?)?;
     module.add_function(wrap_pyfunction!(admin::create_database, module)?)?;
     module.add_function(wrap_pyfunction!(admin::drop_database, module)?)?;
