@@ -40,6 +40,7 @@ class Report:
 type _TemplateReason = Literal[
     "NotNullColumn",
     "NullableColumn",
+    "ScanFilterNotNull",
     "NotValidatedConstraint",
     "ForeignOrView",
     "ViewColumn",
@@ -59,6 +60,7 @@ type _TemplateReason = Literal[
 NULL_NOTES: Final[dict[_TemplateReason, str]] = {
     "NullableColumn": "nullable because {d} has no NOT NULL constraint",
     "NotNullColumn": "NOT NULL because {d} is declared NOT NULL",
+    "ScanFilterNotNull": "NOT NULL because a scan filter rejects NULL for {d}",
     "NotValidatedConstraint": "{d} has a NOT NULL constraint that is not validated, so it may still hold NULL",
     "ForeignOrView": "comes from a foreign table or view, which may hold NULL",
     "ViewColumn": "NOT NULL because the definition of the view proves {d} is never NULL",
@@ -87,6 +89,7 @@ def null_reason_note(reason: _TemplateReason, detail: str | None = None, *, colu
         case (
             "NullableColumn"
             | "NotNullColumn"
+            | "ScanFilterNotNull"
             | "NotValidatedConstraint"
             | "ForeignOrView"
             | "ViewColumn"

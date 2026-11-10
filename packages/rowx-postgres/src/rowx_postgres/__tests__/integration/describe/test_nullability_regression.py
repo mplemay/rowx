@@ -1,8 +1,9 @@
 import asyncio
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, LiteralString
 
 import psycopg
 import pytest
+from psycopg import sql as pg_sql
 from rowx_core.errors import DatabaseError
 from rowx_postgres import connect
 from rowx_postgres.__tests__.integration.describe.sqlx_cases import SQLX_CASES
@@ -405,3 +406,80 @@ def test_a_volatile_domain_check_has_no_side_effect_during_describe(schema: str,
         called = conn.execute("SELECT is_called FROM domain_effects_seq").fetchone()
     assert rows == (0,)
     assert called == (False,)
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected", "has_null"),
+    [
+        ("SELECT email FROM users WHERE email IS NOT NULL", (False, "ScanFilterNotNull"), False),
+        ("SELECT u.email FROM users u WHERE u.email IS NOT NULL", (False, "ScanFilterNotNull"), False),
+        ("SELECT email FROM users", (True, "NullableColumn"), True),
+        ("SELECT email FROM users WHERE email IS NOT NULL OR name = 'bob'", (True, "NullableColumn"), True),
+        ("SELECT email FROM scan_contacts WHERE backup IS NOT NULL", (True, "NullableColumn"), True),
+        (
+            "SELECT b.email FROM users a LEFT JOIN (SELECT * FROM users WHERE email IS NOT NULL) b ON a.id = b.id",
+            (True, "OuterJoin"),
+            True,
+        ),
+        (
+            "SELECT u.email FROM users u CROSS JOIN scan_contacts c WHERE c.email IS NOT NULL",
+            (True, "NullableColumn"),
+            True,
+        ),
+    ],
+    ids=["direct", "alias", "unfiltered", "or", "different-column", "outer-join", "same-name-relations"],
+)
+def test_scan_filter_witnesses(schema: str, sql: LiteralString, expected: tuple[bool, str], *, has_null: bool) -> None:
+    execute(
+        schema,
+        "CREATE TABLE scan_contacts (email text, backup text)",
+        "INSERT INTO scan_contacts VALUES (NULL, 'x'), ('a', NULL)",
+    )
+    assert verdicts(schema, sql) == [expected]
+    with psycopg.connect(schema) as conn:
+        rows = conn.execute(pg_sql.SQL(sql)).fetchall()
+    assert rows
+    assert any(row[0] is None for row in rows) is has_null
+
+
+def test_scan_filter_quoted_identifier_falls_back(schema: str) -> None:
+    execute(schema, 'CREATE TABLE quoted_scan ("Email" text)', "INSERT INTO quoted_scan VALUES (NULL), ('a')")
+    sql = 'SELECT "Email" FROM quoted_scan WHERE "Email" IS NOT NULL'
+    assert verdicts(schema, sql) == [(True, "NullableColumn")]
+    with psycopg.connect(schema) as conn:
+        assert conn.execute(pg_sql.SQL(sql)).fetchall() == [("a",)]
+
+
+def test_scan_filter_ignores_domain_surrogate_plan(schema: str) -> None:
+    execute(
+        schema,
+        "CREATE DOMAIN email_param AS text",
+        "CREATE FUNCTION as_text(email_param) RETURNS text LANGUAGE SQL IMMUTABLE AS 'SELECT $1::text'",
+        "CREATE FUNCTION accepts(text, email_param) RETURNS boolean LANGUAGE SQL IMMUTABLE AS 'SELECT true'",
+        "CREATE FUNCTION accepts(text, text) RETURNS boolean LANGUAGE SQL IMMUTABLE AS 'SELECT $1 IS NOT NULL'",
+    )
+    sql = "SELECT email, as_text($1) FROM users WHERE accepts(email, $1)"
+    assert verdicts(schema, sql)[0] == (True, "NullableColumn")
+    with psycopg.connect(schema) as conn:
+        conn.execute("PREPARE domain_witness AS " + sql)
+        rows = conn.execute("EXECUTE domain_witness(NULL)").fetchall()
+    assert rows
+    assert any(row[0] is None for row in rows)
+
+
+def test_scan_filter_keeps_overrides_and_composite_fallback(schema: str) -> None:
+    assert verdicts(schema, 'SELECT email AS "email?" FROM users WHERE email IS NOT NULL') == [
+        (True, "OverrideQuestion")
+    ]
+    execute(
+        schema,
+        "CREATE TYPE pair AS (a int, b int)",
+        "CREATE DOMAIN pair_domain AS pair",
+        "CREATE TABLE scan_shapes (p pair, d pair_domain, a int[])",
+        "INSERT INTO scan_shapes VALUES (ROW(1, 2), ROW(1, 2), ARRAY[1])",
+    )
+    for column in ("p", "d", "a"):
+        sql = f"SELECT {column} FROM scan_shapes WHERE {column} IS NOT NULL"  # ruff: ignore[hardcoded-sql-expression]
+        assert verdicts(schema, sql) == [(True, "NullableColumn")]
+        with psycopg.connect(schema) as conn:
+            assert conn.execute(pg_sql.SQL(sql)).fetchall()

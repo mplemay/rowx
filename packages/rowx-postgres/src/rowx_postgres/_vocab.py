@@ -149,6 +149,7 @@ type CodecName = Literal[
 type NullReasonName = Literal[
     "NotNullColumn",
     "NullableColumn",
+    "ScanFilterNotNull",
     "NotValidatedConstraint",
     "ForeignOrView",
     "ViewColumn",
