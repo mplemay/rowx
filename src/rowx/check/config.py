@@ -109,7 +109,11 @@ def _load(path: Path) -> Config:
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
         msg = f"{path}: {error}"
         raise ConfigError(msg) from None
-    table = data.get("tool", {}).get("rowx", {})
+    tool = data.get("tool", {})
+    if not isinstance(tool, dict):
+        msg = f"{path}: [tool] must be a table"
+        raise ConfigError(msg)
+    table = tool.get("rowx", {})
     if not isinstance(table, dict):
         msg = f"{path}: [tool.rowx] must be a table"
         raise ConfigError(msg)

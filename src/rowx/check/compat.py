@@ -8,6 +8,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Final
 
+from rowx_core.errors import DatabaseError, InterfaceError
+
 from rowx._backend import backend_for
 from rowx.check.config import Config, ConfigError, load_config
 from rowx.check.migrate import load_migrator, resolve_target
@@ -152,12 +154,12 @@ async def _run(base: Snapshot, head: Snapshot, dsn: str, jobs: int, scratches: l
     async with AsyncExitStack() as stack:
         urls: list[str] = []
         for snapshot in (base, head):
-            scratch = Scratch(dsn, backend.admin(dsn), sweep_previous=False)
-            scratches.append(scratch)
             try:
+                scratch = Scratch(dsn, backend.admin(dsn), sweep_previous=False)
+                scratches.append(scratch)
                 migrator = load_migrator(resolve_target(snapshot.config, None), dsn, backend)
                 built = await stack.enter_async_context(scratch.session(migrator))
-            except CheckError as error:
+            except (CheckError, DatabaseError, InterfaceError, OSError) as error:
                 msg = f"incomplete: building schema for revision {snapshot.sha}: {error}"
                 raise CheckError(msg) from None
             urls.append(built.url)
@@ -199,9 +201,9 @@ def _handle_snapshots(args: Namespace, dsn: str, scratches: list[Scratch]) -> in
         if any(scratch.leaked for scratch in scratches):
             sys.stdout.write("incomplete: scratch cleanup failed\n")
             return 2
-        if status != EXIT_INCOMPLETE:
-            sys.stdout.write("incompatible\n" if status == 1 else "compatible checked subset\n")
-        return status
+    if status != EXIT_INCOMPLETE:
+        sys.stdout.write("incompatible\n" if status == 1 else "compatible checked subset\n")
+    return status
 
 
 def handle(args: Namespace) -> int:
