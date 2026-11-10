@@ -380,10 +380,8 @@ def compare(
             return findings
 
 
-def _shown_param(evident: ParamType) -> str:
-    return (
-        f"list[{_shown_param(evident.item)}]" if evident.name == "list" and evident.item is not None else evident.name
-    )
+def shown_param(evident: ParamType) -> str:
+    return f"list[{shown_param(evident.item)}]" if evident.name == "list" and evident.item is not None else evident.name
 
 
 # `None` binds NULL for every parameter, and an unknown or unsupported parameter is never reported here
@@ -408,7 +406,7 @@ def _param_finding(  # ruff: ignore[too-many-arguments, too-many-positional-argu
     accepted = ", ".join(f"`{name}`" for name in rules.types[key].accepted_params)
     message = (
         f'parameter ${index + 1} has type "{type_name}", {noun} accepts {accepted}, '
-        f"but the interpolation is `{_shown_param(evident)}`"
+        f"but the interpolation is `{shown_param(evident)}`"
     )
     return Finding(rule="param-type-mismatch", message=message)
 

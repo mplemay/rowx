@@ -11,7 +11,15 @@ from rowx_core.backend import CheckerBackend, CheckerSession, ColumnInfo, Descri
 from rowx_core.errors import ConnectionBusyError, DatabaseError, InterfaceError
 
 from rowx._backend import backend_for
-from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param_result, expected_type
+from rowx.check.compare import (
+    ColumnDesc,
+    DescribeDesc,
+    Finding,
+    compare,
+    compare_param_result,
+    expected_type,
+    shown_param,
+)
 from rowx.check.construction import template_reports
 from rowx.check.discover import discover_source, too_deep
 from rowx.check.model import Diagnostic, Rule, Span
@@ -589,7 +597,7 @@ def _inspection(
     parameters = tuple(
         InspectedParameter(
             sql_type=clean(param.sql_type),
-            python_type=clean(param.python_type.name) if param.python_type is not None else None,
+            python_type=clean(shown_param(param.python_type)) if param.python_type is not None else None,
             mismatch=param.mismatch,
         )
         for param in site.coverage.parameters

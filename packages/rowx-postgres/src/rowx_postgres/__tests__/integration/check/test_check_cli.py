@@ -967,7 +967,11 @@ def test_inspect_supported_arrays_and_unsupported_types(
         "types.py",
         "from rowx import query\n"
         "query[list[int]](t'SELECT ARRAY[1] AS \"values!\"')\n"
-        "query[str | None](t'SELECT NULL::xml AS \"unknown\"')\n",
+        "query[str | None](t'SELECT NULL::xml AS \"unknown\"')\n"
+        "def arrays(good: list[list[int]], bad: list[str], unknown: list[Missing]) -> None:\n"
+        "    query[list[int] | None](t'SELECT {good}::int4[]')\n"
+        "    query[list[int] | None](t'SELECT {bad}::int4[]')\n"
+        "    query[list[int] | None](t'SELECT {unknown}::int4[]')\n",
     )
     code, out, err = _run(capsys, str(path), "--database-url", schema, "--inspect")
     assert code == 1
@@ -975,3 +979,6 @@ def test_inspect_supported_arrays_and_unsupported_types(
     assert 'SQL "_int4", Python "list[int]"' in out
     assert 'SQL "xml", Python unknown' in out
     assert "error[unsupported-type]" in out
+    assert 'SQL "_int4", Python "list[list[int]]", no mismatch reported' in out
+    assert 'SQL "_int4", Python "list[str]", mismatch' in out
+    assert 'SQL "_int4", Python unknown, not compared' in out
