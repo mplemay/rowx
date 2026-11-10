@@ -79,7 +79,7 @@ def _label(column: ColumnDesc, index: int) -> str:
     return f'column {index + 1} "{column.name}"'
 
 
-def _expected(column: ColumnDesc, rules: CheckerBackend) -> str:
+def expected_type(column: ColumnDesc, rules: CheckerBackend) -> str:
     if column.type_key == "array":
         leaf = _py_result(rules, column.element_key) if column.element_key is not None else "?"
         return f"list[{leaf}]"
@@ -206,9 +206,9 @@ def _compare_element(  # ruff: ignore[too-many-arguments, too-many-positional-ar
         return []
     if not _leaf_matches(column, elem, rules):
         if subject is not None:
-            message = f"{_label(column, index)} is `{_expected(column, rules)}` but {subject} is `{_shown(elem)}`"
+            message = f"{_label(column, index)} is `{expected_type(column, rules)}` but {subject} is `{_shown(elem)}`"
         else:
-            expected = _expected(column, rules)
+            expected = expected_type(column, rules)
             message = f"{_label(column, index)}: column type is `{expected}` but the annotation is `{_shown(elem)}`"
         return [
             Finding(

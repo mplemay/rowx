@@ -1384,7 +1384,7 @@ A complete project, with migrations, an application module, drift-checked querie
 ## The checker
 
 ```text
-rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json] [--statistics] [--coverage] [--require-checked] [--disallow-unchecked] [-j N] [--scratch] [--no-drift-check]
+rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json] [--statistics] [--coverage] [--inspect] [--require-checked] [--disallow-unchecked] [-j N] [--scratch] [--no-drift-check]
 ```
 
 The checker never imports or executes your code. It parses your files, finds every `query[T](t"...")` call, resolves `T`
@@ -1447,6 +1447,10 @@ and fails the run, without hiding the other files. There are no ignore comments:
 path in `[tool.rowx]`, such as `exclude = ["**/raw_sql.py"]`.
 
 ### Query check coverage
+
+Use `rowx check --inspect PATH` to show each successfully described query's columns, types, nullability reasons,
+and parameter comparison evidence. It does not execute queries or import source modules. Inspection appears on stderr
+when `--output-format json` is selected, leaving the diagnostics JSON unchanged.
 
 Use `rowx check --coverage` to list recognized direct query sites and their description and comparison evidence. The
 report goes to stderr with `--output-format json`; JSON diagnostics remain on stdout. A described parameter can have a

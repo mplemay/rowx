@@ -4,6 +4,7 @@ import sys
 from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from importlib.metadata import version
+from json import dumps
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -43,6 +44,7 @@ def _add_check(subparsers: _SubParsersAction[ArgumentParser]) -> None:
     check.add_argument("--config", type=Path, metavar="FILE")
     check.add_argument("--output-format", choices=("text", "json"), default="text")
     check.add_argument("--statistics", action="store_true")
+    check.add_argument("--inspect", action="store_true", help="show described query contracts")
     check.add_argument("--coverage", action="store_true", help="report recognized query sites and comparison coverage")
     check.add_argument(
         "--require-checked", action="store_true", help="require at least one successfully described query"
@@ -118,6 +120,31 @@ def _coverage(result: RunResult, root: Path) -> str:
                 )
                 lines.append(f"    parameter ${index}: SQL {strip_controls(param.sql_type)}, Python {py}; {status}")
     return "\n".join(lines) + "\n"
+
+
+def _inspect(result: RunResult) -> str:
+    def quoted(value: str) -> str:
+        return strip_controls(dumps(value, ensure_ascii=False))
+
+    lines: list[str] = []
+    for site in result.inspection:
+        path = site.path
+        span = site.span
+        lines.append(f"query {quoted(str(path))}:{span.line}:{span.col}-{span.end_line}:{span.end_col}")
+        for index, column in enumerate(site.columns, 1):
+            nullable = "nullable" if column.nullable else "not nullable"
+            mapping = quoted(column.python_type) if column.python_type is not None else "unknown"
+            lines.append(
+                f"  column {index}: {quoted(column.name)}, SQL {quoted(column.sql_type)}, Python {mapping}, "
+                f"{nullable}, {quoted(column.reason)}"
+            )
+        for index, param in enumerate(site.parameters, 1):
+            py = quoted(param.python_type) if param.python_type is not None else "unknown"
+            status = (
+                "not compared" if param.mismatch is None else "mismatch" if param.mismatch else "no mismatch reported"
+            )
+            lines.append(f"  parameter ${index}: SQL {quoted(param.sql_type)}, Python {py}, {status}")
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def _policies(result: RunResult, root: Path, *, require_checked: bool, disallow_unchecked: bool) -> None:
@@ -208,6 +235,7 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
                 dsn,
                 args.jobs,
                 _check_hooks(config, state, scratch=scratch, drift=not args.no_drift_check),
+                inspect=args.inspect,
             ),
         )
     except CheckError as error:
@@ -274,9 +302,13 @@ def _print_result(result: RunResult, root: Path, args: Namespace) -> None:
             sys.stderr.write(_statistics(result))
         if args.coverage:
             sys.stderr.write(_coverage(result, root))
+        if args.inspect:
+            sys.stderr.write(_inspect(result))
     else:
         sys.stdout.write(render_text(result.reports, result.sources, root))
         if args.statistics:
             sys.stdout.write(_statistics(result))
         if args.coverage:
             sys.stdout.write(_coverage(result, root))
+        if args.inspect:
+            sys.stdout.write(_inspect(result))

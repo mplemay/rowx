@@ -11,12 +11,12 @@ from rowx_core.backend import CheckerBackend, CheckerSession, ColumnInfo, Descri
 from rowx_core.errors import ConnectionBusyError, DatabaseError, InterfaceError
 
 from rowx._backend import backend_for
-from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param_result
+from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param_result, expected_type
 from rowx.check.construction import template_reports
 from rowx.check.discover import discover_source, too_deep
 from rowx.check.model import Diagnostic, Rule, Span
 from rowx.check.params import ParamInference
-from rowx.check.render import Report, null_reason_note
+from rowx.check.render import Report, null_reason_note, strip_controls
 from rowx.check.resolve import ModuleGraph, RowType, resolve_row_type, roots_for
 from rowx.check.sourcemap import SourceMap, SourceMapper
 
@@ -98,6 +98,15 @@ class ParameterCoverage:
     mismatch: bool | None
 
 
+@dataclass(slots=True, kw_only=True, frozen=True)
+class InspectedColumn:
+    name: str
+    sql_type: str
+    python_type: str | None
+    nullable: bool
+    reason: str
+
+
 @dataclass(slots=True, kw_only=True)
 class SiteCoverage:
     path: Path
@@ -109,12 +118,28 @@ class SiteCoverage:
     parameters: tuple[ParameterCoverage, ...] = ()
 
 
+@dataclass(slots=True, kw_only=True, frozen=True)
+class InspectedParameter:
+    sql_type: str
+    python_type: str | None
+    mismatch: bool | None
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class InspectedSite:
+    path: str
+    span: Span
+    columns: tuple[InspectedColumn, ...]
+    parameters: tuple[InspectedParameter, ...]
+
+
 @dataclass(slots=True, kw_only=True)
 class RunResult:
     reports: list[Report]
     sources: dict[Path, str]
     statistics: Statistics
     coverage: list[SiteCoverage] = field(default_factory=list)
+    inspection: list[InspectedSite] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -533,6 +558,49 @@ def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Re
     ]
 
 
+def _inspection(
+    site: _Site, outcome: Describe, backend: CheckerBackend, dsns: tuple[str, ...], root: Path
+) -> InspectedSite:
+    def clean(value: str) -> str:
+        value = strip_controls(value)
+        for dsn in dsns:
+            value = redact(value, dsn)
+        return value
+
+    columns: list[InspectedColumn] = []
+    for column in outcome.columns:
+        key = column.type_key
+        supported = key in backend.types and (key != "array" or column.element_key in backend.types)
+        mapping = expected_type(_column_desc(column), backend) if supported else None
+        reason = (
+            "nullability unknown, assumed nullable"
+            if column.reason == "Computed"
+            else null_reason_note(column.reason, column.reason_detail, column=column.name)
+        )
+        columns.append(
+            InspectedColumn(
+                name=clean(column.name),
+                sql_type=clean(column.type_name),
+                python_type=clean(mapping) if bool(mapping) else None,
+                nullable=column.nullable,
+                reason=clean(reason),
+            )
+        )
+    parameters = tuple(
+        InspectedParameter(
+            sql_type=clean(param.sql_type),
+            python_type=clean(param.python_type.name) if param.python_type is not None else None,
+            mismatch=param.mismatch,
+        )
+        for param in site.coverage.parameters
+    )
+    try:
+        path = site.call.path.relative_to(root)
+    except ValueError:
+        path = site.call.path
+    return InspectedSite(path=clean(str(path)), span=site.call.span, columns=tuple(columns), parameters=parameters)
+
+
 def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     graph: ModuleGraph,
     roots: tuple[Path, ...],
@@ -617,14 +685,18 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
     jobs: int,
     hooks: Hooks | None = None,
     backend: CheckerBackend | None = None,
+    *,
+    inspect: bool = False,
 ) -> RunResult:
     hooks = hooks or Hooks()
     stats = Statistics()
     selected = backend
     coverage: list[SiteCoverage] = []
+    inspection: list[InspectedSite] = []
     sites, reports, sources, selected = _collect(config, files, stats, selected, dsn, coverage)
     statements = sorted({site.sourcemap.sql for site in sites})
     stats.distinct_sql = len(statements)
+    target = dsn
     if statements:
         if dsn is None or not dsn.strip():
             msg = f"no database URL; pass --database-url or set ${config.database_url_env}"
@@ -644,6 +716,11 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
             # collection inferred parameters before a backend existed; bind before they are compared
             if site.inference is not None:
                 site.inference.bind(selected)
-            reports.extend(_evaluate(site, outcomes[site.sourcemap.sql], selected))
+            outcome = outcomes[site.sourcemap.sql]
+            reports.extend(_evaluate(site, outcome, selected))
+            if inspect and not isinstance(outcome, DatabaseError):
+                inspection.append(
+                    _inspection(site, outcome, selected, tuple(value for value in (dsn, target) if value), config.root)
+                )
     stats.by_rule.update(report.diagnostic.rule for report in reports)
-    return RunResult(reports=reports, sources=sources, statistics=stats, coverage=coverage)
+    return RunResult(reports=reports, sources=sources, statistics=stats, coverage=coverage, inspection=inspection)

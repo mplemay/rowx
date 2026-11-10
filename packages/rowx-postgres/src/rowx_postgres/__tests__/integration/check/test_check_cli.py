@@ -3,6 +3,8 @@ import json
 import os
 import secrets
 import signal
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote, urlparse, urlunparse
@@ -10,7 +12,7 @@ from urllib.parse import quote, urlparse, urlunparse
 import psycopg
 import pytest
 from psycopg import sql
-from psycopg.conninfo import make_conninfo
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from rowx_core.errors import DatabaseError
 from rowx_postgres import Connection, Migrator
 from rowx_postgres.__tests__.integration.check.harness import CASES_DIR, check_case, parse_markers
@@ -847,3 +849,129 @@ def run():
     assert "error[unsupported-type]" in out
     assert 'error[type-mismatch]: column 1 "value": column type is `str` but the annotation is `int`' in out
     assert "error[nullability-mismatch]" not in out
+
+
+def test_inspect_contracts_and_deduplicated_sites(
+    schema: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with psycopg.connect(schema, autocommit=True) as conn:
+        conn.execute("CREATE TABLE inspect_a (id int NOT NULL, optional int)")
+        conn.execute("CREATE TABLE inspect_b (id int NOT NULL)")
+    path = _write(
+        tmp_path,
+        "inspect.py",
+        """from rowx import query
+
+def run(unknown, known: int):
+    query[tuple[int, int | None, int | None, int, int | None]](t\'SELECT a.id, b.id, a.id + 1, a.id AS "forced!", a.id AS "optional?" FROM inspect_a a LEFT JOIN inspect_b b ON a.id = b.id\')
+    query[int](t\'SELECT optional FROM inspect_a WHERE optional IS NOT NULL\')
+    query[int](t\'SELECT {unknown}::int AS "value!"\')
+    query[int](t\'SELECT {known}::int AS "value!"\')
+    query[int](t\'SELECT nope FROM missing_table\')
+""",
+    )
+    code, out, err = _run(capsys, str(path), "--database-url", schema, "--inspect", "--statistics")
+    assert code == 1
+    assert not err
+    assert out.count('column 1: "value", SQL "int4", Python "int"') == 2
+    assert "Python unknown, not compared" in out
+    assert 'Python "int", no mismatch reported' in out
+    assert "forced NOT NULL by the" in out
+    assert "nullability unknown, assumed nullable" in out
+    assert "nullable side of an outer join" in out
+    assert "scan filter rejects NULL" in out
+    assert "forced nullable" in out
+    assert "declared NOT NULL" in out
+    assert "distinct SQL strings described: 4" in out
+    assert "error[sql-error]" in out
+    assert 'inspect.py":6:' in out
+    assert 'inspect.py":7:' in out
+    code, out, err = _run(capsys, str(path), "--database-url", schema, "--inspect", "--output-format", "json")
+    assert code == 1
+    diagnostics = json.loads(out)
+    diagnostic = next(item for item in diagnostics if item["rule"] == "sql-error")
+    error_line = path.read_text().splitlines()[7]
+    assert (diagnostic["line"], diagnostic["col"]) == (8, error_line.index("missing_table") + 1)
+    code_plain, plain, plain_err = _run(capsys, str(path), "--database-url", schema, "--output-format", "json")
+    assert code_plain == code
+    assert plain == out
+    assert not plain_err
+    assert 'column 1: "value"' in err
+
+
+def test_inspect_subprocess_never_evaluates_source(schema: str, tmp_path: Path) -> None:
+    with psycopg.connect(schema, autocommit=True) as conn:
+        conn.execute("CREATE TABLE inspect_sentinel (id int NOT NULL)")
+    module_marker = tmp_path / "module-fired"
+    annotation_marker = tmp_path / "annotation-fired"
+    path = _write(
+        tmp_path,
+        "sentinels.py",
+        f"""from pathlib import Path
+from typing import Annotated
+from rowx import query
+Path({str(module_marker)!r}).touch()
+def annotation():
+    Path({str(annotation_marker)!r}).touch()
+    return int
+def run():
+    query[Annotated[int, annotation()]](t'INSERT INTO inspect_sentinel VALUES (1) RETURNING id AS "value!"')
+""",  # ruff: ignore[hardcoded-sql-expression]
+    )
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [str(Path(sys.executable).with_name("rowx")), "check", str(path), "--database-url", schema, "--inspect"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert 'column 1: "value"' in result.stdout
+    assert not module_marker.exists()
+    assert not annotation_marker.exists()
+    with psycopg.connect(schema) as conn:
+        assert conn.execute("SELECT count(*) FROM inspect_sentinel").fetchone() == (0,)
+
+
+def test_inspect_sanitizes_identifiers_before_redaction(
+    schema: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    password = conninfo_to_dict(schema).get("password")
+    if not isinstance(password, str) or len(password) < 2:
+        pytest.skip("the database URL needs a password for this test")
+    hostile = password[0] + "\u200b" + password[1:] + "\n\tline"
+    identifier = hostile.replace('"', '""')
+    path = _write(tmp_path, "hostile.py", f"from rowx import query\nquery[int](t'''SELECT 1 AS \"{identifier}!\"''')\n")
+    code, out, err = _run(capsys, str(path), "--database-url", schema, "--inspect")
+    assert code == 0
+    assert not err
+    assert password not in out
+    assert "\u200b" not in out
+    assert "\\n\\tline" in out
+    assert len(out.splitlines()) == 2
+
+
+@pytest.mark.usefixtures("scratch_project")
+def test_scratch_inspection_uses_migrated_schema(no_leftovers: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = _scratch(capsys, no_leftovers, "--inspect")
+    assert code == 0
+    assert not err
+    assert 'column 1: "id", SQL "int4", Python "int"' in out
+    assert 'column 2: "name", SQL "text", Python "str"' in out
+
+
+def test_inspect_supported_arrays_and_unsupported_types(
+    schema: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(
+        tmp_path,
+        "types.py",
+        "from rowx import query\n"
+        "query[list[int]](t'SELECT ARRAY[1] AS \"values!\"')\n"
+        "query[str | None](t'SELECT NULL::xml AS \"unknown\"')\n",
+    )
+    code, out, err = _run(capsys, str(path), "--database-url", schema, "--inspect")
+    assert code == 1
+    assert not err
+    assert 'SQL "_int4", Python "list[int]"' in out
+    assert 'SQL "xml", Python unknown' in out
+    assert "error[unsupported-type]" in out
