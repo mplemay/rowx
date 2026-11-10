@@ -91,13 +91,10 @@ impl<B> Hook<B> {
         }
     }
 
-    fn start(
-        &self,
-        cancel: &Cancel<B>,
-        future: impl Future<Output = ()> + Send + 'static,
-    ) -> Result<(), TaskStopped>
+    fn start<F>(&self, cancel: &Cancel<B>, make: impl FnOnce() -> F) -> Result<(), TaskStopped>
     where
         B: Clone,
+        F: Future<Output = ()> + Send + 'static,
     {
         let mut operation = self.0.lock().map_err(|_| TaskStopped)?;
         let previous = std::mem::replace(&mut *operation, Operation::Finished);
@@ -107,7 +104,7 @@ impl<B> Hook<B> {
         };
         *operation = Operation::Running {
             claim,
-            task: cancel.handle.spawn(future),
+            task: cancel.handle.spawn(make()),
             cancel: cancel.clone(),
         };
         drop(operation);
@@ -240,7 +237,7 @@ where
 {
     let (tx, rx) = oneshot::channel();
     let completion = hook.clone();
-    hook.start(cancel, async move {
+    hook.start(cancel, || async move {
         let finish = FinishOnDrop(completion);
         let out = fut.await;
         drop(finish);
@@ -257,17 +254,27 @@ where
 
 /// Runs the stream producer in its own task. The claim can outlive a single read.
 ///
+/// The factory runs under the claim lock so it can publish bookkeeping before a close releases
+/// the claim. It must not block or call into Python.
+///
 /// # Errors
 /// `TaskStopped` when the reservation is no longer available.
-pub fn spawn_stream<B: Backend>(
+pub fn spawn_stream<B, F>(
     cancel: &Cancel<B>,
     hook: &Hook<B>,
-    fut: impl Future<Output = ()> + Send + 'static,
-) -> Result<(), TaskStopped> {
+    make: impl FnOnce() -> F,
+) -> Result<(), TaskStopped>
+where
+    B: Backend,
+    F: Future<Output = ()> + Send + 'static,
+{
     let completion = hook.clone();
-    hook.start(cancel, async move {
-        let _finish = FinishOnDrop(completion);
-        fut.await;
+    hook.start(cancel, || {
+        let fut = make();
+        async move {
+            let _finish = FinishOnDrop(completion);
+            fut.await;
+        }
     })
 }
 
@@ -382,7 +389,7 @@ mod tests {
         let cancel = cancel();
         let hook = Hook::new(cancel.state.claim()?);
         let (release, wait) = oneshot::channel();
-        spawn_stream(&cancel, &hook, async {
+        spawn_stream(&cancel, &hook, || async {
             let _ = wait.await;
         })?;
         hook.finish();

@@ -266,11 +266,12 @@ impl RowStream {
                 let inner = Arc::clone(&cancel.backend.conn);
                 let state = Arc::clone(&cancel.state);
                 let producer = Arc::clone(&shared);
-                if let Err(e) = cancel::spawn_stream(
-                    &cancel,
-                    &shared.hook,
-                    produce(inner, state, start, producer),
-                ) {
+                if let Err(e) = cancel::spawn_stream(&cancel, &shared.hook, || {
+                    // A close can return the checkout while the producer still holds the
+                    // connection. Record a possible transaction before that release can start.
+                    note_sql(&state, &start.args.sql);
+                    produce(inner, state, start, producer)
+                }) {
                     if shared.is_finished() {
                         return Ok(empty());
                     }
@@ -445,7 +446,6 @@ async fn produce(
     if shared.is_finished() {
         return;
     }
-    note_sql(&state, &start.args.sql);
     run(&mut conn, &state, start, &shared).await;
 }
 

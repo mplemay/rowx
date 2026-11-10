@@ -8,11 +8,12 @@ use std::time::Duration;
 
 use common::TestResult;
 use rowx_core::pool::Manage;
-use rowx_postgres::cancel::{Hook, spawn};
+use rowx_postgres::cancel::{Hook, spawn, spawn_stream};
 use rowx_postgres::dsn::ConnectOptions;
 use rowx_postgres::error::Error;
 use rowx_postgres::pool::{PgManager, Pool, PoolOptions, Pooled, RESET_QUERY};
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 
 const STRESS_ITERATIONS: u32 = 300;
 
@@ -127,6 +128,61 @@ async fn max_size_one_resets_session() -> TestResult {
     .await?;
     assert_eq!(probe, "none");
     drop(second);
+    pool.close(Some(Duration::from_secs(5))).await;
+    schema.drop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn closing_a_stream_before_its_begin_completes_still_rolls_back() -> TestResult {
+    let Some(schema) = common::fresh_schema().await? else {
+        return Ok(());
+    };
+    let runtime = Handle::current();
+    let manager = PgManager::new(
+        &ConnectOptions::from_dsn(&schema.dsn)?,
+        runtime.clone(),
+        None,
+    )?;
+    let options = PoolOptions {
+        max_size: 1,
+        ..PoolOptions::default()
+    };
+    let pool = Pool::new(manager, options, runtime)?;
+    let first = pool.acquire().await?;
+    let pid = query_text(&first, "SELECT pg_backend_pid()::text").await?;
+    let cancel = &first.conn()?.cancel;
+    let hook = Hook::new(cancel.state.claim_leased(first.lease())?);
+    let inner = Arc::clone(&cancel.backend.conn);
+    let (ready, started) = oneshot::channel();
+    let (resume, paused) = oneshot::channel();
+    let (completed, result) = oneshot::channel();
+    spawn_stream(cancel, &hook, || {
+        cancel.state.mark_maybe_in_txn();
+        async move {
+            let guard = inner.lock().await;
+            if ready.send(()).is_ok() && paused.await.is_ok() {
+                let result = guard
+                    .simple("BEGIN; CREATE TABLE stream_reset_probe (i int)")
+                    .await;
+                drop(guard);
+                let _ = completed.send(result);
+            }
+        }
+    })?;
+    assert!(cancel.state.maybe_in_txn());
+    tokio::time::timeout(Duration::from_secs(5), started).await??;
+
+    // Close after the producer committed to running SQL, but before it sends BEGIN.
+    hook.finish();
+    drop(first);
+    resume.send(()).map_err(|()| "stream producer stopped")?;
+    tokio::time::timeout(Duration::from_secs(5), result).await???;
+
+    let next = pool.acquire().await?;
+    let sql = "SELECT pg_backend_pid()::text || ':' || coalesce(to_regclass('stream_reset_probe')::text, 'none')";
+    assert_eq!(query_text(&next, sql).await?, format!("{pid}:none"));
+    drop(next);
     pool.close(Some(Duration::from_secs(5))).await;
     schema.drop().await?;
     Ok(())
