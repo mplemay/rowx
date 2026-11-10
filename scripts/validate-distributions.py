@@ -2,7 +2,7 @@
 from argparse import ArgumentParser
 from email.parser import Parser
 from os import environ
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final
 from zipfile import ZipFile
 
@@ -181,7 +181,11 @@ def _validate_license(path: Path, metadata: Message) -> None:
 
 
 def _read_packaged_license(path: Path, wheel: ZipFile, names: list[str]) -> bytes:
-    packaged = [name for name in names if not name.endswith("/") and name.endswith(LICENSE_ENTRY_SUFFIX)]
+    packaged = [
+        name
+        for name in names
+        if not name.endswith("/") and PurePosixPath(name).full_match("*.dist-info/licenses/LICENSE")
+    ]
     if len(packaged) != MATCH_COUNT:
         present = [name for name in names if not name.endswith("/") and "LICENSE" in name.upper()]
         message = f"{path.name} license file is not {LICENSE_ENTRY_SUFFIX}: {present}"

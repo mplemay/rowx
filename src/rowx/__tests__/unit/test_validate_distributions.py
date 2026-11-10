@@ -63,6 +63,7 @@ class WheelBuild:
     requires: tuple[str, ...] | None = None
     license_entry: str | None = None
     license_body: bytes | None = None
+    license_header: str = "LICENSE"
     include_license: bool = True
     extras: tuple[tuple[str, bytes], ...] = ()
 
@@ -93,13 +94,13 @@ def _default_requires(namespace: str) -> tuple[str, ...]:
     return (core,)
 
 
-def _metadata(name: str, version: str, requires: tuple[str, ...]) -> str:
+def _metadata(name: str, version: str, requires: tuple[str, ...], license_header: str) -> str:
     lines = [
         "Metadata-Version: 2.4",
         f"Name: {name}",
         f"Version: {version}",
         "License-Expression: MIT",
-        "License-File: LICENSE",
+        f"License-File: {license_header}",
     ]
     lines.extend(f"Classifier: {classifier}" for classifier in CLASSIFIERS)
     lines.append(f"Keywords: {KEYWORDS}")
@@ -117,7 +118,10 @@ def _write_wheel(directory: Path, build: WheelBuild) -> Path:
     path = directory / build.filename
     with ZipFile(path, "w") as wheel:
         wheel.writestr(f"{namespace}/py.typed", b"")
-        wheel.writestr(f"{dist_info}/METADATA", _metadata(name, version, requires))
+        wheel.writestr(
+            f"{dist_info}/METADATA",
+            _metadata(name, version, requires, build.license_header),
+        )
         if build.include_license:
             entry = f"{dist_info}/licenses/LICENSE" if build.license_entry is None else build.license_entry
             body = LICENSE_PATHS[namespace].read_bytes() if build.license_body is None else build.license_body
@@ -157,6 +161,36 @@ def test_decoy_license_path_fails(tmp_path: Path) -> None:
     path = _write_wheel(
         tmp_path,
         WheelBuild(filename=ROWX_WHEEL, include_license=False, extras=((decoy, b"decoy"),)),
+    )
+    with pytest.raises(SystemExit, match="license file is not"):
+        VALIDATE_WHEEL(path)
+
+
+def test_nested_license_path_fails(tmp_path: Path) -> None:
+    entry = f"{ROWX}/data/.dist-info/licenses/LICENSE"
+    path = _write_wheel(
+        tmp_path,
+        WheelBuild(
+            filename=ROWX_WHEEL,
+            include_license=False,
+            extras=((entry, LICENSE_PATHS[ROWX].read_bytes()),),
+        ),
+    )
+    with pytest.raises(SystemExit, match="license file is not"):
+        VALIDATE_WHEEL(path)
+
+
+def test_license_file_header_mismatch_fails(tmp_path: Path) -> None:
+    path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, license_header="COPYING"))
+    with pytest.raises(SystemExit, match="License-File"):
+        VALIDATE_WHEEL(path)
+
+
+def test_two_license_entries_fail(tmp_path: Path) -> None:
+    entry = "other.dist-info/licenses/LICENSE"
+    path = _write_wheel(
+        tmp_path,
+        WheelBuild(filename=ROWX_WHEEL, extras=((entry, LICENSE_PATHS[ROWX].read_bytes()),)),
     )
     with pytest.raises(SystemExit, match="license file is not"):
         VALIDATE_WHEEL(path)
