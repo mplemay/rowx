@@ -355,7 +355,7 @@ def test_format_duration(value: timedelta | None, expected: str) -> None:
     assert format_duration(value) == expected
 
 
-HOSTILE: Final = f"bad \x1b[2J{chr(0x202E)} text"
+HOSTILE: Final[str] = f"bad \x1b[2J{chr(0x202E)} text"
 
 
 def test_cli_errors_are_stripped_of_control_and_bidi_characters(capsys: pytest.CaptureFixture[str]) -> None:

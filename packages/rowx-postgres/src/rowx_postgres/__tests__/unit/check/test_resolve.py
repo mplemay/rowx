@@ -13,7 +13,9 @@ from rowx.check.resolve import ModuleGraph, Resolution, RowType, resolve_row_typ
 if TYPE_CHECKING:
     from pathlib import Path
 
-PG_RULES: Final = load().checker()
+    from rowx_core.backend import CheckerBackend
+
+PG_RULES: Final[CheckerBackend] = load().checker()
 
 
 def write(root: Path, files: dict[str, str]) -> None:
@@ -40,7 +42,7 @@ def leaves(resolution: Resolution) -> list[tuple[str, bool]]:
     return [(elem.leaf, elem.nullable) for elem in row_type(resolution).elements]
 
 
-QUERY = 'from rowx import query\nquery[{t}](t"select 1")\n'
+QUERY: Final[str] = 'from rowx import query\nquery[{t}](t"select 1")\n'
 
 
 def test_cross_module_alias_with_note(tmp_path: Path) -> None:
@@ -1499,7 +1501,7 @@ def test_user_code_is_never_imported(tmp_path: Path) -> None:
     assert "boom" not in sys.modules
 
 
-TYPE_CHECKING_HEADER = (
+TYPE_CHECKING_HEADER: Final[str] = (
     "from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict\nfrom dataclasses import dataclass\n"
     "if TYPE_CHECKING:\n    from fractions import Fraction\n"
 )

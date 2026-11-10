@@ -232,7 +232,7 @@ def test_unknown_escape_keeps_backslash() -> None:
     assert [text_at(src, sm.locate(i + 1)) for i in range(len(sm.sql))] == ["a", "\\", "q", " ", "b"]
 
 
-SEEDS: Final = range(400)
+SEEDS: Final[range] = range(400)
 
 
 def generated_sql(source: str) -> str:

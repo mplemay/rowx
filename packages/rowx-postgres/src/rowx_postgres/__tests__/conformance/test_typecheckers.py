@@ -4,7 +4,7 @@ import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from rowx_postgres.__tests__.conformance.row_types import PRELUDE, ROWS, UNKNOWN_NAMES
@@ -13,7 +13,10 @@ from rowx_postgres._backend import load
 from rowx.check.discover import discover_file
 from rowx.check.resolve import Elem, ModuleGraph, RowType, resolve_row_type
 
-PG_RULES: Final = load().checker()
+if TYPE_CHECKING:
+    from rowx_core.backend import CheckerBackend
+
+PG_RULES: Final[CheckerBackend] = load().checker()
 
 MAIN_NAME: Final[str] = "main.py"
 REVEAL_MARK: Final[str] = "# reveal-here"

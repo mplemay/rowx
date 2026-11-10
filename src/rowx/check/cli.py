@@ -22,9 +22,9 @@ if TYPE_CHECKING:
 
     from rowx.check.runner import ScratchBuild
 
-EXIT_CLEAN = 0
-EXIT_DIAGNOSTICS = 1
-EXIT_FAILURE = 2
+EXIT_CLEAN: Final[int] = 0
+EXIT_DIAGNOSTICS: Final[int] = 1
+EXIT_FAILURE: Final[int] = 2
 
 SCRATCH_HELP: Final[str] = (
     "build a scratch database from the migrations (the URL is a server URL), check against it, and drop it. "

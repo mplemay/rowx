@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.db]
 
 GOLDEN: Final[Path] = Path(__file__).resolve().parent / "golden"
-ELAPSED: Final = re.compile(r"\(\d+\.\d(?:us|ms|s)\)")
-JSON_TIMES: Final = re.compile(r'("installed_on": )"[^"]+"|("execution_time": )\d+')
+ELAPSED: Final[re.Pattern[str]] = re.compile(r"\(\d+\.\d(?:us|ms|s)\)")
+JSON_TIMES: Final[re.Pattern[str]] = re.compile(r'("installed_on": )"[^"]+"|("execution_time": )\d+')
 WAIT_LIMIT: Final[float] = 30.0
 
 

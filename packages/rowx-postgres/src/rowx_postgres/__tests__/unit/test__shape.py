@@ -1,4 +1,4 @@
-from rowx_core._rowplan import FieldPlan, ShapeSpec
+from rowx_core import FieldPlan, ShapeSpec
 from rowx_postgres._core import RowShape
 from rowx_postgres._shape import native_shape
 

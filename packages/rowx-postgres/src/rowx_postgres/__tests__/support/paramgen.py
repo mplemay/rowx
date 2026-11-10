@@ -11,7 +11,9 @@ from rowx.check.params import ParamInference, ParamType
 if TYPE_CHECKING:
     from random import Random
 
-PG_RULES: Final = load().checker()
+    from rowx_core.backend import CheckerBackend
+
+PG_RULES: Final[CheckerBackend] = load().checker()
 
 SCALAR_KINDS: Final[tuple[str, ...]] = (
     "int",

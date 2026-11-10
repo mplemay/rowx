@@ -1,6 +1,6 @@
 import ast
 from textwrap import dedent
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from rowx_postgres.__tests__.support.paramgen import (
@@ -19,7 +19,10 @@ from rowx_postgres._backend import load
 from rowx.__tests__.sourcegen import seeded
 from rowx.check.params import ParamInference, ParamType
 
-PG_RULES: Final = load().checker()
+if TYPE_CHECKING:
+    from rowx_core.backend import CheckerBackend
+
+PG_RULES: Final[CheckerBackend] = load().checker()
 
 
 def show(found: ParamType | None) -> str | None:
@@ -497,7 +500,7 @@ def test_qualified_builtin_annotations(imports: str, annotation: str, expected: 
     assert infer(f'{imports}\ndef f(x: {annotation}):\n    q(t"{{x}}")') == [expected]
 
 
-SEEDS: Final = range(300)
+SEEDS: Final[range] = range(300)
 
 
 @pytest.mark.parametrize("seed", SEEDS)

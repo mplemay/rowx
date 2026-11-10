@@ -9,7 +9,7 @@ from rowx.__tests__.sourcegen import seeded
 
 pytestmark = [pytest.mark.db]
 
-SEEDS: Final = range(200)
+SEEDS: Final[range] = range(200)
 # the parameter type each inferred name binds to; `Template` has no parameter type of its own
 PG_TYPES: Final[dict[str, str]] = {
     "bool": "bool",

@@ -16,9 +16,10 @@ from rowx.check.resolve import Elem, RowType
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from rowx_core.backend import CheckerBackend
     from rowx_postgres._core import Describe
 
-PG_RULES: Final = load().checker()
+PG_RULES: Final[CheckerBackend] = load().checker()
 
 pytestmark = [pytest.mark.db]
 

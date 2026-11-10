@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 
 EOLS: Final[tuple[str, ...]] = ("\n", "\r\n", "\r")
-LINE_BREAK: Final = re.compile(r"\r\n|\r|\n")
+LINE_BREAK: Final[re.Pattern[str]] = re.compile(r"\r\n|\r|\n")
 # the plain characters never include a quote, a brace, a backslash, `*`, `/` or a line separator
 PLAIN: Final[tuple[str, ...]] = (*"abcdefghijklmnopqrstuvwxyz0123456789 _,.()", "é", "ß", "日", "本", "😀")
 SIMPLE_ESCAPES: Final[tuple[tuple[str, str], ...]] = (

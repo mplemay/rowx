@@ -455,7 +455,7 @@ def test_random_bytes_never_panic(key: str) -> None:
 
 # from _core/encode/test__core.py
 
-UTC: Final = dt.UTC
+UTC: Final[dt.timezone] = dt.UTC
 MIB: Final[int] = 1 << 20
 
 
@@ -535,10 +535,10 @@ def test_decimal_beyond_numeric_range_is_database_error(schema: str) -> None:
     assert info.value.sqlstate == "22003"
 
 
-NAIVE_DATETIME: Final = dt.datetime(2024, 1, 2, 3, 4, 5)  # ruff: ignore[call-datetime-without-tzinfo]
-AWARE_DATETIME: Final = NAIVE_DATETIME.replace(tzinfo=dt.timezone(dt.timedelta(hours=-5)))
-NAIVE_TIME: Final = dt.time(1, 2, 3)
-AWARE_TIME: Final = NAIVE_TIME.replace(tzinfo=UTC)
+NAIVE_DATETIME: Final[dt.datetime] = dt.datetime(2024, 1, 2, 3, 4, 5)  # ruff: ignore[call-datetime-without-tzinfo]
+AWARE_DATETIME: Final[dt.datetime] = NAIVE_DATETIME.replace(tzinfo=dt.timezone(dt.timedelta(hours=-5)))
+NAIVE_TIME: Final[dt.time] = dt.time(1, 2, 3)
+AWARE_TIME: Final[dt.time] = NAIVE_TIME.replace(tzinfo=UTC)
 
 
 @pytest.mark.db
@@ -869,8 +869,8 @@ def test_every_element_family_round_trips_as_an_array_parameter(schema: str, sql
 
 # no supported range subtype has a bound text that can hold a quote, backslash, comma, bracket or whitespace, or
 # spell `empty`; the literal grammar is gone, so the checks that matter are the exact `range_send` bytes below
-TS_LOW: Final = dt.datetime(1900, 1, 1, 0, 0, 0, 1)  # ruff: ignore[call-datetime-without-tzinfo]
-TS_HIGH: Final = dt.datetime(2262, 4, 11, 23, 47, 16, 854775)  # ruff: ignore[call-datetime-without-tzinfo]
+TS_LOW: Final[dt.datetime] = dt.datetime(1900, 1, 1, 0, 0, 0, 1)  # ruff: ignore[call-datetime-without-tzinfo]
+TS_HIGH: Final[dt.datetime] = dt.datetime(2262, 4, 11, 23, 47, 16, 854775)  # ruff: ignore[call-datetime-without-tzinfo]
 RANGE_BOUNDS: Final[dict[str, tuple[object, object]]] = {
     "int4range": (-(2**31), 2**31 - 2),
     "int8range": (-(2**63), 2**63 - 2),
@@ -1340,19 +1340,19 @@ type Difference = Literal[
     "instant", "float32", "decode-error", "void", "host-address", "range", "money", "geometric", "cube"
 ]
 
-_RANGE_CLASS: Final[str] = (
+RANGE_CLASS: Final[str] = (
     "rowx returns `rowx_postgres.Range`, while psycopg returns its own `Range`; the bounds are equal"
 )
-_RANGE_BOUNDS: Final[str] = (
+RANGE_BOUNDS_NOTE: Final[str] = (
     "an infinite bound of this subtype raises `DecodeError`, while psycopg raises its own `DataError`"
 )
 RANGE_DIFFERENCES: Final[dict[str, str]] = {
-    "int4range": f"{_RANGE_CLASS}.",
-    "int8range": f"{_RANGE_CLASS}.",
-    "numrange": f"{_RANGE_CLASS}.",
-    "daterange": f"{_RANGE_CLASS}, but {_RANGE_BOUNDS}.",
-    "tsrange": f"{_RANGE_CLASS}, but {_RANGE_BOUNDS}.",
-    "tstzrange": f"{_RANGE_CLASS} as instants, but {_RANGE_BOUNDS}.",
+    "int4range": f"{RANGE_CLASS}.",
+    "int8range": f"{RANGE_CLASS}.",
+    "numrange": f"{RANGE_CLASS}.",
+    "daterange": f"{RANGE_CLASS}, but {RANGE_BOUNDS_NOTE}.",
+    "tsrange": f"{RANGE_CLASS}, but {RANGE_BOUNDS_NOTE}.",
+    "tstzrange": f"{RANGE_CLASS} as instants, but {RANGE_BOUNDS_NOTE}.",
 }
 
 
@@ -1876,8 +1876,8 @@ def test_difference_list_matches_doc() -> None:
 
 # from _core/named/test__core.py
 
-NULLABLE: Final = 1
-SPAN: Final = 2
+NULLABLE: Final[int] = 1
+SPAN: Final[int] = 2
 
 type Field = tuple[str, tuple[str, ...] | None, bool, int]
 
@@ -2346,8 +2346,8 @@ SETTINGS: Final[list[tuple[str, str]]] = [
     ("extra_float_digits", "3"),
 ]
 
-PLUS_530: Final = dt.timezone(dt.timedelta(hours=5, minutes=30))
-MINUS_8: Final = dt.timezone(dt.timedelta(hours=-8))
+PLUS_530: Final[dt.timezone] = dt.timezone(dt.timedelta(hours=5, minutes=30))
+MINUS_8: Final[dt.timezone] = dt.timezone(dt.timedelta(hours=-8))
 
 # SQL type -> value sent as text; the numeric, timetz, json, enum and array codecs all travel as text
 TEXT_PARAMS: Final[list[tuple[str, Any]]] = [

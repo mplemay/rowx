@@ -1,7 +1,7 @@
 import tempfile
 from os import environ
 from pathlib import Path
-from re import DOTALL, MULTILINE, compile as re_compile
+from re import DOTALL, MULTILINE, Pattern, compile as re_compile
 from runpy import run_path
 from subprocess import run  # ruff: ignore[suspicious-subprocess-import]
 from sys import executable
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 ROOT: Final[Path] = next(parent for parent in Path(__file__).resolve().parents if (parent / "Cargo.lock").is_file())
 DOC_FILES: Final[tuple[Path, ...]] = (ROOT / "README.md", ROOT / "docs" / "guide.md")
-SNIPPET: Final = re_compile(r"^```python test\n(?P<body>.*?)^```$", MULTILINE | DOTALL)
+SNIPPET: Final[Pattern[str]] = re_compile(r"^```python test\n(?P<body>.*?)^```$", MULTILINE | DOTALL)
 
 
 # the testing guide snippet runs the plugin in a temporary project, whose template (cached for the next run of a real

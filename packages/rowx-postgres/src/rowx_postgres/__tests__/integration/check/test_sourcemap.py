@@ -15,7 +15,7 @@ from rowx.check.sourcemap import SourceMap, SourceMapper
 
 pytestmark = [pytest.mark.db]
 
-SEEDS: Final = range(120)
+SEEDS: Final[range] = range(120)
 TIMEOUT_MS: Final[int] = 10_000
 UNDEFINED_COLUMN: Final[str] = "42703"
 # the error sits in the second static segment, after the first interpolation
