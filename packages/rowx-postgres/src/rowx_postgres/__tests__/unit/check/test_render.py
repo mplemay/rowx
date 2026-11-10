@@ -208,6 +208,7 @@ def test_crlf_and_tabs() -> None:
     ("reason", "detail", "expected"),
     [
         ("NullableColumn", "users.email", "nullable because users.email has no NOT NULL constraint"),
+        ("ScanFilterNotNull", "users.email", "NOT NULL because a scan filter rejects NULL for users.email"),
         ("OuterJoin", "Hash Left Join", "nullable side of an outer join (Hash Left Join)"),
         ("Computed", None, 'computed expression; add AS "col!"'),
     ],
