@@ -44,3 +44,11 @@ fmt:
     uv run prek run cargo-fmt --all-files
     uv run prek run ruff-format --all-files
     uv run prek run shfmt --all-files
+
+# serve the documentation site
+docs:
+    uv run --group docs zensical serve
+
+# build the documentation site in strict mode
+docs-build:
+    uv run --group docs zensical build --clean --strict

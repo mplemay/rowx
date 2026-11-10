@@ -1,0 +1,82 @@
+[project]
+site_name = "rowx"
+site_description = "Typesafe raw SQL for Python without an ORM."
+site_url = "https://mplemay.github.io/rowx/"
+repo_url = "https://github.com/mplemay/rowx"
+repo_name = "mplemay/rowx"
+docs_dir = "docs"
+site_dir = "site"
+strict = true
+nav = [
+  { "Home" = "index.md" },
+  { "Guide" = "guide.md" },
+  { "Packages" = "packages.md" },
+  { "Types" = "types.md" },
+  { "Known limits" = "known-limits.md" },
+  { "Changelog" = "changelog.md" },
+]
+# Built so links from the guide and known limits still resolve. Not navigation items.
+not_in_nav = """
+/design/
+/spikes/
+"""
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.copy",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.plugins.search]
+enabled = true
+
+[project.validation]
+invalid_links = true
+invalid_link_anchors = true
+
+# Keep GitHub-style heading ids, and accept ```python test fences.
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+toc.permalink = true
+toc.slugify.object = "pymdownx.slugs.slugify"
+toc.slugify.kwds.case = "lower"
+pymdownx.arithmatex.generic = true
+pymdownx.betterem = {}
+pymdownx.caret = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.superfences.relaxed_headers = true
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tasklist.custom_checkbox = true
+pymdownx.tilde = {}
