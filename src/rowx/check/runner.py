@@ -44,6 +44,7 @@ PASSWORD_PARAM_KV: Final[Pattern[str]] = re_compile(
 URL_SCHEME: Final[Pattern[str]] = re_compile(r"\s*[A-Za-z][A-Za-z0-9+.-]*://")
 USERINFO: Final[Pattern[str]] = re_compile(r"(?P<key>://[^/?#\s:@]*:)(?P<value>[^/?#\s]*)@")
 ROW_INCOMPLETE_RULES: Final[frozenset[Rule]] = frozenset({
+    "type-mismatch",
     "unsupported-type",
     "arity-mismatch",
     "unexpected-column",

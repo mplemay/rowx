@@ -830,6 +830,7 @@ def run():
     query[tuple[int, int]](t'SELECT 1 AS "value!"')
     query[tuple[int, str]](t'''SELECT 1 AS "value!", '<a/>'::xml AS "p!"''')
     query[Row](t'SELECT 1 AS "a!", 2 AS "name!"')
+    query[int](t'SELECT NULL::text AS "value?"')
 """,
     )
     code, out, _ = _run(capsys, str(path), "--database-url", schema, "--coverage")
@@ -840,6 +841,9 @@ def run():
         "row contract: partially compared",
         "row contract: partially compared",
         "row contract: partially compared",
+        "row contract: partially compared",
     ]
     assert "error[arity-mismatch]" in out
     assert "error[unsupported-type]" in out
+    assert 'error[type-mismatch]: column 1 "value": column type is `str` but the annotation is `int`' in out
+    assert "error[nullability-mismatch]" not in out
