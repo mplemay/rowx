@@ -8,6 +8,8 @@ a live Postgres 18 database before you ship.
 
 Install the checker and PostgreSQL backend with `uv add "rowx[postgres]"`.
 
+Free-threaded CPython 3.14t cannot install the abi3 wheels, so pip builds rowx-postgres from the source distribution.
+
 ```python test
 import asyncio
 

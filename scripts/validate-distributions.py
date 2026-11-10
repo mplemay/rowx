@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 from argparse import ArgumentParser
+from email.parser import Parser
 from os import environ
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 from zipfile import ZipFile
+
+if TYPE_CHECKING:
+    from email.message import Message
 
 ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 DIST: Final[Path] = ROOT / "dist"
@@ -17,6 +21,42 @@ WHEEL_TAGS: Final[tuple[tuple[str, ...], ...]] = (
     ("macosx", "arm64"),
     ("win_amd64",),
 )
+MIT_LICENSE: Final[str] = "MIT"
+LICENSE_PATH_MARKER: Final[str] = ".dist-info/licenses/"
+METADATA_SUFFIX: Final[str] = ".dist-info/METADATA"
+WHEEL_PARTS_WITHOUT_BUILD: Final[int] = 5
+WHEEL_PARTS_WITH_BUILD: Final[int] = 6
+VERSION_INDEX: Final[int] = 1
+PAIR_LENGTH: Final[int] = 2
+ROWX: Final[str] = "rowx"
+ROWX_CORE: Final[str] = "rowx_core"
+ROWX_POSTGRES: Final[str] = "rowx_postgres"
+CORE_DISTRIBUTION: Final[str] = "rowx-core"
+POSTGRES_DISTRIBUTION: Final[str] = "rowx-postgres"
+PYTEST_DISTRIBUTION: Final[str] = "pytest"
+POSTGRES_EXTRA: Final[str] = "postgres"
+PYTEST_EXTRA: Final[str] = "pytest"
+EXPECTED_CLASSIFIERS: Final[frozenset[str]] = frozenset({
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+    "Topic :: Database",
+    "Framework :: AsyncIO",
+})
+EXPECTED_KEYWORDS: Final[tuple[str, ...]] = ("sql", "postgresql", "postgres", "typed", "async", "t-string")
+EXPECTED_URLS: Final[dict[str, str]] = {
+    "Documentation": "https://mplemay.github.io/rowx/",
+    "Repository": "https://github.com/mplemay/rowx",
+    "Issues": "https://github.com/mplemay/rowx/issues",
+    "Changelog": "https://github.com/mplemay/rowx/blob/main/docs/changelog.md",
+}
+FORBIDDEN_CORE_REQUIREMENTS: Final[frozenset[str]] = frozenset({ROWX, POSTGRES_DISTRIBUTION})
+
+type Requirement = tuple[str, str | None]
 
 
 def main() -> int:
@@ -56,6 +96,12 @@ def validate_wheel(path: Path) -> None:
     namespace = path.name.split("-", maxsplit=1)[0]
     with ZipFile(path) as wheel:
         names = wheel.namelist()
+        metadata = _read_metadata(path, wheel)
+    _reject_development_files(path, namespace, names)
+    _validate_metadata(path, namespace, names, metadata)
+
+
+def _reject_development_files(path: Path, namespace: str, names: list[str]) -> None:
     for name in names:
         parts = Path(name).parts
         if "__tests__" in parts or "__pycache__" in parts or name.endswith((".rs", ".pyc", "Cargo.toml")):
@@ -64,12 +110,182 @@ def validate_wheel(path: Path) -> None:
         if parts and parts[0] != namespace and not parts[0].endswith(".dist-info"):
             message = f"{path.name} owns an unexpected namespace: {name}"
             raise SystemExit(message)
-        if namespace != "rowx_postgres" and name.endswith((".so", ".pyd", ".dll", ".dylib")):
+        if namespace != ROWX_POSTGRES and name.endswith((".so", ".pyd", ".dll", ".dylib")):
             message = f"{path.name} must be pure Python"
             raise SystemExit(message)
     if f"{namespace}/py.typed" not in names:
         message = f"{path.name} is missing its typing marker"
         raise SystemExit(message)
+
+
+def _validate_metadata(path: Path, namespace: str, names: list[str], metadata: Message) -> None:
+    version = _wheel_version(path)
+    _validate_license(path, metadata)
+    _validate_license_file(path, names)
+    _validate_classifiers(path, metadata)
+    _validate_keywords(path, metadata)
+    _validate_urls(path, metadata)
+    _validate_requires(path, namespace, version, metadata)
+
+
+def _read_metadata(path: Path, wheel: ZipFile) -> Message:
+    matches = [name for name in wheel.namelist() if name.endswith(METADATA_SUFFIX)]
+    if len(matches) != MATCH_COUNT:
+        message = f"{path.name} metadata files are {matches}"
+        raise SystemExit(message)
+    return Parser().parsestr(wheel.read(matches[0]).decode("utf-8"))
+
+
+def _wheel_version(path: Path) -> str:
+    parts = path.name.removesuffix(".whl").split("-")
+    if len(parts) not in {WHEEL_PARTS_WITHOUT_BUILD, WHEEL_PARTS_WITH_BUILD}:
+        message = f"{path.name} is not a wheel filename"
+        raise SystemExit(message)
+    return parts[VERSION_INDEX]
+
+
+def _validate_license(path: Path, metadata: Message) -> None:
+    expression = metadata.get("License-Expression")
+    legacy = metadata.get("License")
+    if expression == MIT_LICENSE or (expression is None and legacy == MIT_LICENSE):
+        return
+    message = f"{path.name} license metadata is License-Expression={expression!r} License={legacy!r}"
+    raise SystemExit(message)
+
+
+def _validate_license_file(path: Path, names: list[str]) -> None:
+    packaged = [name for name in names if LICENSE_PATH_MARKER in name and not name.endswith("/")]
+    if packaged:
+        return
+    present = [name for name in names if "LICENSE" in name.upper()]
+    message = f"{path.name} license file is not under {LICENSE_PATH_MARKER}: {present}"
+    raise SystemExit(message)
+
+
+def _validate_classifiers(path: Path, metadata: Message) -> None:
+    found = frozenset(metadata.get_all("Classifier", []))
+    if found != EXPECTED_CLASSIFIERS:
+        message = f"{path.name} classifiers are {sorted(found)}"
+        raise SystemExit(message)
+
+
+def _validate_keywords(path: Path, metadata: Message) -> None:
+    raw = metadata.get("Keywords")
+    keywords = tuple(part.strip() for part in raw.split(",")) if raw is not None else ()
+    if keywords != EXPECTED_KEYWORDS:
+        message = f"{path.name} keywords are {keywords}"
+        raise SystemExit(message)
+
+
+def _validate_urls(path: Path, metadata: Message) -> None:
+    found: dict[str, str] = {}
+    for value in metadata.get_all("Project-URL", []):
+        label, separator, url = value.partition(",")
+        if not separator:
+            message = f"{path.name} has a Project-URL without a comma: {value}"
+            raise SystemExit(message)
+        found[label.strip()] = url.strip()
+    if found != EXPECTED_URLS:
+        message = f"{path.name} project URLs are {found}"
+        raise SystemExit(message)
+
+
+def _validate_requires(path: Path, namespace: str, version: str, metadata: Message) -> None:
+    requirements = [_split_requirement(value) for value in metadata.get_all("Requires-Dist", [])]
+    if namespace == ROWX:
+        _validate_rowx_requires(path, version, requirements)
+        return
+    if namespace == ROWX_CORE:
+        _validate_core_requires(path, requirements)
+        return
+    if namespace == ROWX_POSTGRES:
+        _validate_postgres_requires(path, version, requirements)
+        return
+    message = f"{path.name} has an unexpected distribution name"
+    raise SystemExit(message)
+
+
+def _validate_rowx_requires(path: Path, version: str, requirements: list[Requirement]) -> None:
+    direct = [requirement for requirement, marker in requirements if marker is None]
+    expected_core = f"{CORE_DISTRIBUTION}=={version}"
+    if direct != [expected_core]:
+        message = f"{path.name} direct requirements are {direct}, expected [{expected_core}]"
+        raise SystemExit(message)
+    extras: list[tuple[str, str]] = []
+    for requirement, marker in requirements:
+        if marker is None:
+            continue
+        extra = _extra_name(marker)
+        if extra is None:
+            message = f"{path.name} has a requirement marker that is not a single extra: {requirement} ; {marker}"
+            raise SystemExit(message)
+        extras.append((requirement, extra))
+    expected_postgres = f"{POSTGRES_DISTRIBUTION}=={version}"
+    postgres = [
+        (requirement, extra)
+        for requirement, extra in extras
+        if _distribution_name(requirement) == POSTGRES_DISTRIBUTION
+    ]
+    if postgres != [(expected_postgres, POSTGRES_EXTRA)]:
+        message = (
+            f"{path.name} postgres requirements are {postgres}, expected [({expected_postgres}, {POSTGRES_EXTRA})]"
+        )
+        raise SystemExit(message)
+    for requirement, extra in extras:
+        if _distribution_name(requirement) == POSTGRES_DISTRIBUTION:
+            continue
+        if _distribution_name(requirement) != PYTEST_DISTRIBUTION or extra != PYTEST_EXTRA:
+            message = f"{path.name} has an unexpected extra requirement: {requirement} ; extra == {extra}"
+            raise SystemExit(message)
+
+
+def _validate_core_requires(path: Path, requirements: list[Requirement]) -> None:
+    for requirement, _marker in requirements:
+        if _distribution_name(requirement) in FORBIDDEN_CORE_REQUIREMENTS:
+            message = f"{path.name} must not require {requirement}"
+            raise SystemExit(message)
+
+
+def _validate_postgres_requires(path: Path, version: str, requirements: list[Requirement]) -> None:
+    expected = f"{CORE_DISTRIBUTION}=={version}"
+    found = [requirement if marker is None else f"{requirement}; {marker}" for requirement, marker in requirements]
+    if found != [expected]:
+        message = f"{path.name} requirements are {found}, expected [{expected}]"
+        raise SystemExit(message)
+
+
+def _split_requirement(value: str) -> Requirement:
+    requirement, separator, marker = value.partition(";")
+    if separator:
+        return requirement.strip(), marker.strip()
+    return requirement.strip(), None
+
+
+def _extra_name(marker: str) -> str | None:
+    text = marker.strip()
+    if len(text) >= PAIR_LENGTH and text[0] == "(" and text[-1] == ")":
+        text = text[1:-1].strip()
+    left, separator, right = text.partition("==")
+    if not separator or left.strip() != "extra":
+        return None
+    value = right.strip()
+    quoted = (
+        len(value) >= PAIR_LENGTH
+        and value[0] in {"'", '"'}
+        and value.endswith(value[0])
+        and value.count(value[0]) == PAIR_LENGTH
+    )
+    if not quoted:
+        return None
+    return value[1:-1]
+
+
+def _distribution_name(requirement: str) -> str:
+    name = requirement.strip()
+    for index, char in enumerate(name):
+        if char in "<>=!~[;( ":
+            return name[:index].strip().lower().replace("_", "-")
+    return name.lower().replace("_", "-")
 
 
 def _required(name: str) -> str:

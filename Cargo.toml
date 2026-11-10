@@ -13,6 +13,7 @@ exclude = ["fuzz"]
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
+license = "MIT"
 
 [workspace.dependencies]
 # pyo3 and pyo3-async-runtimes minors always move together (docs/design/architecture.md)
