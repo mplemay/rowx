@@ -102,7 +102,11 @@ pub(crate) fn scan_filter_not_null(
     let Some(root) = plan.get(0).and_then(|entry| entry.get("Plan")) else {
         return proven;
     };
-    if str_key(root, "Node Type") != Some("Seq Scan") || children(root).next().is_some() {
+    if !matches!(
+        str_key(root, "Node Type"),
+        Some("Seq Scan" | "Index Scan" | "Index Only Scan")
+    ) || children(root).next().is_some()
+    {
         return proven;
     }
     let (Some(schema), Some(relation), Some(alias), Some(filter)) = (

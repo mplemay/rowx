@@ -442,6 +442,36 @@ def test_scan_filter_witnesses(schema: str, sql: LiteralString, expected: tuple[
     assert any(row[0] is None for row in rows) is has_null
 
 
+@pytest.mark.parametrize(("index_only", "node_type"), [(False, "Index Scan"), (True, "Index Only Scan")])
+def test_scan_filter_indexed_witness(schema: str, *, index_only: bool, node_type: str) -> None:
+    execute(
+        schema,
+        "CREATE TABLE scan_indexed (id integer, email text)",
+        "INSERT INTO scan_indexed VALUES (1, 'a'), (2, NULL), (3, 'b')",
+        "CREATE INDEX ON scan_indexed (id) INCLUDE (email)",
+    )
+    sql = "SELECT email FROM scan_indexed WHERE id >= 1 AND email IS NOT NULL"
+    index_only_setting = "on" if index_only else "off"
+
+    async def body(conn: Connection) -> list[tuple[bool, str]]:
+        await scalar(conn, "SELECT set_config('enable_seqscan', 'off', false)")
+        await scalar(conn, "SELECT set_config('enable_bitmapscan', 'off', false)")
+        await scalar(conn, f"SELECT set_config('enable_indexonlyscan', '{index_only_setting}', false)")
+        return [(c.nullable, c.reason) for c in (await describe(conn, sql)).columns]
+
+    assert run_checker(schema, body) == [(False, "ScanFilterNotNull")]
+    with psycopg.connect(schema) as conn:
+        conn.execute("SET enable_seqscan = off")
+        conn.execute("SET enable_bitmapscan = off")
+        conn.execute(pg_sql.SQL("SET enable_indexonlyscan = {}").format(pg_sql.SQL(index_only_setting)))
+        plan = conn.execute(pg_sql.SQL("EXPLAIN (VERBOSE, FORMAT JSON) " + sql)).fetchone()
+        assert plan is not None
+        root = plan[0][0]["Plan"]
+        assert root["Node Type"] == node_type
+        assert root["Filter"] == "(scan_indexed.email IS NOT NULL)"
+        assert set(conn.execute(pg_sql.SQL(sql)).fetchall()) == {("a",), ("b",)}
+
+
 def test_scan_filter_quoted_identifier_falls_back(schema: str) -> None:
     execute(schema, 'CREATE TABLE quoted_scan ("Email" text)', "INSERT INTO quoted_scan VALUES (NULL), ('a')")
     sql = 'SELECT "Email" FROM quoted_scan WHERE "Email" IS NOT NULL'
