@@ -11,7 +11,8 @@ from rowx_core.backend import UnsupportedCapabilityError
 
 from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
 from rowx.check.config import Config, ConfigError, database_url, load_config
-from rowx.check.render import render_json, render_text, strip_controls
+from rowx.check.model import Diagnostic, Span
+from rowx.check.render import Report, render_json, render_text, strip_controls
 from rowx.check.runner import CheckError, Hooks, RunResult, redact, run_check
 from rowx.check.walk import discover_files
 
@@ -42,6 +43,11 @@ def _add_check(subparsers: _SubParsersAction[ArgumentParser]) -> None:
     check.add_argument("--config", type=Path, metavar="FILE")
     check.add_argument("--output-format", choices=("text", "json"), default="text")
     check.add_argument("--statistics", action="store_true")
+    check.add_argument("--coverage", action="store_true", help="report recognized query sites and comparison coverage")
+    check.add_argument(
+        "--require-checked", action="store_true", help="require at least one successfully described query"
+    )
+    check.add_argument("--disallow-unchecked", action="store_true", help="reject recognized query_unchecked calls")
     check.add_argument("--scratch", action="store_true", help=SCRATCH_HELP)
     check.add_argument("--no-drift-check", action="store_true")
     check.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1), metavar="N")
@@ -82,6 +88,63 @@ def _statistics(result: RunResult) -> str:
     lines.append(f"diagnostics: {sum(stats.by_rule.values())}")
     lines.extend(f"  {rule}: {count}" for rule, count in sorted(stats.by_rule.items()))
     return "\n".join(lines) + "\n"
+
+
+def _coverage(result: RunResult, root: Path) -> str:
+    lines = [f"recognized query sites: {len(result.coverage)}"]
+    if not result.coverage:
+        lines.append("no recognized query sites in selected files")
+    for site in result.coverage:
+        try:
+            path = site.path.relative_to(root)
+        except ValueError:
+            path = site.path
+        span = site.span
+        location = f"{strip_controls(str(path))}:{span.line}:{span.col}-{span.end_line}:{span.end_col}"
+        state = "unchecked" if site.kind == "query_unchecked" else "described" if site.described else "not described"
+        lines.append(f"  {location}: {state}")
+        if site.described:
+            lines.append(f"    row contract: {site.row_comparison}")
+            if not site.parameters_aligned:
+                lines.append("    parameters: not aligned or inference unavailable")
+            for index, param in enumerate(site.parameters, 1):
+                py = param.python_type.name if param.python_type is not None else "unknown"
+                status = (
+                    "not compared"
+                    if param.mismatch is None
+                    else "mismatch"
+                    if param.mismatch
+                    else "no mismatch reported"
+                )
+                lines.append(f"    parameter ${index}: SQL {strip_controls(param.sql_type)}, Python {py}; {status}")
+    return "\n".join(lines) + "\n"
+
+
+def _policies(result: RunResult, root: Path, *, require_checked: bool, disallow_unchecked: bool) -> None:
+    if require_checked and not any(site.described for site in result.coverage):
+        result.reports.append(
+            Report(
+                diagnostic=Diagnostic(
+                    rule="coverage-require-checked",
+                    message="no query was successfully described",
+                    path=root,
+                    span=Span(line=1, col=1, end_line=1, end_col=2),
+                )
+            )
+        )
+    if disallow_unchecked:
+        for site in result.coverage:
+            if site.kind == "query_unchecked":
+                result.reports.append(
+                    Report(
+                        diagnostic=Diagnostic(
+                            rule="coverage-unchecked",
+                            message="query_unchecked is disallowed",
+                            path=site.path,
+                            span=site.span,
+                        )
+                    )
+                )
 
 
 class _Built(Protocol):
@@ -197,12 +260,23 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("error: interrupted", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
+    _policies(result, root, require_checked=args.require_checked, disallow_unchecked=args.disallow_unchecked)
+    result.statistics.by_rule.clear()
+    result.statistics.by_rule.update(report.diagnostic.rule for report in result.reports)
+    _print_result(result, root, args)
+    return EXIT_DIAGNOSTICS if result.reports else EXIT_CLEAN
+
+
+def _print_result(result: RunResult, root: Path, args: Namespace) -> None:
     if args.output_format == "json":
         sys.stdout.write(render_json(result.reports, root))
         if args.statistics:
             sys.stderr.write(_statistics(result))
+        if args.coverage:
+            sys.stderr.write(_coverage(result, root))
     else:
         sys.stdout.write(render_text(result.reports, result.sources, root))
         if args.statistics:
             sys.stdout.write(_statistics(result))
-    return EXIT_DIAGNOSTICS if result.reports else EXIT_CLEAN
+        if args.coverage:
+            sys.stdout.write(_coverage(result, root))

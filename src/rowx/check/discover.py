@@ -939,6 +939,7 @@ class _Finder(ast.NodeVisitor):
         self._visit_all(node.keywords)
         if ref.ambiguous:
             return
+        self.result.recognized.append((ref.kind, self._lines.span(node)))
         row_type = subscript.slice if subscript is not None else None
         row_type_span = self._lines.span(row_type) if row_type is not None else None
         if ref.kind == "query_unchecked":
