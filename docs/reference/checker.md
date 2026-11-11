@@ -136,9 +136,10 @@ attributed to the neighbouring interpolation.
 `:ident` is recognised while assembling a `query_unchecked` template. The source span is the interpolation. Nested
 templates are flattened in source order. A repeated nested template is shared. A non-inline argument of `query` is
 `dynamic-query` on that argument (`query[int](sql)` spans `sql`). The same rule is reported on the call when the
-argument count, a keyword, or a star means it is not exactly one positional argument. A `query_unchecked` call is
-silent unless its sole argument is an inline t-string. The file's encoding cookie is honoured. A file that does not
-decode is `syntax-error`.
+argument count, a keyword, or a star means it is not exactly one positional argument. If the argument of
+`query_unchecked` is not an inline t-string, there is no diagnostic. If it is an inline t-string, the SQL is still
+not described, a non-literal format spec is `dynamic-query`, and `T` is still resolved. The file's encoding cookie is
+honoured. A file that does not decode is `syntax-error`.
 
 ## Row-type resolution
 
@@ -167,7 +168,7 @@ from its parameters. A string annotation inside a class is parsed. A string as `
 |---|---|
 | `syntax-error` | The file did not parse, did not decode, or is nested too deeply to analyse. |
 | `indirect-query` | A use the checker will not follow, including a star import of `rowx` or `rowx_core`. |
-| `dynamic-query` | For `query`, a non-inline argument (reported on that argument) or a call that is not exactly one positional argument because of the argument count, a keyword, or a star (reported on the call). An inline `query` t-string with a conversion, a format spec, or a nested t-string. A `query_unchecked` call is silent unless its sole argument is an inline t-string; a non-literal format spec in that t-string is this rule, and `T` is still resolved. |
+| `dynamic-query` | For `query`, a non-inline argument (reported on that argument) or a call that is not exactly one positional argument because of the argument count, a keyword, or a star (reported on the call). An inline `query` t-string with a conversion, a format spec, or a nested t-string. If the argument of `query_unchecked` is not an inline t-string, there is no diagnostic. If it is an inline t-string, the SQL is still not described, a non-literal format spec is this rule, and `T` is still resolved. |
 | `template-construction` | A hand-built `Template`, or a non-literal format spec, in a discovered file. |
 | `unresolved-row-type` | A name in `T` could not be resolved. This includes a `query_unchecked` row type. |
 | `invalid-row-type` | `T` resolved but is not in the grammar. This includes a `query_unchecked` row type. |
