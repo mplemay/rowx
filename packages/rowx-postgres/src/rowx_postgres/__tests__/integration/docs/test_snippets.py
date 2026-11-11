@@ -70,6 +70,56 @@ def test_snippet_runs(path: Path, index: int, body: str, schema: str, tmp_path: 
     run_path(str(script), init_globals={"DSN": schema})
 
 
+def test_published_readmes_use_canonical_imports() -> None:
+    readme = (ROOT / "README.md").read_text()
+    core_readme = (ROOT / "packages" / "rowx-core" / "README.md").read_text()
+    postgres_readme = (ROOT / "packages" / "rowx-postgres" / "README.md").read_text()
+    why = ROOT / "docs" / "why.md"
+    zensical = (ROOT / "zensical.toml").read_text()
+    assert why.is_file()
+    why_text = why.read_text()
+
+    assert "from rowx import query" in readme
+    assert "from rowx.postgres import Pool" in readme
+    assert "from rowx.postgres import connect" in readme
+    assert "rowx[postgres]" in readme
+    assert "from rowx_postgres import" not in readme
+    index = (ROOT / "docs" / "index.md").read_text()
+    assert "from rowx.postgres import connect" in index
+    assert "from rowx_postgres import" not in index
+    assert "docs/why.md" in readme
+    assert "docs/changelog.md" in readme
+    assert "prepares each checked" in readme
+    assert "query_unchecked" in readme
+    assert "no diagnostics" in readme
+
+    assert "from rowx_core import query" in core_readme
+    assert "no runtime dependencies" in core_readme
+    assert "rowx[postgres]" in core_readme
+    assert "uv add rowx-core rowx-postgres" in core_readme
+
+    assert "from rowx_postgres import Pool, connect" in postgres_readme
+    assert "depends only on" in postgres_readme
+    assert "rowx-core" in postgres_readme
+    assert "uv add rowx-core rowx-postgres" in postgres_readme
+    assert "rowx[postgres]" in postgres_readme
+
+    assert "SQLx" in why_text
+    assert "asyncpg" in why_text
+    assert "psycopg" in why_text
+    assert "SQLAlchemy" in why_text
+    assert "sqlc" in why_text
+    assert "query_unchecked" in why_text
+    assert "query_as!" in why_text
+    assert "do not describe mapped objects" not in why_text
+    assert "The FAQ is about" not in why_text
+    assert "tstring()" in why_text
+    assert "not a t-string" not in why_text
+    assert "The checker never imports" in why_text
+
+    assert "why.md" in zensical
+
+
 def test_parametrization_runs_every_fence() -> None:
     # The decorator sets pytestmark at import. ty does not treat that attribute as declared.
     raw = vars(test_snippet_runs).get("pytestmark")
