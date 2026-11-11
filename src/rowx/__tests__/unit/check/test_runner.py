@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass, replace
+from functools import partial
 from time import perf_counter
 from typing import TYPE_CHECKING, override
 
@@ -356,3 +357,47 @@ def test_a_file_nested_too_deeply_does_not_hide_the_others(tmp_path: Path, capsy
     assert "internal error" not in out
     assert "the file is nested too deeply to analyse" in out
     assert "template-construction" in out
+
+
+def test_operational_sql_failure_survives_cli_ignore_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake_backend: CheckerBackend
+) -> None:
+    from rowx._backend import backend_for  # ruff: ignore[import-outside-top-level]
+    from rowx.check.runner import _Operational  # ruff: ignore[import-outside-top-level]
+
+    path = tmp_path / "site.py"
+    path.write_text('from rowx import query\nquery[int](t"SELECT 1") # rowx: ignore\n', encoding="utf-8")
+
+    async def outcomes(*_args: object, **_kwargs: object) -> dict[str, _Operational]:  # ruff: ignore[unused-async]
+        return {"SELECT 1": _Operational(DatabaseError("XX000", "operational failure"))}
+
+    backend = replace(fake_backend, compiler=backend_for("postgres://").checker().compiler)
+
+    monkeypatch.setattr("rowx.check.runner.describe_all", outcomes)
+    monkeypatch.setattr("rowx.check.cli.run_check", partial(run_check, backend=backend))
+    assert main(["check", str(path), "--database-url", "fake://db", "--ignore", "all"]) == 2
+    assert "error[sql-error]" in capsys.readouterr().out
+
+
+def test_run_check_preserves_raw_reports_with_ignores(tmp_path: Path) -> None:
+    path = tmp_path / "site.py"
+    path.write_text("from rowx import query\nquery[int](sql) # rowx: ignore[dynamic-query]\n", encoding="utf-8")
+    config = load_config(tmp_path)
+    result = asyncio.run(run_check(config, [path], None, 1))
+    assert [report.diagnostic.rule for report in result.reports] == ["dynamic-query"]
+
+
+def test_glob_include_resolves_imported_row_type(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "models.py").write_text("type Row = tuple[int, str]\n", encoding="utf-8")
+    path = src / "queries.py"
+    path.write_text(
+        'from models import Row\nfrom rowx import query_unchecked\nquery_unchecked[Row](t"SELECT 1")\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text('[tool.rowx]\ninclude = ["src/**/*.py"]\n', encoding="utf-8")
+    config = load_config(tmp_path)
+    result = asyncio.run(run_check(config, discover_files(config, tmp_path), None, 1, boundary=tmp_path))
+    assert not result.reports
+    assert result.statistics.unchecked == 1

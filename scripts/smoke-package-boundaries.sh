@@ -8,6 +8,7 @@ if (($# != 1)); then
 fi
 
 distributions="$(cd "$1" && pwd)"
+rowx_wheels=("$distributions"/rowx-*.whl)
 workspace="$(mktemp -d)"
 trap 'rm -rf "$workspace"' EXIT
 cd "$workspace"
@@ -68,7 +69,7 @@ assert find_spec("rowx") is None
 PY
 
 uv venv --python "${PYTHON:-3.14}" cli
-uv pip install --refresh --python cli/bin/python --no-index --find-links "$distributions" rowx
+uv pip install --refresh --python cli/bin/python "$distributions"/rowx-*.whl "$distributions"/rowx_core-*.whl
 cli/bin/python - <<'PY'
 from pathlib import Path
 from sys import modules
@@ -89,7 +90,7 @@ else:
 Path("queries.py").write_text('from rowx_core import query\nquery[int](t"SELECT 1")\n')
 assert main(["check", "--database-url", "postgresql://localhost/example", "queries.py"]) == 2
 PY
-uv pip install --refresh --python cli/bin/python --no-index --find-links "$distributions" 'rowx[postgres]'
+uv pip install --refresh --python cli/bin/python "${rowx_wheels[0]}[postgres]" "$distributions"/rowx_core-*.whl "$distributions"/rowx_postgres-*.whl
 cli/bin/python - <<'PY'
 import rowx_postgres
 from rowx import InterfaceError, postgres, query

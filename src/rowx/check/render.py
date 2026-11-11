@@ -36,6 +36,8 @@ class Report:
     # the position of the report among those at one span, which a named row uses to keep the order the design gives
     order: int = 0
     wider_nullability: bool = False
+    severity: Literal["error", "warning"] = "error"
+    operational: bool = False
 
 
 type _TemplateReason = Literal[
@@ -181,7 +183,7 @@ def _block(report: Report, source: str | None, width: int, root: Path | None) ->
     span = diagnostic.span
     pad = " " * width
     out = [
-        f"error[{diagnostic.rule}]: {strip_controls(diagnostic.message)}",
+        f"{report.severity}[{diagnostic.rule}]: {strip_controls(diagnostic.message)}",
         f"{pad}--> {_relative(diagnostic.path, root)}:{span.line}:{span.col}",
     ]
     if source is not None and 1 <= span.line <= len(_source_lines(source)):
@@ -219,6 +221,7 @@ def render_json(reports: Iterable[Report], root: Path | None = None) -> str:
         items.append(
             {
                 "rule": diagnostic.rule,
+                "severity": report.severity,
                 "message": diagnostic.message,
                 "file": _relative(diagnostic.path, root),
                 "line": span.line,
