@@ -14,7 +14,7 @@ Free-threaded CPython 3.14t cannot install the abi3 wheels, so pip builds rowx-p
 import asyncio
 
 from rowx import query
-from rowx_postgres import Pool
+from rowx.postgres import Pool
 
 type UserRow = tuple[int, str, str | None]  # id, name, email
 
@@ -36,7 +36,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-- `Pool` is safe to create at module level and acquires a connection per call. Use `rowx_postgres.connect(dsn)` for a
+- `Pool` is safe to create at module level and acquires a connection per call. Use `rowx.postgres.connect(dsn)` for a
   single connection, and `pool.transaction()` for transactions.
 - Interpolations (`{name}`) are always bound as server-side parameters. They are never pasted into the SQL text.
 - `query[T]` states the row type. `one` returns `T`, `optional` returns `T | None`, `all` returns `list[T]`, and
@@ -50,7 +50,7 @@ import asyncio
 from dataclasses import dataclass
 
 from rowx import query
-from rowx_postgres import connect
+from rowx.postgres import connect
 
 
 @dataclass(slots=True)
@@ -95,20 +95,19 @@ contract for the exit codes.
 ## Distributions
 
 `rowx` is the optional CLI and re-exports `query`. `from rowx import query` and `from rowx_core import query` are the
-same object.
+same object. With `rowx[postgres]`, the backend is `rowx.postgres`.
 
-`rowx-core` (`rowx_core`) has no runtime dependencies. `rowx-postgres` (`rowx_postgres`) depends only on matching
-`rowx-core`.
+`rowx-core` (`rowx_core`) has no runtime dependencies. `rowx-postgres` depends only on matching `rowx-core`.
+`rowx.postgres` re-exports that driver and needs the `postgres` extra.
 
-A standalone application installs `rowx-core` and `rowx-postgres` and does not get the `rowx` command:
+A standalone application installs `rowx-core` and `rowx-postgres` and does not get the `rowx` command. That pair
+imports the driver as `rowx_postgres`:
 
 ```sh
 uv add rowx-core rowx-postgres
 ```
 
 The checker uses `--database-url` or `DATABASE_URL` and does not import the application.
-
-`rowx.postgres` remains a compatibility re-export of `rowx_postgres` and still needs the `postgres` extra.
 
 ## Documentation
 

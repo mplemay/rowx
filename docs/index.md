@@ -5,7 +5,7 @@ explicit row type. A Rust driver built on tokio-postgres runs it, and `rowx chec
 Postgres 18 database.
 
 ```python
-from rowx_postgres import connect
+from rowx.postgres import connect
 from rowx import query
 
 async with await connect(dsn) as conn:

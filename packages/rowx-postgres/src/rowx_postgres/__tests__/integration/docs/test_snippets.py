@@ -80,9 +80,13 @@ def test_published_readmes_use_canonical_imports() -> None:
     why_text = why.read_text()
 
     assert "from rowx import query" in readme
-    assert "from rowx_postgres import" in readme
+    assert "from rowx.postgres import Pool" in readme
+    assert "from rowx.postgres import connect" in readme
     assert "rowx[postgres]" in readme
-    assert "from rowx.postgres import" not in readme
+    assert "from rowx_postgres import" not in readme
+    index = (ROOT / "docs" / "index.md").read_text()
+    assert "from rowx.postgres import connect" in index
+    assert "from rowx_postgres import" not in index
     assert "docs/why.md" in readme
     assert "docs/changelog.md" in readme
     assert "prepares each checked" in readme
