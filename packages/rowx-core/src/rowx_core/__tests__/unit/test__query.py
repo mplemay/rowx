@@ -139,6 +139,17 @@ def test_query_validates_without_selecting_a_compiler() -> None:
         query(t"SELECT \x00")
 
 
+def test_identifier_shape_is_rejected_at_construction() -> None:
+    with pytest.raises(TypeError, match="identifier must be a str"):
+        query_unchecked(t"SELECT {1:ident}")
+
+
+def test_identifier_length_and_placement_are_not_construction_errors() -> None:
+    name = "a" * 64
+    assert query_unchecked(t"SELECT {name:ident}") is not None
+    assert query_unchecked(t"SELECT '{name:ident}'") is not None
+
+
 def test_unchecked_capture_retains_shared_nested_templates() -> None:
     value = 1
     template = t"{value}"

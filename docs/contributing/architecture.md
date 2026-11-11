@@ -33,7 +33,9 @@ Rust crates:
 | `packages/rowx-postgres` | The cdylib. Cargo package name `rowx-postgres-py`, library name `_core`. This is the binding crate, not a separate distribution. |
 
 Workspace members are those four paths. `pyo3` and `pyo3-async-runtimes` are workspace dependencies and their minor
-versions move together. The extension is built with maturin. Do not `cargo build` the cdylib on its own.
+versions move together. `uv sync` installs the workspace. `ty` checks each package in place, with no merged
+type-check tree and no cross-package symlink. Build the extension with
+`uv run maturin develop -m packages/rowx-postgres/Cargo.toml`. Do not `cargo build` the cdylib on its own.
 
 ## Native module and runtimes
 
@@ -48,10 +50,13 @@ The GIL is released around IO. IO runs on that runtime.
 ## Acyclic dependencies
 
 `rowx-postgres` does not import `rowx`. The checker in `rowx` selects a backend from the database URL and receives
-the backend's checker, admin and migration services as arguments. There is no `ContextVar`, no default backend, and
-no cast through `Any` to hide a backend type. A capability the process did not install is an error from
-`backend_for`, not a silent PostgreSQL fallback. Keyword and `postgres`/`postgresql` URLs ask for `rowx_postgres`.
-Error redaction is string processing over the URL the command already holds. It does not import a provider.
+the backend's checker, admin and migration services as arguments. `Backend` in
+`packages/rowx-core/src/rowx_core/backend.py` has `checker`, `admin`, `migrations`, and `testing` factories. A
+missing one raises `UnsupportedCapabilityError`. A checker-only backend need not implement administration or
+testing. There is no `ContextVar`, no default backend, and no cast through `Any` to hide a backend type. A
+capability the process did not install is an error from `backend_for`, not a silent PostgreSQL fallback. Keyword
+and `postgres`/`postgresql` URLs ask for `rowx_postgres`. Error redaction is string processing over the URL the
+command already holds. It does not import a provider.
 
 ## Validation timing
 
