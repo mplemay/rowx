@@ -38,8 +38,9 @@ async def user_id(conn, name: str) -> int | None:
 
 ## Lists use ANY
 
-Bind a list with `= ANY({ids})`. That is one parameter however long the list is. An empty list is valid. Do not
-build an `IN` list of placeholders or quoted literals.
+Bind a list with `= ANY({ids})`. That is one parameter however long the list is. An empty list is valid.
+`IN ({listed})` is still one parameter. Building that list with an f-string and passing the `str` to `query` raises
+`TypeError` because `query` requires a template.
 
 Incorrect:
 
@@ -49,7 +50,8 @@ from rowx import query
 
 async def by_name(conn, names: list[str]) -> list[str]:
     listed = ", ".join(f"'{name}'" for name in names)
-    return await query[str](t"SELECT name FROM users WHERE name IN ({listed}) ORDER BY name").all(conn)
+    sql = f"SELECT name FROM users WHERE name IN ({listed}) ORDER BY name"
+    return await query[str](sql).all(conn)
 ```
 
 Correct:

@@ -71,8 +71,8 @@ The checker finds the t-string by parsing the file. It does not import the appli
 
 ## `query_unchecked` SQL is not described
 
-`query_unchecked` SQL is not described while `T` is still resolved. Keep the call in a small function that
-allowlists its dynamic parts. See [Identifiers](identifiers.md).
+`query_unchecked` is for an allowlisted dynamic part ([Identifiers](identifiers.md)); its SQL is not described, and
+`T` is still resolved.
 
 Incorrect:
 
@@ -81,15 +81,19 @@ from rowx import query_unchecked
 
 
 def names():
-    return query_unchecked[dict](t"SELECT name FROM users ORDER BY name")
+    return query_unchecked[str](t"SELECT name FROM users ORDER BY name")
 ```
+
+The checker does not describe that SQL.
 
 Correct:
 
 ```python
-from rowx import query_unchecked
+from rowx import query
 
 
 def names():
-    return query_unchecked[str](t"SELECT name FROM users ORDER BY name")
+    return query[str](t"SELECT name FROM users ORDER BY name")
 ```
+
+A static statement belongs on `query`, which is described.

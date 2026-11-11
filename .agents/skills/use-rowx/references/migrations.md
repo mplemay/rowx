@@ -36,6 +36,7 @@ rowx database reset
 rowx database setup
 ```
 
-Migration files are trusted SQL. Checksums are the SHA-384 of the raw bytes. With `[tool.rowx.migrate]` present,
-`rowx check` compares the database with the directory before it describes queries. A drift or scratch failure
+Migration files are trusted SQL. Checksums are the SHA-384 of the raw bytes. The drift gate is installed only when
+`[tool.rowx.migrate]` is present, `--scratch` is off, and `--no-drift-check` is off. Nothing is compared when no
+statement would be described. `--scratch` applies migrations and does not drift-check. A drift or scratch failure
 exits 2.

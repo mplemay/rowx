@@ -173,19 +173,11 @@ def test_use_rowx_skill_links_resolve() -> None:
             assert resolved.is_file(), f"{source.relative_to(ROOT)} -> {destination}"
 
 
-def _python_fence_contains(text: str, needle: str) -> bool:
-    in_python = False
-    for line in text.splitlines():
-        if in_python:
-            if line.startswith("```"):
-                in_python = False
-                continue
-            if needle in line:
-                return True
-            continue
-        if line.startswith("```python"):
-            in_python = True
-    return False
+def _python_fence_after(text: str, label: str) -> str:
+    start = text.index(f"{label}:")
+    fence = text.index("```python\n", start)
+    body_start = fence + len("```python\n")
+    return text[body_start : text.index("\n```", body_start)]
 
 
 def test_skill_import_rule_does_not_export_connect() -> None:
@@ -218,8 +210,33 @@ def test_skill_unchecked_section_calls_query_unchecked() -> None:
     start = text.index(heading)
     next_heading = text.find("\n## ", start + 1)
     section = text[start:] if next_heading < 0 else text[start:next_heading]
-    assert _python_fence_contains(section, "query_unchecked")
+    incorrect = _python_fence_after(section, "Incorrect")
+    correct = _python_fence_after(section, "Correct")
+    assert "query_unchecked[str]" in incorrect
+    assert "query[str]" in correct
+    assert "query_unchecked" not in correct
+    assert "SQL is not described" in section
+    assert "dict" not in section
     assert "query[str](sql)" in text[:start]
+
+
+def test_skill_any_list_is_one_parameter() -> None:
+    text = (USE_ROWX_SKILL.parent / "rules" / "parameters.md").read_text()
+    start = text.index("## Lists use ANY")
+    section = text[start : text.index("\n## ", start + 1)]
+    assert "one parameter" in section
+    incorrect = _python_fence_after(section, "Incorrect")
+    assert any('f"' in line for line in incorrect.splitlines())
+    call = incorrect[incorrect.index("query[") :].split(")", 1)[0]
+    assert 't"' not in call
+    assert "ANY(" in _python_fence_after(section, "Correct")
+
+
+def test_skill_drift_gate_states_its_conditions() -> None:
+    text = (USE_ROWX_SKILL.parent / "references" / "migrations.md").read_text()
+    assert "--no-drift-check" in text
+    assert "--scratch" in text
+    assert "would be described" in text
 
 
 def test_skill_fetch_has_no_io_until_iteration() -> None:
