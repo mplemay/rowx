@@ -76,14 +76,14 @@ def _walk_dir(directory: Path, root: Path, patterns: tuple[str, ...]) -> list[Pa
     return found
 
 
-def discover_files(config: Config, cwd: Path, paths: list[Path] | None = None) -> list[Path]:
+def discover_files(config: Config, cwd: Path, paths: list[Path] | None = None, *, use_git: bool = True) -> list[Path]:
     root = config.root
     patterns = config.all_excludes
     if paths is not None and paths:
         targets = [(cwd / path).resolve() for path in paths]
     else:
         targets = [(root / entry).resolve() for entry in config.include]
-    tracked = _git_files(root)
+    tracked = _git_files(root) if use_git else None
     found: dict[Path, None] = {}
     for target in targets:
         if not target.exists():

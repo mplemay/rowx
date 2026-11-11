@@ -27,3 +27,25 @@ def test_scratch_url_that_cannot_be_parsed_never_quotes_the_dsn(dsn: str) -> Non
     with pytest.raises(CheckError) as caught:
         _ = Scratch(dsn, admin).url
     assert str(caught.value) == "the database URL could not be parsed"
+
+
+def test_collision_does_not_drop_an_existing_database() -> None:
+    import asyncio  # ruff: ignore[import-outside-top-level]
+    from unittest.mock import AsyncMock  # ruff: ignore[import-outside-top-level]
+
+    from rowx_core.errors import DatabaseError  # ruff: ignore[import-outside-top-level]
+
+    admin = Mock(spec=AdminService)
+    admin.with_database.return_value = "postgresql://host/scratch"
+    admin.create_scratch = AsyncMock(side_effect=DatabaseError("42P04", "already exists"))
+    admin.drop = AsyncMock()
+    scratch = Scratch("postgresql://host/postgres", admin, sweep_previous=False)
+
+    async def run() -> None:
+        with pytest.raises(CheckError):
+            async with scratch.session(Mock()):
+                pass
+
+    asyncio.run(run())
+    admin.drop.assert_not_awaited()
+    assert not scratch.leaked

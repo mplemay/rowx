@@ -51,6 +51,7 @@ class Finding:
     # the indices into a named row's fields that the finding concerns, for the field notes and the JSON `field`
     fields: tuple[int, ...] = ()
     notes: tuple[str, ...] = ()
+    wider_nullability: bool = False
 
 
 def _rules(backend: CheckerBackend | None) -> CheckerBackend:
@@ -184,6 +185,7 @@ def _nullability_finding(
             help=help_,
             reason=column.reason,
             reason_detail=column.reason_detail,
+            wider_nullability=not column.nullable,
         ),
     ]
 
@@ -432,14 +434,16 @@ def compare_param_result(  # ruff: ignore[too-many-arguments, too-many-positiona
     element_key: str | None = None,
     backend: CheckerBackend | None = None,
 ) -> tuple[Finding | None, bool]:
-    if evident is None or type_key is None or evident.name == "None":
+    if evident is None or type_key is None:
         return None, False
+    if evident.name == "None":
+        return None, True
     rules = _rules(backend)
     if not _accepts(rules, evident.name, type_key):
         return _param_finding(index, type_name, type_key, evident, "which", rules), True
     if type_key == "array":
         leaf = _array_leaf(evident)
-        if element_key is None or leaf is None or leaf.name == "None":
+        if element_key is None or leaf is None:
             return None, False
         return _element_finding(index, type_name, element_key, evident, rules), True
     return None, True

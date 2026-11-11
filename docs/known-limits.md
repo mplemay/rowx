@@ -100,3 +100,7 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
   in the database it creates, and the plugin in its template databases. Migration files are trusted code.
 - **The test plugin is asyncio only.** Trio is unsupported, and roles created by a test are cluster-wide, so a database
   clone doesn't isolate them.
+
+Rollout compatibility covers discoverable query sites and schema effects the checker can describe. It does not
+execute queries or verify production data or permissions. For example, PostgreSQL 18.3 accepts Parse/Describe and
+EXPLAIN for an INSERT omitting a new NOT NULL column with no default, even though execution fails.

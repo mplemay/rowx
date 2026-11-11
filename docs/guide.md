@@ -1505,6 +1505,32 @@ refused.
 The checker's session is read-only by default (`default_transaction_read_only = on`) and sets `statement_timeout`,
 `lock_timeout` and `idle_in_transaction_session_timeout`.
 
+### Checking rollout compatibility
+
+Use a disposable PostgreSQL server and trusted migration files to check both rollout orders:
+
+```sh
+rowx check-compat --against BASE --head HEAD --database-url "$ROWX_DATABASE_URL"
+```
+
+The command independently replays each revision's migrations in scratch databases. Those databases share the
+server's roles and other cluster resources. It checks each revision on its own schema before checking baseline
+source on the head schema (migrate first) and head source on the baseline schema (deploy first). It reports
+recognized and skipped sites for each revision. Exit status 0 means the checked subset is compatible, 1 means a
+cross-schema incompatibility was found, and 2 means the check was incomplete.
+
+The checker never executes checked queries. PostgreSQL 18.3 accepts Parse/Describe and EXPLAIN for an INSERT that
+omits a newly added NOT NULL column without a default, although executing that INSERT fails. Runtime constraints,
+production data and permissions are outside this check's coverage.
+
+For example, `INSERT INTO t (id) VALUES (1)` can still be described after
+`ALTER TABLE t ADD COLUMN required text NOT NULL`, but fails when executed.
+
+For example, run `docker run --rm -e POSTGRES_PASSWORD=example -p 127.0.0.1:5432:5432 postgres:18` and set
+`ROWX_DATABASE_URL=postgresql://postgres:example@127.0.0.1:5432/postgres`. Pass the URL through `--database-url` or
+`ROWX_DATABASE_URL`; historical configuration does not select the server. The role needs `CREATEDB`. The workflow
+rejects symbolic links and Git submodules in snapshots.
+
 ## CI recipe
 
 Run the checker against a throwaway `postgres:18` service that has your schema applied.

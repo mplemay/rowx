@@ -35,6 +35,7 @@ class Report:
     field: str | None = None
     # the position of the report among those at one span, which a named row uses to keep the order the design gives
     order: int = 0
+    wider_nullability: bool = False
 
 
 type _TemplateReason = Literal[
