@@ -9,7 +9,9 @@ from rowx_core.backend import CheckerBackend, CheckerSession
 from rowx_core.errors import DatabaseError, InterfaceError
 
 from rowx.check.cli import main
-from rowx.check.runner import CheckError, describe_all, redact
+from rowx.check.config import load_config
+from rowx.check.runner import CheckError, RunResult, describe_all, redact, run_check
+from rowx.check.walk import discover_files
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -258,6 +260,27 @@ def test_redact_merges_overlapping_secrets_before_masking() -> None:
     assert redact("xx abcdef yy", "host=h password=abcd sslpassword=cdef") == "xx *** yy"
     assert redact("a*b", "host=h password=*") == "a***b"
     assert redact("ababa", "host=h password=aba") == "***"
+
+
+def _check_source(tmp_path: Path, source: str) -> RunResult:
+    path = tmp_path / "query.py"
+    path.write_text(source, encoding="utf-8")
+    config = load_config(path.parent)
+    return asyncio.run(run_check(config, discover_files(config, path.parent, [path]), None, 1))
+
+
+def test_unchecked_invalid_row_type_needs_no_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    result = _check_source(tmp_path, 'from rowx import query_unchecked\nquery_unchecked[dict](t"NOT SQL")\n')
+    assert [report.diagnostic.rule for report in result.reports] == ["invalid-row-type"]
+    assert result.statistics.checked == 0
+
+
+def test_valid_unchecked_row_type_needs_no_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    result = _check_source(tmp_path, 'from rowx import query_unchecked\nquery_unchecked[int](t"THIS IS NOT SQL")\n')
+    assert result.reports == []
+    assert result.statistics.checked == 0
 
 
 def test_a_file_nested_too_deeply_does_not_hide_the_others(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

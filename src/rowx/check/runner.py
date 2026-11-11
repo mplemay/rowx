@@ -654,11 +654,11 @@ def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-argumen
     mapper = SourceMapper(result.source or "", None if backend is None else backend.compiler)
     reports.extend(template_reports(path, result.templates, mapper, inference))
     for call in result.calls:
-        if call.template is None:
-            continue
         resolution = resolve_row_type(graph, call, roots, backend, dsn)
         if resolution.diagnostic is not None:
             reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
+        if call.template is None:
+            continue
         sites.append(
             _Site(
                 call=call,
