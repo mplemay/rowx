@@ -86,6 +86,7 @@ def _default_requires(namespace: str) -> tuple[str, ...]:
     if namespace == ROWX:
         return (
             core,
+            "pathspec<2,>=1.1.1",
             f"rowx-postgres=={VERSION} ; extra == 'postgres'",
             "pytest>=9.2.0 ; extra == 'pytest'",
         )
@@ -146,6 +147,23 @@ def test_core_wheel_rejects_requires_dist_rowx_postgres(tmp_path: Path) -> None:
 def test_core_wheel_rejects_requires_dist_requests(tmp_path: Path) -> None:
     path = _write_wheel(tmp_path, WheelBuild(filename=CORE_WHEEL, requires=(REQUESTS_REQUIREMENT,)))
     with pytest.raises(SystemExit, match="must not declare Requires-Dist"):
+        VALIDATE_WHEEL(path)
+
+
+@pytest.mark.parametrize("requirement", [None, "pathspec>=1.1.1", "pathspec>=1.0,<2", "requests>=2"])
+def test_rowx_wheel_rejects_missing_or_unapproved_direct_dependency(tmp_path: Path, requirement: str | None) -> None:
+    requires = tuple(value for value in (f"rowx-core=={VERSION}", requirement) if value is not None)
+    path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, requires=requires))
+    with pytest.raises(SystemExit, match="direct requirements"):
+        VALIDATE_WHEEL(path)
+
+
+def test_postgres_wheel_rejects_pathspec_dependency(tmp_path: Path) -> None:
+    path = _write_wheel(
+        tmp_path,
+        WheelBuild(filename=POSTGRES_WHEEL, requires=(f"rowx-core=={VERSION}", "pathspec<2,>=1.1.1")),
+    )
+    with pytest.raises(SystemExit, match="requirements are"):
         VALIDATE_WHEEL(path)
 
 

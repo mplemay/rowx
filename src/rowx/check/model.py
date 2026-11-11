@@ -29,6 +29,8 @@ type Rule = Literal[
     "param-type-mismatch",
     "coverage-require-checked",
     "coverage-unchecked",
+    "invalid-ignore-comment",
+    "unused-ignore-comment",
 ]
 type QueryKind = Literal["query", "query_unchecked"]
 # "value": the class used as a value; "attribute": an attribute access other than a direct call (including any dunder

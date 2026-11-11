@@ -2,7 +2,7 @@ import ast
 import asyncio
 from collections import Counter, deque
 from contextlib import AsyncExitStack, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from re import DOTALL, IGNORECASE, Pattern, compile as re_compile, escape as re_escape, sub
 from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
@@ -589,7 +589,7 @@ def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Re
         site.coverage.sql_failed = True
         site.coverage.operational_failure = isinstance(outcome, _Operational)
         error = outcome.error if isinstance(outcome, _Operational) else outcome
-        return [_sql_error(site, error, backend)]
+        return [replace(_sql_error(site, error, backend), operational=isinstance(outcome, _Operational))]
     site.coverage.described = True
     params = _param_reports(site, outcome, backend)
     rows = _row_reports(site, outcome, backend)
@@ -714,6 +714,7 @@ def _collect(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         roots = roots_for(config, path)
         if result.source is None:
             continue
+        sources[path] = result.source
         selected = backend
         if selected is None and any(call.template is not None for call in result.calls):
             if dsn is None or not dsn.strip():

@@ -31,8 +31,13 @@ def test_every_rule_has_a_marker() -> None:
     rules = set(get_args(Rule.__value__))
     marked = {expectation.rule for path in CASE_FILES for expectation in parse_markers(path.read_text("utf-8"))}
     marked.update(expectation.rule for expectation in parse_markers(SYNTAX_ERROR))
-    # Policy diagnostics require opt-in flags and are exercised by CLI tests.
-    assert rules - marked == {"coverage-require-checked", "coverage-unchecked"}
+    # Policy and suppression diagnostics are exercised by checker CLI and suppression tests.
+    assert rules - marked == {
+        "coverage-require-checked",
+        "coverage-unchecked",
+        "invalid-ignore-comment",
+        "unused-ignore-comment",
+    }
     assert marked - rules == set()
 
 

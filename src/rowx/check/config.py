@@ -23,7 +23,17 @@ DEFAULT_EXCLUDE: Final[tuple[str, ...]] = (
     "build",
     "dist",
 )
-KEYS: Final[tuple[str, ...]] = ("include", "exclude", "database_url_env", "statement_timeout", "migrate")
+KEYS: Final[tuple[str, ...]] = (
+    "include",
+    "exclude",
+    "database_url_env",
+    "statement_timeout",
+    "migrate",
+    "rules",
+    "terminal",
+    "respect-ignore-files",
+    "force-exclude",
+)
 MIGRATE_KEYS: Final[tuple[str, ...]] = (
     "dir",
     "table",
@@ -67,6 +77,10 @@ class Config:
     source: Path | None = field(default=None)
     # None when `[tool.rowx.migrate]` is absent; an empty table is configured
     migrate: MigrateConfig | None = None
+    rules: dict[str, str] = field(default_factory=dict)
+    error_on_warning: bool = True
+    respect_ignore_files: bool = True
+    force_exclude: bool = False
 
     @property
     def all_excludes(self) -> tuple[str, ...]:
@@ -122,10 +136,22 @@ def _load(path: Path) -> Config:
             hint = f" (did you mean {close[0]!r}?)" if (close := get_close_matches(key, KEYS, n=1)) else ""
             msg = f"{path}: unknown key {key!r} in [tool.rowx]{hint}; expected one of: {', '.join(KEYS)}"
             raise ConfigError(msg)
+    include = _strings(path, table, "include", DEFAULT_INCLUDE)
+    exclude = _strings(path, table, "exclude", ())
+    from rowx.check.walk import validate_pattern  # ruff: ignore[import-outside-top-level]
+
+    try:
+        for pattern in include:
+            validate_pattern(pattern)
+        for pattern in exclude:
+            validate_pattern(pattern, allow_negation=True)
+    except ValueError as error:
+        msg = f"{path}: {error}"
+        raise ConfigError(msg) from None
     return Config(
         root=path.parent,
-        include=_strings(path, table, "include", DEFAULT_INCLUDE),
-        exclude=_strings(path, table, "exclude", ()),
+        include=include,
+        exclude=exclude,
         database_url_env=_string(path, table, "database_url_env", DEFAULT_DATABASE_URL_ENV),
         statement_timeout_ms=(
             _duration(path, table["statement_timeout"])
@@ -134,6 +160,10 @@ def _load(path: Path) -> Config:
         ),
         source=path,
         migrate=_migrate(path, table["migrate"]) if "migrate" in table else None,
+        rules=_rules(path, table.get("rules", {})),
+        error_on_warning=_terminal(path, table.get("terminal", {})),
+        respect_ignore_files=_bool_default(path, table, "respect-ignore-files", default=True),
+        force_exclude=_bool_default(path, table, "force-exclude", default=False),
     )
 
 
@@ -212,3 +242,29 @@ def _strings(path: Path, table: dict[str, object], key: str, default: tuple[str,
         msg = f"{path}: {key} must be a list of strings"
         raise ConfigError(msg)
     return tuple(str(item) for item in value)
+
+
+def _bool_default(path: Path, table: dict[str, object], key: str, *, default: bool) -> bool:
+    value = table.get(key, default)
+    if not isinstance(value, bool):
+        msg = f"{path}: {key} must be a boolean"
+        raise ConfigError(msg)
+    return value
+
+
+def _rules(path: Path, raw: object) -> dict[str, str]:
+    from rowx.check.rules import resolve_levels  # ruff: ignore[import-outside-top-level]
+
+    if not isinstance(raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
+        msg = f"{path}: [tool.rowx.rules] must be a table of rule levels"
+        raise ConfigError(msg)
+    rules = {str(key): str(value) for key, value in raw.items()}
+    resolve_levels(rules, [])
+    return rules
+
+
+def _terminal(path: Path, raw: object) -> bool:
+    if not isinstance(raw, dict) or any(key != "error-on-warning" for key in raw):
+        msg = f"{path}: [tool.rowx.terminal] only accepts error-on-warning"
+        raise ConfigError(msg)
+    return _bool_default(path, {str(key): value for key, value in raw.items()}, "error-on-warning", default=True)

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from rowx._backend import backend_for
 from rowx.check.model import Diagnostic, QueryCall, Rule, Span
+from rowx.check.walk import literal_prefix
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -675,7 +676,13 @@ def _reject_shadowed(tree: ast.Module, row_type: ast.expr) -> None:
 
 
 def roots_for(config: Config, path: Path) -> tuple[Path, ...]:
-    roots = [root for entry in config.include if (root := (config.root / entry).resolve()).is_dir()]
+    roots: list[Path] = []
+    for entry in config.include:
+        root = (config.root / literal_prefix(entry)).resolve()
+        if root.is_file():
+            root = root.parent
+        if root.is_dir():
+            roots.append(root)
     # a src layout: the directory containing the file's top-level package is also a root
     directory = path.resolve().parent
     start = directory

@@ -1,4 +1,6 @@
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -127,3 +129,73 @@ def test_materialize_rejects_native_case_collisions(
     monkeypatch.chdir(repo)
     with pytest.raises(compat.CheckError, match="filesystem collision"):
         compat._materialize(git(repo, "rev-parse", "HEAD"), destination)
+
+
+def test_snapshot_keeps_tracked_ignored_query_in_compatibility_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rowx.check.discover import discover_file  # ruff: ignore[import-outside-top-level]
+    from rowx.check.model import Diagnostic  # ruff: ignore[import-outside-top-level]
+    from rowx.check.render import Report  # ruff: ignore[import-outside-top-level]
+    from rowx.check.runner import RunResult, SiteCoverage, Statistics  # ruff: ignore[import-outside-top-level]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    revision(repo, "[tool.rowx.migrate]\n")
+    (repo / "good.py").write_text('from rowx import query\nquery[tuple[int]](t"select 1")\n', encoding="utf-8")
+    (repo / "bad.py").write_text('from rowx import query\nquery[tuple[int]](t"select 2")\n', encoding="utf-8")
+    git(repo, "add", "good.py", "bad.py")
+    (repo / ".gitignore").write_text("bad.py\n", encoding="utf-8")
+    git(repo, "add", ".gitignore")
+    git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "queries")
+    monkeypatch.chdir(repo)
+    seen: list[list[str]] = []
+
+    async def check(_config: object, files: list[Path], *_args: object, **_kwargs: object) -> RunResult:  # ruff: ignore[unused-async]
+        seen.append([file.name for file in files])
+        calls = [call for file in files for call in discover_file(file).calls]
+        coverage = [
+            SiteCoverage(
+                path=call.path,
+                span=call.span,
+                kind=call.kind,
+                described=True,
+                row_comparison="compared",
+                parameters_aligned=True,
+            )
+            for call in calls
+        ]
+        reports = []
+        if len(seen) > 2:
+            reports = [
+                Report(diagnostic=Diagnostic(rule="sql-error", message="incompatible", path=call.path, span=call.span))
+                for call in calls
+                if call.path.name == "bad.py"
+            ]
+        return RunResult(reports=reports, sources={}, statistics=Statistics(), coverage=coverage)
+
+    @asynccontextmanager
+    async def session(_migrator: object):
+        yield SimpleNamespace(url="postgresql://example")
+
+    class FakeScratch:
+        leaked = False
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        @staticmethod
+        def session(migrator: object) -> AbstractAsyncContextManager[SimpleNamespace]:
+            return session(migrator)
+
+        def sweep(self) -> None:
+            pass
+
+    monkeypatch.setattr(compat, "Scratch", FakeScratch)
+    monkeypatch.setattr(compat, "backend_for", lambda _dsn: SimpleNamespace(admin=lambda _dsn: None))
+    monkeypatch.setattr(compat, "load_migrator", lambda *_args: None)
+    monkeypatch.setattr(compat, "run_check", check)
+    status = main(["check-compat", "--against", "HEAD", "--head", "HEAD", "--database-url", "postgresql://host/db"])
+    assert seen == [["bad.py", "good.py"]] * 4
+    assert status == 1
+    assert "incompatible" in capsys.readouterr().out
