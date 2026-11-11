@@ -63,6 +63,12 @@ def test_include_and_user_exclude(tmp_path: Path) -> None:
     assert names(tmp_path, discover_files(config, tmp_path)) == ["src/a.py"]
 
 
+def test_literal_includes_normalize_dot_segments_for_exclusion_and_deduplication(tmp_path: Path) -> None:
+    touch(tmp_path, "src/a.py", "generated/b.py")
+    config = Config(root=tmp_path, include=("src", "src/../src", "src/../generated"), exclude=("generated",))
+    assert names(tmp_path, discover_files(config, tmp_path)) == ["src/a.py"]
+
+
 def test_explicit_paths_override_include_and_own_exclusion(tmp_path: Path) -> None:
     touch(tmp_path, "src/a.py", "other/b.py", "other/migrations/m.py", "other/gen.py")
     config = Config(root=tmp_path, include=("src",), exclude=("**/migrations/**", "**/gen.py"))
@@ -182,7 +188,7 @@ def test_explicit_directory_keeps_descendant_ignore_matches(tmp_path: Path, igno
     assert names(root, discover_files(Config(root=root), root, [Path("build")])) == ["build/ok.py"]
 
 
-@pytest.mark.parametrize("include", ["link/sub", "link/*"])
+@pytest.mark.parametrize("include", ["link/sub", "link/*", "link/../real/sub", "real/../link/sub"])
 def test_directory_include_does_not_cross_symlink(tmp_path: Path, include: str) -> None:
     root = tmp_path.resolve()
     touch(root, "real/sub/a.py")

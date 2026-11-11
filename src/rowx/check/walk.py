@@ -142,12 +142,17 @@ def _walk_error(error: OSError) -> None:
 
 def _read_ignore(path: Path) -> GitIgnoreSpec | None:
     try:
-        return GitIgnoreSpec.from_lines(path.read_text(encoding="utf-8").splitlines())
+        lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as error:
         reason = "invalid UTF-8" if isinstance(error, UnicodeDecodeError) else error.strerror or "I/O error"
         msg = f"cannot read ignore file {path}: {reason}"
+        raise ConfigError(msg) from error
+    try:
+        return GitIgnoreSpec.from_lines(lines)
+    except ValueError as error:
+        msg = f"invalid pattern in ignore file {path}: {error}"
         raise ConfigError(msg) from error
 
 
@@ -311,7 +316,12 @@ def discover_files(config: Config, cwd: Path, paths: list[Path] | None = None, *
         for entry in config.include:
             normalized = _normalize(entry)
             if not any(char in entry for char in "*?[\\"):
-                targets = [discovery.root / normalized if normalized else discovery.root]
+                target = discovery.root / normalized if normalized else discovery.root
+                # Check the original path before removing '..', which could hide
+                # a traversal through a directory symlink.
+                if any(parent.is_symlink() for parent in target.parents if parent.is_relative_to(discovery.root)):
+                    continue
+                targets = [Path(abspath(target))]  # ruff: ignore[os-path-abspath]
             else:
                 targets = discovery.glob_targets(entry)
             for target in targets:

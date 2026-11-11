@@ -1,11 +1,11 @@
 from typing import TYPE_CHECKING
 
+import pytest
+
 from rowx.check.cli import main
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def test_coverage_and_policies_without_database(
@@ -128,6 +128,20 @@ def test_invalid_ignore_file_is_a_configuration_error(
     (tmp_path / "site.py").write_text("x = 1\n", encoding="utf-8")
     assert main(["check"]) == 2
     assert ".ignore" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("ignore_file", [".gitignore", ".ignore"])
+@pytest.mark.parametrize("pattern", ["!", "abc\\"])
+def test_malformed_ignore_pattern_is_a_configuration_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, ignore_file: str, pattern: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ignore_file).write_text(pattern + "\n", encoding="utf-8")
+    (tmp_path / "site.py").write_text("x = 1\n", encoding="utf-8")
+    assert main(["check"]) == 2
+    captured = capsys.readouterr()
+    assert ignore_file in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_checker_never_executes_source_with_ignore(
