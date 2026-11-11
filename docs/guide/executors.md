@@ -12,9 +12,10 @@ shared pieces (`query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor
 and PostgreSQL, or `rowx-postgres` to use the backend and core without the CLI.
 
 A query captures its template without selecting a database. The connection, pool or transaction passed to a query
-supplies its compiler and execution behavior. Generic template errors are reported at construction; PostgreSQL
-quoting, lexical and parameter-limit errors are reported when the query is used. Static checking separately selects
-its backend from the configured database URL, without importing or executing application code.
+supplies its compiler and execution behavior. Construction rejects a bad template, including a bad `:ident` value,
+and the compiler emits `$n` and the adjacency space when the method runs and raises for `:ident` placement, the
+63-byte name limit, and the parameter cap ([Errors](errors.md)). Static checking separately selects its backend
+from the configured database URL, without importing or executing application code.
 
 A `Pool` is an `Executor`, so every query method takes it in place of a connection. The constructor does no IO, so a
 pool is safe to create at module level. `async with pool` warms it to `min_size` and closes it on exit; the first

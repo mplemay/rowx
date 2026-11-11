@@ -9,9 +9,11 @@
   `rowx-postgres`. The packages in this tree are still version 0.2.0 until #270. 0.3.0 is unreleased and is not on PyPI.
 - `query(...)` captures a neutral template and selects no compiler. Each call uses that executor's `compiler`. A
   later call on another executor compiles again.
-- The `query` constructor rejects a non-template, a NUL in static text, a conversion, and an unsupported format
-  spec. PostgreSQL `$n` placeholders, adjacency padding, quoting, lexical placement, and the 65535 parameter cap
-  are raised when the method runs, in `rowx_postgres._compiler`.
+- The `query` constructor rejects a non-template, a NUL in static text, a conversion, an unsupported format spec,
+  and an `:ident` value that is not a non-empty `str` (or a tuple of them) without a NUL or a control character.
+  When the method runs, `rowx_postgres._compiler` emits `$n` and the adjacency space, quotes the captured
+  identifier, and raises `TypeError` for an `:ident` outside plain code, a name longer than 63 bytes, and more
+  than 65535 parameters.
 - Each exception class is defined in `rowx_core.errors` and re-exported from `rowx` and `rowx.errors` as the same
   object. The native error registry uses those classes. There is no Postgres-specific exception tree.
 - `rowx check --coverage` lists recognized direct query sites and whether each was described and compared.

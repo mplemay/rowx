@@ -113,9 +113,11 @@ import this guide uses is `from rowx_postgres import connect, Pool`.
 executor passed to the method (`packages/rowx-core/src/rowx_core/_query.py`). A later call on another executor
 compiles again. See [Executors](executors.md).
 
-Generic template rejects happen in the `query` constructor in `rowx_core`: a non-template, a NUL in static text, a
-conversion, and an unsupported format spec. PostgreSQL `$n` placeholders, adjacency padding, quoting, lexical
-placement, and the 65535 parameter cap happen when the method runs, in `rowx_postgres._compiler`.
+The `query` constructor in `rowx_core` captures the template and selects no compiler. It raises `TypeError` for a
+non-template, a NUL in static text, a conversion, an unsupported format spec, and an `:ident` value that is not a
+non-empty `str` (or a tuple of them) without a NUL or a control character. When the method runs,
+`rowx_postgres._compiler` emits `$n` and the adjacency space, quotes the captured identifier, and raises
+`TypeError` for an `:ident` outside plain code, a name longer than 63 bytes, and more than 65535 parameters.
 
 Each exception class is defined in `rowx_core.errors` and re-exported from `rowx` and `rowx.errors` as that same
 object. The native error registry uses those classes. There is no Postgres-specific exception tree. See

@@ -29,10 +29,10 @@ statement_timeout = "10s"         # integer + unit: ms|s|min
 The database URL comes from `--database-url`, else from the environment variable named by `database_url_env`.
 
 That URL is an explicit check target, in the style of SQLx. `database_url_env` defaults to `DATABASE_URL`. The
-checker does not infer which executor will run a query. It checks a construction nothing calls, and it checks both
-public query import roots, `rowx` and `rowx_core`. At runtime the executor passed to the method supplies the
-compiler, and that compiler emits the SQL for the call. A later call on another executor compiles again. There is
-no automatic multi-target routing and no offline query metadata.
+checker does not infer which executor will run a query. It checks every recognized `query` and `query_unchecked`
+construction, including one nothing calls, on both public import roots, `rowx` and `rowx_core`. At runtime the
+executor passed to the method supplies the compiler, and that compiler emits the SQL for the call. A later call on
+another executor compiles again. There is no automatic multi-target routing and no offline query metadata.
 
 ## Hand-built templates
 
