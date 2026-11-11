@@ -796,6 +796,7 @@ name = "rowx"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "pathspec" },
     { name = "rowx-core" },
 ]
 
@@ -841,6 +842,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "pathspec", specifier = ">=1.1.1,<2" },
     { name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.2.0" },
     { name = "rowx-core", editable = "packages/rowx-core" },
     { name = "rowx-postgres", marker = "extra == 'postgres'", editable = "packages/rowx-postgres" },

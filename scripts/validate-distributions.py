@@ -35,6 +35,8 @@ ROWX_POSTGRES: Final[str] = "rowx_postgres"
 CORE_DISTRIBUTION: Final[str] = "rowx-core"
 POSTGRES_DISTRIBUTION: Final[str] = "rowx-postgres"
 PYTEST_DISTRIBUTION: Final[str] = "pytest"
+PATHSPEC_DISTRIBUTION: Final[str] = "pathspec"
+PATHSPEC_CONSTRAINTS: Final[frozenset[str]] = frozenset({">=1.1.1", "<2"})
 POSTGRES_EXTRA: Final[str] = "postgres"
 PYTEST_EXTRA: Final[str] = "pytest"
 EXPECTED_CLASSIFIERS: Final[frozenset[str]] = frozenset({
@@ -253,8 +255,14 @@ def _validate_requires(path: Path, namespace: str, version: str, metadata: Messa
 def _validate_rowx_requires(path: Path, version: str, requirements: list[Requirement]) -> None:
     direct = [requirement for requirement, marker in requirements if marker is None]
     expected_core = f"{CORE_DISTRIBUTION}=={version}"
-    if direct != [expected_core]:
-        message = f"{path.name} direct requirements are {direct}, expected [{expected_core}]"
+    pathspec = [requirement for requirement in direct if _distribution_name(requirement) == PATHSPEC_DISTRIBUTION]
+    valid_pathspec = (
+        len(pathspec) == 1
+        and frozenset(part.strip() for part in pathspec[0].removeprefix(PATHSPEC_DISTRIBUTION).split(","))
+        == PATHSPEC_CONSTRAINTS
+    )
+    if len(direct) != PAIR_LENGTH or direct.count(expected_core) != 1 or not valid_pathspec:
+        message = f"{path.name} direct requirements are {direct}, expected {expected_core} and pathspec>=1.1.1,<2"
         raise SystemExit(message)
     extras: list[tuple[str, str]] = []
     for requirement, marker in requirements:

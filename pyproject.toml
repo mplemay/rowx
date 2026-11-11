@@ -21,7 +21,7 @@ classifiers = [
     "Framework :: AsyncIO",
 ]
 keywords = ["sql", "postgresql", "postgres", "typed", "async", "t-string"]
-dependencies = ["rowx-core==0.2.0"]
+dependencies = ["rowx-core==0.2.0", "pathspec>=1.1.1,<2"]
 
 [project.optional-dependencies]
 postgres = ["rowx-postgres==0.2.0"]

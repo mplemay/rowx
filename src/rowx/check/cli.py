@@ -1,12 +1,12 @@
 import asyncio
 import os
 import sys
-from argparse import ArgumentParser, Namespace
-from dataclasses import dataclass
+from argparse import Action, ArgumentParser, BooleanOptionalAction, Namespace
+from dataclasses import dataclass, replace
 from importlib.metadata import version
 from json import dumps
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol, override
 
 from rowx_core.backend import UnsupportedCapabilityError
 
@@ -14,7 +14,9 @@ from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
 from rowx.check.config import Config, ConfigError, database_url, load_config
 from rowx.check.model import Diagnostic, Span
 from rowx.check.render import Report, render_json, render_text, strip_controls
+from rowx.check.rules import apply_levels, resolve_levels
 from rowx.check.runner import CheckError, Hooks, RunResult, redact, run_check
+from rowx.check.suppress import apply_suppressions
 from rowx.check.walk import discover_files
 
 if TYPE_CHECKING:
@@ -36,6 +38,19 @@ SCRATCH_HELP: Final[str] = (
 )
 
 
+class _RuleAction(Action):
+    @override
+    def __call__(
+        self, parser: ArgumentParser, namespace: Namespace, values: object, option_string: str | None = None
+    ) -> None:
+        del parser
+        if not isinstance(values, str):
+            return
+        actions = getattr(namespace, self.dest, None) or []
+        actions.append((values, (option_string or "").removeprefix("--")))
+        setattr(namespace, self.dest, actions)
+
+
 def _add_check(subparsers: _SubParsersAction[ArgumentParser]) -> None:
     check = subparsers.add_parser("check")
     check.add_argument("--version", action="version", version=version("rowx"))
@@ -44,6 +59,11 @@ def _add_check(subparsers: _SubParsersAction[ArgumentParser]) -> None:
     check.add_argument("--config", type=Path, metavar="FILE")
     check.add_argument("--output-format", choices=("text", "json"), default="text")
     check.add_argument("--statistics", action="store_true")
+    for flag in ("error", "warn", "ignore"):
+        check.add_argument(f"--{flag}", dest="rule_actions", action=_RuleAction, metavar="RULE")
+    check.add_argument("--exit-zero-on-warning", action="store_true")
+    check.add_argument("--respect-ignore-files", action=BooleanOptionalAction, default=None)
+    check.add_argument("--force-exclude", action="store_true", default=None)
     check.add_argument("--inspect", action="store_true", help="show described query contracts")
     check.add_argument("--coverage", action="store_true", help="report recognized query sites and comparison coverage")
     check.add_argument(
@@ -225,10 +245,19 @@ def _check_hooks(config: Config, state: _HookState, *, scratch: bool, drift: boo
 def _check(args: Namespace) -> tuple[RunResult, Path]:
     cwd = Path.cwd()
     config = load_config(cwd, args.config)
+    args.levels = resolve_levels(config.rules, args.rule_actions or [])
+    args.error_on_warning = config.error_on_warning and not args.exit_zero_on_warning
     scratch = bool(args.scratch)
     if scratch and config.migrate is None:
         msg = "`--scratch` needs a `[tool.rowx.migrate]` table in pyproject.toml"
         raise CheckError(msg)
+    config = replace(
+        config,
+        respect_ignore_files=config.respect_ignore_files
+        if args.respect_ignore_files is None
+        else args.respect_ignore_files,
+        force_exclude=config.force_exclude if args.force_exclude is None else args.force_exclude,
+    )
     files = discover_files(config, cwd, args.paths)
     dsn = database_url(config, args.database_url)
     state = _HookState()
@@ -311,10 +340,23 @@ def main(argv: list[str] | None = None) -> int:
         print("error: interrupted", file=sys.stderr)  # ruff: ignore[print]
         return EXIT_FAILURE
     _policies(result, root, require_checked=args.require_checked, disallow_unchecked=args.disallow_unchecked)
+    result.reports = apply_levels(result.reports, args.levels)
+    result.reports = apply_suppressions(result.reports, result.sources, args.levels)
+    result.reports = apply_levels(result.reports, args.levels)
     result.statistics.by_rule.clear()
     result.statistics.by_rule.update(report.diagnostic.rule for report in result.reports)
     _print_result(result, root, args)
-    return EXIT_DIAGNOSTICS if result.reports else EXIT_CLEAN
+    return _exit_code(result, error_on_warning=args.error_on_warning)
+
+
+def _exit_code(result: RunResult, *, error_on_warning: bool) -> int:
+    if any(report.operational for report in result.reports):
+        return EXIT_FAILURE
+    return (
+        EXIT_DIAGNOSTICS
+        if any(report.severity == "error" or error_on_warning for report in result.reports)
+        else EXIT_CLEAN
+    )
 
 
 def _print_result(result: RunResult, root: Path, args: Namespace) -> None:
