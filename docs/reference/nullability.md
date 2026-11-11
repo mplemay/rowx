@@ -1,8 +1,9 @@
 # Nullability
 
 Describe prepares a statement, reads catalog NOT NULL, and walks the generic plan. Unknown columns count as nullable.
-`"col!"` and `"col?"` overrides apply last. The walker can only promote a column to nullable, except where a set
-operation or the computed-column whitelist proves a computed column NOT NULL.
+`"col!"` and `"col?"` overrides apply last. The plan pass can promote a column to nullable. A set operation, the
+computed-column whitelist, or a scan filter can prove a column NOT NULL. A later promotion still forces the column
+nullable.
 
 The plan walk lives in `crates/rowx-postgres/src/explain.rs`. Catalog nullability and the describe session live in
 `crates/rowx-postgres/src/describe.rs`. The Python binding is `rowx_postgres._core.describe`. Column-name override
@@ -63,9 +64,14 @@ With `--scratch` ([Drift gate and scratch](checker.md#drift-gate-and-scratch)) t
      fails here.
    - If the plan pass fails, base results are kept and unknown columns are marked `ExplainFailed`. This is
      non-fatal.
-   - The walk can only promote a column to nullable. The exceptions are a computed column that
-     [Set operations](#set-operations) prove NOT NULL (`SetOperation`) and one that
-     [Computed columns](#computed-columns) prove NOT NULL (`ComputedExpr`).
+   - The plan pass can promote a column to nullable. A computed column that
+     [Set operations](#set-operations) prove NOT NULL is `SetOperation`, and one that
+     [Computed columns](#computed-columns) prove NOT NULL is `ComputedExpr`. A catalog-nullable simple or enum
+     column is `ScanFilterNotNull` when `scan_filter_not_null` matches a childless `Seq Scan`, `Index Scan`, or
+     `Index Only Scan`: the output text equals the plain column or `alias.column`, the origin schema and relation
+     match the scan, and the filter text is exactly `(alias.column IS NOT NULL)`. The alias and the column are
+     plain unquoted lowercase identifiers. A later promotion still forces the column nullable. Overrides still
+     apply last.
 4. **Overrides** ([Overrides](#overrides)).
 5. **Defaulting.** An unknown column becomes nullable. A computed column outside the whitelist therefore needs
    `"col!"`.

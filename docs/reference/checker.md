@@ -23,7 +23,7 @@ The entry point is `rowx = "rowx.check.cli:main"`.
 |---|---|
 | 0 | No diagnostics. That includes a run that found no queries. |
 | 1 | One or more diagnostics. |
-| 2 | Bad invocation or config, an unreachable database, a describe failure that is not an SQL error, or an internal error. |
+| 2 | Bad invocation or config, an unreachable database, a describe failure that is not an SQL error, a drift or scratch failure, or an internal error. |
 
 A missing database URL is exit 2 only when at least one statement would be described. A file whose calls are all
 `query_unchecked` does not need one.
@@ -38,9 +38,13 @@ for every recognized `query_unchecked` call. `--statistics` prints the scan coun
 
 With `--output-format json`, diagnostics stay on stdout. Statistics, coverage and inspect go to stderr.
 
-`rowx check-compat --against BASE --head HEAD` checks the same sources at two revisions and reports a change in
-column count, column name, column type or parameter types. The URL is `--database-url` or `ROWX_DATABASE_URL`. It
-does not read `database_url_env`.
+`rowx check-compat --against BASE --head HEAD` checks the same sources at two revisions. Every cross-schema report
+with `not report.wider_nullability` is incompatible. That includes a change in column count, column name, column
+type or parameter types, and a NOT NULL column becoming nullable against a non-null annotation. A wider annotation
+(`X | None` on a NOT NULL column) is not incompatible. Exit 0 is a complete compatible subset, exit 1 is an
+incompatibility, and exit 2 is incomplete: own-schema coverage was not established, a comparison could not be
+established, or scratch cleanup failed. The URL is `--database-url` or `ROWX_DATABASE_URL`. It does not read
+`database_url_env`.
 
 ## Config
 
@@ -62,7 +66,7 @@ table = "_rowx_migrations"
 |---|---|
 | `database_url_env` | Environment variable holding the URL. Default `DATABASE_URL`. |
 | `include` | Directory or file roots, relative to the config file. Default `["."]`. |
-| `exclude` | Extra glob patterns, matched on top of the defaults below. A pattern with no slash matches a name at any depth. An absolute pattern matches nothing. |
+| `exclude` | Extra glob patterns, matched on top of the defaults below. A pattern with no slash matches a name at any depth. Slashes at either end are stripped, so a leading slash is removed and the remainder is matched like any other pattern. |
 | `statement_timeout` | A positive integer plus `ms`, `s` or `min`. Default `10s`. |
 | `migrate` | Present or absent as a table. Its keys are `dir` (default `migrations`), `table` (default `_rowx_migrations`), `create_schemas`, `ignore_missing`, `allow_out_of_order`, `versioning` (`inferred`, `timestamp`, `sequential`) and `kind` (`inferred`, `simple`, `reversible`). |
 
@@ -128,7 +132,7 @@ consumes `compiled.padding`. It does not invent a second spacing rule. An offset
 attributed to the neighbouring interpolation.
 
 `:ident` is recognised while assembling a `query_unchecked` template. The source span is the interpolation. Nested
-templates are flattened in source order, and a cycle is `dynamic-query`. A template that is not an inline literal
+templates are flattened in source order. A repeated nested template is shared. A template that is not an inline literal
 has no spans, so the diagnostic points at the call. The file's encoding cookie is honoured. A file that does not
 decode is `syntax-error`.
 
@@ -140,7 +144,7 @@ decode is `syntax-error`.
 The scope is module-level assignments and `type` aliases, class bodies, and function-local assignments when the call
 is in that function. An imported name is found through the package layout and the include roots, not through
 `sys.path`. A module outside the project is `unresolved-row-type`. `TYPE_CHECKING` blocks are read for imports. A
-name assigned both inside and outside the block uses the runtime assignment. A name that exists only under
+name assigned both inside and outside the block uses the first `TYPE_CHECKING` binding. A name that exists only under
 `TYPE_CHECKING` is `invalid-row-type` when it is used as a value the runtime would have to import.
 
 Supported forms are `tuple[...]`, a scalar leaf, `X | None`, `Annotated`, `ReadOnly`, `Required`, `NotRequired`,
@@ -161,19 +165,19 @@ from its parameters. A string annotation inside a class is parsed. A string as `
 | `invalid-row-type` | `T` resolved but is not in the grammar. This includes a `query_unchecked` row type. |
 | `sql-error` | Postgres rejected the statement. The span is the mapped server position. |
 | `param-count-mismatch` | The number of described parameters differs from the number of interpolations. |
-| `missing-row-type` | The query returns columns and the row type is `None`. |
-| `unexpected-row-type` | The query returns no columns and the row type is not `None`. |
+| `missing-row-type` | Columns remain after `void` columns are dropped, and the row type is `None`. An all-`void` statement with row type `None` has no diagnostic. |
+| `unexpected-row-type` | No columns remain after `void` columns are dropped, and the row type is not `None`. `compare` is not called. |
 | `arity-mismatch` | A tuple, a scalar, or a `NamedTuple` has a different column count. |
 | `missing-column` | A field without a default has no column. |
 | `unexpected-column` | A name-matched row has no field for a column. |
 | `duplicate-column` | Two columns have the same stripped name, or two names of one field. |
 | `ambiguous-column` | One column matches two pydantic fields. |
 | `column-name-mismatch` | A `NamedTuple` column name differs from the field. |
-| `unsupported-type` | The column's type has no leaf in the [type table](../types.md). |
+| `unsupported-type` | A column or a parameter whose type has no leaf in the [type table](../types.md). |
 | `type-mismatch` | A described type is not acceptable for the element. The message names both types. |
-| `nullability-mismatch` | A column may be NULL and the element is not nullable. |
-| `invalid-override` | A quoted alias of 63 bytes or more ends in `!` or `?`. |
-| `param-type-mismatch` | The interpolation's evident type is not in the parameter's accepted types. `None` is accepted for every parameter. An unknown or unsupported parameter is not reported. |
+| `nullability-mismatch` | A column may be NULL and the element is not nullable, or a NOT NULL column faces an element that is a union with `None`. The second finding is checker-only: the runtime NULL check does not raise for it. |
+| `invalid-override` | The described name is longer than 59 bytes and at most 63, and a quoted source alias is longer than 63 bytes, ends in `!` or `?`, and starts with that name. An alias of exactly 63 bytes that still ends in the suffix is not reported. A described name of 59 bytes or shorter is not reported. |
+| `param-type-mismatch` | An evident Python type the parameter does not accept. `None` is accepted for every parameter. It is not emitted for an unknown type or for a parameter already reported as `unsupported-type`. |
 | `coverage-require-checked` | `--require-checked`, and no query was successfully described. |
 | `coverage-unchecked` | `--disallow-unchecked`, and the call is `query_unchecked`. |
 
@@ -187,10 +191,13 @@ wherever that base is. `int2`, `int4` and `int8` all accept `int`, and `float4` 
 
 `typing.Any` and `builtins.object` are the leaf `any`. They are the only annotations neutral to both type and
 nullability. Once a column is supported and is not `void`, comparison returns no findings, so they match that
-column's type and either nullability. An unsupported column is still `unsupported-type`. A `void` column matches
-only the element `None` (leaf `none`), including a named field typed `None`. Anything else facing `void`, including
-`Any` and `object`, is `type-mismatch`, and the help says to use `.execute()`. A bare `None` element against any
-other type is `type-mismatch` too. It does not silence nullability.
+column's type and either nullability. An unsupported column is still `unsupported-type`. `_row_reports` drops
+columns with `type_key == "void"` before it decides. If none remain and the row type is `None`, there is no
+diagnostic. If none remain and the row type is anything else, the rule is `unexpected-row-type` and `compare` is
+not called. `type-mismatch` for `void`, including `Any` and `object`, happens only when `compare` runs because
+some other column is not `void`. Then a `void` column matches only the element `None` (leaf `none`), including a
+named field typed `None`. Anything else facing that `void` column is `type-mismatch`, and the help says to use
+`.execute()`. A bare `None` element against any other type is `type-mismatch` too. It does not silence nullability.
 
 `json` and `jsonb` accept any leaf annotation other than `None`. Nullability is still checked, unless the element
 is `Any` or `object`.
@@ -206,7 +213,8 @@ error.
 ## Parameter type inference
 
 `src/rowx/check/params.py` infers a type for each interpolation. Comparison then uses the type table's accepted
-parameter types. An unknown interpolation is not reported. The value `None`, and an annotation that is only
+parameter types. An unknown type is not a `param-type-mismatch`. A parameter with no leaf is `unsupported-type`,
+and that comparison does not also emit `param-type-mismatch`. The value `None`, and an annotation that is only
 `None`, is accepted for every parameter. For an array parameter the nested lists are flattened to their leaf,
 because the declared type does not record dimensions, and that leaf is checked against the element type. A leaf
 that was not inferred is not reported.
@@ -259,16 +267,15 @@ that reuses a builtin name (`def f[int](x: int)`) hides that builtin inside the 
 Text is the default. One block per diagnostic, in file order then source position:
 
 ```text
-error[type-mismatch]: column 2 is `int8` but the row type expects `str`
-  --> src/app.py:14:18
+error[type-mismatch]: column 2 "name": column type is `int` but the annotation is `str`
+  --> src/app.py:14:22
    |
 14 |     query[tuple[int, str]](t"SELECT id, name FROM users")
-   |                  ^^^
-   |
-   = note: …
+   |                      ^^^ element 2
 ```
 
-Notes and help lines follow the snippet. Tabs expand to four spaces. A zero-width span still gets one caret.
+Note lines are `= note:` and help lines are `= help:`. They follow the snippet. The sample above stops after the
+caret. Tabs expand to four spaces. A zero-width span still gets one caret.
 Server-supplied text is sanitised before it reaches a terminal ([Checker](security.md#checker)).
 
 `--output-format json` prints one JSON array. Each object has `rule`, `message`, `file`, `line`, `col`, `end_line`,
@@ -290,8 +297,8 @@ before a drop. `drop` does not read the migration files.
 The drift gate runs when `[tool.rowx.migrate]` is present, `--no-drift-check` is absent, and `--scratch` is not set.
 It compares the migration files with the history table using the `info` plan, which takes no lock and creates
 nothing. The connection is read-only (`migrator.open(readonly=True)`). It does not apply migrations. A pending,
-modified or missing migration fails the command. `ignore_missing` lets a missing migration pass. Implementation:
-`src/rowx/check/drift.py`.
+modified, missing, or dirty migration fails the gate. `ignore_missing` skips only a missing migration, so a dirty
+migration still fails. Implementation: `src/rowx/check/drift.py`.
 
 `--scratch` needs `[tool.rowx.migrate]`. It treats the URL as a server URL, creates a temporary database, applies
 the migrations, and checks against that. The temporary database is dropped at the end, including on cancellation.

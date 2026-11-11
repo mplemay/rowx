@@ -86,7 +86,7 @@ opening a connection is retried. The migration command runs once.
 
 ## Deferred
 
-Moved out of the design roadmap. The issues are the rest of the work. They are not specified here.
+These items are not specified in the reference and are tracked by the issues below.
 
 - [#296](https://github.com/mplemay/rowx/issues/296) checker suppressions and rule configuration
 - [#297](https://github.com/mplemay/rowx/issues/297) remaining named row types

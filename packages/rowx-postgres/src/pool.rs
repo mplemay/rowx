@@ -81,7 +81,7 @@ impl Pool {
 
 #[pymethods]
 impl Pool {
-    // the argument list is fixed by the pool constructor in docs/reference/api.md
+    // the argument list is fixed by Pool.__init__ in packages/rowx-postgres/src/rowx_postgres/_pool.py
     #[allow(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (
@@ -224,7 +224,7 @@ impl Pool {
         })
     }
 
-    // the argument list is fixed by the binding contract in docs/reference/driver.md, execution path
+    // the argument list is fixed by Executor._fetch in packages/rowx-core/src/rowx_core/_executor.py
     #[allow(clippy::too_many_arguments)]
     #[pyo3(name = "_fetch")]
     fn fetch<'py>(
@@ -307,7 +307,7 @@ impl Pool {
         Ok(future)
     }
 
-    // the argument list is fixed by the binding contract in docs/reference/driver.md, streaming
+    // the argument list is fixed by Executor._stream in packages/rowx-core/src/rowx_core/_executor.py
     #[allow(clippy::too_many_arguments)]
     #[pyo3(name = "_stream")]
     fn stream(

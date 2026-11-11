@@ -60,8 +60,8 @@ run on. They are not connections. Open a PostgreSQL connection with `rowx_postgr
 code uses `query` and `rowx_postgres`.
 
 `query` and `query_unchecked` are siblings. Neither subclasses the other, and user code must not subclass either.
-The checker reports `indirect-query` if it does. Neither class declares `__slots__` without a `__dict__`, so
-`__orig_class__` stays visible and `T` can be read.
+The checker reports `indirect-query` if it does. `query` and `query_unchecked` set no `__slots__`, so each instance
+has a `__dict__`, which keeps `__orig_class__` and therefore `T`.
 
 Methods:
 
@@ -162,7 +162,13 @@ rows live in `packages/rowx-postgres/src/rowx_postgres/__tests__/conformance/row
 ROW   := NONE | tuple[ELEM, ...] | ELEM | NAMED
 NONE  := None
 NAMED := dataclass | NamedTuple | TypedDict | pydantic BaseModel | pydantic dataclass
-ELEM  := LEAF | LEAF | None | Any | object | None
+ELEM  := LEAF
+       | "LEAF | None"
+       | Optional[LEAF]
+       | Union[LEAF, None]
+       | Any
+       | object
+       | None
 LEAF  := int | float | str | bool | bytes
        | decimal.Decimal | datetime.date | datetime.time | datetime.datetime
        | datetime.timedelta | uuid.UUID
@@ -188,8 +194,9 @@ or `ForwardRef`; an unbound `TypeVar`; a bare `tuple`, `tuple[()]` or `tuple[X, 
 non-`None` member other than the two network pairs; `Literal`; any `dict` other than `dict[str, str | None]`; and
 the named-row rejections below.
 
-An element is nullable when it is `None`, a union with `None`, `Any` or `object`. `T` is read lazily from
-`__orig_class__` at the first row-returning call. The plan is cached per `T`.
+`"LEAF | None"` is a Python union, one alternative, as are `Optional[LEAF]` and `Union[LEAF, None]`. A bare `None`
+element is the `void` element. An element is nullable when it is a union with `None`, `Any`, or `object`. `T` is
+read lazily from `__orig_class__` at the first row-returning call. The plan is cached per `T`.
 
 A new leaf needs a grammar line, a row-plan rule, a checker rule and conformance rows. A new named form needs the
 same four.
@@ -213,8 +220,8 @@ dependency of the test suite, not a dependency of `rowx` or `rowx-postgres`.
 
 Fields come from the bases in the library's own order. A redeclared field replaces the base field in place. A
 project base that is not a row type contributes no fields. A NamedTuple's fields are only `_fields` of the class
-that directly subclasses `NamedTuple`. The checker follows C3 over project classes. An inconsistent MRO or a cycle
-is `unresolved-row-type`. A private name `__x` is keyed by its mangled name.
+that directly subclasses `NamedTuple`. The checker follows the C3 method resolution order over project classes. An
+inconsistent MRO or a cycle is `unresolved-row-type`. A private name `__x` is keyed by its mangled name.
 
 These are **not** fields: `ClassVar`, `KW_ONLY`, `field(init=False)`, pydantic private attributes, `computed_field`,
 and `Field(init=False)` on a pydantic dataclass (`Field(init=False)` on a `BaseModel` is an ordinary field). A field
@@ -246,11 +253,13 @@ order. The checker's text and the runtime `RowShapeError` text are the same, in 
 | `ambiguous-column` | ``column 2 "y" matches fields "x" and "y" of `M` `` |
 | `column-name-mismatch` | ``column 2 "login" faces field "email" of `UserRow` (position 2)`` |
 | `type-mismatch` | ``column 2 "age" is `int` but field "age" of `User` is `str` `` |
-| `nullability-mismatch` | ``column 3 "email" may be NULL but field "email" of `User` is `str` `` |
+| `nullability-mismatch` | ``column 3 "email" may be NULL but field "email" of `User` is `str` ``; ``column 3 "email" is NOT NULL but field "email" of `User` is `str \| None` `` |
 
 A `?column?` duplicate reads ``columns 1 and 3 are both unnamed (`?column?`)``. Two names of one pydantic field read
 ``columns 1 "id" and 2 "user_id" both map to field "id" of `M` ``. A NamedTuple arity mismatch reads
 ``the query returns 4 columns but `UserRow` takes between 2 and 3`` (`takes exactly N` when the bounds are equal).
+The NOT NULL form of `nullability-mismatch` is checker-only. The runtime NULL check does not raise for a NOT NULL
+column annotated as a union with `None`.
 
 **Pydantic.** A `BaseModel` is built with `__pydantic_validator__.validate_python(row_dict)`. A pydantic dataclass is
 called as `cls(**row_dict)`, because `validate_python(dict)` raises `dataclass_exact_type` under `strict=True`. The
@@ -375,8 +384,10 @@ A result column whose name ends in `!` is forced NOT NULL, and one ending in `?`
   `RowShapeError`.
 - A named row strips one trailing `!` or `?` before matching. `"id!"` maps to the field `id`. The suffix does not
   weaken the NULL check.
-- A described name of exactly 63 bytes whose quoted alias in the source ends in `!` or `?` is `invalid-override`,
-  because Postgres would have truncated the suffix.
+- The described name is longer than 59 bytes and at most 63. The quoted source alias is longer than 63 bytes, ends
+  in `!` or `?`, and starts with the described name. That is `invalid-override`, because Postgres truncated the
+  suffix. An alias of exactly 63 bytes that still ends in the suffix is not reported. A described name of 59 bytes
+  or shorter is not reported.
 - Type overrides (`"col: T"`) are not supported ([#302](https://github.com/mplemay/rowx/issues/302)).
 
 ## Errors

@@ -30,6 +30,7 @@ def git(root: Path, *args: str) -> None:
         ("migrations/001.py", ("**/migrations/**",), True),
         ("a/b.py", ("**/migrations/**",), False),
         ("a/build/x.py", ("build",), True),
+        ("a/build/x.py", ("/build",), True),
         ("a/building/x.py", ("build",), False),
         ("a/gen_x.py", ("gen_*.py",), True),
         ("a/b/c.py", ("a/b",), True),
