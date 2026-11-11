@@ -7,10 +7,16 @@ from re import DOTALL, IGNORECASE, Pattern, compile as re_compile, escape as re_
 from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
-from rowx_core.backend import CheckerBackend, CheckerSession, ColumnInfo, Describe
+from rowx_core.backend import (
+    CheckerBackend,
+    CheckerSession,
+    ColumnInfo,
+    Describe,
+    UnsupportedCapabilityError,
+)
 from rowx_core.errors import ConnectionBusyError, DatabaseError, InterfaceError
 
-from rowx._backend import backend_for
+from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
 from rowx.check.compare import (
     ColumnDesc,
     DescribeDesc,
@@ -639,6 +645,15 @@ def _inspection(
     return InspectedSite(path=clean(str(path)), span=site.call.span, columns=tuple(columns), parameters=parameters)
 
 
+# an unchecked file is not described; the type table is vocabulary and opening it does not connect
+def _vocabulary_backend(dsn: str | None) -> CheckerBackend | None:
+    supplied = (dsn,) if dsn is not None and dsn.strip() else ()
+    for url in (*supplied, "postgres://"):
+        with suppress(BackendMissing, UnsupportedSchemeError, UnsupportedCapabilityError):
+            return backend_for(url).checker()
+    return None
+
+
 def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     graph: ModuleGraph,
     roots: tuple[Path, ...],
@@ -653,12 +668,15 @@ def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-argumen
     inference = ParamInference(result.tree, backend, dsn) if result.tree is not None else None
     mapper = SourceMapper(result.source or "", None if backend is None else backend.compiler)
     reports.extend(template_reports(path, result.templates, mapper, inference))
+    # one vocabulary load for the file; a URL that cannot be loaded must not reach resolve_row_type
+    row_backend = backend if backend is not None else _vocabulary_backend(dsn)
+    row_dsn = dsn if backend is not None else None
     for call in result.calls:
-        if call.template is None:
-            continue
-        resolution = resolve_row_type(graph, call, roots, backend, dsn)
+        resolution = resolve_row_type(graph, call, roots, row_backend, row_dsn)
         if resolution.diagnostic is not None:
             reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
+        if call.template is None:
+            continue
         sites.append(
             _Site(
                 call=call,

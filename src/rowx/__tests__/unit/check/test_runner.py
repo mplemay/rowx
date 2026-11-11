@@ -9,7 +9,9 @@ from rowx_core.backend import CheckerBackend, CheckerSession
 from rowx_core.errors import DatabaseError, InterfaceError
 
 from rowx.check.cli import main
-from rowx.check.runner import CheckError, describe_all, redact
+from rowx.check.config import load_config
+from rowx.check.runner import CheckError, RunResult, describe_all, redact, run_check
+from rowx.check.walk import discover_files
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -258,6 +260,91 @@ def test_redact_merges_overlapping_secrets_before_masking() -> None:
     assert redact("xx abcdef yy", "host=h password=abcd sslpassword=cdef") == "xx *** yy"
     assert redact("a*b", "host=h password=*") == "a***b"
     assert redact("ababa", "host=h password=aba") == "***"
+
+
+def _check_source(tmp_path: Path, source: str) -> RunResult:
+    path = tmp_path / "query.py"
+    path.write_text(source, encoding="utf-8")
+    config = load_config(path.parent)
+    return asyncio.run(run_check(config, discover_files(config, path.parent, [path]), None, 1))
+
+
+def _unchecked_value_types(imported: str) -> str:
+    return f"""\
+from dataclasses import dataclass
+
+from rowx import query_unchecked
+{imported}
+
+
+@dataclass
+class Pay:
+    amount: Money
+
+
+query_unchecked[Money](t"SELECT 1")
+query_unchecked[Range[int]](t"SELECT 1")
+query_unchecked[tuple[Money, int]](t"SELECT 1, 2")
+query_unchecked[Pay](t"SELECT 1")
+"""
+
+
+def test_unchecked_invalid_row_type_needs_no_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    result = _check_source(tmp_path, 'from rowx import query_unchecked\nquery_unchecked[dict](t"NOT SQL")\n')
+    assert [report.diagnostic.rule for report in result.reports] == ["invalid-row-type"]
+    assert result.statistics.checked == 0
+
+
+def test_valid_unchecked_row_type_needs_no_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    result = _check_source(tmp_path, 'from rowx import query_unchecked\nquery_unchecked[int](t"THIS IS NOT SQL")\n')
+    assert result.reports == []
+    assert result.statistics.checked == 0
+
+
+def test_unchecked_rowx_postgres_value_types_need_no_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    result = _check_source(tmp_path, _unchecked_value_types("from rowx_postgres import Money, Range"))
+    assert result.reports == []
+    assert result.statistics.checked == 0
+
+
+def test_unchecked_rowx_postgres_package_value_types_need_no_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    result = _check_source(tmp_path, _unchecked_value_types("from rowx.postgres import Money, Range"))
+    assert result.reports == []
+    assert result.statistics.checked == 0
+
+
+def test_unchecked_invalid_range_needs_no_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    source = (
+        'from rowx import query_unchecked\nfrom rowx_postgres import Range\nquery_unchecked[Range[str]](t"SELECT 1")\n'
+    )
+    result = _check_source(tmp_path, source)
+    assert [report.diagnostic.rule for report in result.reports] == ["invalid-row-type"]
+    assert result.statistics.checked == 0
+
+
+def test_unchecked_unknown_scheme_reports_invalid_row_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    source = 'from rowx import query_unchecked\nquery_unchecked[dict](t"NOT SQL")\n'
+    path = tmp_path / "query.py"
+    path.write_text(source, encoding="utf-8")
+    config = load_config(path.parent)
+    result = asyncio.run(run_check(config, discover_files(config, path.parent, [path]), "sqlite://x", 1))
+    assert [report.diagnostic.rule for report in result.reports] == ["invalid-row-type"]
+    assert result.statistics.checked == 0
+    code = main(["check", str(path), "--database-url", "sqlite://x"])
+    error = capsys.readouterr().err
+    assert code == 1
+    assert "unknown database scheme" not in error
+    assert "install `rowx[postgres]`" not in error
 
 
 def test_a_file_nested_too_deeply_does_not_hide_the_others(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
