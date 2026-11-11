@@ -2,7 +2,19 @@
 
 PostgreSQL execution, migrations and database services for rowx.
 
-Install `rowx[postgres]` for the checker and PostgreSQL backend, or `rowx-postgres` alone
-for an application that uses `rowx_core` and `rowx_postgres` without the CLI.
+`rowx-postgres` depends only on matching `rowx-core`.
+
+```python
+from rowx_postgres import Pool, connect
+```
+
+A standalone application installs `rowx-core` and `rowx-postgres`. That standalone pair does not include the `rowx`
+command.
+
+```sh
+uv add rowx-core rowx-postgres
+```
+
+`rowx[postgres]` is the checker plus this backend.
 
 Free-threaded CPython 3.14t cannot install the abi3 wheels, so pip builds rowx-postgres from the source distribution.

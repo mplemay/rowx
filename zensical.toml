@@ -9,6 +9,7 @@ site_dir = "site"
 strict = true
 nav = [
   { "Home" = "index.md" },
+  { "Why rowx" = "why.md" },
   { "Guide" = [
     { "Overview" = "guide.md" },
     { "Get started" = "guide/get-started.md" },

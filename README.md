@@ -1,8 +1,7 @@
 # rowx
 
-Typesafe raw SQL for Python 3.14+. No ORM: you write SQL as a [PEP 750](https://peps.python.org/pep-0750/) t-string and
-say what a row looks like. A Rust driver built on tokio-postgres runs it, and `rowx check` validates every query against
-a live Postgres 18 database before you ship.
+SQLx for Python. Typesafe raw SQL, with no ORM: you write SQL as a [PEP 750](https://peps.python.org/pep-0750/)
+t-string and say what a row looks like. `rowx check` validates every query against a live Postgres 18 database.
 
 ## Quickstart
 
@@ -14,7 +13,7 @@ Free-threaded CPython 3.14t cannot install the abi3 wheels, so pip builds rowx-p
 import asyncio
 
 from rowx import query
-from rowx.postgres import Pool
+from rowx_postgres import Pool
 
 type UserRow = tuple[int, str, str | None]  # id, name, email
 
@@ -36,7 +35,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-- `Pool` is safe to create at module level and acquires a connection per call. Use `rowx.postgres.connect(dsn)` for a
+- `Pool` is safe to create at module level and acquires a connection per call. Use `rowx_postgres.connect(dsn)` for a
   single connection, and `pool.transaction()` for transactions.
 - Interpolations (`{name}`) are always bound as server-side parameters. They are never pasted into the SQL text.
 - `query[T]` states the row type. `one` returns `T`, `optional` returns `T | None`, `all` returns `list[T]`, and
@@ -50,7 +49,7 @@ import asyncio
 from dataclasses import dataclass
 
 from rowx import query
-from rowx.postgres import connect
+from rowx_postgres import connect
 
 
 @dataclass(slots=True)
@@ -75,19 +74,46 @@ Check the queries against your database:
 rowx check src --database-url postgresql://app@localhost/app
 ```
 
-`rowx check` exits 0 when every query matches the database, 1 when it reports diagnostics, and 2 on a usage or
-connection error.
+`rowx check` exits 0 when every query matches the database, 1 when it reports diagnostics, and 2 on a usage or config
+error, an unreachable database, a describe failure that is not an SQL error, or an internal error.
 
-`rowx-core` provides backend-independent query and executor primitives through `rowx_core`. The `rowx` package
-re-exports its query API and supplies the CLI. The `postgres` extra exposes the backend's public API as
-`rowx.postgres`. The `rowx-postgres` distribution can also be installed on its own and imported as `rowx_postgres`.
-Runtime queries use their supplied connection or pool. The checker uses `--database-url` or `DATABASE_URL`
-without importing your application.
+A type mismatch is reported like this:
+
+```text
+error[type-mismatch]: column 2 "name": column type is `int` but the annotation is `str`
+  --> src/app.py:14:22
+   |
+14 |     query[tuple[int, str]](t"SELECT id, name FROM users")
+   |                      ^^^ element 2
+```
+
+The rules are in the [checker guide](docs/guide/checker.md).
+
+## Distributions
+
+`rowx` is the optional CLI and re-exports `query`. `from rowx import query` and `from rowx_core import query` are the
+same object.
+
+`rowx-core` (`rowx_core`) has no runtime dependencies. `rowx-postgres` (`rowx_postgres`) depends only on matching
+`rowx-core`.
+
+A standalone application installs `rowx-core` and `rowx-postgres` and does not get the `rowx` command:
+
+```sh
+uv add rowx-core rowx-postgres
+```
+
+The checker uses `--database-url` or `DATABASE_URL` and does not import the application.
+
+`rowx.postgres` remains a compatibility re-export of `rowx_postgres` and still needs the `postgres` extra.
 
 ## Documentation
 
 - [User guide](docs/guide.md): row types (tuples, scalars and named classes), pools, transactions, migrations, writing
   queries, overrides, the checker, CI and poolers.
+- [Why rowx](docs/why.md): where SQL lives, and how a live database check compares with other libraries.
+- [Changelog](docs/changelog.md): what changed in each release.
+- [Packages](docs/packages.md): the three distributions and the canonical imports.
 - [Postgres type mapping](docs/types.md): what each Postgres type decodes to and which Python types can be bound.
 - [Known limits](docs/known-limits.md): where nullability inference is less precise than the database.
 - [Reference](docs/reference/index.md): the full specification.

@@ -15,6 +15,7 @@ async with await connect(dsn) as conn:
 The block above is an illustration. The [user guide](guide.md) has samples the test suite runs.
 
 - [User guide](guide.md): install, queries, rows, executors, the checker, migrations, and testing.
+- [Why rowx](why.md): where SQL lives, and how a live database check compares with other libraries.
 - [Packages](packages.md): the three distributions and the canonical imports.
 - [Postgres type mapping](types.md): what each Postgres type decodes to, and which Python values can be bound.
 - [Known limits](known-limits.md): where nullability inference is less precise than the database.
