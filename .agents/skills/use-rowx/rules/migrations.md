@@ -31,14 +31,8 @@ async def next_version(dsn: str) -> int:
 
 Correct:
 
-```python
-from rowx_postgres import Migrator, connect
-
-
-async def apply(dsn: str, directory: str) -> None:
-    migrator = Migrator(directory)
-    async with await connect(dsn) as conn:
-        await migrator.run(conn)
+```sh
+rowx migrate add "add email"
 ```
 
 The correct way to add a file is the command `rowx migrate add "add email"`, not a query against the history table.
@@ -66,12 +60,8 @@ async def reset(dsn: str, directory: str) -> None:
 
 Correct:
 
-```python
-from rowx_postgres import Migrator, connect
-
-
-async def apply(dsn: str, directory: str) -> None:
-    migrator = Migrator(directory)
-    async with await connect(dsn) as conn:
-        await migrator.run(conn)
+```sh
+# validates the directory before the drop; setup does the same before it creates or changes the database
+rowx database reset
+rowx database setup
 ```

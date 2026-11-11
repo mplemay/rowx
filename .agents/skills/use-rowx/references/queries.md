@@ -6,8 +6,11 @@ What `query` and `query_unchecked` accept is in [Writing queries](../../../../do
 ## Shape
 
 A query is `query[T](t"...")` with one inline t-string. Call `.all(conn)`, `.one(conn)`, `.optional(conn)`,
-`.execute(conn)`, or `.fetch(conn)`. The executor compiles and runs that call. A later call on another executor
-compiles again. Construction selects no compiler.
+`.execute(conn)`, or `.fetch(conn)`. `all`, `one`, `optional`, and `execute` compile and run when called.
+
+`fetch` compiles and returns a `RowStream`. The statement runs on the first iteration. There is no IO until iteration.
+
+A later call on another executor compiles again. Construction selects no compiler.
 
 ```python
 from rowx import query

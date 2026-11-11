@@ -173,6 +173,66 @@ def test_use_rowx_skill_links_resolve() -> None:
             assert resolved.is_file(), f"{source.relative_to(ROOT)} -> {destination}"
 
 
+def _python_fence_contains(text: str, needle: str) -> bool:
+    in_python = False
+    for line in text.splitlines():
+        if in_python:
+            if line.startswith("```"):
+                in_python = False
+                continue
+            if needle in line:
+                return True
+            continue
+        if line.startswith("```python"):
+            in_python = True
+    return False
+
+
+def test_skill_import_rule_does_not_export_connect() -> None:
+    text = (USE_ROWX_SKILL.parent / "rules" / "imports.md").read_text()
+    assert "`connect` imported from `rowx` or `rowx_core`" not in text
+    assert "`connect` is not exported by `rowx` or `rowx_core`" in text
+
+
+def test_skill_reset_rule_names_the_role() -> None:
+    text = (USE_ROWX_SKILL.parent / "rules" / "reset.md").read_text()
+    assert "neither the role nor session authorization" in text
+
+
+def test_skill_migration_samples_match_the_commands() -> None:
+    rules = (USE_ROWX_SKILL.parent / "rules" / "migrations.md").read_text()
+    add, reset = rules.split("## Validate before reset drops", maxsplit=1)
+    assert "rowx migrate add" in add
+    assert "migrator.run" not in add
+    assert "rowx database reset" in reset
+    assert "rowx database drop" in reset
+    reference = (USE_ROWX_SKILL.parent / "references" / "migrations.md").read_text()
+    assert "rowx migrate add" in reference
+    assert "rowx database reset" in reference
+    assert "migrator.run" not in reference
+
+
+def test_skill_unchecked_section_calls_query_unchecked() -> None:
+    text = (USE_ROWX_SKILL.parent / "rules" / "diagnostics.md").read_text()
+    heading = "## `query_unchecked` SQL is not described"
+    start = text.index(heading)
+    next_heading = text.find("\n## ", start + 1)
+    section = text[start:] if next_heading < 0 else text[start:next_heading]
+    assert _python_fence_contains(section, "query_unchecked")
+    assert "query[str](sql)" in text[:start]
+
+
+def test_skill_fetch_has_no_io_until_iteration() -> None:
+    text = (USE_ROWX_SKILL.parent / "references" / "queries.md").read_text()
+    assert "no IO until iteration" in text
+
+
+def test_skill_testing_reference_allows_asyncio_tests() -> None:
+    text = (USE_ROWX_SKILL.parent / "references" / "testing.md").read_text()
+    assert "asyncio.run" in text
+    assert "Trio" in text
+
+
 def test_parametrization_runs_every_fence() -> None:
     # The decorator sets pytestmark at import. ty does not treat that attribute as declared.
     raw = vars(test_snippet_runs).get("pytestmark")

@@ -7,6 +7,11 @@ the plan, and validation order are in [the migrations reference](../../../../doc
 
 `rowx migrate add "add email"` writes the next file with no database and no backend, including when the directory
 already exists and has to be read to choose the next version. `run`, `revert`, `skip`, and `info` need a backend.
+Do not open a connection to invent the next version.
+
+```sh
+rowx migrate add "add email"
+```
 
 ## Validate before a destructive reset
 
@@ -14,17 +19,21 @@ already exists and has to be read to choose the next version. `run`, `revert`, `
 not match the grammar, a duplicate version, an unpaired `.up.sql` or `.down.sql`, or a file that is not UTF-8 raises
 `MigrationSourceError`.
 
+```python
+from rowx_postgres import Migrator
+
+
+def load_migrator(directory: str) -> Migrator:
+    return Migrator(directory)
+```
+
 `rowx database reset` and `rowx database setup` construct that migrator before they create, drop, or change the
 database. A bad directory fails `reset` before the drop. `rowx database drop` does not read migration files.
 
-```python
-from rowx_postgres import Migrator, connect
-
-
-async def apply(dsn: str, directory: str) -> None:
-    migrator = Migrator(directory)
-    async with await connect(dsn) as conn:
-        await migrator.run(conn)
+```sh
+# validates the directory before the drop; setup does the same before it creates or changes the database
+rowx database reset
+rowx database setup
 ```
 
 Migration files are trusted SQL. Checksums are the SHA-384 of the raw bytes. With `[tool.rowx.migrate]` present,

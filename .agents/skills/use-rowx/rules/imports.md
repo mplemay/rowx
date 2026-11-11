@@ -22,8 +22,11 @@ only on matching `rowx-core`. It does not depend on the CLI.
 ## Canonical driver import
 
 `rowx.postgres` re-exports `rowx_postgres` and still needs the `postgres` extra. New code imports `rowx_postgres`.
-`Pool` and `connect` imported from `rowx` or `rowx_core` are executor protocols. They are not a connection pool and
-not a connect function.
+`Pool` imported from `rowx` or `rowx_core` is the executor protocol, not a connection pool.
+
+`connect` is not exported by `rowx` or `rowx_core`.
+
+Import it with `from rowx_postgres import connect`. `rowx.postgres.connect` is only the compatibility re-export.
 
 Incorrect:
 
