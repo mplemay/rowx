@@ -1,7 +1,7 @@
 # The checker
 
 ```text
-rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json] [--statistics] [--coverage] [--inspect] [--require-checked] [--disallow-unchecked] [-j N] [--scratch] [--no-drift-check]
+rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json] [--statistics] [--coverage] [--inspect] [--require-checked] [--disallow-unchecked] [-j N] [--scratch] [--no-drift-check] [--error RULE] [--warn RULE] [--ignore RULE] [--exit-zero-on-warning] [--respect-ignore-files | --no-respect-ignore-files] [--force-exclude]
 ```
 
 The checker never imports or executes your code. It parses your files, finds every `query[T](t"...")` call, resolves `T`
@@ -10,8 +10,8 @@ types. See [the checker rules](../reference/checker.md#rules) for the rules.
 
 | Exit code | Meaning |
 |---|---|
-| 0 | No diagnostics, including when no queries were found. |
-| 1 | One or more diagnostics. |
+| 0 | No failing diagnostics, including when no queries were found or only warnings remain with warning failure disabled. |
+| 1 | An error, or a warning when warnings fail the check (the default). |
 | 2 | Usage or config error, an unreachable database, a describe failure that is not an SQL error, or an internal error. |
 
 Configuration lives in `pyproject.toml`:
@@ -33,6 +33,44 @@ checker does not infer which executor will run a query. It checks every recogniz
 construction, including one nothing calls, on both public import roots, `rowx` and `rowx_core`. At runtime the
 executor passed to the method supplies the compiler, and that compiler emits the SQL for the call. A later call on
 another executor compiles again. There is no automatic multi-target routing and no offline query metadata.
+
+## Checker suppressions and rule levels
+
+Rowx uses its own comments; `type: ignore`, `noqa`, and `@no_type_check` do not suppress SQL checks. A trailing
+comment such as `# rowx: ignore[invalid-row-type]` suppresses that rule when its diagnostic starts or ends on that
+line, using the last occupied line of an end-exclusive span. A comment in the middle of a multiline span does not
+match. Multiple rules can be comma separated. `# rowx: ignore` suppresses ordinary rules on that line. A standalone
+comment before the first code token applies to the whole file; a standalone comment after code does not apply to the
+next line. A reason can follow the directive as `# rowx: ignore[sql-error] # reason`. Unrecognized or malformed
+comments and unused entries produce `invalid-ignore-comment` and `unused-ignore-comment` warnings. Suppression changes
+reporting only: source discovery, SQL description, and coverage still run. Operational failures remain errors.
+If tokenization fails, comments in that file are not applied and no unused-ignore warnings are generated.
+
+Configure levels in `pyproject.toml`:
+
+```toml
+[tool.rowx.rules]
+all = "error"
+unused-ignore-comment = "warn"
+```
+
+Levels are `error`, `warn`, and `ignore`. Specific settings override `all`; repeatable `--error RULE`, `--warn RULE`,
+and `--ignore RULE` options apply in command-line order and also accept `all`. Warnings fail the check by default;
+`--exit-zero-on-warning` or `[tool.rowx.terminal] error-on-warning = false` changes that. JSON diagnostics include
+`severity`. Direct checker results and `check-compat` retain raw evidence regardless of reporting settings;
+compatibility snapshot discovery bypasses ignore files while retaining the snapshot's rowx exclusions. Baselines,
+automatic ignore insertion, and generic Python type-checker suppression compatibility are outside this feature.
+
+## Source selection
+
+`[tool.rowx] include` and `exclude` patterns are anchored to the project root. Use `**/generated` for a basename at any
+depth (previously `generated` did this); `generated` now refers to the root directory. Excludes accept ordered `!`
+reinclusions. For import resolution, each include contributes its literal directory prefix before the first glob
+component as a source root. Rowx reads nested `.gitignore` and `.ignore` files even outside Git; tracked files matching
+those rules are excluded, and untracked files are included unless ignored. Set `respect-ignore-files = false` or pass
+`--no-respect-ignore-files` to disable these files. Explicit paths bypass filtering for the selected path itself;
+descendants of explicit directories are still filtered. Use `force-exclude = true` or `--force-exclude` to filter
+explicit paths too. The `.git` directory is always excluded.
 
 ## Hand-built templates
 
@@ -63,11 +101,8 @@ a `Template`, `__reduce__` and pickle, `__annotations__`, `typing.get_type_hints
 `locals()` and `vars()` (read, or assigned through), `sys.modules[__name__]`, `setattr` on a module and
 `operator.attrgetter`.
 
-Only tracked `*.py` files under the include roots are checked. `.pyi` stubs, extensionless scripts, and gitignored or
-untracked files are not. `exclude` entries are matched relative to the project, so an absolute path matches nothing.
-A file nested too deeply to analyse (thousands of chained operators or attributes) is reported as a `syntax-error`
-and fails the run, without hiding the other files. There are no ignore comments: the only escape is to exclude the
-path in `[tool.rowx]`, such as `exclude = ["**/raw_sql.py"]`.
+Only selected `*.py` files are checked; `.pyi` stubs and extensionless scripts are not. A file nested too deeply to
+analyse (thousands of chained operators or attributes) is reported as a `syntax-error` without hiding other files.
 
 ## Query check coverage
 

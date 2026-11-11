@@ -1102,14 +1102,20 @@ def discover_source(path: Path, data: bytes) -> FileResult:
         end_line = error.end_lineno or line
         end_col = error.end_offset or col + 1
         end_col = max(end_col, col + 1) if end_line == line else end_col
-        return _syntax_error(path, error.msg, Span(line=line, col=col, end_line=end_line, end_col=end_col))
+        result = _syntax_error(path, error.msg, Span(line=line, col=col, end_line=end_line, end_col=end_col))
+        result.source = source
+        return result
     except (ValueError, RecursionError, MemoryError) as error:
-        return _syntax_error(path, f"cannot parse file: {error}", Span(line=1, col=1, end_line=1, end_col=2))
+        result = _syntax_error(path, f"cannot parse file: {error}", Span(line=1, col=1, end_line=1, end_col=2))
+        result.source = source
+        return result
     try:
         finder = _Finder(path, tree, lines)
         finder.visit(tree)
     except RecursionError:
-        return too_deep(path)
+        result = too_deep(path)
+        result.source = source
+        return result
     finder.result.templates = finder.facts()
     finder.result.source = source
     return finder.result

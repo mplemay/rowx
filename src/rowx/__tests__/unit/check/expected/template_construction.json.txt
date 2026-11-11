@@ -1,6 +1,7 @@
 [
   {
     "rule": "template-construction",
+    "severity": "error",
     "message": "`Template` used as a value, so the calls to it can't be seen",
     "file": "app/build.py",
     "line": 6,
@@ -16,6 +17,7 @@
   },
   {
     "rule": "template-construction",
+    "severity": "error",
     "message": "`Template(...)` takes only `str` literals, t-strings and `Interpolation(...)` calls",
     "file": "app/build.py",
     "line": 10,
@@ -31,6 +33,7 @@
   },
   {
     "rule": "template-construction",
+    "severity": "error",
     "message": "a starred argument to `Template(...)` can hold raw SQL",
     "file": "app/build.py",
     "line": 11,
@@ -46,6 +49,7 @@
   },
   {
     "rule": "template-construction",
+    "severity": "error",
     "message": "`Template(...)` takes only `str` literals, t-strings and `Interpolation(...)` calls",
     "file": "app/build.py",
     "line": 12,
@@ -61,6 +65,7 @@
   },
   {
     "rule": "template-construction",
+    "severity": "error",
     "message": "`Template(...)` takes only `str` literals, t-strings and `Interpolation(...)` calls",
     "file": "app/build.py",
     "line": 13,
@@ -76,6 +81,7 @@
   },
   {
     "rule": "template-construction",
+    "severity": "error",
     "message": "the `conversion` and `format_spec` of `Interpolation(...)` must be literals",
     "file": "app/build.py",
     "line": 14,
@@ -91,6 +97,7 @@
   },
   {
     "rule": "template-construction",
+    "severity": "error",
     "message": "a t-string can only be added to a t-string or a `Template`, not an unknown operand",
     "file": "app/build.py",
     "line": 15,
