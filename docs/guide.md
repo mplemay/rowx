@@ -1379,7 +1379,7 @@ with TemporaryDirectory() as tmp:
 ```
 
 A complete project, with migrations, an application module, drift-checked queries and a `conftest.py`, is in
-[`examples/migrations`](../examples/migrations).
+[`examples/migrations`](https://github.com/mplemay/rowx/tree/main/examples/migrations).
 
 ## The checker
 
@@ -1803,7 +1803,7 @@ asyncio.run(main())
 ```
 
 The full pattern, a filtered and sortable listing that is also checked in CI, is in
-[`examples/security`](../examples/security).
+[`examples/security`](https://github.com/mplemay/rowx/tree/main/examples/security).
 
 ### Pool reset
 
