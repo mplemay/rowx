@@ -1,7 +1,7 @@
 import string.templatelib
 import typing
 from string import templatelib
-from string.templatelib import Template, _template_unpickle  # error: [template-construction]  # ty: ignore[import-not-found]
+from string.templatelib import Template, _template_unpickle  # error: [template-construction]  # ty: ignore[unresolved-import]
 from typing import Annotated, cast
 
 import rowx_core._template
@@ -19,7 +19,7 @@ new = Template.__new__  # error: [template-construction]
 kind = type(t"a")  # error: [template-construction]
 made = type(t"a")("x")  # error: [template-construction]
 mapped = list(map(Template, ["a"]))  # error: [template-construction]
-private = templatelib._template_unpickle  # error: [template-construction]  # ty: ignore[missing-attribute]
+private = templatelib._template_unpickle  # error: [template-construction]  # ty: ignore[unresolved-attribute]
 unpickle = _template_unpickle  # error: [template-construction]
 via_string = string.templatelib  # error: [template-construction]
 

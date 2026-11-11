@@ -7,3 +7,6 @@ rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
 [env]
 # abi3-py314 needs a 3.14 interpreter at build time; the uv venv provides it
 PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
+
+[registry]
+global-min-publish-age = "7 days"

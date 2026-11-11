@@ -38,6 +38,7 @@ Changelog = "https://github.com/mplemay/rowx/blob/main/docs/changelog.md"
 rowx = "rowx.check.cli:main"
 
 [tool.uv]
+exclude-newer = "7 days"
 
 [tool.uv.workspace]
 members = ["packages/rowx-core", "packages/rowx-postgres"]
