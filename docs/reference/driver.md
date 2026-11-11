@@ -76,6 +76,12 @@ Arrays and ranges are always sent in binary format. There is no text literal for
 untrusted element text cannot change the array's shape. Scalar parameters may still use text format. A scalar has
 no element grammar, so a text-format scalar can corrupt only itself. `json.dumps` stays ASCII-only.
 
+Nested lists must be rectangular. The encoder takes each dimension's length from the first element at that depth
+and raises `EncodeError` (`the nested lists are ragged`) when another element has a different length or a
+different depth. A NULL element is still binary: the wire length is `-1` and there is no payload. An element is
+never sent as text. A list deeper than six levels is `EncodeError`. An empty list at any level, once the shape is
+rectangular, encodes as an empty array.
+
 ## Session encoding watch
 
 tokio-postgres sets `client_encoding=UTF8` at startup and does not notice a later `SET`. When `client_encoding`

@@ -181,13 +181,78 @@ Every rule is an error. Warnings, ignore comments and per-rule configuration are
 [#296](https://github.com/mplemay/rowx/issues/296). `--fix` is
 [#301](https://github.com/mplemay/rowx/issues/301).
 
-Type compatibility is nominal, with two relaxations. A domain is acceptable wherever its base is. `int2`, `int4`
-and `int8` all accept `int`, and `float4` and `float8` both accept `float`. Anything else is `type-mismatch`,
-including `int` for a `numeric` column. `None`, `Any` and `object` silence `nullability-mismatch` for that column.
-They do not silence `type-mismatch`.
+Type compatibility is nominal, with two relaxations. A domain is compared as its base type, so it is acceptable
+wherever that base is. `int2`, `int4` and `int8` all accept `int`, and `float4` and `float8` both accept `float`.
+`int` for a `numeric` column is `type-mismatch`.
+
+`typing.Any` and `builtins.object` are the leaf `any`. They are the only annotations neutral to both type and
+nullability. Once a column is supported and is not `void`, comparison returns no findings, so they match that
+column's type and either nullability. An unsupported column is still `unsupported-type`. A `void` column matches
+only the element `None` (leaf `none`), including a named field typed `None`. Anything else facing `void`, including
+`Any` and `object`, is `type-mismatch`, and the help says to use `.execute()`. A bare `None` element against any
+other type is `type-mismatch` too. It does not silence nullability.
+
+`json` and `jsonb` accept any leaf annotation other than `None`. Nullability is still checked, unless the element
+is `Any` or `object`.
+
+An array matches `list[...]` when the innermost leaf is the element type. The annotation does not record
+dimensions, so any nesting depth is accepted. An element may be `X` or `X | None` at every level, and that
+`| None` is not a nullability mismatch. The array column's own nullability is still checked against whether the
+annotation is `list[...] | None`.
 
 A template with more than one statement is `sql-error` from Postgres. A parameter in a DDL statement is a server
 error.
+
+## Parameter type inference
+
+`src/rowx/check/params.py` infers a type for each interpolation. Comparison then uses the type table's accepted
+parameter types. An unknown interpolation is not reported. The value `None`, and an annotation that is only
+`None`, is accepted for every parameter. For an array parameter the nested lists are flattened to their leaf,
+because the declared type does not record dimensions, and that leaf is checked against the element type. A leaf
+that was not inferred is not reported.
+
+**Literals.** An `int`, `float`, `str`, `bytes` or `bool` constant is that type, including a unary `+` or `-` on
+an `int` or `float`. `True` is `bool`, not `int`. `None` is `None`. An inline t-string is `Template`. A list or
+tuple literal is `list[...]` when every element has the same evident type. An empty list or tuple, a mix of
+types, a `None` element beside another type, a star (`[1, *xs]`), or a name with no evident type is unknown. A
+complex number is unknown.
+
+**Constructors.** A call is evident only when its callee resolves, through imports, to one of these:
+
+- `decimal.Decimal`, `uuid.UUID`, `datetime.date`, `datetime.datetime`, `datetime.time`, `datetime.timedelta`,
+  `datetime.datetime.now` (including `datetime.now` after `from datetime import datetime`)
+- `bytearray` and `memoryview`, including `builtins.bytearray` and `builtins.memoryview` when that is how they
+  are written
+- an `ipaddress` class (`IPv4Interface`, `IPv6Interface`, `IPv4Address`, `IPv6Address`, `IPv4Network`,
+  `IPv6Network`)
+- a `rowx_postgres` value class the backend records (`Money`, `Interval`, `Range`, `Cube`, and the geometric
+  types)
+
+`date.today()` is unknown. So is `int(1)`, `str(1)`, or any other builtin call. A shadowed builtin stays
+unknown: a function named `bytearray`, or `Decimal` imported from anywhere other than `decimal`, is not the
+constructor. A relative import does not resolve. `from module import *` makes the name unknown. `Range[int]` is
+evident as `Range`. The type argument is not part of the inferred parameter type.
+
+**Names.** A name is evident only when the scope that sees it has exactly one binding, and that binding is an
+annotated parameter, an `AnnAssign`, or an `Assign` whose value is itself evident. An `AnnAssign` uses the
+annotation, not the value, so `a: int = compute()` is `int`. An `Assign` follows the value, including a chain
+`a = b = 1` and a name copied from another evident name. A self-reference (`x = x`) or a mutual reference is
+unknown.
+
+Anything else bound to that name in the same scope makes it unknown: a second assignment or annotation, an
+`AugAssign`, `del`, a walrus, a `for` or `async for` target, `with … as`, an unpacking target, `except … as`, an
+import, a function or class definition, a `type` alias, or a `match` capture. `*args` and `**kwargs` are unknown
+even when annotated. `global` or `nonlocal` anywhere in the file makes that name unknown in every scope. A class
+body name is visible only in that class body, not in its methods and not after the class. A comprehension target
+does not hide the same name outside the comprehension. A walrus inside a comprehension is bound in the scope
+around the comprehension, so it hides a name there.
+
+**Annotations.** In an annotation, `X | None` counts as `X`, and `None` alone counts as `None`. A union of
+distinct non-`None` types is unknown, including when one member does not resolve. `int | int` is `int`.
+`list[int]` and `list[list[str]]` are evident. `list[int | None]` is `list[int]`. A bare `list`, a
+`list[object]`, and a string annotation (`"int"`) are unknown. `dict[...]` is `dict`. A builtin used in an
+annotation must not be shadowed. `from some_module import *` makes a builtin annotation unknown. A type parameter
+that reuses a builtin name (`def f[int](x: int)`) hides that builtin inside the function.
 
 ## Output
 
