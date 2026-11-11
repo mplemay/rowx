@@ -109,6 +109,9 @@ def test_published_readmes_use_canonical_imports() -> None:
     assert "query_as!" in why_text
     assert "do not describe mapped objects" not in why_text
     assert "The FAQ is about" not in why_text
+    assert "tstring()" in why_text
+    assert "not a t-string" not in why_text
+    assert "The checker never imports" in why_text
 
     assert "why.md" in zensical
 
