@@ -85,6 +85,9 @@ def test_published_readmes_use_canonical_imports() -> None:
     assert "from rowx.postgres import" not in readme
     assert "docs/why.md" in readme
     assert "docs/changelog.md" in readme
+    assert "prepares each checked" in readme
+    assert "query_unchecked" in readme
+    assert "no diagnostics" in readme
 
     assert "from rowx_core import query" in core_readme
     assert "no runtime dependencies" in core_readme
@@ -102,6 +105,10 @@ def test_published_readmes_use_canonical_imports() -> None:
     assert "psycopg" in why_text
     assert "SQLAlchemy" in why_text
     assert "sqlc" in why_text
+    assert "query_unchecked" in why_text
+    assert "query_as!" in why_text
+    assert "do not describe mapped objects" not in why_text
+    assert "The FAQ is about" not in why_text
 
     assert "why.md" in zensical
 

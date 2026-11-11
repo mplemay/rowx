@@ -1,7 +1,8 @@
 # rowx
 
 SQLx for Python 3.14+. Typesafe raw SQL, with no ORM: you write SQL as a [PEP 750](https://peps.python.org/pep-0750/)
-t-string and say what a row looks like. `rowx check` validates every query against a live Postgres 18 database.
+t-string and say what a row looks like. `rowx check` prepares each checked `query` against a live Postgres 18 database.
+`query_unchecked` SQL is not described.
 
 ## Quickstart
 
@@ -74,8 +75,9 @@ Check the queries against your database:
 rowx check src --database-url postgresql://app@localhost/app
 ```
 
-`rowx check` exits 0 when every query matches the database, 1 when it reports diagnostics, and 2 on a usage or config
-error, an unreachable database, a describe failure that is not an SQL error, or an internal error.
+`rowx check` exits 0 when it reports no diagnostics, including when no queries were found, 1 when it reports one or
+more diagnostics, and 2 on a bad invocation or config, an unreachable database, a describe failure that is not an SQL
+error, a drift or scratch failure, or an internal error.
 
 A type mismatch is reported like this:
 
@@ -87,7 +89,8 @@ error[type-mismatch]: column 2 "name": column type is `int` but the annotation i
    |                      ^^^ element 2
 ```
 
-The rules are in the [checker guide](docs/guide/checker.md).
+The rules are in the [checker guide](docs/guide/checker.md). The [checker reference](docs/reference/checker.md) is the
+contract for the exit codes.
 
 ## Distributions
 
