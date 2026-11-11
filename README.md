@@ -1,6 +1,6 @@
 # rowx
 
-SQLx for Python. Typesafe raw SQL, with no ORM: you write SQL as a [PEP 750](https://peps.python.org/pep-0750/)
+SQLx for Python 3.14+. Typesafe raw SQL, with no ORM: you write SQL as a [PEP 750](https://peps.python.org/pep-0750/)
 t-string and say what a row looks like. `rowx check` validates every query against a live Postgres 18 database.
 
 ## Quickstart
