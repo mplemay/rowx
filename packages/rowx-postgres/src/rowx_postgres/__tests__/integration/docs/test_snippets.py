@@ -18,6 +18,13 @@ ROOT: Final[Path] = next(parent for parent in Path(__file__).resolve().parents i
 # `.agents/skills/` may be absent; the pattern stays so a later skill page is picked up.
 DOC_GLOBS: Final[tuple[str, ...]] = ("README.md", "docs/**/*.md", ".agents/skills/**/*.md")
 SNIPPET: Final[Pattern[str]] = re_compile(r"^```python test\n(?P<body>.*?)^```$", MULTILINE | DOTALL)
+USE_ROWX_SKILL: Final[Path] = ROOT / ".agents" / "skills" / "use-rowx" / "SKILL.md"
+USE_ROWX_SKILL_URL: Final[str] = "https://github.com/mplemay/rowx/blob/main/.agents/skills/use-rowx/SKILL.md"
+FENCED_BLOCK: Final[Pattern[str]] = re_compile(r"^```.*?^```$", MULTILINE | DOTALL)
+INLINE_CODE: Final[Pattern[str]] = re_compile(r"`[^`]*`")
+INLINE_LINK: Final[Pattern[str]] = re_compile(r"\[[^]]*\]\(([^)]*)\)")
+REFERENCE_DEFINITION: Final[Pattern[str]] = re_compile(r"^\[[^]]+\]:[ \t]+(\S+)", MULTILINE)
+EXTERNAL_LINK_PREFIXES: Final[tuple[str, ...]] = ("http://", "https://", "mailto:")
 
 
 # the testing guide snippet runs the plugin in a temporary project, whose template (cached for the next run of a real
@@ -118,6 +125,52 @@ def test_published_readmes_use_canonical_imports() -> None:
     assert "The checker never imports" in why_text
 
     assert "why.md" in zensical
+
+
+def _link_destinations(text: str) -> list[str]:
+    # Fenced blocks and inline code are not markdown links. `query[T](t"...")` is code, not a link.
+    prose = INLINE_CODE.sub("", FENCED_BLOCK.sub("", text))
+    inline = [match.group(1) for match in INLINE_LINK.finditer(prose)]
+    defined = [match.group(1) for match in REFERENCE_DEFINITION.finditer(prose)]
+    return [*inline, *defined]
+
+
+def _relative_target(destination: str) -> str | None:
+    target = destination.strip()
+    if len(target) >= 2 and target[0] == "<" and target[-1] == ">":
+        target = target[1:-1].strip()
+    target = target.split(maxsplit=1)[0]
+    if target.startswith(EXTERNAL_LINK_PREFIXES):
+        return None
+    path = target.split("#", 1)[0]
+    if not path:
+        return None
+    return path
+
+
+def test_use_rowx_skill_is_discovered() -> None:
+    assert USE_ROWX_SKILL in set(_doc_files())
+
+
+def test_use_rowx_skill_is_linked() -> None:
+    readme = (ROOT / "README.md").read_text()
+    index = (ROOT / "docs" / "index.md").read_text()
+    testing = (ROOT / "docs" / "contributing" / "testing.md").read_text()
+    assert ".agents/skills/use-rowx/SKILL.md" in readme
+    assert USE_ROWX_SKILL_URL in index
+    assert USE_ROWX_SKILL_URL in testing
+
+
+def test_use_rowx_skill_links_resolve() -> None:
+    sources = sorted(USE_ROWX_SKILL.parent.rglob("*.md"))
+    assert sources
+    for source in sources:
+        for destination in _link_destinations(source.read_text()):
+            if (relative := _relative_target(destination)) is None:
+                continue
+            resolved = (source.parent / relative).resolve()
+            assert resolved.is_relative_to(ROOT), f"{source.relative_to(ROOT)} -> {destination}"
+            assert resolved.is_file(), f"{source.relative_to(ROOT)} -> {destination}"
 
 
 def test_parametrization_runs_every_fence() -> None:

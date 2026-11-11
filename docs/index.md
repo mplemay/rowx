@@ -20,5 +20,7 @@ The block above is an illustration. The [user guide](guide.md) has samples the t
 - [Postgres type mapping](types.md): what each Postgres type decodes to, and which Python values can be bound.
 - [Known limits](known-limits.md): where nullability inference is less precise than the database.
 - [Changelog](changelog.md): what changed in each release.
+- [use-rowx skill](https://github.com/mplemay/rowx/blob/main/.agents/skills/use-rowx/SKILL.md): agent guidance for
+  queries, the package split, and `rowx check`.
 
 Install the checker and the PostgreSQL backend with `uv add "rowx[postgres]"`.
