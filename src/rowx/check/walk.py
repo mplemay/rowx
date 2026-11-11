@@ -232,18 +232,18 @@ class _Discovery:
                     found.append(path)
         return found
 
-    def visit(self, target: Path, *, bypass: bool) -> None:
+    def visit(self, target: Path, *, bypass: bool, explicit: bool) -> None:
         if not target.exists():
             msg = f"path does not exist: {target}"
             raise ConfigError(msg)
         anchor = target.parent if target.is_file() else target
         if ".git" in target.parts:
             return
-        if target.is_dir():
+        if target.is_dir() or not explicit:
             base = self.root if target.is_relative_to(self.root) else Path(target.anchor)
             if any(
                 parent.is_symlink()
-                for parent in (target, *target.parents)
+                for parent in ((target, *target.parents) if target.is_dir() else target.parents)
                 if parent != base and parent.is_relative_to(base)
             ):
                 return
@@ -306,7 +306,7 @@ def discover_files(config: Config, cwd: Path, paths: list[Path] | None = None, *
                 # symlink selected inside the project or an external target.
                 top = Path(*target.parts[:2])
                 target = top.resolve() / target.relative_to(top)
-            discovery.visit(target, bypass=not config.force_exclude)
+            discovery.visit(target, bypass=not config.force_exclude, explicit=True)
     else:
         for entry in config.include:
             normalized = _normalize(entry)
@@ -315,5 +315,5 @@ def discover_files(config: Config, cwd: Path, paths: list[Path] | None = None, *
             else:
                 targets = discovery.glob_targets(entry)
             for target in targets:
-                discovery.visit(target, bypass=False)
+                discovery.visit(target, bypass=False, explicit=False)
     return sorted(discovery.found)

@@ -192,6 +192,16 @@ def test_directory_include_does_not_cross_symlink(tmp_path: Path, include: str) 
     assert names(root, discover_files(Config(root=root), root, [Path("link/sub/a.py")])) == ["link/sub/a.py"]
 
 
+def test_literal_file_include_does_not_cross_directory_symlink(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    touch(root, "real/sub/a.py")
+    (root / "link").symlink_to(root / "real", target_is_directory=True)
+    assert discover_files(Config(root=root, include=("link/sub/a.py",)), root) == []
+    assert names(root, discover_files(Config(root=root, force_exclude=True), root, [Path("link/sub/a.py")])) == [
+        "link/sub/a.py"
+    ]
+
+
 def test_external_directory_does_not_cross_symlink(tmp_path: Path) -> None:
     root = tmp_path.resolve()
     project = root / "project"
