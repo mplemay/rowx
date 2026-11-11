@@ -14,12 +14,23 @@ nav = [
   { "Types" = "types.md" },
   { "Known limits" = "known-limits.md" },
   { "Changelog" = "changelog.md" },
+  { "Reference" = [
+    { "Overview" = "reference/index.md" },
+    { "API" = "reference/api.md" },
+    { "Type mapping" = "reference/type-mapping.md" },
+    { "Checker" = "reference/checker.md" },
+    { "Nullability" = "reference/nullability.md" },
+    { "Migrations" = "reference/migrations.md" },
+    { "Security" = "reference/security.md" },
+    { "Driver" = "reference/driver.md" },
+  ] },
+  { "Contributing" = [
+    { "Architecture" = "contributing/architecture.md" },
+    { "Decisions" = "contributing/decisions.md" },
+    { "Testing" = "contributing/testing.md" },
+    { "Dependencies" = "contributing/dependencies.md" },
+  ] },
 ]
-# Built so links from the guide and known limits still resolve. Not navigation items.
-not_in_nav = """
-/design/
-/spikes/
-"""
 
 [project.theme]
 language = "en"

@@ -90,4 +90,4 @@ without importing your application.
   queries, overrides, the checker, CI and poolers.
 - [Postgres type mapping](docs/types.md): what each Postgres type decodes to and which Python types can be bound.
 - [Known limits](docs/known-limits.md): where nullability inference is less precise than the database.
-- [Design](docs/design/README.md): the full specification.
+- [Reference](docs/reference/index.md): the full specification.

@@ -1,5 +1,10 @@
 # Decision log
 
+This is the record of decisions, including ones that were later amended. It is not the current layout. The current
+tree is [Architecture](architecture.md). Entries below that name `rowx.postgres`, `rowx._core`, `rowx-py` or
+`rowx-postgres-py` as the packaging are historical. Those names are not the distributions or the native module now.
+The native module is `rowx_postgres._core`. Value types live in `rowx_postgres`.
+
 ## Design interview (2026-10-23)
 
 | # | Topic | Decision |
@@ -27,14 +32,14 @@
 | 21 | sqlparser-rs | Not in v1 |
 | 22 | Concurrency | One operation per connection; raise `ConnectionBusyError` |
 | 23 | TLS | rustls |
-| 24 | Packaging | One wheel and one CLI |
+| 24 | Packaging | Historical layout: one wheel and one CLI. Current packaging is three distributions ([Architecture](architecture.md)) |
 | 25 | Doc shape | Spec plus milestones and tasks |
 
 ## Review-driven decisions (revision 2)
 
 | # | Decision | Why |
 |---|---|---|
-| R1 | `rowx-pg` is pure Rust; all PyObject work is in `rowx-py` | Keeps `cargo test` real and the boundary clean |
+| R1 | Historical layout: `rowx-pg` is pure Rust and PyObject work is in `rowx-py`. The split still holds. The crates are now `rowx-postgres` and `rowx-py-core`, and the extension crate is `rowx-postgres-py` | Keeps `cargo test` real and the boundary clean |
 | R2 | Cancellation uses a Settling state, rowx's own CancelRequest read to EOF, and draining | Stale cancels killed 55% of follow-up queries |
 | R3 | Base nullability checks `convalidated` and `relkind` | PG18 `NOT VALID` NOT NULL, foreign tables |
 | R4 | The walker covers scan boundaries, grouping sets, RETURNING old/new, and every matching position | Five unsafe NOT NULL answers were measured |
@@ -73,12 +78,12 @@
 
 | # | Decision | Why |
 |---|---|---|
-| C1 | `Executor` is a `typing.Protocol` over a private SPI (`_fetch`, `_stream`, `_execute`, `closed`); `rowx` never imports `rowx.postgres` | The widening that Q9 anticipated; `import rowx` loads no backend |
+| C1 | `Executor` is a `typing.Protocol` over a private SPI (`_fetch`, `_stream`, `_execute`, `closed`). Historical layout: the note said `rowx` never imports `rowx.postgres`. Current rule: `import rowx` loads no backend, and connections come from `rowx_postgres` | The widening that Q9 anticipated |
 | C2 | The runtime covers a connection, a pool and transactions; pipelining stays deferred | Roadmap items 2 and 3 |
 | C3 | Hard move: `rowx.connect`/`rowx.Connection` removed, no aliases; `rowx.ping` removed | 0.1.0 is untagged (the Q1 precedent) |
-| C4 | Crates: `rowx-core`, `rowx-postgres` (was `rowx-pg`), `rowx-py-core`, `rowx-postgres-py`, `rowx-py` | A second backend only adds crates and a namespace |
-| C5 | One extension module: `rowx._core` plus the `rowx._core.postgres` submodule, registered in `sys.modules`; `_core.pyi` becomes a stub package | One wheel (Q24 still holds) with a backend-shaped namespace |
-| C6 | `type_table()`, `_types.py` and `_vocab.py` move under `rowx.postgres`; the checker stays in `rowx.check` and is Postgres-only | They are Postgres-specific; checker dispatch is deferred |
+| C4 | Historical layout: crates `rowx-core`, `rowx-postgres` (was `rowx-pg`), `rowx-py-core`, `rowx-postgres-py`, `rowx-py`. There is no `rowx-py` crate now. The extension crate is still named `rowx-postgres-py` and builds `rowx_postgres._core` | A second backend only adds crates and a namespace |
+| C5 | Historical layout: one extension module `rowx._core` plus `rowx._core.postgres`, and one wheel. Current module: `rowx_postgres._core`. Decision 24 no longer holds | One wheel with a backend-shaped namespace, since superseded |
+| C6 | Historical layout: `type_table()`, `_types.py` and `_vocab.py` move under `rowx.postgres`. They now live in `rowx_postgres`. The checker stays in `rowx.check` | They are Postgres-specific; checker dispatch is deferred |
 | C7 | Shared exception-class registry in `rowx-py-core`; each backend maps its own `thiserror` enum; replaces the "single mapping point" rule | Backends own their errors |
 | C8 | A backend trait in `rowx-core` for cancel and is-alive, reused by the pool's `Manage` | `Cancel` held Postgres types |
 | C9 | `ConnectOptions` is a frozen dataclass; `from_dsn` uses the Rust parser; `server_settings` travel in `options` as `-c`; other DSN keys go in `extra` | One parser; startup settings survive `RESET ALL`; nothing is dropped |
@@ -107,16 +112,16 @@
 | T2 | Roadmap item 6 | Ranges, `inet` and `money` become built-in. Overrides and user codecs for domains and composites stay deferred | Built-ins need no override API |
 | T3 | `inet`, `cidr` leaves | `IPv4Interface \| IPv6Interface` and `IPv4Network \| IPv6Network`, each one leaf and the only multi-member unions the grammar admits | The stdlib already models both; no new address type |
 | T4 | `macaddr`, `macaddr8` | `str`, lower case, colon separated. `macaddr8` is beyond sqlx | No stdlib type |
-| T5 | Ranges | `rowx.postgres.Range[T]`, a frozen dataclass modelled on psycopg; `T` is checked against the subtype; arrays of ranges included | Needs bounds, inclusivity and empty |
-| T6 | `money` | `rowx.postgres.Money(minor_units)`, binary int8, with `to_decimal(scale)` taking the scale explicitly | Results are always binary, so a text path is not available; `lc_monetary` can change mid-session, so rowx holds no scale |
+| T5 | Ranges | Historical home `rowx.postgres.Range[T]`. Current home `rowx_postgres.Range[T]`, a frozen dataclass modelled on psycopg; `T` is checked against the subtype; arrays of ranges included | Needs bounds, inclusivity and empty |
+| T6 | `money` | Historical home `rowx.postgres.Money`. Current home `rowx_postgres.Money(minor_units)`, binary int8, with `to_decimal(scale)` taking the scale explicitly | Results are always binary, so a text path is not available; `lc_monetary` can change mid-session, so rowx holds no scale |
 | T7 | Bit strings | `str` of `0`/`1` | Lossless and stdlib only |
-| T8 | Interval months | `timedelta` stays and raises on months. `rowx.postgres.Interval` is an opt-in second leaf on the same column | No silent lossy conversion |
-| T9 | Geometric | Frozen dataclasses in `rowx.postgres` | sqlx and asyncpg both have types |
-| T10 | Extensions | `hstore` → `dict[str, str \| None]`, `ltree`/`lquery` → `str`, `cube` → `rowx.postgres.Cube(lower_left, upper_right)` | A flat tuple cannot tell a box from a higher-dimensional point |
+| T8 | Interval months | `timedelta` stays and raises on months. Historical home `rowx.postgres.Interval`. Current home `rowx_postgres.Interval`, an opt-in second leaf on the same column | No silent lossy conversion |
+| T9 | Geometric | Historical home: frozen dataclasses in `rowx.postgres`. Current home: `rowx_postgres` | sqlx and asyncpg both have types |
+| T10 | Extensions | `hstore` → `dict[str, str \| None]`, `ltree`/`lquery` → `str`, `cube` → `rowx_postgres.Cube(lower_left, upper_right)`. Historical home was `rowx.postgres.Cube` | A flat tuple cannot tell a box from a higher-dimensional point |
 | T11 | Extension matching | By name and owning extension (`pg_depend` → `pg_extension`), resolved in `describe.rs`, cached per connection with the statement cache, reused by runtime dispatch. Applies to `citext` too | A same-named user type must not be treated as the extension type |
 | T12 | Wiring | `Matcher::ExtNamed` and `Matcher::RangeKind`, plus one `Codec` variant per family. Each feature PR calls these out | Enum change, not an appended row |
 | T13 | Grammar | Each leaf needs a grammar line, a `_rowplan` rule, a resolver rule and conformance rows. Also admitted: `dict[str, str \| None]` (hstore) | Keeps both implementations in step |
-| T14 | Parameters | Each type accepts the values in the [type table](type-mapping.md); subclasses are checked before their bases | Matches existing extraction order |
+| T14 | Parameters | Each type accepts the values in the [type table](../reference/type-mapping.md); subclasses are checked before their bases | Matches existing extraction order |
 | T15 | Encoding | Binary where a `*_send` exists (results are always binary). `typsend = 0` rule unchanged | Existing rule |
 | T16 | Testing | Every family joins the #94, #95, #108 and #109 oracles through `type_table()` | [Testing](testing.md) |
 
@@ -166,11 +171,11 @@ Both are far below a database round trip, so the speed is a tie-breaker only. #7
 
 ## Migrations (2026-10-29)
 
-The design is in [Migrations](migrations.md).
+The contract is in [Migrations](../reference/migrations.md).
 
 | # | Topic | Decision | Why |
 |---|---|---|---|
-| M1 | Scope | SQL-file migrations are in scope: a `Migrator` in `rowx.postgres`, `rowx migrate` and `rowx database`, a migrations-aware `rowx check`, and an opt-in pytest plugin. Reverses non-goal "Migrations" and amends decision 15 | A project needs one tool for schema, queries and tests, and the checker needs a way to build the schema |
+| M1 | Scope | SQL-file migrations are in scope: a `Migrator` (historical home `rowx.postgres`; current home `rowx_postgres`), `rowx migrate` and `rowx database`, a migrations-aware `rowx check`, and an opt-in pytest plugin. Reverses non-goal "Migrations" and amends decision 15 | A project needs one tool for schema, queries and tests, and the checker needs a way to build the schema |
 | M2 | File format | sqlx's: `<VERSION>_<DESCRIPTION>.sql`, or `.up.sql` plus `.down.sql`; `VERSION` is a positive `i64`; simple and reversible files can be mixed | An existing sqlx project switches without renaming files |
 | M3 | File reading | Only regular files directly in the directory; a non-`.sql` file is ignored; a non-matching `.sql` file, a duplicate version, an unpaired up/down file and a non-UTF-8 file are errors naming the file; no warn or ignore setting | Matches sqlx's current default; silent skips hide mistakes |
 | M4 | `-- no-transaction` | Byte-exact first line opts a file out of the per-migration transaction. The file is still one simple Query, which Postgres runs as one implicit transaction unless the file has its own transaction control, so `CREATE INDEX CONCURRENTLY` and similar must be alone in their file, and `ALTER TYPE … ADD VALUE` followed by a use of the value needs its own `COMMIT` in between | Needed for those statements; matches sqlx, which also sends the file as one Query |
@@ -205,7 +210,7 @@ The design is in [Migrations](migrations.md).
 | M33 | Fixtures | `rowx_database_url`, `rowx_connection` and `rowx_pool`, function-scoped, synchronous and driven by `asyncio.run`; tests run on asyncio (pytest-asyncio, or anyio's asyncio backend), not Trio | rowx objects aren't bound to one event loop, but its awaitables are asyncio futures |
 | M34 | Plugin config | `rowx_database_url` ini option, else `database_url_env`; `--rowx-keep-templates`; stale templates removed by default | |
 | M35 | Out of scope | Package resources, Python-code, repeatable and afterMigrate migrations, squashing, `sqlty breaking`-style checks (item 7) and per-test SQL fixtures | The design PR notes that item 7 gains a way to build old and new schemas |
-| M36 | Dependencies | `sha2` for SHA-384 and a CRC-32 crate for the lock key | [Dependency evaluation](dependencies.md#dependency-evaluation) |
+| M36 | Dependencies | `sha2` for SHA-384 and a CRC-32 crate for the lock key | [Dependency evaluation](dependencies.md) |
 | M37 | Revert | Transactional: `BEGIN`, the `.down.sql`, `DELETE` the row, `COMMIT` (as sqlx). `-- no-transaction`: mark the row `success = false`, the file, then `DELETE`, so a failure leaves it dirty. The history row holds the `.up.sql` checksum | Mirrors apply; the checksum rule matches sqlx |
 | M38 | Versions | *Amended after review (M2, M3).* `VERSION` is ASCII digits parsed as an `i64`: 0 or more, leading zeros allowed, so `1` and `001` are a duplicate; a sign or any other character is an error. Files are read following symlinks, and `.sql` is case-sensitive | sqlx parses any `i64` of digits; the first design said positive |
 | M39 | `-- no-transaction` detection | *Amended after review (M4).* A byte prefix of the file (`starts_with`, as sqlx does), so a trailing `\r\n` or comment counts and a BOM disables it. It opts out of rowx's `BEGIN`/`COMMIT` only, the file stays one Query | Matches sqlx exactly; "first line" was inaccurate |
@@ -243,12 +248,12 @@ record columns stay deferred, because a named type is allowed only as the row.
 |---|---|---|---|
 | N1 | Scope | A query can declare its row as a `@dataclass`, `NamedTuple`, `TypedDict`, pydantic v2 `BaseModel` or pydantic dataclass, in addition to a tuple or a scalar. Amends decision 8; removes the "Named row types" non-goal | Roadmap item 1; the checker validates a field as it validates a tuple element |
 | N2 | Where | `NAMED` appears at the `ROW` level only. A named type below the row (in a tuple, list, union, or as a field type) is `invalid-row-type` | Nesting needs composite and record support (T1) and a JSON story |
-| N3 | Leaf order | Leaf detection runs before named detection in `_rowplan` and `resolve.py` | The `rowx.postgres` value classes are frozen dataclasses |
+| N3 | Leaf order | Leaf detection runs before named detection in `_rowplan` and `resolve.py` | Historical home `rowx.postgres`. The `rowx_postgres` value classes are frozen dataclasses |
 | N4 | Rejected on both sides | `Protocol`, `collections.namedtuple`, attrs, msgspec, `RootModel`, pydantic v1, a stdlib dataclass with `init=False`, `InitVar` (also on a pydantic dataclass, whose decorator accepts `init=False`), a nullable named row (help "use .optional()"), and a named type below the row | The runtime and the checker can both see them, or they have no sensible row |
 | N5 | Checker-only rejections | A class decorator other than the dataclass decorators and `typing.final`, `metaclass=` or another unknown class keyword, and a hand-written `__init__` on a stdlib dataclass are `invalid-row-type`. The runtime accepts them and reports a failure as `RowConstructError` | The checker can't see what they do to the constructor; the runtime can just call it. Conformance rows record both verdicts |
 | N6 | Matching | By name for dataclasses, TypedDicts and pydantic models. A NamedTuple matches by position, and the names must match too (`column-name-mismatch`) | Names are exact like everything else (decision 17); a positional-only match would hide a reordered SELECT |
 | N7 | NamedTuple fields | Fields come from `_fields`, i.e. the class that directly subclasses `NamedTuple`. Annotations that a subclass adds are ignored, on both sides | The runtime has no other source. The checker mirrors it so the two agree |
-| N8 | Column names | One function, `rowx-core::row_shape::column_name`, strips one trailing `!` or `?` and exempts `?column?`. `describe.rs` and the mapping call it; the checker passes raw names through `_core.postgres.map_columns`. Matching is case-sensitive | No Python port, so nothing is stripped twice or differently |
+| N8 | Column names | One function, `rowx-core::row_shape::column_name`, strips one trailing `!` or `?` and exempts `?column?`. `describe.rs` and the mapping call it. Historical binding `_core.postgres.map_columns`. Current binding `rowx_postgres._core.map_columns`. Matching is case-sensitive | No Python port, so nothing is stripped twice or differently |
 | N9 | Bijection with defaults | Every column needs a field (`unexpected-column`, even for `extra="allow"` and `extra_items`) and every field without a default needs a column (`missing-column`). A field is optional with a dataclass default, a pydantic default, `NotRequired` or `total=False` | An extra column is always a bug; this is stricter than sqlty |
 | N10 | Duplicates | Two columns with the same stripped name are `duplicate-column` (`?column?` included, whether or not a field has the name; `field` is then `None`), as are two accepted names of one pydantic field. Their columns aren't also `unexpected-column`. One column matching two or more fields is `ambiguous-column` (pydantic only) | A dict or kwargs would silently drop one; pydantic keeps one of `id` and `user_id` silently |
 | N11 | Not fields | `ClassVar`, `KW_ONLY`, `field(init=False)`, pydantic private attributes, `computed_field` and `Field(init=False)` on a pydantic dataclass (on a `BaseModel` it is an ordinary field, #206) | The constructor doesn't accept them |
@@ -263,13 +268,13 @@ record columns stay deferred, because a named type is allowed only as the row.
 | N20 | Runtime plan | `RowPlan` gains `kind="named"`, the field specs and a `_core.RowShape` cached per plan (constructor, form, matching, keys, accepted names, required, flags, type name) | One immutable description that Rust reads without calling back into Python |
 | N21 | Mapping | `rowx-postgres` maps the prepared statement's columns in `open()` beside the arity check, including the cached-statement re-prepare. A mismatch is a `RowShapeError` before execution, even for an empty result. The mapping travels with the rows and sets the NULL mask; a pass-through column counts as nullable | Same guarantee as the arity check (R18) |
 | N22 | Collect all errors | `row_shape::map_columns` returns every `ShapeError`. The runtime message lists them and the checker emits one diagnostic each | A SELECT with three problems shouldn't take three runs |
-| N23 | `map_columns` binding | `_core.postgres.map_columns(columns, fields: list[(names \| None, required)], positional)` takes plain specs, not a `RowShape` | The checker can't build a `RowShape`: it has no constructor and never imports user code |
+| N23 | `map_columns` binding | Historical binding `_core.postgres.map_columns`. Current binding `rowx_postgres._core.map_columns(columns, fields: list[(names \| None, required)], positional)` takes plain specs, not a `RowShape` | The checker can't build a `RowShape`: it has no constructor and never imports user code |
 | N24 | Construction | Under the GIL, in one pass: one `PyTuple` for the positional form, a kwargs dict, the row dict, or the validator call. `_fetch` and `_stream` take a trailing `shape: RowShape \| None` | Keeps the tuple and scalar paths untouched |
 | N25 | `RowConstructError` | `RowConstructError(DecodeError)` with `type_name`, a 0-based `row_index` across stream batches, and the original as `__cause__`. Types are not checked at runtime except by pydantic | A raising constructor is a decode failure of that row; stream semantics are `DecodeError`'s |
 | N26 | Checker resolution | Classes are resolved from the project's `ModuleGraph`; bases and decorators match by resolved import and inheritance is project-only. An unsupported stdlib/typing/rowx/pydantic name is `invalid-row-type`; any other name outside the roots is `unresolved-row-type` | The checker never imports user code |
 | N27 | Output | `note: field defined at path:line:col` and `"field": str \| null` in JSON; five new rules and a NamedTuple `arity-mismatch` range | A field-level diagnostic must say which field |
 | N28 | Performance | Per-form variants in `bench/fetch_100k.py`, recorded with no hard threshold. The only gate is no regression in tuple and scalar paths | Named rows cost more by design |
-| N29 | Out of scope | attrs, msgspec, `Protocol`, nested and JSON-shaped fields, composites and records (T1 stays deferred), `flatten`, a pydantic type table, named parameters, and row classes from installed packages | [Roadmap](roadmap.md) |
+| N29 | Out of scope | attrs, msgspec, `Protocol`, nested and JSON-shaped fields, composites and records (T1 stays deferred), `flatten`, a pydantic type table, named parameters, and row classes from installed packages | [Deferred](architecture.md#deferred) |
 | N30 | Inheritance and calls | Fields follow the library's order, a redeclared field replaces the base's in place, and a non-row-type project base contributes no fields. The `keyword` form may call positionally when nothing is absent and no field is keyword-only | The checker mirrors what the library does; the positional call is an optimisation the benchmark decides |
 | N31 | Messages and shape errors | `map_columns` returns field and column indices (`ShapeIssue`), and the caller renders the text, in the formats in api.md. `RowConstructError` wraps `Exception` only. The per-field type rules run on cleanly mapped columns of a by-name row and are suppressed by any positional mapping error | Goldens compare bytes; the binding and the checker hold different field records |
 | N32 | `init=False` on a pydantic dataclass | `pydantic.dataclasses.dataclass` takes only `init=False` (meaning "keep pydantic's `__init__`"); `init=True` raises. A literal decorator `init=False` is accepted on both sides, and only an `InitVar` field is rejected. Amends N4. Dated 2026-11-03 | Verified on pydantic 2.14.2 in #206; the design's "rejected on both sides" couldn't hold |
@@ -283,7 +288,8 @@ record columns stay deferred, because a named type is allowed only as the row.
 
 ## Security hardening (2026-11-03)
 
-Records the decisions of #214 (design #215). The threat model and invariant are in [Security](security.md#threat-model).
+Records the decisions of #214 (design #215). The threat model and invariant are in
+[Security](../reference/security.md#threat-model).
 
 | # | Topic | Decision | Why |
 |---|---|---|---|

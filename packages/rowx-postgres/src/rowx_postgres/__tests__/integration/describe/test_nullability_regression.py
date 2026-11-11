@@ -21,7 +21,7 @@ def verdicts(dsn: str, sql: str) -> list[tuple[bool, str]]:
     return [(c.nullable, c.reason) for c in run_describe(dsn, sql).columns]
 
 
-# one case per row of the evidence table in docs/design/nullability.md, in table order
+# one case per row of the evidence table in docs/reference/nullability.md, in table order
 @pytest.mark.parametrize(
     ("sql", "expected"),
     [
