@@ -195,8 +195,10 @@ non-`None` member other than the two network pairs; `Literal`; any `dict` other 
 the named-row rejections below.
 
 `"LEAF | None"` is a Python union, one alternative, as are `Optional[LEAF]` and `Union[LEAF, None]`. A bare `None`
-element is the `void` element. An element is nullable when it is a union with `None`, `Any`, or `object`. `T` is
-read lazily from `__orig_class__` at the first row-returning call. The plan is cached per `T`.
+element is the checker leaf `none`: it matches only `void`, and any other column is `type-mismatch`. `_elem` returns
+true for `None`, so that element's `nullable_mask` is true. An element is also nullable when it is a union with `None`,
+`Any`, or `object`. `T` is read lazily from `__orig_class__` at the first row-returning call. The plan is cached per
+`T`.
 
 A new leaf needs a grammar line, a row-plan rule, a checker rule and conformance rows. A new named form needs the
 same four.
@@ -242,8 +244,8 @@ checker passes raw names through `rowx_postgres._core.map_columns`.
 `arity-mismatch` and no name rules run. A stripped name that differs from the field is `column-name-mismatch`.
 
 Every violation is reported, not only the first. Column-indexed issues come first, then `missing-column` by field
-order. The checker's text and the runtime `RowShapeError` text are the same, in the `column N "name"` style
-(columns are 1-based). `RowShapeError` reads ``{type_name}: {msg}; {msg}``.
+order. The checker's text and the runtime `RowShapeError` text are the same for the mapping messages below, in the
+`column N "name"` style (columns are 1-based). `RowShapeError` reads ``{type_name}: {msg}; {msg}``.
 
 | Issue | Message |
 |---|---|
@@ -252,14 +254,18 @@ order. The checker's text and the runtime `RowShapeError` text are the same, in 
 | `duplicate-column` | ``columns 1 and 3 are both named "id"`` |
 | `ambiguous-column` | ``column 2 "y" matches fields "x" and "y" of `M` `` |
 | `column-name-mismatch` | ``column 2 "login" faces field "email" of `UserRow` (position 2)`` |
-| `type-mismatch` | ``column 2 "age" is `int` but field "age" of `User` is `str` `` |
-| `nullability-mismatch` | ``column 3 "email" may be NULL but field "email" of `User` is `str` ``; ``column 3 "email" is NOT NULL but field "email" of `User` is `str \| None` `` |
 
 A `?column?` duplicate reads ``columns 1 and 3 are both unnamed (`?column?`)``. Two names of one pydantic field read
 ``columns 1 "id" and 2 "user_id" both map to field "id" of `M` ``. A NamedTuple arity mismatch reads
 ``the query returns 4 columns but `UserRow` takes between 2 and 3`` (`takes exactly N` when the bounds are equal).
-The NOT NULL form of `nullability-mismatch` is checker-only. The runtime NULL check does not raise for a NOT NULL
-column annotated as a union with `None`.
+
+`type-mismatch` and both `nullability-mismatch` strings are checker-only. A type mismatch reads
+``column 2 "age" is `int` but field "age" of `User` is `str` ``. Nullability reads
+``column 3 "email" may be NULL but field "email" of `User` is `str` `` or
+``column 3 "email" is NOT NULL but field "email" of `User` is `str \| None` ``.
+The NOT NULL form is checker-only. The runtime NULL check does not raise for a NOT NULL column annotated as a union
+with `None`. A NULL in a non-nullable field uses the runtime text
+``NULL in column N "..." for non-nullable field ...`` under [Runtime validation](#runtime-validation).
 
 **Pydantic.** A `BaseModel` is built with `__pydantic_validator__.validate_python(row_dict)`. A pydantic dataclass is
 called as `cls(**row_dict)`, because `validate_python(dict)` raises `dataclass_exact_type` under `strict=True`. The

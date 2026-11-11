@@ -38,13 +38,13 @@ for every recognized `query_unchecked` call. `--statistics` prints the scan coun
 
 With `--output-format json`, diagnostics stay on stdout. Statistics, coverage and inspect go to stderr.
 
-`rowx check-compat --against BASE --head HEAD` checks the same sources at two revisions. Every cross-schema report
-with `not report.wider_nullability` is incompatible. That includes a change in column count, column name, column
-type or parameter types, and a NOT NULL column becoming nullable against a non-null annotation. A wider annotation
-(`X | None` on a NOT NULL column) is not incompatible. Exit 0 is a complete compatible subset, exit 1 is an
-incompatibility, and exit 2 is incomplete: own-schema coverage was not established, a comparison could not be
-established, or scratch cleanup failed. The URL is `--database-url` or `ROWX_DATABASE_URL`. It does not read
-`database_url_env`.
+`rowx check-compat --against BASE --head HEAD` checks the same sources at two revisions. Every cross-schema report with
+`not report.wider_nullability` is incompatible. That includes a change in column count, column name, column type or
+parameter types, and a NOT NULL column becoming nullable against a non-null annotation. A wider annotation (`X | None`
+on a NOT NULL column) is not incompatible. Exit 0 is a complete compatible subset, exit 1 is an incompatibility, and
+exit 2 is incomplete: `incomplete: loading revision`, `incomplete: building schema`, own-schema coverage was not
+established, a comparison could not be established, or scratch cleanup failed. The first two are `CheckError`s raised
+before the 0/1/2 return. The URL is `--database-url` or `ROWX_DATABASE_URL`. It does not read `database_url_env`.
 
 ## Config
 
@@ -79,9 +79,11 @@ URL precedence is `--database-url`, then the configured environment variable. Th
 Default exclude names, always applied, are `.git`, `.venv`, `venv`, `node_modules`, `__pycache__`, `site-packages`,
 `build` and `dist`.
 
-The config file is the nearest `pyproject.toml` walking up from the working directory, or `--config`. Tracked and
-untracked `.py` files come from `git ls-files` when the path is inside that project and git succeeds. Otherwise the
-directory is walked. Gitignored files are not checked. `.pyi` files are not checked.
+The config file is the nearest `pyproject.toml` walking up from the working directory, or `--config`. A directory
+target inside that project uses `git ls-files` when git succeeds: tracked `.py` files, including one that is also
+gitignored, and untracked `.py` files that are not gitignored. Without git, or when the directory is outside the
+project, the walk includes gitignored `.py` files that are not excluded. An explicit file is checked whenever it is
+not excluded, including a `.pyi` and a gitignored path.
 
 ## Discovery
 
@@ -132,8 +134,10 @@ consumes `compiled.padding`. It does not invent a second spacing rule. An offset
 attributed to the neighbouring interpolation.
 
 `:ident` is recognised while assembling a `query_unchecked` template. The source span is the interpolation. Nested
-templates are flattened in source order. A repeated nested template is shared. A template that is not an inline literal
-has no spans, so the diagnostic points at the call. The file's encoding cookie is honoured. A file that does not
+templates are flattened in source order. A repeated nested template is shared. A non-inline argument of `query` is
+`dynamic-query` on that argument (`query[int](sql)` spans `sql`). The same rule is reported on the call when the
+argument count, a keyword, or a star means it is not exactly one positional argument. A `query_unchecked` call is
+silent unless its sole argument is an inline t-string. The file's encoding cookie is honoured. A file that does not
 decode is `syntax-error`.
 
 ## Row-type resolution
@@ -143,9 +147,13 @@ decode is `syntax-error`.
 
 The scope is module-level assignments and `type` aliases, class bodies, and function-local assignments when the call
 is in that function. An imported name is found through the package layout and the include roots, not through
-`sys.path`. A module outside the project is `unresolved-row-type`. `TYPE_CHECKING` blocks are read for imports. A
-name assigned both inside and outside the block uses the first `TYPE_CHECKING` binding. A name that exists only under
-`TYPE_CHECKING` is `invalid-row-type` when it is used as a value the runtime would have to import.
+`sys.path`. Names from `KNOWN_ROOTS` (the standard library, `typing_extensions`, `rowx`, `rowx_core`, `pydantic`,
+plus the roots of a selected backend's value-class modules) that are not a supported row type or base are
+`invalid-row-type`. A root outside that set is outside the project and is `unresolved-row-type`. `TYPE_CHECKING`
+blocks are read for imports. A name assigned both inside and outside the block uses the first `TYPE_CHECKING`
+binding. A name that exists only under `TYPE_CHECKING` is `invalid-row-type` in a field annotation and in an alias
+body, with help `import X at runtime`. A `query[T]` uses the `TYPE_CHECKING` binding, so `from datetime import date`
+inside that block can resolve.
 
 Supported forms are `tuple[...]`, a scalar leaf, `X | None`, `Annotated`, `ReadOnly`, `Required`, `NotRequired`,
 `type` aliases, and the named forms in [Named row types](api.md#named-row-types). A generic alias is substituted
@@ -159,7 +167,7 @@ from its parameters. A string annotation inside a class is parsed. A string as `
 |---|---|
 | `syntax-error` | The file did not parse, did not decode, or is nested too deeply to analyse. |
 | `indirect-query` | A use the checker will not follow, including a star import of `rowx` or `rowx_core`. |
-| `dynamic-query` | The SQL is not an inline t-string the checker can describe, or a `query_unchecked` interpolation has a non-literal format spec. `T` is still resolved. |
+| `dynamic-query` | For `query`, a non-inline argument (reported on that argument) or a call that is not exactly one positional argument because of the argument count, a keyword, or a star (reported on the call). An inline `query` t-string with a conversion, a format spec, or a nested t-string. A `query_unchecked` call is silent unless its sole argument is an inline t-string; a non-literal format spec in that t-string is this rule, and `T` is still resolved. |
 | `template-construction` | A hand-built `Template`, or a non-literal format spec, in a discovered file. |
 | `unresolved-row-type` | A name in `T` could not be resolved. This includes a `query_unchecked` row type. |
 | `invalid-row-type` | `T` resolved but is not in the grammar. This includes a `query_unchecked` row type. |

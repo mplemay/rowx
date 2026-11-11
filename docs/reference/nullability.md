@@ -66,12 +66,14 @@ With `--scratch` ([Drift gate and scratch](checker.md#drift-gate-and-scratch)) t
      non-fatal.
    - The plan pass can promote a column to nullable. A computed column that
      [Set operations](#set-operations) prove NOT NULL is `SetOperation`, and one that
-     [Computed columns](#computed-columns) prove NOT NULL is `ComputedExpr`. A catalog-nullable simple or enum
-     column is `ScanFilterNotNull` when `scan_filter_not_null` matches a childless `Seq Scan`, `Index Scan`, or
-     `Index Only Scan`: the output text equals the plain column or `alias.column`, the origin schema and relation
+     [Computed columns](#computed-columns) prove NOT NULL is `ComputedExpr`. A catalog-nullable column is
+     `ScanFilterNotNull` when `refine` sees a simple type or an enum after `base_type` unwraps domains, and
+     `scan_filter_not_null` matches a childless `Seq Scan`, `Index Scan`, or `Index Only Scan` that is the root
+     plan node: the output text equals the plain column or `alias.column`, the origin schema and relation
      match the scan, and the filter text is exactly `(alias.column IS NOT NULL)`. The alias and the column are
-     plain unquoted lowercase identifiers. A later promotion still forces the column nullable. Overrides still
-     apply last.
+     plain unquoted lowercase identifiers. `scan_filter_not_null` returns no proof unless that root is the
+     childless scan, so a scan under `Sort` or `Limit` stays `NullableColumn`. A later promotion still forces the
+     column nullable. Overrides still apply last.
 4. **Overrides** ([Overrides](#overrides)).
 5. **Defaulting.** An unknown column becomes nullable. A computed column outside the whitelist therefore needs
    `"col!"`.

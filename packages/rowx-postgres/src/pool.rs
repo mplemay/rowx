@@ -81,7 +81,8 @@ impl Pool {
 
 #[pymethods]
 impl Pool {
-    // the argument list is fixed by Pool.__init__ in packages/rowx-postgres/src/rowx_postgres/_pool.py
+    // the parameters match the PoolImpl(...) call in packages/rowx-postgres/src/rowx_postgres/_pool.py
+    // init, setup, and reset stay on the Python object
     #[allow(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (
