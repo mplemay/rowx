@@ -2,9 +2,13 @@ import os
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import psycopg
 import pytest
+
+if TYPE_CHECKING:
+    from rowx_core.backend import Describe
 
 pytestmark = pytest.mark.db
 
@@ -152,6 +156,9 @@ def test_historical_source_is_never_executed(tmp_path: Path, schema: str) -> Non
         ("from rowx import query\nquery[int](t'SELECT missing FROM t')", "CREATE TABLE t (x int)", "own schema"),
         ("from rowx import query\nquery[int](t'SELECT 1')", "SELECT nonexistent_function()", "building schema"),
         ("from rowx import query_unchecked\nquery_unchecked(t'SELECT 1')", "SELECT 1", "unchecked"),
+        ("x = 1", "SELECT 1", "incomplete"),
+        ("from rowx import query\nquery[Missing](t'SELECT 1')", "SELECT 1", "incomplete"),
+        ("from rowx import query\nquery[int](t'SELECT {unknown}::int')", "SELECT 1", "incomplete"),
     ],
 )
 def test_incomplete_runs(tmp_path: Path, schema: str, source: str, migration: str, expected: str) -> None:
@@ -200,3 +207,82 @@ def test_checked_subset_reports_skipped_sites(tmp_path: Path, schema: str) -> No
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.count("unchecked") >= 2
     assert "compatible checked subset" in result.stdout
+
+
+def test_cross_schema_timeout_identifies_phase(
+    tmp_path: Path, schema: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rowx_core.errors import DatabaseError  # ruff: ignore[import-outside-top-level]
+    from rowx_postgres._services import PostgresCheckerSession  # ruff: ignore[import-outside-top-level]
+
+    from rowx.check.cli import main  # ruff: ignore[import-outside-top-level]
+
+    del schema
+    git(tmp_path, "init", "-q")
+    (tmp_path / "pyproject.toml").write_text("[tool.rowx.migrate]\n", encoding="utf-8")
+    (tmp_path / "migrations").mkdir()
+    source = "from rowx import query\nquery[int](t'SELECT 1')"
+    base = commit(tmp_path, source, "SELECT 1")
+    head = commit(tmp_path, source + "\n# head", "SELECT 1")
+    original = PostgresCheckerSession.describe
+    calls = 0
+
+    async def describe_with_timeout(self: PostgresCheckerSession, sql: str) -> Describe:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            error = DatabaseError("57014", "injected timeout")
+            raise error
+        return await original(self, sql)
+
+    monkeypatch.setattr(PostgresCheckerSession, "describe", describe_with_timeout)
+    monkeypatch.chdir(tmp_path)
+    status = main(["check-compat", "--against", base, "--head", head, "--database-url", os.environ["ROWX_TEST_DSN"]])
+    captured = capsys.readouterr()
+    assert status == 2
+    assert f"migrate first: source {base}, schema {head}" in captured.out
+    assert "timeout" in captured.err
+    assert "compatible checked subset" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("sqlstate", "expected"),
+    [("53200", 2), ("53100", 2), ("55P03", 2), ("55006", 2), ("42501", 2), ("42703", 1)],
+)
+def test_cross_schema_database_failure_classification(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
+    tmp_path: Path,
+    schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    sqlstate: str,
+    expected: int,
+) -> None:
+    from rowx_core.errors import DatabaseError  # ruff: ignore[import-outside-top-level]
+    from rowx_postgres._services import PostgresCheckerSession  # ruff: ignore[import-outside-top-level]
+
+    from rowx.check.cli import main  # ruff: ignore[import-outside-top-level]
+
+    del schema
+    git(tmp_path, "init", "-q")
+    (tmp_path / "pyproject.toml").write_text("[tool.rowx.migrate]\n", encoding="utf-8")
+    (tmp_path / "migrations").mkdir()
+    sha = commit(tmp_path, "from rowx import query\nquery[int](t'SELECT x FROM t')", "CREATE TABLE t (x int NOT NULL)")
+    original = PostgresCheckerSession.describe
+    calls = 0
+
+    async def describe_with_failure(self: PostgresCheckerSession, sql: str) -> Describe:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            error = DatabaseError(sqlstate, "injected database error")
+            raise error
+        return await original(self, sql)
+
+    monkeypatch.setattr(PostgresCheckerSession, "describe", describe_with_failure)
+    monkeypatch.chdir(tmp_path)
+    status = main(["check-compat", "--against", sha, "--head", sha, "--database-url", os.environ["ROWX_TEST_DSN"]])
+    output = capsys.readouterr().out
+    assert calls == 4
+    assert status == expected
+    assert "sql-error" in output
+    assert ("incomplete" in output) == (expected == 2)

@@ -198,7 +198,7 @@ class MigrationService(Protocol):
     async def run_on(self, dsn: str) -> Sequence[MigrationResult]: ...
 
 
-type Failure = Literal["lost", "timeout", "other"]
+type Failure = Literal["lost", "timeout", "operational", "other"]
 type FieldSpec = tuple[Sequence[str] | None, bool]
 type MapColumns = Callable[
     [Sequence[str], Sequence[FieldSpec], bool], tuple[Sequence[int | None], Sequence[ShapeIssue]]

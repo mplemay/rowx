@@ -5,7 +5,7 @@ import sys
 from contextlib import AsyncExitStack, ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, TemporaryFile
 from typing import TYPE_CHECKING, Final
 
 from rowx_core.errors import DatabaseError, InterfaceError
@@ -22,6 +22,7 @@ EXIT_INCOMPLETE: Final[int] = 2
 
 if TYPE_CHECKING:
     from argparse import Namespace
+    from typing import BinaryIO
 
 
 @dataclass(slots=True, kw_only=True)
@@ -64,28 +65,56 @@ def _materialize(sha: str, root: Path) -> None:
             msg = f"unsupported path in revision {sha}: {name}"
             raise CheckError(msg)
         blobs.append((path, oid))
-    batch = subprocess.run(
-        ["git", "--no-replace-objects", "cat-file", "--batch"],  # ruff: ignore[start-process-with-partial-path]
-        input=b"".join(oid + b"\n" for _, oid in blobs),
-        check=True,
-        capture_output=True,
-    ).stdout
-    offset = 0
-    for path, oid in blobs:
-        end = batch.index(b"\n", offset)
-        object_id, kind, size = batch[offset:end].split(b" ")
-        if object_id != oid or kind != b"blob":
-            msg = "unexpected Git object"
-            raise ValueError(msg)
-        offset = end + 1
-        length = int(size)
-        content = batch[offset : offset + length]
-        if len(content) != length or batch[offset + length : offset + length + 1] != b"\n":
-            msg = "truncated Git object"
-            raise ValueError(msg)
-        offset += length + 1
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
+    with TemporaryFile() as requests, TemporaryFile() as output:
+        for _, oid in blobs:
+            requests.write(oid + b"\n")
+        requests.seek(0)
+        subprocess.run(
+            ["git", "--no-replace-objects", "cat-file", "--batch"],  # ruff: ignore[start-process-with-partial-path]
+            stdin=requests,
+            stdout=output,
+            check=True,
+        )
+        output.seek(0)
+        directories: set[Path] = {root}
+        for path, oid in blobs:
+            _write_blob(output, path, oid, root, directories)
+
+
+def _write_blob(output: BinaryIO, path: Path, oid: bytes, root: Path, directories: set[Path]) -> None:
+    object_id, kind, size = output.readline().split(b" ")
+    if object_id != oid or kind != b"blob":
+        msg = "unexpected Git object"
+        raise ValueError(msg)
+    missing = []
+    parent = path.parent
+    while parent not in directories:
+        missing.append(parent)
+        parent = parent.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            msg = f"filesystem collision: {directory.relative_to(root)}"
+            raise CheckError(msg) from None
+        directories.add(directory)
+    try:
+        target = path.open("xb")
+    except FileExistsError:
+        msg = f"filesystem collision: {path.relative_to(root)}"
+        raise CheckError(msg) from None
+    with target:
+        remaining = int(size)
+        while remaining:
+            chunk = output.read(min(remaining, 65536))
+            if not chunk:
+                msg = "truncated Git object"
+                raise ValueError(msg)
+            target.write(chunk)
+            remaining -= len(chunk)
+    if output.read(1) != b"\n":
+        msg = "truncated Git object"
+        raise ValueError(msg)
 
 
 def _snapshot(revision: str, root: Path) -> Snapshot:
@@ -126,6 +155,8 @@ def _complete(result: RunResult, *, own: bool) -> bool:
 
 
 def _site_complete(site: SiteCoverage, *, own: bool) -> bool:
+    if site.operational_failure:
+        return False
     if not site.described:
         return not own and site.sql_failed
     if site.row_unresolved or (site.row_comparison != "compared" and (own or not site.row_failed)):
@@ -165,9 +196,9 @@ async def _run(base: Snapshot, head: Snapshot, dsn: str, jobs: int, scratches: l
             urls.append(built.url)
         own: list[RunResult] = []
         for snapshot, url in zip((base, head), urls, strict=True):
+            sys.stdout.write(f"own schema: source {snapshot.sha}, schema {snapshot.sha}\n")
             result = await run_check(snapshot.config, snapshot.files, url, jobs, boundary=snapshot.root)
             own.append(result)
-            sys.stdout.write(f"own schema: source {snapshot.sha}, schema {snapshot.sha}\n")
             _show(result, snapshot)
         if not all(_complete(result, own=True) for result in own):
             sys.stdout.write("incomplete: own-schema checks did not establish complete coverage\n")
@@ -178,8 +209,8 @@ async def _run(base: Snapshot, head: Snapshot, dsn: str, jobs: int, scratches: l
             ("migrate first", base, head, urls[1]),
             ("deploy first", head, base, urls[0]),
         ):
-            result = await run_check(snapshot.config, snapshot.files, url, jobs, boundary=snapshot.root)
             sys.stdout.write(f"{direction}: source {snapshot.sha}, schema {schema.sha}\n")
+            result = await run_check(snapshot.config, snapshot.files, url, jobs, boundary=snapshot.root)
             _show(result, snapshot)
             incompatible |= any(not report.wider_nullability for report in result.reports)
             incomplete |= not _complete(result, own=False)

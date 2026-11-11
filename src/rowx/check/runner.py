@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from rowx.check.model import FileResult, QueryCall, QueryKind
     from rowx.check.params import ParamType
 
-type Outcome = Describe | DatabaseError
+type Outcome = Describe | DatabaseError | _Operational
 type RowComparison = Literal["compared", "partially compared", "not compared"]
 
 PASSWORD_PARAM: Final[Pattern[str]] = re_compile(
@@ -125,6 +125,7 @@ class SiteCoverage:
     parameters_aligned: bool = False
     parameters: tuple[ParameterCoverage, ...] = ()
     sql_failed: bool = False
+    operational_failure: bool = False
     row_failed: bool = False
     row_unresolved: bool = False
     parameters_failed: bool = False
@@ -251,6 +252,11 @@ async def _connect(dsn: str, timeout_ms: int, backend: CheckerBackend) -> Checke
 
 
 @dataclass(slots=True, frozen=True)
+class _Operational:
+    error: DatabaseError
+
+
+@dataclass(slots=True, frozen=True)
 class _Lost:
     error: Exception
 
@@ -285,6 +291,8 @@ class _Worker:
                     raise CheckError(msg) from None
                 case "lost":
                     return _Lost(error)
+                case "operational" if isinstance(error, DatabaseError):
+                    return _Operational(error)
                 case _:
                     if isinstance(error, DatabaseError):
                         return error
@@ -571,9 +579,11 @@ def _finding_report(
 
 
 def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Report]:
-    if isinstance(outcome, DatabaseError):
+    if isinstance(outcome, (DatabaseError, _Operational)):
         site.coverage.sql_failed = True
-        return [_sql_error(site, outcome, backend)]
+        site.coverage.operational_failure = isinstance(outcome, _Operational)
+        error = outcome.error if isinstance(outcome, _Operational) else outcome
+        return [_sql_error(site, error, backend)]
     site.coverage.described = True
     params = _param_reports(site, outcome, backend)
     rows = _row_reports(site, outcome, backend)
@@ -748,7 +758,7 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
                 site.inference.bind(selected)
             outcome = outcomes[site.sourcemap.sql]
             reports.extend(_evaluate(site, outcome, selected))
-            if inspect and not isinstance(outcome, DatabaseError):
+            if inspect and not isinstance(outcome, (DatabaseError, _Operational)):
                 inspection.append(
                     _inspection(site, outcome, selected, tuple(value for value in (dsn, target) if value), config.root)
                 )

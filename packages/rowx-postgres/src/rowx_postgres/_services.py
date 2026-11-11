@@ -81,6 +81,14 @@ class PostgresCheckerSession(CheckerSession):
                 return "timeout"
             if error.sqlstate == "57P01" or error.sqlstate.startswith("08"):
                 return "lost"
+            if error.sqlstate in {"42501", "55006", "55P03"} or error.sqlstate.startswith((
+                "53",
+                "57",
+                "58",
+                "F0",
+                "XX",
+            )):
+                return "operational"
         return "other"
 
 

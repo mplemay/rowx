@@ -2,13 +2,13 @@ import subprocess  # ruff: ignore[suspicious-subprocess-import]
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
+import pytest
+
 from rowx.check import compat
 from rowx.check.cli import main
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def git(root: Path, *args: str) -> str:
@@ -88,3 +88,42 @@ def test_snapshot_cleanup_error_prevents_compatible_verdict(
     assert status == 2
     assert "snapshot cleanup failed" in captured.err
     assert "compatible checked subset" not in captured.out
+
+
+def test_materialize_large_blob_exactly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    revision(repo, "[tool.rowx.migrate]\n")
+    content = bytes(range(256)) * 1025
+    (repo / "large.bin").write_bytes(content)
+    git(repo, "add", ".")
+    git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "large")
+    destination = tmp_path / "snapshot"
+    destination.mkdir()
+    monkeypatch.chdir(repo)
+    compat._materialize(git(repo, "rev-parse", "HEAD"), destination)
+    assert (destination / "large.bin").read_bytes() == content
+
+
+@pytest.mark.parametrize("names", [("source/Q.py", "source/q.py"), ("Directory/a.py", "directory/b.py")])
+def test_materialize_rejects_native_case_collisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: tuple[str, str]
+) -> None:
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    revision(repo, "[tool.rowx.migrate]\n")
+    oid = git(repo, "hash-object", "-w", "pyproject.toml")
+    for name in names:
+        git(repo, "update-index", "--add", "--cacheinfo", f"100644,{oid},{name}")
+    git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "collisions")
+    destination = tmp_path / "snapshot"
+    destination.mkdir()
+    probe = tmp_path / "caseprobe"
+    probe.mkdir()
+    (probe / "Q").touch()
+    if not (probe / "q").exists():
+        pytest.skip("filesystem is case-sensitive")
+    monkeypatch.chdir(repo)
+    with pytest.raises(compat.CheckError, match="filesystem collision"):
+        compat._materialize(git(repo, "rev-parse", "HEAD"), destination)
