@@ -151,6 +151,20 @@ def test_historical_source_is_never_executed(tmp_path: Path, schema: str) -> Non
 
 
 @pytest.mark.parametrize(
+    "source", ["query[int | None](t'SELECT {None}::int')", "query[list[int | None] | None](t'SELECT {[None]}::int[]')"]
+)
+def test_known_null_self_compatibility(tmp_path: Path, schema: str, source: str) -> None:
+    del schema
+    git(tmp_path, "init", "-q")
+    (tmp_path / "pyproject.toml").write_text("[tool.rowx.migrate]\n", encoding="utf-8")
+    (tmp_path / "migrations").mkdir()
+    revision = commit(tmp_path, "from rowx import query\n" + source, "SELECT 1")
+    result = run_compat(tmp_path, revision, revision)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "compatible checked subset" in result.stdout
+
+
+@pytest.mark.parametrize(
     ("source", "migration", "expected"),
     [
         ("from rowx import query\nquery[int](t'SELECT missing FROM t')", "CREATE TABLE t (x int)", "own schema"),

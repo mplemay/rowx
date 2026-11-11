@@ -74,6 +74,23 @@ def test_ok_basic_matches_its_markers() -> None:
     assert check_case(OK_BASIC, _dsn()) == []
 
 
+def test_null_parameter_preserves_default_output(
+    schema: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(tmp_path, "null.py", "from rowx import query\nquery[int | None](t'SELECT {None}::int')\n")
+    assert _run(capsys, str(path), "--database-url", schema) == (0, "", "")
+    assert _run(capsys, str(path), "--database-url", schema, "--output-format", "json") == (0, "[]\n", "")
+    path.write_text("from rowx import query\nquery[int](t'SELECT 1 WHERE {None}::xml IS NULL')\n", encoding="utf-8")
+    code, out, err = _run(capsys, str(path), "--database-url", schema)
+    assert code == 1
+    assert "error[unsupported-type]" in out
+    assert not err
+    code, out, err = _run(capsys, str(path), "--database-url", schema, "--output-format", "json")
+    assert code == 1
+    assert [item["rule"] for item in json.loads(out)] == ["unsupported-type"]
+    assert not err
+
+
 def test_postgres_reexports_match_checker_types(
     schema: str,
     tmp_path: Path,

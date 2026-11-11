@@ -6,7 +6,7 @@ import pytest
 from rowx_postgres._backend import load
 from rowx_postgres._vocab import LeafName, TypeKey
 
-from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
+from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param, compare_param_result
 from rowx.check.model import Span
 from rowx.check.params import ParamName, ParamType
 from rowx.check.resolve import Elem, NamedField, RowType
@@ -251,6 +251,16 @@ def test_param_mismatch_names_both_types() -> None:
 )
 def test_param_not_flagged(key: str | None, evident: ParamType | None) -> None:
     assert compare_param(0, "t", key, evident, backend=PG_RULES) is None
+
+
+def test_null_parameter_comparison_coverage() -> None:
+    null = ParamType("None")
+    nulls = ParamType("list", null)
+    assert compare_param_result(0, "int4", "int4", null, backend=PG_RULES) == (None, True)
+    assert compare_param_result(0, "int4[]", "array", nulls, "int4", PG_RULES) == (None, True)
+    assert compare_param_result(0, "int4", "int4", None, backend=PG_RULES) == (None, False)
+    assert compare_param_result(0, "unknown", None, null, backend=PG_RULES) == (None, False)
+    assert compare_param_result(0, "unknown[]", "array", nulls, None, PG_RULES) == (None, False)
 
 
 @pytest.mark.parametrize(
