@@ -13,6 +13,8 @@ Both public import roots are checked: `from rowx import query` and `from rowx_co
 rowx check [PATHS...]
   [--database-url URL] [--config FILE] [--output-format text|json]
   [--statistics] [--inspect] [--coverage]
+  [--error RULE] [--warn RULE] [--ignore RULE] [--exit-zero-on-warning]
+  [--respect-ignore-files | --no-respect-ignore-files] [--force-exclude]
   [--require-checked] [--disallow-unchecked]
   [-j N] [--scratch] [--no-drift-check]
 ```
@@ -21,8 +23,8 @@ The entry point is `rowx = "rowx.check.cli:main"`.
 
 | Exit code | Meaning |
 |---|---|
-| 0 | No diagnostics. That includes a run that found no queries. |
-| 1 | One or more diagnostics. |
+| 0 | No visible diagnostics, including a run that found no queries; also warnings only when `--exit-zero-on-warning` or `error-on-warning = false` is set. |
+| 1 | One or more visible errors, or warnings when warnings fail the check (the default). |
 | 2 | Bad invocation or config, an unreachable database, a describe failure that is not an SQL error, a drift or scratch failure, or an internal error. |
 
 A missing database URL is exit 2 only when at least one statement would be described. A file whose calls are all
@@ -43,7 +45,10 @@ With `--output-format json`, diagnostics stay on stdout. Statistics, coverage an
 parameter types, and a NOT NULL column becoming nullable against a non-null annotation. A wider annotation (`X | None`
 on a NOT NULL column) is not incompatible. Exit 0 is a complete compatible subset, exit 1 is an incompatibility, and
 exit 2 is incomplete: `incomplete: loading revision`, `incomplete: building schema`, own-schema coverage was not
-established, a comparison could not be established, or scratch cleanup failed. The first two are `CheckError`s raised
+established, a comparison could not be established, or scratch cleanup failed. Compatibility uses raw checker
+evidence: rule levels and inline suppressions cannot turn an incompatible or incomplete check into a compatible one.
+Snapshot configuration still validates rule settings and applies its versioned path exclusions; snapshot discovery
+does not apply `.gitignore` or `.ignore`. The loading-revision and building-schema failures are `CheckError`s raised
 before the 0/1/2 return. The URL is `--database-url` or `ROWX_DATABASE_URL`. It does not read `database_url_env`.
 
 ## Config
@@ -54,8 +59,18 @@ before the 0/1/2 return. The URL is `--database-url` or `ROWX_DATABASE_URL`. It 
 [tool.rowx]
 database_url_env = "DATABASE_URL"
 include = ["src", "tests"]
-exclude = ["**/generated/**"]
+exclude = ["**/generated", "!src/generated/keep.py"]
 statement_timeout = "10s"
+respect-ignore-files = true
+force-exclude = false
+
+[tool.rowx.rules]
+all = "error"
+invalid-ignore-comment = "warn"
+unused-ignore-comment = "warn"
+
+[tool.rowx.terminal]
+error-on-warning = true
 
 [tool.rowx.migrate]
 dir = "migrations"
@@ -65,8 +80,12 @@ table = "_rowx_migrations"
 | Key | Meaning |
 |---|---|
 | `database_url_env` | Environment variable holding the URL. Default `DATABASE_URL`. |
-| `include` | Directory or file roots, relative to the config file. Default `["."]`. |
-| `exclude` | Extra glob patterns, matched on top of the defaults below. A pattern with no slash matches a name at any depth. Slashes at either end are stripped, so a leading slash is removed and the remainder is matched like any other pattern. |
+| `include` | Project-root-anchored directory or file patterns. Default `["."]`. |
+| `exclude` | Ordered project-root-anchored patterns applied after the default exclusions; a leading `!` reincludes a match. Default `[]`. |
+| `respect-ignore-files` | Respect `.gitignore` and `.ignore` during ordinary discovery. Default `true`; `--respect-ignore-files` and `--no-respect-ignore-files` override it. |
+| `force-exclude` | Apply filters to explicitly supplied paths. Default `false`; `--force-exclude` enables it. |
+| `rules` | Table mapping rule names or `all` to `error`, `warn` or `ignore`. See [Rules](#rules). |
+| `terminal` | Table with `error-on-warning` (boolean, default `true`). `--exit-zero-on-warning` makes warnings alone exit 0. |
 | `statement_timeout` | A positive integer plus `ms`, `s` or `min`. Default `10s`. |
 | `migrate` | Present or absent as a table. Its keys are `dir` (default `migrations`), `table` (default `_rowx_migrations`), `create_schemas`, `ignore_missing`, `allow_out_of_order`, `versioning` (`inferred`, `timestamp`, `sequential`) and `kind` (`inferred`, `simple`, `reversible`). |
 
@@ -76,14 +95,34 @@ the database URL already sets. Unknown keys are a config error (exit 2), with a 
 URL precedence is `--database-url`, then the configured environment variable. The implementation is
 `src/rowx/check/config.py`.
 
-Default exclude names, always applied, are `.git`, `.venv`, `venv`, `node_modules`, `__pycache__`, `site-packages`,
-`build` and `dist`.
+The config file is the nearest `pyproject.toml` walking up from the working directory, or `--config`. Patterns are
+relative to its directory (the project root); without a config file the working directory is the root. `src` matches
+only root `src`, while `**/src` matches that name at any depth. A matching directory includes its descendants. `*`
+and `?` match within a path component, `**` is a whole component, and character classes and ranges and backslash
+escapes are supported. A trailing slash restricts a match to a directory; optional leading `./` or `/` anchors at the
+root. Invalid patterns, including an unclosed class, trailing escape or embedded `**`, are config errors. Include
+patterns select directories or `.py` files; unmatched glob includes select nothing, while a missing literal path is
+an error. Results are deduplicated and sorted. To migrate an old basename exclusion at any depth, change, for example,
+`generated` to `**/generated`.
 
-The config file is the nearest `pyproject.toml` walking up from the working directory, or `--config`. A directory
-target inside that project uses `git ls-files` when git succeeds: tracked `.py` files, including one that is also
-gitignored, and untracked `.py` files that are not gitignored. Without git, or when the directory is outside the
-project, the walk includes gitignored `.py` files that are not excluded. An explicit file is checked whenever it is
-not excluded, including a `.pyi` and a gitignored path.
+The defaults exclude `.venv`, `venv`, `node_modules`, `__pycache__`, `site-packages`, `build` and `dist` at any
+depth. A later negated exclude can reinclude these directories or descendants. `.git` is a hard exclusion at any
+depth, including explicitly selected directories, and cannot be reopened.
+
+Ordinary discovery respects nested `.gitignore` and `.ignore` even outside Git. Each file is relative to its own
+directory and follows gitignore comment, anchoring, directory and negation rules. `.ignore` takes precedence over
+`.gitignore` in the same directory; deeper ignore files override higher files, but a child cannot reopen a parent
+excluded by an ignore file unless that parent is reopened. Ancestor ignore files up to the project root are read.
+Tracked status does not override these rules: tracked and untracked files are selected alike. Unreadable or invalid
+UTF-8 ignore files and directory read failures are configuration errors (exit 2). No global Git excludes are used.
+
+A path supplied explicitly on the CLI bypasses include, exclude and ignore-file filtering for that path itself unless
+`--force-exclude` or `force-exclude = true` is set. Explicit files must still have the `.py` suffix. An explicit
+directory bypasses exclusions of the selected directory and its ancestors, while independently matching rules still
+filter descendants. Configured include entries and glob matches are not explicit CLI paths. Directory symlinks,
+including symlink ancestors of configured includes, are not traversed; an explicitly selected CLI file may still
+use such a path. External explicit paths are supported; their filtering is anchored at the selected directory or, for
+a file, its parent. Filtering selects files for checking; it does not change runtime imports or type resolution.
 
 ## Discovery
 
@@ -114,8 +153,8 @@ query inside `exec`. The checker does not claim otherwise.
 `template-construction` (`src/rowx/check/construction.py`) runs on every discovered file, with or without a `query`
 import. It reports a `Template(...)` call whose arguments are not literals, an indirect use that hides that call, and
 a non-literal format spec in a t-string. The spec on a direct `query_unchecked` argument is `dynamic-query` instead,
-so one interpolation is not reported twice. There is no suppression comment. Exclude the path, or build the SQL by
-nesting t-string literals. The runtime behaviour is in
+so one interpolation is not reported twice. The rule can be configured or suppressed like other ordinary rules.
+The runtime behaviour is in
 [Parameters and SQL text](security.md#parameters-and-sql-text).
 
 ## Source map
@@ -148,7 +187,10 @@ honoured. A file that does not decode is `syntax-error`.
 
 The scope is module-level assignments and `type` aliases, class bodies, and function-local assignments when the call
 is in that function. An imported name is found through the package layout and the include roots, not through
-`sys.path`. Names from `KNOWN_ROOTS` (the standard library, `typing_extensions`, `rowx`, `rowx_core`, `pydantic`,
+`sys.path`. For each include pattern the source root is its literal prefix before the first wildcard; a file
+prefix uses its parent, and only existing directories are used. The directory containing the checked file’s
+top-level package is also a root. Names from `KNOWN_ROOTS` (the standard library, `typing_extensions`, `rowx`,
+`rowx_core`, `pydantic`,
 plus the roots of a selected backend's value-class modules) that are not a supported row type or base are
 `invalid-row-type`. A root outside that set is outside the project and is `unresolved-row-type`. `TYPE_CHECKING`
 blocks are read for imports. A name assigned both inside and outside the block uses the first `TYPE_CHECKING`
@@ -189,9 +231,47 @@ from its parameters. A string annotation inside a class is parsed. A string as `
 | `param-type-mismatch` | An evident Python type the parameter does not accept. `None` is accepted for every parameter. It is not emitted for an unknown type or for a parameter already reported as `unsupported-type`. |
 | `coverage-require-checked` | `--require-checked`, and no query was successfully described. |
 | `coverage-unchecked` | `--disallow-unchecked`, and the call is `query_unchecked`. |
+| `invalid-ignore-comment` | A malformed rowx ignore or an unknown rule in one. Default `warn`. |
+| `unused-ignore-comment` | An ignore or individual rule entry did not suppress a visible diagnostic. Default `warn`. |
 
-Every rule is an error. Warnings, ignore comments and per-rule configuration are
-[#296](https://github.com/mplemay/rowx/issues/296). `--fix` is
+All other rules default to `error`. Set `[tool.rowx.rules]` entries to `error`, `warn` or `ignore`; `all` applies
+first and specific entries override it. Repeat `--error RULE`, `--warn RULE` and `--ignore RULE` to override config
+in command-line order; each accepts a rule name or `all`, and the last applicable option wins. Unknown names, levels
+or malformed tables are configuration errors. Warnings cause exit 1 by default; set
+`[tool.rowx.terminal] error-on-warning = false` or pass `--exit-zero-on-warning` for warnings alone to exit 0.
+
+Use a native Python comment to suppress an ordinary diagnostic:
+
+```python
+from rowx import query
+
+query["Row"](t"SELECT 1")  # rowx: ignore[invalid-row-type] # reason
+```
+
+A directive on its own line before the first Python code token applies to the whole file. Blank lines, shebangs and
+encoding comments may precede it. A standalone directive after code has begun has no next-line or block effect. A
+trailing directive applies when its line is the first or last occupied line of a diagnostic's primary span; a middle
+line alone does not match. Spans use end-exclusive positions, so an end at column 1 of a later line belongs to the
+preceding line. Zero-width spans remain on their own line. A bare `# rowx: ignore` suppresses ordinary rules, while
+bracketed directives name exact lowercase rules, separated by commas. Whitespace around the colon and codes is
+accepted. An optional reason follows whitespace and a further `#`. Multiple `#`-delimited tool comments can share a
+line. Only Python comment tokens count; directive text in strings does not.
+
+Malformed syntax, empty lists and unknown names produce `invalid-ignore-comment`; a malformed bracketed directive
+never becomes a broad ignore. Valid names in a mixed valid/unknown list still work. Rule levels are applied before
+usage accounting, so disabled findings cannot make an ignore used. Each visible finding is consumed by the most local
+matching directive (inline before file-wide, then source order); one entry may suppress multiple findings. Each
+unmatched or redundant valid rule entry produces an unused finding, as does a broad ignore with no effect. A bare
+ignore cannot suppress `unused-ignore-comment`; name that rule explicitly to suppress it. This second pass does not
+create recursive unused findings for that entry. If tokenization fails, no ignores or unused findings from its partial
+stream are applied; an undecodable source cannot be suppressed. A parse error can be suppressed when tokenization
+succeeds.
+
+Suppression and ignored rule levels change reporting, not discovery, SQL description, inspection or coverage evidence;
+a suppressed query can still require a database connection. Operational failures retain their provenance and stay
+visible as exit 2 even if their rule is `sql-error` or configured to ignore; ordinary PostgreSQL SQL errors remain
+suppressible. `type: ignore`, `noqa` and `@no_type_check` do not suppress rowx SQL checks. Generic type-checker
+suppression compatibility, baselines and automatic insertion of ignores are deferred. `--fix` is
 [#301](https://github.com/mplemay/rowx/issues/301).
 
 Type compatibility is nominal, with two relaxations. A domain is compared as its base type, so it is acceptable
@@ -283,13 +363,14 @@ error[type-mismatch]: column 2 "name": column type is `int` but the annotation i
    |                      ^^^ element 2
 ```
 
-Note lines are `= note:` and help lines are `= help:`. They follow the snippet. The sample above stops after the
-caret. Tabs expand to four spaces. A zero-width span still gets one caret.
-Server-supplied text is sanitised before it reaches a terminal ([Checker](security.md#checker)).
+Warnings use `warning[rule]` in place of `error[rule]`. Note lines are `= note:` and help lines are `= help:`. They
+follow the snippet. The sample above stops after the caret. Tabs expand to four spaces. A zero-width span still gets one
+caret. Server-supplied text is sanitised before it reaches a terminal ([Checker](security.md#checker)).
 
-`--output-format json` prints one JSON array. Each object has `rule`, `message`, `file`, `line`, `col`, `end_line`,
-`end_col`, `notes`, `help`, `sqlstate`, `sql`, `column_index` and `field`. There is no separate footer. Pass
-`--statistics` for the counts.
+`--output-format json` prints one JSON array. Each object has `rule`, `severity` (`error` or `warning`), `message`,
+`file`, `line`, `col`, `end_line`, `end_col`, `notes`, `help`, `sqlstate`, `sql`, `column_index` and `field`. There is
+no separate footer. Pass `--statistics` for the counts; diagnostic counts reflect visible reports, while coverage
+evidence is unaffected by reporting filters.
 
 Described column metadata is not written to a disk cache. Every check prepares the statements it describes.
 
@@ -329,6 +410,8 @@ The connecting role needs `CREATEDB`. The drift gate does not run in this mode. 
 | `src/rowx/check/render.py` | Text and JSON output. |
 | `src/rowx/check/runner.py` | Scheduling and the checker session. |
 | `src/rowx/check/model.py` | Diagnostic and rule types. |
+| `src/rowx/check/rules.py` | Rule levels and reporting policy. |
+| `src/rowx/check/suppress.py` | Native ignore comments and usage accounting. |
 | `src/rowx/check/migrate.py` | `rowx migrate`. |
 | `src/rowx/check/database.py` | `rowx database`. |
 | `src/rowx/check/drift.py` | Drift gate. |

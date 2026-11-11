@@ -28,7 +28,9 @@ array or range parameter.**
   ([Rules](checker.md#rules)) rejects that construction in every file under the include roots, and also a non-literal
   format spec in any t-string literal there.
   - The rule is **best-effort**. `getattr` and `eval` can still build a template, so can code outside the include
-    roots, and so can generated code. It has no ignore comments: the only escape is to exclude the path in config.
+    roots, and so can generated code. The `template-construction` rule can be configured or suppressed with a native
+    rowx ignore comment; doing so hides the finding and does not add a runtime provenance check. See
+    [Rules](checker.md#rules).
   - A runtime provenance check and an `assert_sql_safe` escape hatch were both rejected.
 - **Migration files are trusted code.** `Migrator` and `rowx check --scratch` run their statements over the simple
   query protocol, because a file holds many statements. This is internal, and it adds no public raw-SQL escape. Only
