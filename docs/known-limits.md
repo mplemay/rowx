@@ -1,6 +1,6 @@
 # Known limits
 
-Nullability inference limits from [the design](design/nullability.md#known-limits-pinned-by-tests-documented), each
+Nullability inference limits from [the reference](reference/nullability.md#known-limits), each
 pinned by a test in `packages/rowx-postgres/src/rowx_postgres/__tests__/integration/describe/test_known_limits.py`.
 A `limit` is a case where rowx is
 less precise than the database allows. A `correct` case is a hard-looking shape that rowx gets right.

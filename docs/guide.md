@@ -455,7 +455,7 @@ asyncio.run(main())
 ### What isn't supported
 
 - A row class from attrs or msgspec, a `Protocol`, an untyped `collections.namedtuple`, a `RootModel` and `pydantic.v1`
-  models. They are deferred, not rejected for good: see the [roadmap](design/roadmap.md).
+  models. They are deferred, not rejected for good: see the [roadmap](contributing/architecture.md#deferred).
 - A stdlib dataclass with `init=False`, an `InitVar` field (a pydantic dataclass accepts `init=False`), and a class
   with no fields.
 - A nullable row (`User | None`): call `.optional()` instead. A row class nested in a tuple, a list or a union, or used
@@ -470,7 +470,8 @@ asyncio.run(main())
 ## Writing queries
 
 A `query[T]` takes one inline t-string. Conversions (`{x!r}`, `{x=}`), format specs and nested templates are rejected,
-so every interpolation is a bound parameter. Use `query_unchecked` for dynamic SQL; it is skipped by the checker.
+so every interpolation is a bound parameter. Use `query_unchecked` for dynamic SQL; the checker does not describe
+its SQL, but it still resolves `T`.
 
 ```python test
 import asyncio
@@ -1389,7 +1390,7 @@ rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text
 
 The checker never imports or executes your code. It parses your files, finds every `query[T](t"...")` call, resolves `T`
 statically, and asks Postgres to prepare and describe the SQL. Then it compares the columns and parameters with your
-types. See [the checker rules](design/checker.md#rules-all-errors) for the rules.
+types. See [the checker rules](reference/checker.md#rules) for the rules.
 
 | Exit code | Meaning |
 |---|---|
@@ -1603,15 +1604,16 @@ It treats three things as untrusted: the values you interpolate (and the values 
 bytes a server sends when `sslmode` is weaker than `verify-full`, and the session state that application SQL can change
 and that outlives a pool checkout (`SET ROLE`, temp tables, `SET client_encoding`). The rule it holds is that no
 untrusted input can change the parse tree of a statement, or the shape of an array or range parameter. The contract is
-in [Security and safety](design/security.md); this section is what it asks of your code.
+in [Security and safety](reference/security.md); this section is what it asks of your code.
 
 ### SQL injection
 
 - **Values are always bound.** Every `{x}` becomes a server-side parameter, never part of the SQL text. `query` rejects
   conversions, format specs and nested templates, and there is no public raw-SQL escape. A value that looks like SQL is
   only a value.
-- **`query` plus `rowx check` in CI is the gate.** Dynamic SQL needs `query_unchecked`, which the checker skips, so keep
-  it in small functions that take their dynamic parts from an allowlist ([below](#identifiers)). The checker's
+- **`query` plus `rowx check` in CI is the gate.** Dynamic SQL needs `query_unchecked`, whose SQL the checker
+  does not describe (it still resolves `T`), so keep it in small functions that take their dynamic parts from an
+  allowlist ([below](#identifiers)). The checker's
   `dynamic-query` and `template-construction` rules find the rest ([The checker](#the-checker)), and
   [CI recipe](#ci-recipe) runs them on every push.
 - **`Template(...)` with a non-literal string is raw SQL.** It is the one way to put attacker-controlled text into a
