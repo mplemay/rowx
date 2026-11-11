@@ -82,6 +82,7 @@ class PostgresCheckerSession(CheckerSession):
             if error.sqlstate == "57P01" or error.sqlstate.startswith("08"):
                 return "lost"
             if error.sqlstate in {"42501", "55006", "55P03"} or error.sqlstate.startswith((
+                "40",
                 "53",
                 "57",
                 "58",

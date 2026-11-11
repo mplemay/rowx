@@ -247,7 +247,7 @@ def test_cross_schema_timeout_identifies_phase(
 
 @pytest.mark.parametrize(
     ("sqlstate", "expected"),
-    [("53200", 2), ("53100", 2), ("55P03", 2), ("55006", 2), ("42501", 2), ("42703", 1)],
+    [("53200", 2), ("53100", 2), ("55P03", 2), ("55006", 2), ("42501", 2), ("40P01", 2), ("40001", 2), ("42703", 1)],
 )
 def test_cross_schema_database_failure_classification(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     tmp_path: Path,
