@@ -14,9 +14,10 @@ metadata:
 
 # Use rowx
 
-rowx is typesafe raw SQL for Python 3.14+. A query is a PEP 750 t-string with an explicit row type. The executor
-you pass compiles and runs it. `rowx check` prepares each checked query against a live Postgres 18 database and
-does not import application code.
+rowx is for when you would otherwise reach for SQLAlchemy and you would rather write the SQL. A query is a PEP 750
+t-string plus the Python type of the row. The executor you pass compiles and runs it. `rowx check` prepares each
+checked query against a live Postgres 18 database and does not import application code. There is no session and no
+query builder.
 
 ## When to Use This Skill
 

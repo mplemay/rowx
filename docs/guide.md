@@ -1,25 +1,32 @@
 # rowx user guide
 
-rowx runs raw SQL written as t-strings and returns typed rows. The same row types drive `rowx check`, a static checker
-that prepares every query against a live Postgres 18 database and reports mismatches.
+You write the SQL, name the row in ordinary Python, and `rowx check` fails the build when Postgres disagrees.
 
-The `python test` blocks in this guide are executed against a seeded database (users `alice`, `bob` and `carol`, plus
-`orders`) by the test suite, with `DSN` set to its connection string.
+The `python test` blocks in this guide run against a seeded database (users `alice`, `bob`, and `carol`, plus
+`orders`). The test suite sets `DSN`.
 
-- [Get started](guide/get-started.md): install, a first query, and the upgrade from 0.2.
-- [Queries](guide/query.md): what `query` and `query_unchecked` accept.
-- [Parameters](guide/parameters.md): binding rules and nullability overrides.
-- [Rows](guide/rows.md): scalar, tuple, and named rows.
-- [Executors](guide/executors.md): connections, pools, transactions, and the statement cache.
-- [Streaming](guide/streaming.md): `fetch` and `RowStream`.
-- [Errors](guide/errors.md): exception identity, and when errors are raised.
-- [Checker](guide/checker.md): `rowx check` against an explicit database target.
+## Start
+
+- [First query](guide/get-started.md): install `rowx[postgres]` and run `SELECT`.
+- [Rows](guide/rows.md): a scalar, a tuple, or a class you already write.
+- [Check](guide/checker.md): the diagnostic when a column and `T` disagree.
+- [From SQLAlchemy](from-sqlalchemy.md): what you give up, and what you keep.
+
+## The rest of the job
+
+- [Queries](guide/query.md): one statement, bound values, and `query_unchecked`.
+- [Parameters](guide/parameters.md): `ANY`, casts, and nullability overrides.
+- [Executors](guide/executors.md): a connection, a pool, a transaction.
+- [Streaming](guide/streaming.md): `fetch` when the result is large.
+- [Errors](guide/errors.md): `RowNotFound`, `RowShapeError`, and `DecodeError`.
 - [CI](guide/ci.md): run the checker on a throwaway Postgres.
-- [Migrations](guide/migrations.md): SQL-file migrations.
-- [Testing](guide/testing.md): the `rowx.testing` pytest plugin.
-- [Security](guide/security.md): what to trust, and what stays a bound value.
+- [Migrations](guide/migrations.md): SQL files, applied in order.
+- [Testing](guide/testing.md): a migrated database per test.
+- [Security](guide/security.md): what is trusted, and what stays a bound value.
 
 ## Known limits
+
+Each case is pinned in [known limits](known-limits.md). The short index:
 
 - **Nullability inference** is conservative, never optimistic. Views, set operations, recursive CTEs and computed
   columns are nullable; use `"col!"` to narrow. See [known-limits.md](known-limits.md) for each case.

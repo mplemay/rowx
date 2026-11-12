@@ -1,12 +1,26 @@
-# The checker
+# Check
 
-```text
-rowx check [PATHS...] [--database-url URL] [--config FILE] [--output-format text|json] [--statistics] [--coverage] [--inspect] [--require-checked] [--disallow-unchecked] [-j N] [--scratch] [--no-drift-check] [--error RULE] [--warn RULE] [--ignore RULE] [--exit-zero-on-warning] [--respect-ignore-files | --no-respect-ignore-files] [--force-exclude]
+Run this against a database that has your schema. CI does the same thing. A workflow you can paste is
+[CI](ci.md).
+
+```sh
+rowx check src --database-url postgresql://app@localhost/app
 ```
 
-The checker never imports or executes your code. It parses your files, finds every `query[T](t"...")` call, resolves `T`
-statically, and asks Postgres to prepare and describe the SQL. Then it compares the columns and parameters with your
-types. See [the checker rules](../reference/checker.md#rules) for the rules.
+A column that does not match `T` is reported like this:
+
+```text
+error[type-mismatch]: column 2 "name": column type is `int` but the annotation is `str`
+  --> src/app.py:14:22
+   |
+14 |     query[tuple[int, str]](t"SELECT id, name FROM users")
+   |                      ^^^ element 2
+```
+
+The checker parses your files. It does not import the application, and it does not execute the statement. It asks
+Postgres to prepare and describe each checked `query[T](t"...")`, then compares the columns and parameters with `T`.
+It does not guess which executor will run the query. `query_unchecked` SQL is not described. The flag list, the rules,
+and the exit-code contract are the [checker reference](../reference/checker.md).
 
 | Exit code | Meaning |
 |---|---|
@@ -26,14 +40,12 @@ statement_timeout = "10s"         # integer + unit: ms|s|min
 
 `[tool.rowx.migrate]` is described under [Migrations](migrations.md).
 
-The database URL comes from `--database-url`, else from the environment variable named by `database_url_env`.
-
-That URL is an explicit check target, in the style of SQLx. `database_url_env` defaults to `DATABASE_URL`. The
-checker does not infer which executor will run a query. It checks every recognized `query` and `query_unchecked`
-construction, including one nothing calls, on the public import roots `rowx` and `rowx_core`. At
-runtime the executor passed to the method supplies the compiler, and that compiler emits the SQL for the call. A
-later call on another executor compiles again. There is no automatic multi-target routing and no offline query
-metadata.
+The database URL comes from `--database-url`, else from the environment variable named by `database_url_env`
+(default `DATABASE_URL`). Described metadata is not written to disk, so a check needs a database. The checker does not
+infer which executor will run a query. It checks every recognized `query` and `query_unchecked` construction, including
+one nothing calls, on the public import roots `rowx` and `rowx_core`. At runtime the executor passed to the method
+supplies the compiler, and that compiler emits the SQL for the call. A later call on another executor compiles again.
+There is no automatic multi-target routing and no offline query metadata.
 
 ## Checker suppressions and rule levels
 

@@ -1,18 +1,66 @@
 # Why rowx
 
-rowx is SQLx for Python 3.14+: typesafe raw SQL as a [PEP 750](https://peps.python.org/pep-0750/) t-string, checked by
-`rowx check` against a live Postgres 18 database, with no ORM. The [user guide](guide.md) is how to write and run a
-query. The [packages](packages.md) page lists the three distributions.
+You keep the SQL you would have written in psql, you name the row in ordinary Python, and the build fails when Postgres
+disagrees.
+
+A query is a [PEP 750](https://peps.python.org/pep-0750/) t-string plus the Python type of the row. `rowx check` finds
+`query[T](t"...")` in your files. The checker never imports or executes application code. It asks Postgres to prepare
+and describe each checked statement, using `--database-url` or `DATABASE_URL`, and compares the columns and parameters
+with `T`. `query_unchecked` SQL is not described. Described metadata is not written to disk, so a check needs a
+database.
+
+- **SQL stays SQL.** The statement in the source is the statement Postgres prepares.
+- **The row is a normal type.** A tuple, a scalar, a dataclass, a `NamedTuple`, a `TypedDict`, or a pydantic model.
+  pyright, mypy, and ty see it with no plugin.
+- **The database checks it.** A mismatch is an error before the program runs. The sample diagnostic is on the
+  [home page](index.md).
+- **Postgres, async, one driver.** Python 3.14+ and `rowx.postgres`. There is no session and no query builder.
+
+Leaving a `Session` is [From SQLAlchemy](from-sqlalchemy.md). The first query is
+[First query](guide/get-started.md).
+
+## Kinship
+
+SQLx is the closest relative. `query!` and `query_as!` check a SQL string against a live database at compile time, and
+[`query_as!`](https://docs.rs/sqlx/latest/sqlx/macro.query_as.html) maps the row onto a struct you name. SQLx can also
+compile from an offline [`.sqlx` cache](https://docs.rs/sqlx/latest/sqlx/macro.query.html#offline-mode). rowx has no
+offline mode. Every check prepares the statements it describes
+([checker reference](reference/checker.md#output)).
+
+sqlc generates functions from SQL files. `sqlc generate` analyzes those files with a built-in engine, and a database
+connection is optional. rowx leaves the t-string in your source and does not emit a function for it.
+
+asyncpg and psycopg run SQL strings at runtime. psycopg's
+[static typing](https://www.psycopg.org/psycopg3/docs/advanced/typing.html) covers the Python API and the rows that come
+back. It does not prepare the statement against the schema. asyncpg's `fetchrow` and `execute` send the string when you
+call them.
+
+SQLAlchemy is the ORM and the expression toolkit. Core is command-oriented SQL. The ORM adds a state-oriented unit of
+work. Raw SQL is a [`text()`](https://docs.sqlalchemy.org/en/21/core/sqlelement.html#sqlalchemy.sql.expression.text) or
+[`tstring()`](https://docs.sqlalchemy.org/en/21/core/sqlelement.html#sqlalchemy.sql.expression.tstring) construct, and
+`tstring()` accepts a PEP 750 t-string. Both run through a DBAPI at runtime.
+[From SQLAlchemy](from-sqlalchemy.md) is that comparison in the shape of a move.
 
 ## Comparison
 
-The rowx row follows the guide and reference. Each other row links to that project's documentation.
+One row per project. The kinship section above is where the offline cache and the generated code belong.
 
-| Project | Where the SQL lives | Whether a live database checks it | ORM or not | Whether the project is a Postgres driver | Offline cache versus generated code |
-|---|---|---|---|---|---|
-| rowx | An inline t-string on `query[T]` ([Queries](guide/query.md)). | Yes, for a checked statement. `rowx check` prepares and describes each checked statement against a live Postgres 18 database. `query_unchecked` SQL is not described ([checker reference](reference/checker.md)). The checker never imports or executes application code ([checker guide](guide/checker.md)). | No. Raw SQL in t-strings ([user guide](guide.md)). | Yes. `rowx-postgres`, on tokio-postgres ([packages](packages.md), [driver](reference/driver.md)). | Described column metadata is not written to a disk cache ([checker reference](reference/checker.md)). |
-| [SQLx](https://docs.rs/sqlx/latest/sqlx/) | SQL string literals in the [`query!`](https://docs.rs/sqlx/latest/sqlx/macro.query.html) macro. The repository is [transact-rs/sqlx](https://github.com/transact-rs/sqlx). | Yes, at compile time. `DATABASE_URL` must point at a database server with the schema the query string is checked against, unless [offline mode](https://docs.rs/sqlx/latest/sqlx/macro.query.html#offline-mode) is used. | No. [`query!`](https://docs.rs/sqlx/latest/sqlx/macro.query.html) maps columns onto an anonymous struct. [`query_as!`](https://docs.rs/sqlx/latest/sqlx/macro.query_as.html) maps a row onto a struct you name. | Yes. [`Postgres`](https://docs.rs/sqlx/latest/sqlx/struct.Postgres.html) is a PostgreSQL database driver. | [Offline mode](https://docs.rs/sqlx/latest/sqlx/macro.query.html#offline-mode) stores a `.sqlx` directory so a later compile can skip the live database. |
-| [asyncpg](https://magicstack.github.io/asyncpg/current/index.html) | SQL strings passed to connection methods such as `execute` and `fetchrow` ([usage](https://magicstack.github.io/asyncpg/current/usage.html)). | No. Connection methods run SQL strings at runtime ([usage](https://magicstack.github.io/asyncpg/current/usage.html)). Those docs do not describe checking the strings against a schema before the program runs. | No. A PostgreSQL protocol library for Python and asyncio. One [FAQ entry](https://magicstack.github.io/asyncpg/current/faq.html#can-i-use-asyncpg-with-sqlalchemy-orm) is whether that library can be used with the SQLAlchemy ORM. | Yes. The introduction describes an implementation of the PostgreSQL server binary protocol. | Neither. The introduction describes a runtime library. It does not describe an offline query cache or generated code. |
-| [psycopg](https://www.psycopg.org/psycopg3/docs/) | SQL strings passed to `execute` ([basic usage](https://www.psycopg.org/psycopg3/docs/basic/usage.html)). | No. `execute` sends SQL at runtime ([basic usage](https://www.psycopg.org/psycopg3/docs/basic/usage.html)). [Static typing](https://www.psycopg.org/psycopg3/docs/advanced/typing.html) annotates the Python API and the rows that come back. It does not prepare the SQL against the database schema. | No. A PostgreSQL database adapter for Python. | Yes. The documentation describes a PostgreSQL database adapter for Python. | Neither. The usage guide describes a runtime adapter. It does not describe an offline query cache or generated code. |
-| [SQLAlchemy](https://docs.sqlalchemy.org/en/21/intro.html) | SQL expression objects and ORM mappings ([overview](https://docs.sqlalchemy.org/en/21/intro.html)). Raw SQL is a [`text()`](https://docs.sqlalchemy.org/en/21/core/sqlelement.html#sqlalchemy.sql.expression.text) or [`tstring()`](https://docs.sqlalchemy.org/en/21/core/sqlelement.html#sqlalchemy.sql.expression.tstring) construct executed by a DBAPI. `tstring()` accepts a PEP 750 t-string. Those docs do not describe preparing it against a live schema. | No. Those expressions run through a DBAPI at runtime ([overview](https://docs.sqlalchemy.org/en/21/intro.html)). The docs do not describe checking them against a live schema before the program runs. | Yes. SQL toolkit and object relational mapper. | A dialect over a DBAPI. It is designed to operate with a DBAPI ([Installing a Database API](https://docs.sqlalchemy.org/en/21/intro.html#installing-a-database-api)). PostgreSQL options include psycopg and asyncpg ([dialect](https://docs.sqlalchemy.org/en/21/dialects/postgresql.html#dialect-postgresql)). | Neither. The overview describes a runtime toolkit. It does not describe an offline query cache or generated query functions. |
-| [sqlc](https://docs.sqlc.dev/en/latest/) | Schema and queries live in separate SQL files ([generate](https://docs.sqlc.dev/en/latest/howto/generate.html)). | `sqlc generate` parses the SQL files and analyzes them with a built-in engine. A database connection is optional, for enhanced analysis ([generate](https://docs.sqlc.dev/en/latest/howto/generate.html)). | No. It generates code from SQL. The docs do not describe an ORM. | The PostgreSQL tutorial emits code that runs with a separate driver, `pgx` ([tutorial](https://docs.sqlc.dev/en/latest/tutorials/getting-started-postgresql.html)). | `sqlc generate` emits the host code the application calls. With managed databases, analysis can also be cached locally ([generate](https://docs.sqlc.dev/en/latest/howto/generate.html)). |
+| Project | Where the SQL lives | Live database check | ORM | Driver |
+|---|---|---|---|---|
+| rowx | An inline t-string on `query[T]` ([Queries](guide/query.md)). | Yes, for a checked statement. | No. | Yes. `rowx-postgres`. |
+| [SQLx](https://docs.rs/sqlx/latest/sqlx/) | String literals in [`query!`](https://docs.rs/sqlx/latest/sqlx/macro.query.html) and `query_as!`. | Yes, at compile time, unless offline mode is used. | No. | Yes. [`Postgres`](https://docs.rs/sqlx/latest/sqlx/struct.Postgres.html). |
+| [asyncpg](https://magicstack.github.io/asyncpg/current/index.html) | Strings passed to [`execute`](https://magicstack.github.io/asyncpg/current/usage.html) and `fetchrow`. | No. They run at runtime. | No. | Yes. |
+| [psycopg](https://www.psycopg.org/psycopg3/docs/) | Strings passed to [`execute`](https://www.psycopg.org/psycopg3/docs/basic/usage.html). | No. Typing covers the Python API, not the statement. | No. | Yes. |
+| [SQLAlchemy](https://docs.sqlalchemy.org/en/21/intro.html) | Expression objects, ORM mappings, or `text()` / `tstring()`. | No. They run through a DBAPI at runtime. | Yes. | A dialect over a DBAPI. |
+| [sqlc](https://docs.sqlc.dev/en/latest/) | Schema and queries in [SQL files](https://docs.sqlc.dev/en/latest/howto/generate.html). | Optional. Analysis works without a connection. | No. | No. The PostgreSQL tutorial emits code for `pgx`. |
+
+## What rowx does not do
+
+- **Postgres only.** One async driver, on [Packages](packages.md). There is no dialect layer.
+- **One statement per query.** A string of several statements fails at prepare.
+  [Known limits](known-limits.md#execution-limits).
+- **`query_unchecked` is not described.** The checker still resolves `T`. [Checker guide](guide/checker.md).
+- **No offline describe cache.** A check needs a database. [Checker reference](reference/checker.md#output).
+- **No generated query functions.** The t-string stays in your source. sqlc is the project that emits host code.
+- **Dynamic identifiers** are an allowlist plus `{name:ident}` on `query_unchecked`, which quotes the name.
+  [Security](guide/security.md#identifiers).

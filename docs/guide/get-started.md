@@ -1,45 +1,19 @@
-# Get started
+# First query
 
-Install the checker and the PostgreSQL backend with:
+Install the checker and the PostgreSQL backend, then run a query.
 
 ```sh
 uv add "rowx[postgres]"
 ```
 
-`rowx` depends on matching `rowx-core`, and the `postgres` extra installs matching `rowx-postgres`.
-With that install, import the query API from `rowx` and connections from `rowx.postgres`.
-`from rowx import query` and `from rowx_core import query` are the same object.
-`Pool` imported from `rowx` is the executor protocol, not a connection pool. `import rowx` loads no backend.
+**Import `Pool` from `rowx.postgres`.** `Pool` imported from `rowx` is the executor protocol, not a connection pool.
+The three distributions are [Packages](../packages.md).
 
-A standalone application installs matching `rowx-core` and `rowx-postgres`. That pair is the query API and the
-driver. It does not include the `rowx` command, which is the `rowx` distribution above, and it imports `rowx_core`
-and `rowx_postgres`.
+If you already shipped 0.2, the imports on this page are the ones you have. The wheel split is
+[Upgrading from 0.2](../packages.md#upgrading-from-02).
 
-```sh
-uv add rowx-core rowx-postgres
-```
-
-The published 0.2.0 wheel and this layout are compared in [Upgrading from 0.2](#upgrading-from-02).
-
-The `python test` blocks on this page are executed against a seeded database (users `alice`, `bob` and `carol`, plus
-`orders`) by the test suite, with `DSN` set to its connection string.
-
-```python test
-import asyncio
-
-from rowx.postgres import connect
-from rowx import query
-
-
-async def main() -> None:
-    async with await connect(DSN) as conn:
-        assert await query[int](t"SELECT 1").one(conn) == 1
-
-
-asyncio.run(main())
-```
-
-## Quickstart
+The `python test` blocks on this page run against a seeded database (users `alice`, `bob`, and `carol`, plus `orders`).
+The test suite sets `DSN`.
 
 ```python test
 import asyncio
@@ -59,6 +33,11 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+`{uid}` is a bound parameter. `UserRow` is the row type. `.one` returns that tuple.
+
+You now have a query the checker and your type checker both see. A dataclass row is [Rows](rows.md). A `Session` and
+`select()` are [From SQLAlchemy](../from-sqlalchemy.md). The check command is [Check](checker.md).
 
 | Method | Result | Behaviour |
 |---|---|---|
@@ -95,33 +74,3 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
-
-## Upgrading from 0.2
-
-0.2.0 published one `rowx` wheel. Its native module was `rowx._core`. Application imports were
-`from rowx import query` and `from rowx.postgres import connect, Pool`. There was no separate `rowx-core` or
-`rowx-postgres` distribution.
-
-The unreleased 0.3.0 split ships three lockstep wheels. `rowx-core` is pure Python, imports as `rowx_core`, and has
-no runtime dependencies. `rowx-postgres` imports as `rowx_postgres`, its native module is `rowx_postgres._core`, and
-it depends only on matching `rowx-core`. `rowx` is pure Python, imports as `rowx`, and depends on matching
-`rowx-core`. The `postgres` extra installs matching `rowx-postgres`. This tree is version 0.3.0. The first
-published split is 0.3.0. It is not on PyPI until the `v0.3.0` tag is published.
-
-`rowx` re-exports the query API of `rowx_core`. `rowx.core` re-exports the `rowx_core` names that `rowx` and
-`rowx.errors` do not already export. `rowx.postgres` re-exports `rowx_postgres` and still needs the `postgres` extra.
-The import this guide uses is `from rowx import query` and `from rowx.postgres import connect, Pool`.
-
-`query(...)` captures a neutral template and selects no compiler. Each call compiles with `compiler.compile` on the
-executor passed to the method (`packages/rowx-core/src/rowx_core/_query.py`). A later call on another executor
-compiles again. See [Executors](executors.md).
-
-The `query` constructor in `rowx_core` captures the template and selects no compiler. It raises `TypeError` for a
-non-template, a NUL in static text, a conversion, an unsupported format spec, and an `:ident` value that is not a
-non-empty `str` (or a tuple of them) without a NUL or a control character. When the method runs,
-`rowx_postgres._compiler` emits `$n` and the adjacency space, quotes the captured identifier, and raises
-`TypeError` for an `:ident` outside plain code, a name longer than 63 bytes, and more than 65535 parameters.
-
-Each exception class is defined in `rowx_core.errors` and re-exported from `rowx` and `rowx.errors`
-as that same object. The native error registry uses those classes. There is no Postgres-specific exception tree. See
-[Errors](errors.md).

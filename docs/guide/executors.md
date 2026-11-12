@@ -6,12 +6,9 @@
 
 ## Pools
 
-`rowx.postgres` holds the Postgres backend (`connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`). The
-shared pieces (`query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor` and the errors) belong to
-`rowx_core` and are re-exported by `rowx`. The shared pieces are the same objects as the `rowx_core` exports. `Pool`
-imported from `rowx` is the executor protocol, not a connection pool. `import rowx` loads no backend. Install
-`rowx[postgres]` for both the CLI and PostgreSQL. A runtime-only install of `rowx-postgres` imports the backend as
-`rowx_postgres` and does not include the CLI.
+A `Pool` is an `Executor`, so every query method takes it in place of a connection. Import it from `rowx.postgres`.
+`Pool` imported from `rowx` is the executor protocol, not a connection pool. The three distributions are
+[Packages](../packages.md). Coming from a `Session` is [From SQLAlchemy](../from-sqlalchemy.md).
 
 A query captures its template without selecting a database. The connection, pool or transaction passed to a query
 supplies its compiler and execution behavior. Construction rejects a bad template, including a bad `:ident` value,
@@ -19,9 +16,8 @@ and the compiler emits `$n` and the adjacency space when the method runs and rai
 63-byte name limit, and the parameter cap ([Errors](errors.md)). Static checking separately selects its backend
 from the configured database URL, without importing or executing application code.
 
-A `Pool` is an `Executor`, so every query method takes it in place of a connection. The constructor does no IO, so a
-pool is safe to create at module level. `async with pool` warms it to `min_size` and closes it on exit; the first
-acquire also opens it.
+The constructor does no IO, so a pool is safe to create at module level. `async with pool` warms it to `min_size` and
+closes it on exit; the first acquire also opens it.
 
 ```python test
 import asyncio
@@ -181,6 +177,9 @@ A `fetch` on a pool acquires at its first row and holds that connection until th
 | `async with pool.acquire() as conn:` | `async with pool.acquire() as conn:` |
 | `async with conn.transaction():` | `async with conn.transaction() as tx:` or `async with pool.transaction() as tx:` |
 | `await pool.close()` | `await pool.close()` (`terminate()` is synchronous) |
+
+The SQLAlchemy names for a session, an engine, and a unit of work are on
+[From SQLAlchemy](../from-sqlalchemy.md). This table is the driver switch.
 
 ## Transactions
 

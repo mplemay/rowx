@@ -1,7 +1,7 @@
 [project]
 name = "rowx"
 version = "0.3.0"
-description = "Typesafe SQL queries for python without an ORM"
+description = "Write the SQL, name the row in Python, and fail the build when Postgres disagrees."
 readme = "README.md"
 authors = [
     { name = "Matt LeMay", email = "mplemay@users.noreply.github.com" }

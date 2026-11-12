@@ -1,14 +1,25 @@
 # rowx
 
-SQLx for Python 3.14+. Typesafe raw SQL, with no ORM: you write SQL as a [PEP 750](https://peps.python.org/pep-0750/)
-t-string and say what a row looks like. `rowx check` prepares each checked `query` against a live Postgres 18 database.
-`query_unchecked` SQL is not described.
+rowx is for when you would otherwise reach for SQLAlchemy and you would rather write the SQL. A query is a
+[PEP 750](https://peps.python.org/pep-0750/) t-string plus the Python type of the row.
+
+`rowx check` prepares each checked `query` against a live Postgres 18 database. It reports a mismatch before the
+program runs. There is no session and no query builder.
+
+- **SQL stays SQL.** You write the statement you would write in psql. `{name}` is a bound parameter. It is never pasted
+  into the SQL text.
+- **The row is a normal type.** A tuple, a scalar, a dataclass, a `NamedTuple`, a `TypedDict`, or a pydantic model.
+  pyright, mypy, and ty see that type with no plugin.
+- **The database checks it.** `rowx check` asks Postgres to prepare and describe the statement, then compares the
+  columns and parameters with the row type.
+- **Postgres, async, one driver.** Python 3.14+, `asyncio`, and `rowx.postgres`. There is no dialect layer.
+
+Postgres only. One statement per query. `query_unchecked` SQL is not described. There is no ORM and no generated query
+functions. The boundary is [Why rowx](docs/why.md) and [Known limits](docs/known-limits.md).
 
 ## Quickstart
 
-Install the checker and PostgreSQL backend with `uv add "rowx[postgres]"`.
-
-Free-threaded CPython 3.14t cannot install the abi3 wheels, so pip builds rowx-postgres from the source distribution.
+Install the checker and the PostgreSQL backend with `uv add "rowx[postgres]"`.
 
 ```python test
 import asyncio
@@ -36,14 +47,16 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-- `Pool` is safe to create at module level and acquires a connection per call. Use `rowx.postgres.connect(dsn)` for a
-  single connection, and `pool.transaction()` for transactions.
-- Interpolations (`{name}`) are always bound as server-side parameters. They are never pasted into the SQL text.
-- `query[T]` states the row type. `one` returns `T`, `optional` returns `T | None`, `all` returns `list[T]`, and
-  `execute` returns a `QueryResult` with `rows_affected`.
-- Type checkers (pyright, mypy, ty) infer all of this with no plugin.
+You now have:
 
-Rows can also be a dataclass, `NamedTuple`, `TypedDict` or pydantic model, matched to the columns by name:
+- a parameter (`{name}`) bound on the server
+- a row type (`UserRow`) that the checker and your type checker both see
+- `.one`, `.all`, and `.execute` (`.optional` when the row may be missing)
+- a pool (`Pool`) or one connection (`from rowx.postgres import connect`)
+- a check that fails the build when the schema and `UserRow` disagree
+
+A dataclass, `NamedTuple`, `TypedDict`, or pydantic model matches columns by name. The shapes are on
+[Rows](docs/guide/rows.md).
 
 ```python test
 import asyncio
@@ -69,6 +82,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+`Pool` imported from `rowx` is the executor protocol, not a connection pool. Import it from `rowx.postgres`. The three
+distributions are [Packages](docs/packages.md).
+
 Check the queries against your database:
 
 ```sh
@@ -76,8 +92,8 @@ rowx check src --database-url postgresql://app@localhost/app
 ```
 
 `rowx check` exits 0 when it reports no diagnostics, including when no queries were found, 1 when it reports one or
-more diagnostics, and 2 on a bad invocation or config, an unreachable database, a describe failure that is not an SQL
-error, a drift or scratch failure, or an internal error.
+more diagnostics, and 2 when the check could not run. The [checker reference](docs/reference/checker.md) is the contract
+for the exit codes.
 
 A type mismatch is reported like this:
 
@@ -89,36 +105,14 @@ error[type-mismatch]: column 2 "name": column type is `int` but the annotation i
    |                      ^^^ element 2
 ```
 
-The rules are in the [checker guide](docs/guide/checker.md). The [checker reference](docs/reference/checker.md) is the
-contract for the exit codes.
+## Next
 
-## Distributions
+- [First query](docs/guide/get-started.md): install, then `SELECT`.
+- [From SQLAlchemy](docs/from-sqlalchemy.md): a `Session`, `select()`, and `text()` / `tstring()`, and what replaces
+  them.
+- [Why rowx](docs/why.md): the decision, then SQLx, sqlc, asyncpg, and psycopg.
 
-`rowx` is the optional CLI. With `rowx[postgres]`, import the query API from `rowx` and the driver from
-`rowx.postgres`. `from rowx import query` and `from rowx_core import query` are the same object. `Pool` imported
-from `rowx` is the executor protocol, not a connection pool. `rowx.core` re-exports only the `rowx_core` names that
-`rowx` and `rowx.errors` do not already export.
-
-`rowx-core` (`rowx_core`) has no runtime dependencies. `rowx-postgres` depends only on matching `rowx-core`.
-`rowx.postgres` re-exports that driver and needs the `postgres` extra.
-
-A standalone application installs `rowx-core` and `rowx-postgres` and does not get the `rowx` command. That pair
-imports the driver as `rowx_postgres`:
-
-```sh
-uv add rowx-core rowx-postgres
-```
-
-The checker uses `--database-url` or `DATABASE_URL` and does not import the application.
-
-## Documentation
-
-- [User guide](docs/guide.md): row types (tuples, scalars and named classes), pools, transactions, migrations, writing
-  queries, overrides, the checker, CI and poolers.
-- [Why rowx](docs/why.md): where SQL lives, and how a live database check compares with other libraries.
-- [Changelog](docs/changelog.md): what changed in each release.
-- [Packages](docs/packages.md): the three distributions and the canonical imports.
-- [Postgres type mapping](docs/types.md): what each Postgres type decodes to and which Python types can be bound.
-- [Known limits](docs/known-limits.md): where nullability inference is less precise than the database.
-- [Reference](docs/reference/index.md): the full specification.
-- [use-rowx skill](.agents/skills/use-rowx/SKILL.md): agent guidance for queries, the package split, and `rowx check`.
+The rules of a check are in the [checker guide](docs/guide/checker.md). The
+[use-rowx skill](.agents/skills/use-rowx/SKILL.md) is agent guidance for queries, the package split, and `rowx check`.
+The [changelog](docs/changelog.md) is what changed in each release. The [user guide](docs/guide.md) is the rest of the
+job.
