@@ -16,10 +16,7 @@ from rowx_core.errors import InterfaceError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from os import PathLike
     from types import TracebackType
-
-    from rowx_postgres._options import ConnectOptions
 
 EMBEDDED_SCHEME: Final[str] = "embedded"
 ENGINE_MODULE: Final[str] = "rowx_embedded"
@@ -98,11 +95,22 @@ def check_directory(directory: str) -> str:
     return normal
 
 
-def reject_embedded(target: str | ConnectOptions, /) -> None:
-    embedded = is_embedded_url(target) if isinstance(target, str) else target.embedded is not None
-    if embedded:
+# for the entry points that take a server URL only (the admin, checker and provisioning services)
+def reject_embedded(dsn: str, /) -> None:
+    if is_embedded_url(dsn):
         msg = (
-            "embedded URLs are not supported here; use a server URL (embedded:// works with connect, Pool and embedded)"
+            "embedded URLs are not supported here; use a server URL "
+            "(to open an embedded database from code, use rowx.postgres.embedded)"
+        )
+        raise InterfaceError(msg)
+
+
+# for `connect`, `Pool` and `ConnectOptions.from_dsn`, which never open an embedded database
+def reject_embedded_open(dsn: str, /) -> None:
+    if is_embedded_url(dsn):
+        msg = (
+            "embedded:// URLs are not opened by connect or Pool; use rowx.postgres.embedded.Database(directory) "
+            "(embedded:///abs/path -> directory '/abs/path', embedded:// -> no directory)"
         )
         raise InterfaceError(msg)
 
@@ -322,10 +330,6 @@ async def start_owned(directory: str | None, snapshot: bytes | None = None) -> E
         # a start that fails after the cancel has no caller to report to
         wrapped.add_done_callback(lambda done: done.cancelled() or done.exception())
         raise
-
-
-async def start(*, directory: str | PathLike[str] | None = None) -> EmbeddedDatabase:
-    return await start_owned(None if directory is None else check_directory(os.fspath(directory)))
 
 
 # private to the checker and the pytest plugin: a snapshot is not a public API in v1

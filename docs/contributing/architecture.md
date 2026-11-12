@@ -104,7 +104,7 @@ member of the workspace. This section says how it is built and linked.
 | `rowx_embedded` | `src/rowx_embedded/` | The Python package: `Instance`, `API_VERSION`, `ENGINE_VERSION`, `RUNTIME_VERSION`, `WASM_SHA256`, `SNAPSHOT_FORMAT`, `EXTENSIONS` and the errors `EngineError`, `DirectoryInUseError` and `SnapshotError`, typed by `_engine.pyi`. |
 | `rowx_embedded._engine` | `src/*.rs` | The pyo3 cdylib (abi3-py314): the Python surface only. |
 | `rowx-embedded-host` | `crates/rowx-embedded-host/` | The host, with no pyo3: the engine thread, the front proxy, the slot state machine, snapshots and ownership. Its logic is unit-tested as pure functions. |
-| `rowx_postgres.embedded` | `packages/rowx-postgres/src/rowx_postgres/` | The adapter: `_embedded.py` (URL grammar, the lazy `importlib` load, ownership), `_scratch.py`, `_embedded_testing.py`. |
+| `rowx_postgres.embedded` | `packages/rowx-postgres/src/rowx_postgres/` | The adapter: `_database.py` (the public `Database`, a `Pool` subclass that starts its instance lazily), `_embedded.py` (URL grammar, the lazy `importlib` load, ownership), `_scratch.py`, `_embedded_testing.py`. |
 
 `rowx-embedded` does not depend on `rowx`, `rowx-core` or `rowx-postgres`, and nothing in the repository's Rust crates
 changed for it: the engine is reached over a Unix socket, which the existing `Host::Unix` path of the driver already

@@ -3,7 +3,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from rowx_postgres import Migrator, Pool
+from rowx_postgres import Migrator
+from rowx_postgres.embedded import Database
 
 from rowx import query
 
@@ -11,8 +12,8 @@ if TYPE_CHECKING:
     from rowx import Executor
 
 MIGRATIONS: Final[Path] = Path(__file__).resolve().parent / "migrations"
-# no server needed: the pool starts an in-process Postgres on first use and closes it with the pool
-DEFAULT_URL: Final[str] = "embedded://"
+# no server needed: the database starts an in-process Postgres on first use and closes it with the database
+DIRECTORY_ENV: Final[str] = "NOTES_DB_DIR"
 
 type NoteRow = tuple[int, str, str | None]  # id, title, body
 
@@ -52,10 +53,10 @@ async def delete_note(db: Executor, note_id: int) -> int:
     return (await query(t"DELETE FROM notes WHERE id = {note_id}").execute(db)).rows_affected
 
 
-async def main(url: str) -> None:
+async def main(directory: str | None) -> None:
     # reads and validates the files now, with no database IO
     migrator = Migrator(MIGRATIONS)
-    async with Pool(url) as pool:
+    async with Database(directory) as pool:
         for result in await migrator.run(pool):
             print(f"applied {result.migration.version} {result.migration.description}")  # ruff: ignore[print]
 
@@ -73,5 +74,5 @@ async def main(url: str) -> None:
 
 
 if __name__ == "__main__":
-    # `embedded://` is a fresh in-memory database; a directory (`embedded:///abs/path`) keeps it between runs
-    asyncio.run(main(os.environ.get("DATABASE_URL") or DEFAULT_URL))
+    # unset is a fresh in-memory database; an absolute directory keeps it between runs
+    asyncio.run(main(os.environ.get(DIRECTORY_ENV) or None))

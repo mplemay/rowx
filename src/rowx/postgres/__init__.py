@@ -22,13 +22,14 @@ try:  # ruff: ignore[non-empty-init-module]
         Range,
         Transaction,
         connect,
-        embedded,
     )
 except ModuleNotFoundError as error:
     if error.name != "rowx_postgres":
         raise
     msg = 'Install "rowx[postgres]" to use rowx.postgres.'
     raise ImportError(msg) from error
+
+from rowx.postgres import embedded
 
 __all__ = [
     "RESET_QUERY",

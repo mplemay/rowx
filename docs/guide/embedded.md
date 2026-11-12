@@ -4,7 +4,8 @@ rowx can run a real PostgreSQL 18 inside your Python process, with no server, no
 development, `rowx check` and tests. **It is not for production**: it serves one session at a time and cannot cancel a
 running statement. Production keeps a real server.
 
-An `embedded://` URL selects it anywhere rowx takes a database URL. The engine is PostgreSQL 18.4 compiled to WASIX and
+In code you use `rowx.postgres.embedded.Database`, which is built like a pool. The CLI and the pytest plugin take an
+`embedded://` URL instead. The engine is PostgreSQL 18.4 compiled to WASIX and
 run by Wasmer; every instance has its own memory. It is the `rowx-embedded` companion package, which `rowx[embedded]`
 installs. This page is the guide; [the reference](../reference/embedded.md) has the contract.
 
@@ -18,92 +19,71 @@ uv add "rowx[embedded]"
 
 The extra installs the matching `rowx-postgres` and the `rowx-embedded` wheel, which carries the engine. Wheels exist
 for macOS on Apple silicon and Linux on x86_64 and aarch64. On any other platform (Windows, macOS on Intel) the extra
-still installs, but ships no engine, and using `embedded://` raises `InterfaceError` ("embedded Postgres is not
+still installs, but ships no engine, and using it raises `InterfaceError` ("embedded Postgres is not
 available on this platform"). If the package is missing on a supported platform the error says so and names the extra.
 
-You can use it without the CLI: `rowx-postgres` plus `rowx-embedded` is enough for `connect`, `Pool` and `embedded`.
+You can use it without the CLI: `rowx-postgres` plus `rowx-embedded` is enough for `Database`.
 
-## URLs
+## Database
 
-| URL | Database |
-|---|---|
-| `embedded://` | A fresh in-memory database, gone when its owner closes. |
-| `embedded:///absolute/path` | A database kept in that directory between runs. One owner at a time. |
+`Database` is an `Executor` and a `rowx_postgres.Pool` that owns one in-process instance. `Database()` is a fresh
+in-memory database, gone when it closes; `Database("/absolute/path")` keeps its data in that directory between runs,
+with one owner at a time. A relative path is a `ValueError`. Pass `options=ConnectOptions(...)` for
+`application_name`, `server_settings` (such as `{"search_path": "app"}`) and the statement cache; a host, port, user,
+password or `sslmode` is a `ValueError`.
 
-Nothing else may appear in the URL: no host, port, user or password, no relative path and no `sslmode` (they are a
-`ValueError`). Other query parameters are passed on to the connection, so `embedded://?options=-c%20search_path%3Dapp`
-works. The `host`, `port`, `user`, `password` and `sslmode` arguments of `ConnectOptions.from_dsn` and `replace` are
-refused for an embedded URL too.
+The constructor does no IO, so a module-level database is fine: the instance starts on the first use (the first query,
+`open()` or `acquire()`), the engine is not even imported before that, and closing the database closes the instance.
+`max_size` is 1 and anything else is a `ValueError`, because the engine serves one session at a time.
 
 ```python test
 import asyncio
 
 from rowx import query
+from rowx.postgres.embedded import Database
+
+
+async def main() -> None:
+    async with Database() as db:
+        assert (db.max_size, db.directory) == (1, None)
+        await query(t"CREATE TABLE users (id int PRIMARY KEY, name text NOT NULL)").execute(db)
+        await query(t"INSERT INTO users VALUES ({1}, {'alice'})").execute(db)
+        assert await query[str](t"SELECT name FROM users").one(db) == "alice"
+        assert "18" in await query[str](t"SHOW server_version").one(db)
+        async with db.transaction() as tx:
+            await query(t"INSERT INTO users VALUES ({2}, {'bob'})").execute(tx)
+        async with db.acquire() as conn:
+            assert await query[int](t"SELECT count(*) FROM users").one(conn) == 2
+
+    # a second database is a second, independent one
+    async with Database() as db:
+        assert await query[int](t"SELECT count(*) FROM pg_tables WHERE tablename = 'users'").one(db) == 0
+
+
+asyncio.run(main())
+```
+
+`ready` is true once the instance has started, `await db.open()` (or `wait_ready()`) starts it ahead of the first query,
+and `db.close()` closes it. Without `async with`, call `close()` yourself.
+
+### The DSN
+
+`db.dsn` is a plain Unix-socket DSN, so anything that speaks to Postgres (psycopg included) can use it. It is available
+once the database has started (`open()` first) and raises `InterfaceError` before that and after `close`. Another client
+can only get the session while the database itself holds none: after a query the database keeps its idle connection
+until `idle_timeout`, so call `db.expire_connections()` first.
+
+```python test
+import asyncio
+
+from rowx import query
+from rowx.postgres.embedded import Database
 from rowx_postgres import connect
 
 
 async def main() -> None:
-    # the connection owns a fresh in-memory instance, and closing the connection closes the instance
-    async with await connect("embedded://") as conn:
-        await query(t"CREATE TABLE users (id int PRIMARY KEY, name text NOT NULL)").execute(conn)
-        await query(t"INSERT INTO users VALUES ({1}, {'alice'})").execute(conn)
-        assert await query[str](t"SELECT name FROM users").one(conn) == "alice"
-        assert "18" in await query[str](t"SHOW server_version").one(conn)
-
-    # a second connect is a second, independent database
-    async with await connect("embedded://") as conn:
-        assert await query[int](t"SELECT count(*) FROM pg_tables WHERE tablename = 'users'").one(conn) == 0
-
-
-asyncio.run(main())
-```
-
-### Pools
-
-`Pool("embedded://")` owns one instance. The constructor does no IO, so a module-level pool is fine: the instance starts
-on the first use (the first query, `open()` or `acquire()`), the engine is not even imported before that, and closing
-the pool closes the instance. `max_size` defaults to 1 for an embedded pool and stays 10 for any other, and
-`Pool(..., max_size=2)` is a `ValueError`, because the engine serves one session at a time.
-
-```python test
-import asyncio
-
-from rowx import query
-from rowx_postgres import Pool
-
-
-async def main() -> None:
-    pool = Pool("embedded://")
-    assert (pool.max_size, pool.size) == (1, 0)  # nothing has started
-    try:
-        assert await query[int](t"SELECT 1").one(pool) == 1
-        async with pool.transaction() as tx:
-            await query(t"CREATE TABLE t (n int)").execute(tx)
-            await query(t"INSERT INTO t VALUES ({1})").execute(tx)
-        assert await query[int](t"SELECT n FROM t").one(pool) == 1
-    finally:
-        await pool.close()
-
-
-asyncio.run(main())
-```
-
-### Sharing one instance
-
-`connect` and `Pool` each own the instance they start. To run several sequential connections against one database, start
-it yourself with `rowx_postgres.embedded`. `db.dsn` is a plain Unix-socket DSN, so anything that speaks to Postgres
-(psycopg included) can use it.
-
-```python test
-import asyncio
-
-from rowx import query
-from rowx_postgres import connect, embedded
-
-
-async def main() -> None:
-    # embedded.start(directory="/abs/path") persists instead
-    async with await embedded.start() as db:
+    # Database("/abs/path") persists instead
+    async with Database() as db:
         async with await connect(db.dsn) as conn:
             await query(t"CREATE TABLE notes (body text)").execute(conn)
             await query(t"INSERT INTO notes VALUES ({'hello'})").execute(conn)
@@ -115,12 +95,27 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-A directory database has one owner. A second `start` (or `connect`, or `rowx migrate`) on a directory another process
-holds fails at once with an `InterfaceError` that names the owner's pid. The directory keeps real durability
-(`fsync` on); an in-memory instance runs with it off.
+A directory database has one owner. A second `Database` (or `rowx migrate`) on a directory another process holds fails
+at once with an `InterfaceError` that names the owner's pid. The directory keeps real durability (`fsync` on); an
+in-memory instance runs with it off.
 
-Do not use an instance, a pool or a connection after a `fork`: the engine's threads exist only in the process that
-started it, so the child gets an `InterfaceError` and the parent's instance is untouched. Start it after the fork.
+Do not use a database or a connection after a `fork`: the engine's threads exist only in the process that started it, so
+the child gets an `InterfaceError` and the parent's instance is untouched. Create the database after the fork.
+
+## URLs
+
+The command line and the pytest plugin take a URL, because they have no code to construct a `Database` from. Generic
+`connect`, `Pool` and `ConnectOptions.from_dsn` refuse one with an `InterfaceError` that points at `Database`; to switch
+between a server and an embedded database at run time, choose in your own code.
+
+| URL | Database |
+|---|---|
+| `embedded://` | A fresh in-memory database, gone when its owner closes. |
+| `embedded:///absolute/path` | A database kept in that directory between runs. One owner at a time. |
+
+Nothing else may appear in the URL: no host, port, user or password, no relative path and no `sslmode` (they are a
+`ValueError`). Other query parameters are passed on to the connection, so `embedded://?options=-c%20search_path%3Dapp`
+works.
 
 ## The one-session rule
 
@@ -130,12 +125,13 @@ SQLSTATE `53300` (`too_many_connections`) with a hint, and the first session is 
 ```python test
 import asyncio
 
+from rowx.postgres.embedded import Database
 from rowx_core import DatabaseError
-from rowx_postgres import connect, embedded
+from rowx_postgres import connect
 
 
 async def main() -> None:
-    async with await embedded.start() as db, await connect(db.dsn):
+    async with Database() as db, db.acquire():
         try:
             await connect(db.dsn)
         except DatabaseError as error:
@@ -149,11 +145,11 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Closing one connection and opening the next never sees this: a client that arrives while the previous session is being
+Closing one session and opening the next never sees this: a client that arrives while the previous session is being
 torn down (`ROLLBACK` then `DISCARD ALL`) waits for it, so every session starts from clean state. In practice:
 
 - Use `max_size=1` for a pool, the default.
-- Do not hold a `Connection` and also use a pool on the same instance. The pool waits for the slot, then fails with
+- Do not hold a `Connection` from `db.dsn` and also use the `Database`. The database waits for the slot, then fails with
   `PoolTimeoutError` whose cause is the `53300` error.
 - Code that opens several connections at once (a worker pool, `asyncio.gather` over `connect`) needs a server, or one
   instance per worker.
@@ -278,7 +274,8 @@ import tempfile
 from pathlib import Path
 
 from rowx import query
-from rowx_postgres import Migrator, Pool
+from rowx.postgres.embedded import Database
+from rowx_postgres import Migrator
 
 with tempfile.TemporaryDirectory() as tmp:
     migrations = Path(tmp) / "migrations"
@@ -289,7 +286,7 @@ with tempfile.TemporaryDirectory() as tmp:
         migrator = Migrator(migrations)
         # a directory database keeps its migrations; the second run finds nothing to apply
         for expected in (1, 0):
-            async with Pool(f"embedded://{tmp}/db") as pool:
+            async with Database(f"{tmp}/db") as pool:
                 assert len(await migrator.run(pool)) == expected
                 assert await query[int](t'SELECT count(*) AS "n!" FROM accounts').one(pool) == 0
 

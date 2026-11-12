@@ -12,8 +12,9 @@ It is development, checking and tests only. Production keeps a real server.
 
 - An embedded database **is** a live Postgres 18 for the purposes of the checker's "always needs a live database" rule:
   the engine reports `server_version` 18.4 and answers `PREPARE` and describe like a server.
-- The DSN grammar gains the `embedded` scheme. It is accepted wherever rowx takes a database URL, except where the
-  section below says otherwise.
+- In code, `rowx.postgres.embedded.Database` opens one. The DSN grammar gains the `embedded` scheme, accepted by the
+  URL-taking entry points (`rowx check`, `rowx check-compat`, `rowx migrate` and the pytest plugin), and refused by
+  `connect`, `Pool` and `ConnectOptions.from_dsn`.
 - It is optional. `rowx-core` keeps zero runtime dependencies and no WASM payload; `import rowx_postgres` never imports
   the engine.
 
@@ -26,63 +27,83 @@ threads and runtime ownership, and the front proxy are under
 
 ## API
 
-### `rowx_postgres.embedded`
+### `rowx.postgres.embedded`
+
+`rowx.postgres.embedded` re-exports `rowx_postgres.embedded`, which exports only `Database`.
 
 ```python
-async def start(*, directory: str | PathLike[str] | None = None) -> EmbeddedDatabase
+class Database(rowx_postgres.Pool):
+    def __init__(
+        self,
+        directory: str | PathLike[str] | None = None,
+        /,
+        *,
+        options: ConnectOptions | None = None,
+        max_size: int = 1,
+        acquire_timeout: float = 30.0,
+        idle_timeout: float | None = 600.0,
+        max_lifetime: float | None = 1800.0,
+        max_queries: int | None = None,
+        ping_after: float | None = 30.0,
+        init: Hook | None = None,
+        setup: Hook | None = None,
+        reset: Hook | None = None,
+        reset_query: str | None = RESET_QUERY,
+    ) -> None
 
-class EmbeddedDatabase:
-    dsn: str                      # a plain Unix-socket DSN
+    directory: str | None   # the normalised absolute path, or None for memory
+    ready: bool             # the instance has started and the native pool is built
     closed: bool
-    async def close(self) -> None
-    async def __aenter__(self) -> Self
-    async def __aexit__(self, ...) -> None
+    dsn: str                # a plain Unix-socket DSN
+    async def wait_ready(self) -> None   # the same as open()
+    # inherited: open, close, terminate, acquire, transaction, size, idle, waiting, min_size, max_size,
+    # expire_connections, async with
 ```
 
-- `directory` must be absolute (a relative path is a `ValueError`); `.`, `..` and repeated or trailing slashes are
-  collapsed, and the root is refused.
-- `dsn` is `postgresql://postgres@/postgres?host=<dir>&sslmode=disable`. Reading it after `close` or in a forked child
-  raises `InterfaceError`.
-- `close` is idempotent, runs the engine's close off the loop and survives a cancelled caller. A close that failed is
-  not recorded as done, so it can be retried.
-- `abandon(force=False)` stops the instance at once without waiting for the engine thread. It refuses a directory unless
-  `force` is set, because it skips the engine's clean shutdown. It exists for interrupted runs, the checker and the
-  plugin.
+- A `Database` is a `Pool` and an `Executor`: `query(...).one(db)`, `db.acquire()` and `db.transaction()` work, and
+  `isinstance(db, Pool)` holds. `Migrator.run(db)` works before `open()`.
+- `directory` must be absolute (a relative path is a `ValueError` in the constructor); `.`, `..` and repeated or
+  trailing slashes are collapsed, and the root is refused. `None` is a fresh in-memory database.
+- `options` carries `application_name`, `server_settings`, `statement_cache_size`, `connect_timeout`, `extra` and
+  `database`. A `host`, `port`, `user`, `password` or `sslmode` is a `ValueError` ("... cannot be set for an embedded
+  database"). The options are pointed at the instance's socket DSN when it starts.
+- `max_size` is 1, and any other value is a `ValueError`. `min_size` is always 0, because a native `min_size` of 1 would
+  hold the only session as soon as the pool opens.
+- `dsn` is `postgresql://postgres@/postgres?host=<dir>&sslmode=disable`. Reading it before the database has started
+  ("call open() first"), after `close`, or in a forked child raises `InterfaceError`. Another client can use it only
+  while the database holds no session, checked out or idle; after a query the idle connection holds the session until
+  `idle_timeout`, so call `expire_connections()` first.
 - Snapshots are not public API in v1: `start_from_snapshot` and `take_snapshot` are used only by the checker and the
-  plugin.
+  plugin, and the instance type (`EmbeddedDatabase`) is private.
 
 ### The `embedded://` grammar
 
-Parsed with `urllib.parse`. The scheme is `embedded` (case-insensitive), the network location is empty, and the path is
-empty (memory) or an absolute path (a directory). These are `ValueError`s, and the message never echoes a value:
+Parsed with `urllib.parse`, by the URL-taking entry points (`rowx check`, `rowx check-compat`, `rowx migrate`, the
+scratch service and the pytest plugin). The scheme is `embedded` (case-insensitive), the network location is empty, and
+the path is empty (memory) or an absolute path (a directory). These are `ValueError`s, and the message never echoes a
+value:
 
 - a host, port, user or password; a relative path; a fragment;
-- the query parameters `host`, `hostaddr`, `port`, `user`, `password` and `sslmode`, and a repeated parameter;
-- `ConnectOptions.from_dsn(url, host=..., port=..., user=..., password=...)` overrides, and `replace()` or a direct
-  construction with an `embedded` target and any of those set.
+- the query parameters `host`, `hostaddr`, `port`, `user`, `password` and `sslmode`, and a repeated parameter.
 
 Other parameters (`options`, `application_name`, `connect_timeout`, `dbname`, ...) are forwarded to the socket DSN, so
-`options=-c search_path=...` works. The target is carried by `ConnectOptions.embedded`, and Rust never receives
-`embedded://` or a missing host: resolution is in Python, and the options are converted to the instance's socket DSN
-(`with_socket`) before `connect_impl`.
+`options=-c search_path=...` works. Rust never receives `embedded://` or a missing host.
 
-Server-only entry points (`rowx database`, the admin service, `open_checker` and the server provisioner) reject an
-embedded URL with an `InterfaceError`.
+`connect`, `Pool` and `ConnectOptions.from_dsn` refuse an embedded URL with an `InterfaceError` that names
+`rowx.postgres.embedded.Database(directory)`. Server-only entry points (`rowx database`, the admin service,
+`open_checker` and the server provisioner) reject one with an `InterfaceError` too.
 
 ### Ownership and the pool
 
-- `connect("embedded://...")` **owns** a fresh instance: it starts it, and `Connection.close()` closes it, even when the
-  connect fails or is cancelled. Two connects are two independent databases.
-- `embedded.start()` returns an instance the caller owns; any number of sequential connections may use its `dsn`.
-- `Pool("embedded://...")` owns one instance, started **on first use** (`open`, `acquire` or a query) in a thread whose
-  future every first-use caller shares. The constructor does no IO and never imports the engine, so a module-level pool
-  is fine and works across event loops. A failed start leaves nothing behind and the next use tries again. Closing or
-  terminating the pool closes the instance, and a close that races the start waits for it.
-- **`Pool(max_size: int | None = None)`.** `None` is 1 for an embedded URL and 10 otherwise. For an embedded URL a
-  `max_size` or `min_size` above 1 is a `ValueError`. Until the instance has started, `size`, `idle` and `waiting` are 0
-  and `closed` reports the pool's own state.
-- A pool that starts its instance goes through Python for every query (as a pool with hooks does), because the native
-  pool streams rows straight to the caller.
+- A `Database` owns one instance, started **on first use** (`open`, `acquire` or a query) in a thread whose future every
+  first-use caller shares. The constructor does no IO and never imports the engine, so a module-level database is fine
+  and works across event loops. A failed start leaves nothing behind and the next use tries again. Closing or
+  terminating the database closes the instance, a close that races the start waits for it, and a database that was
+  never opened closes cleanly.
+- Until the instance has started, `size`, `idle` and `waiting` are 0, `ready` is false and `closed` reports the
+  database's own state.
+- A database goes through Python for every query (as a pool with hooks does), because the native pool is built only
+  once the instance has started.
 - The first use is bounded by the acquire timeout; the start continues in its thread, and a timeout is a
   `PoolTimeoutError`.
 
@@ -97,14 +118,15 @@ embedded URL with an `InterfaceError`.
 | A directory another instance holds | `InterfaceError`: "database directory ... is in use by pid N". |
 | A snapshot the engine refuses (corrupt, or from another build) | `InterfaceError` (internally a `SnapshotRejectedError`, which the plugin rebuilds once). |
 | A second concurrent session | `DatabaseError` `53300`, with a hint. |
-| An instance, pool or database used after a `fork` | `InterfaceError`. The child's `close` and `abandon` do nothing, and the parent's instance survives. |
-| Grammar and override violations | `ValueError`. |
+| A `Database` used after a `fork` | `InterfaceError`. The parent's instance survives. |
+| `connect`, `Pool` or `ConnectOptions.from_dsn` given an `embedded://` URL | `InterfaceError` naming `rowx.postgres.embedded.Database(directory)`. |
+| Grammar violations, a relative directory, `max_size` other than 1, or server options on a `Database` | `ValueError`. |
 
 ## Driver
 
 ### DSN resolution
 
-An embedded `ConnectOptions` is resolved to a socket DSN before the driver sees it:
+A `Database`'s options are resolved to a socket DSN before the driver sees them:
 `postgresql://postgres@/postgres?host=<dir>&sslmode=disable`. Authentication is trust. The `dbname` of an embedded URL
 is honoured only when it is `postgres`: the engine has one database, and another name fails with
 `database "x" does not exist`.
@@ -172,8 +194,8 @@ connection retries, runs on its socket DSN and closes it, and an instance that a
 time is abandoned. A memory URL is exit 2 ("an in-memory embedded database is gone when the command exits"), and so is
 `rowx database ...` for any embedded URL. `rowx migrate add` touches no database.
 
-Migrations also run from code (`Migrator.run` on a connection or pool). The `PostgresMigrations` service takes an
-embedded URL only so that a scratch can be built from it: it never connects to one, and `open` refuses.
+Migrations also run from code (`Migrator.run` on a connection, pool or `Database`). The `PostgresMigrations` service
+takes an embedded URL only so that a scratch can be built from it: it never connects to one, and `open` refuses.
 
 ## Testing
 

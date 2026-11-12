@@ -2,9 +2,10 @@
 
 ## 0.3.0 (unreleased)
 
-- `rowx[embedded]` adds an in-process Postgres 18 for development, checking and tests. An `embedded://` URL selects it
-  for `connect`, `Pool`, `rowx check`, `rowx migrate` and the pytest plugin, and `Pool(max_size=None)` defaults to 1 for
-  it. `rowx check-compat` builds both schemas in memory for `embedded://`. See
+- `rowx[embedded]` adds an in-process Postgres 18 for development, checking and tests. In code,
+  `rowx.postgres.embedded.Database` is a pool-shaped executor that owns one instance (`Database()` in memory,
+  `Database("/abs/dir")` persistent). An `embedded://` URL selects it for `rowx check`, `rowx check-compat`,
+  `rowx migrate` and the pytest plugin; generic `connect`, `Pool` and `ConnectOptions.from_dsn` refuse one. See
   [Embedded Postgres](guide/embedded.md).
 - A pool acquire that times out while connecting now raises `PoolTimeoutError` with the last connect error as its
   `__cause__`, and the message says so, instead of reporting the timeout alone.

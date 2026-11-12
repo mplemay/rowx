@@ -49,7 +49,8 @@ not import your application.
 The `rowx-embedded` distribution's import root is `rowx_embedded`. It is an optional in-process PostgreSQL 18 for
 development, checking and tests, and it is not for production. It depends on no other rowx distribution, and
 `import rowx_postgres` never imports it. It is a per-platform wheel (macOS arm64, Linux x86_64 and aarch64) and has no
-sdist. `rowx[embedded]` installs it, and an `embedded://` database URL then selects it:
+sdist. `rowx[embedded]` installs it, and `rowx.postgres.embedded.Database` (or an `embedded://` URL for the CLI and the
+pytest plugin) then uses it:
 
 ```sh
 uv add "rowx[embedded]"

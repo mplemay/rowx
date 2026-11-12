@@ -1,6 +1,7 @@
 import gc
 import os
 import secrets
+import sys
 import time
 from importlib.util import find_spec
 from pathlib import Path
@@ -10,6 +11,7 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
+from rowx_postgres import _embedded as embedded_module
 from rowx_postgres.__tests__.support.engine import (
     ALLOWED_RUNTIME_SKIPS,
     EMBEDDED_DATABASE_KEY,
@@ -18,6 +20,7 @@ from rowx_postgres.__tests__.support.engine import (
     SERVER_NEEDS,
     SKIPPED_KEY,
 )
+from rowx_postgres.__tests__.support.fake_engine import FakeEngine
 from rowx_postgres._embedded import ENGINE_MODULE, REQUIRE_ENV, is_embedded_url, parse_embedded_url, start_blocking
 
 if TYPE_CHECKING:
@@ -256,3 +259,12 @@ def app_schema() -> Iterator[str]:
 @pytest.fixture
 def security_schema() -> Iterator[str]:
     yield from _example_schema(SECURITY_SCHEMA_SQL)
+
+
+@pytest.fixture
+def engine(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeEngine]:
+    fake = FakeEngine()
+    monkeypatch.setitem(sys.modules, "rowx_embedded", fake)
+    embedded_module.load_cached.cache_clear()
+    yield fake
+    embedded_module.load_cached.cache_clear()

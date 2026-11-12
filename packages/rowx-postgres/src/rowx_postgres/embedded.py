@@ -1,3 +1,3 @@
-from rowx_postgres._embedded import EmbeddedDatabase, start
+from rowx_postgres._database import Database
 
-__all__ = ["EmbeddedDatabase", "start"]
+__all__ = ["Database"]

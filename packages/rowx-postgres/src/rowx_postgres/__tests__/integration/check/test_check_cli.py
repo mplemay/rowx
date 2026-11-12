@@ -18,7 +18,7 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from rowx_core.errors import DatabaseError
-from rowx_postgres import Connection, Migrator, embedded
+from rowx_postgres import Connection, Migrator
 from rowx_postgres.__tests__.integration.check.harness import (
     CASES_DIR,
     Expectation,
@@ -37,6 +37,7 @@ from rowx_postgres.__tests__.integration.check.test_render import (
 )
 from rowx_postgres._core import connect_checker
 from rowx_postgres._services import PostgresMigrationSession
+from rowx_postgres.embedded import Database
 
 from rowx import query_unchecked
 from rowx.check.cli import main
@@ -1355,7 +1356,8 @@ def test_a_directory_that_is_in_use_fails_at_once_instead_of_retrying(
     _write_dirs(tmp_path, "pyproject.toml", "")
     _write_dirs(tmp_path / "migrations", "1_create_a.sql", "CREATE TABLE a (id int4);")
     directory = tmp_path / "db"
-    holder = asyncio.run(embedded.start(directory=directory))
+    holder = Database(directory)
+    asyncio.run(holder.open())
     try:
         started = time.monotonic()
         # a 30 second retry window, which a retried lock error would use up

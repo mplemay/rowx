@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, reveal_type
 
-from rowx_postgres import embedded
+from rowx_postgres.embedded import Database
 
 from rowx import query, query_unchecked
 
@@ -213,8 +213,16 @@ async def negative_migrator_arguments(migrator: Migrator, conn: Connection) -> N
 
 
 async def embedded_database() -> None:
-    db = await embedded.start()
-    reveal_type(db)  # reveal: EmbeddedDatabase
-    reveal_type(db.dsn)  # reveal: str
-    async with await embedded.start(directory="/var/lib/app/db") as owned:
+    db = Database()
+    reveal_type(db)  # reveal: Database
+    reveal_type(db.directory)  # reveal: str | None
+    reveal_type(db.ready)  # reveal: bool
+    await db.wait_ready()
+    async with db.acquire() as conn:
+        reveal_type(conn)  # reveal: Connection
+    async with Database("/var/lib/app/db") as owned:
         reveal_type(owned.dsn)  # reveal: str
+        reveal_type(await query[int](t"SELECT 1").one(owned))  # reveal: int
+    Database(1)  # error  # ty: ignore[invalid-argument-type]
+    embedded_pool: Pool = Database()
+    del embedded_pool

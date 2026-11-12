@@ -29,12 +29,12 @@ def _run_app(env: dict[str, str]) -> tuple[int, str, str]:
     return result.returncode, result.stdout, result.stderr
 
 
-def _env(url: str | None) -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key != "DATABASE_URL"}
-    return env if url is None else {**env, "DATABASE_URL": url}
+def _env(directory: str | None) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key not in {"DATABASE_URL", "NOTES_DB_DIR"}}
+    return env if directory is None else {**env, "NOTES_DB_DIR": directory}
 
 
-def test_app_runs_in_memory_with_no_database_url() -> None:
+def test_app_runs_in_memory_with_no_directory() -> None:
     code, out, err = _run_app(_env(None))
     assert code == 0, err
     assert out.count("applied ") == 2
@@ -44,7 +44,7 @@ def test_app_runs_in_memory_with_no_database_url() -> None:
 
 
 def test_app_keeps_its_rows_in_a_directory(tmp_path: Path) -> None:
-    env = _env(f"embedded://{tmp_path / 'notes-db'}")
+    env = _env(str(tmp_path / "notes-db"))
     code, out, err = _run_app(env)
     assert code == 0, err
     assert out.count("applied ") == 2
