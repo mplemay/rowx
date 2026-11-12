@@ -1,22 +1,24 @@
 ---
 name: use-rowx
 description: >-
-  Write typesafe raw SQL for Postgres with rowx and PEP 750 t-strings, and check it with
-  rowx check. Use when the user mentions rowx, rowx.core, rowx.postgres, rowx_core, rowx_postgres, t-string SQL,
-  a Postgres query through rowx, or rowx check.
+  Write typesafe raw SQL for Postgres with rowx and PEP 750 t-strings, check it with
+  rowx check, replace a SQLAlchemy Session with a typed t-string query, and run those
+  queries from a FastAPI lifespan and path operation. Use when the user mentions rowx, rowx.core,
+  rowx.postgres, rowx_core, rowx_postgres, t-string SQL, a Postgres query through rowx,
+  rowx check, moving from SQLAlchemy to raw SQL, or FastAPI with rowx.
 license: MIT
 compatibility: Requires Python >=3.14
 allowed-tools: Bash(uv *)
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
   author: rowx
 ---
 
 # Use rowx
 
-rowx is typesafe raw SQL for Python 3.14+. A query is a PEP 750 t-string with an explicit row type. The executor
-you pass compiles and runs it. `rowx check` prepares each checked query against a live Postgres 18 database and
-does not import application code.
+rowx is typesafe raw SQL for Python 3.14+, with no ORM. A query is a PEP 750 t-string with an explicit row
+type. The executor you pass compiles and runs it. `rowx check` prepares each checked query against a live Postgres
+18 database and does not import application code.
 
 ## When to Use This Skill
 
@@ -28,6 +30,9 @@ Invoke this skill when:
 - Choosing `query` or `query_unchecked`, or allowlisting an identifier
 - Configuring a pool reset, migrations, or `rowx.testing`
 - Running or interpreting `rowx check`
+- Replacing a SQLAlchemy `Session`, mapped class, `select()`, `text()`, or `tstring()`
+- Holding a `Pool` on a FastAPI lifespan and running a query in a path operation
+- Mapping a row onto a dataclass or a pydantic model
 - Code imports `rowx`, `rowx.core`, `rowx.postgres`, `rowx_core`, `rowx_postgres`, or `query`
 
 Do **not** use this skill for:
@@ -49,6 +54,9 @@ Do **not** use this skill for:
    `rowx.errors` do not already export.
 6. `rowx-core` has no runtime dependencies. `rowx-postgres` depends only on matching `rowx-core`. The backend does
    not depend on the CLI. There is no ContextVar, no implicit Postgres target, and no `Any` dispatch.
+7. Postgres only. There is no unit of work and no identity map. A row is the value this statement returned. A
+   relationship is a `JOIN` or a second statement. You keep the SQL, transactions, a pool, and a dataclass or
+   pydantic row.
 
 ## Critical Rules
 
@@ -154,6 +162,45 @@ Load only the most relevant reference first.
 | Test against a migrated database | [references/testing.md](references/testing.md) |
 | Run `rowx check` and read the exit code | [references/checker.md](references/checker.md) |
 | Catch a rowx exception | [references/errors.md](references/errors.md) |
+| Replace a SQLAlchemy `Session`, `select()`, `text()`, or `tstring()` | [references/sqlalchemy.md](references/sqlalchemy.md) |
+| Hold a `Pool` on a FastAPI lifespan | [references/fastapi.md](references/fastapi.md) |
+| Map a row onto a dataclass or a pydantic model | [references/sqlalchemy.md](references/sqlalchemy.md) |
+
+## From SQLAlchemy
+
+Postgres only. `select(User)`, `text()`, and `tstring()` become `query[User](t"SELECT ...")`. You pass a `Pool`, a
+connection from `connect`, or a transaction. SQLAlchemy Core is command-oriented SQL. The ORM adds a state-oriented
+unit of work. rowx is the command, and `rowx check` prepares the statement. `text()` and `tstring()` run through a
+DBAPI at runtime. `{name}` is a bound value. SQLAlchemy's `tstring()` can also interpolate expressions. An
+identifier stays on `query_unchecked` after an allowlist.
+
+| SQLAlchemy | rowx |
+|---|---|
+| `Session` or `AsyncSession` | the `Pool`, connection, or transaction you pass in |
+| mapped class | a dataclass or a pydantic model, used as `T` |
+| `select(User)` | `query[User](t"SELECT ...")` |
+| `text()` or `tstring()` | that SQL as the t-string on `query[T]` |
+| `scalar_one` / `scalar_one_or_none` | `.one` / `.optional` |
+| `session.begin()` | `async with conn.transaction() as tx` or `pool.transaction()` |
+| `create_async_engine` | `Pool` from `rowx.postgres` |
+| a second lookup that hit the identity map | a second query you wrote |
+| `relationship()` | a `JOIN`, or a second statement |
+| Alembic autogenerate | SQL files and `rowx migrate` ([Migrations](references/migrations.md)) |
+
+You give up the unit of work, the identity map, and relationship loading. You keep the SQL, transactions, a pool,
+and a row that is a dataclass or a pydantic model. Stay when the application uses more than Postgres, when you are
+keeping a large unit of work, or when callers depend on one object identity across queries. The runnable
+replacement, including a pydantic row, is [From SQLAlchemy](references/sqlalchemy.md).
+
+## FastAPI
+
+Create the `Pool` in the lifespan and store it on `app.state`. Import it from `rowx.postgres`. Leaving the
+lifespan's `async with Pool` calls `await pool.close()`. Depend on the pool for one statement. Depend on
+`pool.acquire()` or `pool.transaction()` when several statements share a checkout. Call `query[T](t"...")` in the
+path operation. `.optional` returns `T | None`. `.one` raises `RowNotFound`. Raise the HTTP error in the path
+operation. A yielded transaction commits on a normal return and rolls back when the path operation raises,
+including `HTTPException`. Pass `scope="function"` so that exit finishes before the response is sent. The app is
+[FastAPI](references/fastapi.md). Test the function the route calls with [Testing](references/testing.md).
 
 ## Common Gotchas
 
@@ -177,3 +224,9 @@ Load only the most relevant reference first.
   `rowx[postgres]` or `rowx-core` and `rowx-postgres`.
 - Storing the connection in a ContextVar, falling back to an implicit Postgres target, making `rowx-postgres`
   depend on the CLI, or typing the executor as `Any`.
+- Expecting a second query to return the same instance. Each call returns the rows that statement produced.
+- Creating a `Pool` at import in a server that forks. Open it in the FastAPI lifespan. A pool used after a fork
+  raises `InterfaceError`.
+- Leaving `RowNotFound` for FastAPI to turn into a 404. Use `.optional` and raise the HTTP error in the path
+  operation.
+- Porting a SQLAlchemy `tstring()` interpolation that inserts an expression. `{name}` binds a value.
