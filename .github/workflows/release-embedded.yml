@@ -1,7 +1,7 @@
 name: Release embedded
 
 # `rowx-embedded` is versioned and released on its own (`<pg major>.<pg minor>.<rev>`, tag `embedded-vX.Y.Z`), apart from
-# the `v*` release of rowx. It has no sdist: a source build needs the whole Wasmer tree. A manual run is a dry run: it
+# the `v*` release of rowx. Only prebuilt wheels are published; source archives are checked in CI. A manual run is a dry run: it
 # builds, checks and smoke tests every wheel (sizes land in each job summary) and never publishes.
 on:
   push:

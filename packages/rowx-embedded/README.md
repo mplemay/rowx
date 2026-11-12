@@ -21,4 +21,20 @@ copy = Instance.start(snapshot=snapshot)  # a fresh database with the same data
 Limits: one session at a time (a second client gets `53300`), no query interruption, trust authentication only,
 no `CREATE DATABASE` use, and `inet`/`cidr` binary values use WASI address-family bytes.
 
-The package is built with `maturin` and ships only as a per-platform wheel (no sdist).
+The package is built with `maturin` and published only as a per-platform wheel.
+
+From this directory, build a wheel directly from the checkout with:
+
+```sh
+uv build --wheel
+```
+
+To build a source archive and then build a wheel from that archive, run:
+
+```sh
+uv build
+```
+
+Source archives include the vendored Wasmer compiler patch; Cargo downloads the remaining Rust dependencies from
+the registry. Source builds require the Rust toolchain declared in `Cargo.toml`. Source archives are checked in CI
+but are not published.

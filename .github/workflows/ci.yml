@@ -218,6 +218,9 @@ jobs:
       - name: Test the engine host
         run: cargo test --manifest-path packages/rowx-embedded/Cargo.toml --workspace --locked
 
+      - name: Check the embedded source archive
+        run: uv run --no-project --python 3.14 python scripts/validate-embedded-sdist.py
+
       # the same hooks that `just check-embedded` runs, from the prek version that uv.lock pins
       - name: Format and clippy
         run: uvx prek@0.5.10 run cargo-fmt-embedded cargo-clippy-embedded --hook-stage manual --all-files
