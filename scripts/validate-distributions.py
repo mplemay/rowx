@@ -40,10 +40,17 @@ PATHSPEC_DISTRIBUTION: Final[str] = "pathspec"
 PATHSPEC_CONSTRAINTS: Final[frozenset[str]] = frozenset({">=1.1.1", "<2"})
 POSTGRES_EXTRA: Final[str] = "postgres"
 PYTEST_EXTRA: Final[str] = "pytest"
+EMBEDDED_DISTRIBUTION: Final[str] = "rowx-embedded"
+EMBEDDED_EXTRA: Final[str] = "embedded"
+# the platforms the companion ships wheels for; every disjunct of its marker is one of these plus the extra
+EMBEDDED_PLATFORMS: Final[frozenset[frozenset[tuple[str, str]]]] = frozenset({
+    frozenset({("sys_platform", "darwin"), ("platform_machine", "arm64")}),
+    frozenset({("sys_platform", "linux"), ("platform_machine", "x86_64")}),
+    frozenset({("sys_platform", "linux"), ("platform_machine", "aarch64")}),
+})
 EXPECTED_CLASSIFIERS: Final[frozenset[str]] = frozenset({
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
@@ -292,25 +299,20 @@ def _validate_rowx_requires(path: Path, version: str, requirements: list[Require
     if len(direct) != PAIR_LENGTH or direct.count(expected_core) != 1 or not valid_pathspec:
         message = f"{path.name} direct requirements are {direct}, expected {expected_core} and pathspec>=1.1.1,<2"
         raise SystemExit(message)
-    extras: list[tuple[str, str]] = []
-    for requirement, marker in requirements:
-        if marker is None:
-            continue
-        extra = _extra_name(marker)
-        if extra is None:
-            message = f"{path.name} has a requirement marker that is not a single extra: {requirement} ; {marker}"
-            raise SystemExit(message)
-        extras.append((requirement, extra))
+    extras, embedded = _split_extras(path, requirements)
     expected_postgres = f"{POSTGRES_DISTRIBUTION}=={version}"
-    postgres = [
+    postgres = sorted(
         (requirement, extra)
         for requirement, extra in extras
         if _distribution_name(requirement) == POSTGRES_DISTRIBUTION
-    ]
-    if postgres != [(expected_postgres, POSTGRES_EXTRA)]:
-        message = (
-            f"{path.name} postgres requirements are {postgres}, expected [({expected_postgres}, {POSTGRES_EXTRA})]"
-        )
+    )
+    expected_pairs = [(expected_postgres, EMBEDDED_EXTRA), (expected_postgres, POSTGRES_EXTRA)]
+    if postgres != expected_pairs:
+        message = f"{path.name} postgres requirements are {postgres}, expected {expected_pairs}"
+        raise SystemExit(message)
+    expected_embedded = f"{EMBEDDED_DISTRIBUTION}=={version}"
+    if embedded != [expected_embedded]:
+        message = f"{path.name} embedded requirements are {embedded}, expected [{expected_embedded}]"
         raise SystemExit(message)
     for requirement, extra in extras:
         if _distribution_name(requirement) == POSTGRES_DISTRIBUTION:
@@ -318,6 +320,49 @@ def _validate_rowx_requires(path: Path, version: str, requirements: list[Require
         if _distribution_name(requirement) != PYTEST_DISTRIBUTION or extra != PYTEST_EXTRA:
             message = f"{path.name} has an unexpected extra requirement: {requirement} ; extra == {extra}"
             raise SystemExit(message)
+
+
+def _split_extras(path: Path, requirements: list[Requirement]) -> tuple[list[tuple[str, str]], list[str]]:
+    extras: list[tuple[str, str]] = []
+    embedded: list[str] = []
+    for requirement, marker in requirements:
+        if marker is None:
+            continue
+        if _distribution_name(requirement) == EMBEDDED_DISTRIBUTION and _is_embedded_marker(marker):
+            embedded.append(requirement)
+            continue
+        extra = _extra_name(marker)
+        if extra is None:
+            message = f"{path.name} has a requirement marker that is not a single extra: {requirement} ; {marker}"
+            raise SystemExit(message)
+        extras.append((requirement, extra))
+    return extras, embedded
+
+
+# the companion's marker is a disjunction of (platform clauses and extra == 'embedded'); uv may reorder the clauses
+def _is_embedded_marker(marker: str) -> bool:
+    disjuncts: set[frozenset[tuple[str, str]]] = set()
+    for part in marker.split(" or "):
+        text = part.strip()
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1]
+        atoms = [_comparison(atom) for atom in text.split(" and ")]
+        if None in atoms:
+            return False
+        clauses = frozenset(atom for atom in atoms if atom is not None)
+        if ("extra", EMBEDDED_EXTRA) not in clauses:
+            return False
+        disjuncts.add(clauses - {("extra", EMBEDDED_EXTRA)})
+    return disjuncts == EMBEDDED_PLATFORMS
+
+
+def _comparison(atom: str) -> tuple[str, str] | None:
+    left, separator, right = atom.strip().partition("==")
+    value = right.strip()
+    quoted = len(value) >= PAIR_LENGTH and value[0] in {"'", '"'} and value.endswith(value[0])
+    if not separator or not quoted or value.count(value[0]) != PAIR_LENGTH:
+        return None
+    return left.strip(), value[1:-1]
 
 
 def _validate_core_requires(path: Path, requirements: list[Requirement]) -> None:

@@ -61,6 +61,7 @@ def _run_app(url: str) -> tuple[int, str, str]:
     return result.returncode, result.stdout, result.stderr
 
 
+@pytest.mark.server(needs="sessions")
 def test_app_migrates_at_startup_and_is_repeatable(database_url: str) -> None:
     code, out, err = _run_app(database_url)
     assert code == 0, err
@@ -81,6 +82,7 @@ def test_app_requires_a_database_url() -> None:
     assert "DATABASE_URL is not set" in result.stderr
 
 
+@pytest.mark.server(needs="sessions")
 def test_check_fails_on_drift_then_passes_once_migrated(
     database_url: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -101,6 +103,7 @@ def test_check_fails_on_drift_then_passes_once_migrated(
     assert (captured.out, captured.err) == ("", "")
 
 
+@pytest.mark.server(needs="create-database")
 def test_check_scratch_needs_no_prepared_database(
     server_url: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -110,6 +113,7 @@ def test_check_scratch_needs_no_prepared_database(
     assert (captured.out, captured.err) == ("", "")
 
 
+@pytest.mark.server(needs="create-database")
 def test_the_plugin_tests_pass(pytester: pytest.Pytester, server_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
     # the plugin clones from a server URL and creates its own databases there
     monkeypatch.setenv("DATABASE_URL", server_url)

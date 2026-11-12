@@ -32,6 +32,9 @@ pub fn to_py_err(py: Python<'_>, err: &Error) -> PyErr {
         ),
         Error::Interface(_) | Error::Drift(_) => shared::interface_error(py, &err.to_string()),
         Error::Core(core) => shared::core_to_py_err(py, *core),
+        Error::ConnectTimeout(cause) => {
+            shared::pool_timeout_error_with_cause(py, &err.to_string(), to_py_err(py, cause))
+        }
         Error::RowShape(_) | Error::Shape { .. } | Error::NullField { .. } => {
             shared::row_shape_error(py, &err.to_string())
         }

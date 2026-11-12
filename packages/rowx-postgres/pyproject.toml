@@ -1,6 +1,6 @@
 [project]
 name = "rowx-postgres"
-version = "0.3.0"
+version = "0.4.1"
 description = "PostgreSQL driver and database services for rowx"
 readme = "README.md"
 authors = [
@@ -12,7 +12,6 @@ requires-python = ">=3.14"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
@@ -21,7 +20,7 @@ classifiers = [
     "Framework :: AsyncIO",
 ]
 keywords = ["sql", "postgresql", "postgres", "typed", "async", "t-string"]
-dependencies = ["rowx-core==0.3.0"]
+dependencies = ["rowx-core==0.4.1"]
 
 [project.urls]
 Documentation = "https://mplemay.github.io/rowx/"

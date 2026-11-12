@@ -2,7 +2,7 @@
 
 rowx is SQLx for Python 3.14+: typesafe raw SQL as a [PEP 750](https://peps.python.org/pep-0750/) t-string, checked by
 `rowx check` against a live Postgres 18 database, with no ORM. The [user guide](guide.md) is how to write and run a
-query. The [packages](packages.md) page lists the three distributions.
+query. The [packages](packages.md) page lists the four distributions.
 
 ## Comparison
 

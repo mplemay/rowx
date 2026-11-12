@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "rowx",
     "rowx-core",
+    "rowx-embedded",
     "rowx-postgres",
 ]
 
@@ -802,7 +803,7 @@ wheels = [
 
 [[package]]
 name = "rowx"
-version = "0.3.0"
+version = "0.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "pathspec" },
@@ -810,6 +811,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+embedded = [
+    { name = "rowx-embedded", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "rowx-postgres" },
+]
 postgres = [
     { name = "rowx-postgres" },
 ]
@@ -838,6 +843,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-xdist" },
+    { name = "rowx-embedded" },
     { name = "rowx-postgres" },
     { name = "ruff" },
     { name = "rumdl" },
@@ -855,9 +861,11 @@ requires-dist = [
     { name = "pathspec", specifier = ">=1.1.1,<2" },
     { name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.2.0" },
     { name = "rowx-core", editable = "packages/rowx-core" },
+    { name = "rowx-embedded", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'embedded') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'embedded') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'embedded')", editable = "packages/rowx-embedded" },
+    { name = "rowx-postgres", marker = "extra == 'embedded'", editable = "packages/rowx-postgres" },
     { name = "rowx-postgres", marker = "extra == 'postgres'", editable = "packages/rowx-postgres" },
 ]
-provides-extras = ["postgres", "pytest"]
+provides-extras = ["postgres", "embedded", "pytest"]
 
 [package.metadata.requires-dev]
 bench = [{ name = "asyncpg", specifier = ">=0.31.0" }]
@@ -878,6 +886,7 @@ dev = [
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "pytest-asyncio", specifier = ">=1.4.1.post1" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "rowx-embedded", editable = "packages/rowx-embedded" },
     { name = "rowx-postgres", editable = "packages/rowx-postgres" },
     { name = "ruff", specifier = ">=0.17.3" },
     { name = "rumdl", specifier = ">=0.3.2" },
@@ -890,12 +899,27 @@ docs = [{ name = "zensical", specifier = "==0.1.1" }]
 
 [[package]]
 name = "rowx-core"
-version = "0.3.0"
+version = "0.4.1"
 source = { editable = "packages/rowx-core" }
 
 [[package]]
+name = "rowx-embedded"
+version = "0.4.1"
+source = { editable = "packages/rowx-embedded" }
+dependencies = [
+    { name = "rowx-core" },
+    { name = "rowx-postgres" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "rowx-core", editable = "packages/rowx-core" },
+    { name = "rowx-postgres", editable = "packages/rowx-postgres" },
+]
+
+[[package]]
 name = "rowx-postgres"
-version = "0.3.0"
+version = "0.4.1"
 source = { editable = "packages/rowx-postgres" }
 dependencies = [
     { name = "rowx-core" },

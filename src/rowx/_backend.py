@@ -22,6 +22,7 @@ class BackendModule(Protocol):
 SCHEMES: Final[dict[str, tuple[str, str]]] = {
     "postgres": ("rowx_postgres._backend", "postgres"),
     "postgresql": ("rowx_postgres._backend", "postgres"),
+    "embedded": ("rowx_embedded._backend", "embedded"),
 }
 LOADED: Final[dict[str, Backend]] = {}
 
@@ -49,7 +50,11 @@ def _scheme(dsn: str) -> str | None:
     stripped = dsn.strip()
     if not stripped:
         return None
-    return _parsed(stripped.split(None, 1)[0])
+    token = stripped.split(None, 1)[0]
+    # the embedded grammar also accepts `embedded:` with no `//`, which urlparse would not report as a scheme
+    if token.lower().startswith("embedded:") and not token.lower().startswith("embedded://"):
+        return "embedded"
+    return _parsed(token)
 
 
 def _target(dsn: str) -> tuple[str, str]:

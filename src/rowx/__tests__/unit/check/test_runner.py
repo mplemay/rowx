@@ -102,7 +102,7 @@ def _describe_with(monkeypatch: pytest.MonkeyPatch, *outcomes: object) -> list[s
 
 def test_lost_connection_is_retried_once(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     seen = _describe_with(monkeypatch, DatabaseError("57P01", "terminating connection"), "described")
-    results = asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend))
+    results = asyncio.run(describe_all(["postgresql://x"], ["SELECT 1"], 1000, backend=fake_backend))
     assert results == {"SELECT 1": "described"}
     assert seen == ["SELECT 1", "SELECT 1"]
     assert FakeConnection.closed_count == 2
@@ -111,25 +111,25 @@ def test_lost_connection_is_retried_once(monkeypatch: pytest.MonkeyPatch, fake_b
 def test_connection_class_errors_are_retried(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     _describe_with(monkeypatch, DatabaseError("08006", "connection failure"), InterfaceError("closed"), "described")
     with pytest.raises(CheckError, match="lost the database connection"):
-        asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend))
+        asyncio.run(describe_all(["postgresql://x"], ["SELECT 1"], 1000, backend=fake_backend))
 
 
 def test_second_loss_fails_the_run(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     _describe_with(monkeypatch, InterfaceError("closed"), DatabaseError("57P01", "gone"))
     with pytest.raises(CheckError, match="lost the database connection"):
-        asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend))
+        asyncio.run(describe_all(["postgresql://x"], ["SELECT 1"], 1000, backend=fake_backend))
 
 
 def test_timeout_fails_the_run(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     _describe_with(monkeypatch, DatabaseError("57014", "canceling statement due to statement timeout"))
     with pytest.raises(CheckError, match="timed out"):
-        asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend))
+        asyncio.run(describe_all(["postgresql://x"], ["SELECT 1"], 1000, backend=fake_backend))
 
 
 def test_sql_errors_are_outcomes_not_failures(monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend) -> None:
     error = DatabaseError("42P01", "relation does not exist")
     _describe_with(monkeypatch, error)
-    assert asyncio.run(describe_all("postgresql://x", ["SELECT 1"], 1, 1000, backend=fake_backend)) == {
+    assert asyncio.run(describe_all(["postgresql://x"], ["SELECT 1"], 1000, backend=fake_backend)) == {
         "SELECT 1": error
     }
 
@@ -139,7 +139,7 @@ def test_each_sql_is_described_once_across_workers(
 ) -> None:
     sqls = [f"SELECT {n}" for n in range(9)]
     seen = _describe_with(monkeypatch, *[f"d{n}" for n in range(9)])
-    results = asyncio.run(describe_all("postgresql://x", sqls, 4, 1000, backend=fake_backend))
+    results = asyncio.run(describe_all(["postgresql://x"] * 4, sqls, 1000, backend=fake_backend))
     assert sorted(seen) == sorted(sqls)
     assert set(results) == set(sqls)
 
@@ -189,8 +189,8 @@ def test_concurrent_backend_sessions_cannot_cross_route(fake_backend: CheckerBac
             return second
 
         outcomes = await asyncio.gather(
-            describe_all("fake://first", ["SELECT 1"], 1, 1000, replace(fake_backend, connect_checker=connect_first)),
-            describe_all("fake://second", ["SELECT 1"], 1, 1000, replace(fake_backend, connect_checker=connect_second)),
+            describe_all(["fake://first"], ["SELECT 1"], 1000, replace(fake_backend, connect_checker=connect_first)),
+            describe_all(["fake://second"], ["SELECT 1"], 1000, replace(fake_backend, connect_checker=connect_second)),
         )
         for outcome, owner in zip(outcomes, ("first", "second"), strict=True):
             described = outcome["SELECT 1"]

@@ -208,3 +208,9 @@ def test_require_with_sslmode_disable_is_accepted_for_the_other_values() -> None
     for value in ("disable", "prefer"):
         opts = ConnectOptions.from_dsn(f"host=h sslmode=disable channel_binding={value}")
         assert (opts.sslmode, opts.channel_binding) == ("disable", value)
+
+
+@pytest.mark.parametrize("dsn", ["embedded://", "embedded:///var/lib/db"])
+def test_an_embedded_url_is_not_a_connection_string(dsn: str) -> None:
+    with pytest.raises(InterfaceError, match="invalid connection string"):
+        ConnectOptions.from_dsn(dsn)
