@@ -175,8 +175,8 @@ def test_snapshot_keeps_tracked_ignored_query_in_compatibility_verdict(
         return RunResult(reports=reports, sources={}, statistics=Statistics(), coverage=coverage)
 
     @asynccontextmanager
-    async def session(_migrator: object):
-        yield SimpleNamespace(url="postgresql://example")
+    async def session(_migrator: object, _workers: int):
+        yield SimpleNamespace(urls=("postgresql://example",), seconds=0.0)
 
     class FakeScratch:
         leaked = False
@@ -185,8 +185,8 @@ def test_snapshot_keeps_tracked_ignored_query_in_compatibility_verdict(
             pass
 
         @staticmethod
-        def session(migrator: object) -> AbstractAsyncContextManager[SimpleNamespace]:
-            return session(migrator)
+        def session(migrator: object, workers: int) -> AbstractAsyncContextManager[SimpleNamespace]:
+            return session(migrator, workers)
 
         def sweep(self) -> None:
             pass
@@ -199,3 +199,89 @@ def test_snapshot_keeps_tracked_ignored_query_in_compatibility_verdict(
     assert seen == [["bad.py", "good.py"]] * 4
     assert status == 1
     assert "incompatible" in capsys.readouterr().out
+
+
+def test_embedded_directory_url_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    revision(tmp_path, "[tool.rowx.migrate]\n")
+    monkeypatch.chdir(tmp_path)
+    status = main(["check-compat", "--against", "HEAD", "--head", "HEAD", "--database-url", "embedded:///var/db"])
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "use `embedded://` and not an embedded directory URL" in captured.err
+    assert "Traceback" not in captured.err
+    assert not captured.out
+
+
+def test_embedded_url_builds_each_schema_with_one_instance_per_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rowx_core.backend import ScratchBuild  # ruff: ignore[import-outside-top-level]
+
+    from rowx.check.discover import discover_file  # ruff: ignore[import-outside-top-level]
+    from rowx.check.runner import Hooks, RunResult, SiteCoverage, Statistics  # ruff: ignore[import-outside-top-level]
+
+    revision(tmp_path, "[tool.rowx.migrate]\n")
+    (tmp_path / "good.py").write_text('from rowx import query\nquery[tuple[int]](t"select 1")\n', encoding="utf-8")
+    git(tmp_path, "add", "good.py")
+    git(tmp_path, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "query")
+    monkeypatch.chdir(tmp_path)
+    requested: list[int] = []
+
+    @asynccontextmanager
+    async def session(_service: object, _migrator: object, workers: int):
+        requested.append(workers)
+        tag = len(requested)
+        yield ScratchBuild(
+            urls=tuple(
+                f"postgresql://postgres@/postgres?host=/run/rx{tag}-{n}&sslmode=disable" for n in range(workers)
+            ),
+            seconds=0.0,
+        )
+
+    seen: list[tuple[str | None, tuple[str, ...]]] = []
+
+    async def check(
+        _config: object, files: list[Path], dsn: str | None, _jobs: int, hooks: Hooks, *, boundary: Path
+    ) -> RunResult:
+        assert boundary
+        assert hooks.scratch is not None
+        async with hooks.scratch("embedded://", 2) as built:
+            seen.append((dsn, built.urls))
+        coverage = [
+            SiteCoverage(
+                path=call.path,
+                span=call.span,
+                kind=call.kind,
+                described=True,
+                row_comparison="compared",
+                parameters_aligned=True,
+            )
+            for file in files
+            for call in discover_file(file).calls
+        ]
+        return RunResult(reports=[], sources={}, statistics=Statistics(), coverage=coverage)
+
+    monkeypatch.setattr(compat, "scratch_session", session)
+    monkeypatch.setattr(compat, "load_migrator", lambda *_args: None)
+    monkeypatch.setattr(compat, "run_check", check)
+    status = main([
+        "check-compat",
+        "--against",
+        "HEAD",
+        "--head",
+        "HEAD",
+        "--database-url",
+        "embedded://",
+        "-j",
+        "2",
+    ])
+    captured = capsys.readouterr()
+    assert status == 0
+    assert requested == [2, 2]
+    assert [dsn for dsn, _ in seen] == [urls[0] for _, urls in seen]
+    assert [len(urls) for _, urls in seen] == [2, 2, 2, 2]
+    assert len({urls for _, urls in seen}) == 2
+    assert "compatible checked subset" in captured.out
+    assert "disposable PostgreSQL server" not in captured.err

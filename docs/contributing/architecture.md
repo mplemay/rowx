@@ -9,7 +9,8 @@ linked, and which checks run without a database.
 |---|---|---|
 | `rowx-core` | `rowx_core` | none |
 | `rowx-postgres` | `rowx_postgres` | matching `rowx-core` only |
-| `rowx` | `rowx` | matching `rowx-core`; the `postgres` extra adds matching `rowx-postgres` |
+| `rowx` | `rowx` | matching `rowx-core`; the `postgres` extra adds matching `rowx-postgres`, and the `embedded` extra adds matching `rowx-postgres` and `rowx-embedded` |
+| `rowx-embedded` | `rowx_embedded` | none; it is the optional embedded engine and does not depend on any other rowx distribution |
 
 `from rowx import query` and `from rowx_core import query` are the same object. `import rowx` loads no backend.
 Connections are `from rowx_postgres import Pool, connect`. The `postgres` extra is what installs that package. The
@@ -32,9 +33,10 @@ Rust crates:
 | `crates/rowx-py-core` | Shared PyO3 support: the tokio runtime (`runtime.rs`) and the exception-class registry (`errors.rs`). |
 | `packages/rowx-postgres` | The cdylib. Cargo package name `rowx-postgres-py`, library name `_core`. This is the binding crate, not a separate distribution. |
 
-Workspace members are those four paths. `pyo3` and `pyo3-async-runtimes` are workspace dependencies and their minor
-versions move together. `uv sync` installs the workspace. `ty` checks each package in place, with no merged
-type-check tree and no cross-package symlink. Build the extension with
+Workspace members are those four paths; the embedded companion is excluded from the workspace (see
+[Embedded companion](#embedded-companion)). `pyo3` and `pyo3-async-runtimes` are workspace dependencies and their minor
+versions move together. `uv sync` installs the workspace. `ty` checks each package in place, with no merged type-check
+tree and no cross-package symlink. Build the extension with
 `uv run maturin develop -m packages/rowx-postgres/Cargo.toml`. Do not `cargo build` the cdylib on its own.
 
 ## Native module and runtimes
@@ -88,6 +90,76 @@ migration directory is not a reason to load a backend. `run`, `revert`, `skip` a
 `rowx database reset` and `setup` construct the `Migrator`, which validates the files, before they create, drop or
 change a database. A bad directory fails before the destructive step. `drop` alone does not read the files. Only
 opening a connection is retried. The migration command runs once.
+
+## Embedded companion
+
+The embedded database (`rowx[embedded]`, [reference](../reference/embedded.md)) is a companion distribution, not a
+member of the workspace. This section says how it is built and linked.
+
+### The companion distribution
+
+| Piece | Where | What it is |
+|---|---|---|
+| `rowx-embedded` | `packages/rowx-embedded/` | The distribution. A per-platform wheel built by maturin, with **static metadata** (no `dynamic` fields) so that the `uv-lock` hook never runs maturin or builds Wasmer. No sdist. |
+| `rowx_embedded` | `src/rowx_embedded/` | The Python package: `Instance`, `API_VERSION`, `ENGINE_VERSION`, `RUNTIME_VERSION`, `WASM_SHA256`, `SNAPSHOT_FORMAT`, `EXTENSIONS` and the errors `EngineError`, `DirectoryInUseError` and `SnapshotError`, typed by `_engine.pyi`. |
+| `rowx_embedded._engine` | `src/*.rs` | The pyo3 cdylib (abi3-py314): the Python surface only. |
+| `rowx-embedded-host` | `crates/rowx-embedded-host/` | The host, with no pyo3: the engine thread, the front proxy, the slot state machine, snapshots and ownership. Its logic is unit-tested as pure functions. |
+| `rowx_postgres.embedded` | `packages/rowx-postgres/src/rowx_postgres/` | The adapter: `_embedded.py` (URL grammar, the lazy `importlib` load, ownership), `_scratch.py`, `_embedded_testing.py`. |
+
+`rowx-embedded` does not depend on `rowx`, `rowx-core` or `rowx-postgres`, and nothing in the repository's Rust crates
+changed for it: the engine is reached over a Unix socket, which the existing `Host::Unix` path of the driver already
+handles. The engine never shares native objects with the driver's extension.
+
+The `rowx_postgres` side loads the companion lazily, with `importlib.import_module("rowx_embedded")` on first use, and
+types the surface it uses with a `Protocol`, so that `ty` passes and `import rowx_postgres` works without the package.
+`rowx_embedded.API_VERSION` (an `int`, currently 1) is checked on that first use, and a mismatch is an `InterfaceError`
+naming both versions. The engine load is per process: an engine loaded before a `fork` is refused in the child.
+
+### Build isolation
+
+The companion is **its own Cargo workspace**, listed in the root `Cargo.toml` `exclude`. The engine pulls in about 440
+Wasmer crates (edition 2024, rust-version 1.93), a vendored patch and its own `Cargo.lock`. A root workspace member
+would be built by `cargo test --workspace`, `cargo clippy --workspace` and `maturin develop` of the other packages, and
+the exclusion could not be promised alongside the membership. It carries the same lint table as the root.
+
+The Python side is one root lock: `rowx-embedded` is a `path` source in `[tool.uv.sources]`, not a uv workspace member,
+so `uv sync --all-groups` never builds it. It is installed only through the `embedded` extra.
+
+| Gate | What it does |
+|---|---|
+| `just check` (prek) | Formats the companion (`cargo-fmt-embedded`) and type-checks `packages/rowx-embedded/src`. It never builds Wasmer. |
+| `just check-embedded` | Clippy for the companion: the manual-stage hook `cargo-clippy-embedded`. |
+| `just embedded-dev` | `uv sync --extra embedded`: a maturin build of the engine into the venv. |
+| `just test-embedded` | `ROWX_REQUIRE_EMBEDDED=1 uv run --extra embedded pytest -m embedded`. |
+
+### Threads and runtime ownership
+
+- Each `Instance` owns **one dedicated OS thread** that holds the engine handle (it is not `Send`) and serves commands
+  over a channel. The engine never runs on a Python, tokio or proxy thread.
+- The front proxy is an accept thread plus one thread per connection. They are plain threads, not tokio tasks.
+- Every call from Python releases the GIL. The shared tokio runtime of `rowx-py-core` is untouched: it drives the
+  driver's client, which talks to the proxy like any server.
+- Start, close and snapshot run in a thread of their own on the Python side, not in the event loop's executor, so that
+  an interrupted run never waits for an engine call that cannot be cancelled. A cancelled start finishes in its thread
+  and closes the instance nobody owns.
+- Instances are closed at exit (`atexit`), when the Python object dies (without blocking), and never by a forked child.
+
+### The front proxy
+
+The engine's own endpoint serves clients serially, so a second client and every `CancelRequest` would wait in its listen
+backlog, and the driver's 5 s cancel guard would mark the connection broken. `rowx-embedded` puts its own accept thread
+in front:
+
+- The public socket is `<private dir>/.s.PGSQL.5432`. The engine itself is driven in process, with no endpoint.
+- `SSLRequest` is answered `N`. A `CancelRequest` is read and its socket closed at once, so the client's settle loop
+  sees EOF and drains.
+- Only whitelisted frontend messages are forwarded; `COPY ... FROM STDIN` is held back until its data is complete (up to
+  1 GiB, then `53200`).
+- Between sessions the proxy resets the backend (`ROLLBACK`, then `DISCARD ALL`) and verifies the result. A backend that
+  cannot be put back to idle is unusable and says so.
+
+The proxy never multiplexes, because session state and tokio-postgres's per-client statement names (`s0`, `s1`, ...)
+would collide. See [Driver](../reference/embedded.md#driver).
 
 ## Deferred
 

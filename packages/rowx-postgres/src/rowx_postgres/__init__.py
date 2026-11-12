@@ -1,3 +1,4 @@
+from rowx_postgres import embedded
 from rowx_postgres._connection import RESET_QUERY, Connection, connect
 from rowx_postgres._cube import Cube
 from rowx_postgres._geometric import Box, Circle, Line, LineSegment, Path, Point, Polygon
@@ -31,4 +32,5 @@ __all__ = [
     "Range",
     "Transaction",
     "connect",
+    "embedded",
 ]

@@ -801,6 +801,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+embedded = [
+    { name = "rowx-embedded", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "rowx-postgres" },
+]
 postgres = [
     { name = "rowx-postgres" },
 ]
@@ -845,9 +849,11 @@ requires-dist = [
     { name = "pathspec", specifier = ">=1.1.1,<2" },
     { name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.2.0" },
     { name = "rowx-core", editable = "packages/rowx-core" },
+    { name = "rowx-embedded", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'embedded') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'embedded') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'embedded')", editable = "packages/rowx-embedded" },
+    { name = "rowx-postgres", marker = "extra == 'embedded'", editable = "packages/rowx-postgres" },
     { name = "rowx-postgres", marker = "extra == 'postgres'", editable = "packages/rowx-postgres" },
 ]
-provides-extras = ["postgres", "pytest"]
+provides-extras = ["postgres", "embedded", "pytest"]
 
 [package.metadata.requires-dev]
 bench = [{ name = "asyncpg", specifier = ">=0.31.0" }]
@@ -881,6 +887,11 @@ docs = [{ name = "zensical", specifier = "==0.1.1" }]
 name = "rowx-core"
 version = "0.2.0"
 source = { editable = "packages/rowx-core" }
+
+[[package]]
+name = "rowx-embedded"
+version = "18.4.0"
+source = { editable = "packages/rowx-embedded" }
 
 [[package]]
 name = "rowx-postgres"

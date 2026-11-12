@@ -12,6 +12,7 @@ from rowx_core.migrations import Migration, discover_migrations
 
 from rowx._backend import backend_for
 from rowx.check.config import Config, MigrateConfig, database_url, load_config
+from rowx.check.embedded import embedded_for, open_instance
 from rowx.check.render import strip_controls
 from rowx.check.runner import CheckError, redact
 
@@ -19,7 +20,14 @@ if TYPE_CHECKING:
     from argparse import ArgumentParser, _SubParsersAction
     from collections.abc import Coroutine, Iterable
 
-    from rowx_core.backend import Backend, MigrationResult, MigrationService, MigrationSession, MigrationStatus
+    from rowx_core.backend import (
+        Backend,
+        EmbeddedService,
+        MigrationResult,
+        MigrationService,
+        MigrationSession,
+        MigrationStatus,
+    )
 
 TIMESTAMP_FORMAT: Final[str] = "%Y%m%d%H%M%S"
 SEQUENTIAL_WIDTH: Final[int] = 4
@@ -153,7 +161,17 @@ def handle(args: Namespace) -> None:
             sys.stderr.write(TIP)
         return
     dsn = require_url(config, args.database_url)
-    run_guarded(dsn, _database_command(target, args, dsn, backend_for(dsn)))
+    if (embedded := embedded_for(dsn)) is None:
+        run_guarded(dsn, _database_command(target, args, dsn, backend_for(dsn)))
+        return
+    if not embedded.persistent:
+        msg = "an in-memory embedded database is gone when the command exits; use embedded:///absolute/path"
+        raise CheckError(msg)
+    try:
+        run_guarded(dsn, _embedded_command(embedded, target, args, dsn))
+    finally:
+        # an instance that an interrupted run could not close in time is abandoned, not waited for
+        embedded.sweep()
 
 
 # `migrate run` with no flags, split so a caller can validate the files before any database IO
@@ -293,6 +311,13 @@ def _line(
 ) -> str:
     suffix = f" ({format_duration(elapsed)})" if timed else ""
     return f"{verb} {result.migration.version}/{label} {result.migration.description}{suffix}\n"
+
+
+# the directory's instance is started once, before the command and outside its connection retries, so a directory
+# that another process owns fails at once; the command then runs on the instance's socket DSN
+async def _embedded_command(embedded: EmbeddedService, target: Target, args: Namespace, dsn: str) -> None:
+    async with open_instance(embedded) as socket_dsn:
+        await _database_command(target, args, socket_dsn, backend_for(dsn))
 
 
 async def _database_command(target: Target, args: Namespace, dsn: str, backend: Backend) -> None:

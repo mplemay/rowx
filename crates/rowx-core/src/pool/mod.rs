@@ -38,6 +38,9 @@ pub enum PoolError<E> {
     Core(#[from] CoreError),
     #[error(transparent)]
     Manage(E),
+    /// The acquire deadline passed while connects kept failing; carries the last connect error.
+    #[error("timed out waiting for a pooled connection; the last connect failed")]
+    ConnectTimeout(E),
 }
 
 type Terminate = Arc<dyn Fn() + Send + Sync>;
@@ -239,25 +242,33 @@ impl<M: Manage> Inner<M> {
     }
 
     // retried with backoff until `deadline`, and each attempt is bounded by `connect_timeout`
-    async fn connect_until(&self, deadline: Instant) -> Result<Parts<M>, CoreError> {
+    // and the last connect error is kept, so a timeout can say why nothing connected
+    async fn connect_until(&self, deadline: Instant) -> Result<Parts<M>, PoolError<M::Error>> {
         let mut pause = FIRST_CONNECT_RETRY;
+        let mut last: Option<M::Error> = None;
         loop {
             let now = Instant::now();
             if now >= deadline {
-                return Err(CoreError::PoolTimeout);
+                return Err(
+                    last.map_or_else(|| CoreError::PoolTimeout.into(), PoolError::ConnectTimeout)
+                );
             }
             let remaining = deadline - now;
             let limit = self
                 .options
                 .connect_timeout
                 .map_or(remaining, |each| each.min(remaining));
-            if let Ok(Ok(conn)) = tokio::time::timeout(limit, self.manager.connect()).await {
-                self.size.fetch_add(1, Ordering::AcqRel);
-                // no caller has initialised it yet either, so the `init` hook still has to run
-                return Ok(Parts {
-                    conn,
-                    meta: self.meta(true),
-                });
+            match tokio::time::timeout(limit, self.manager.connect()).await {
+                Ok(Ok(conn)) => {
+                    self.size.fetch_add(1, Ordering::AcqRel);
+                    // no caller has initialised it yet either, so the `init` hook still has to run
+                    return Ok(Parts {
+                        conn,
+                        meta: self.meta(true),
+                    });
+                }
+                Ok(Err(err)) => last = Some(err),
+                Err(_) => {}
             }
             tokio::time::sleep_until((Instant::now() + pause).min(deadline)).await;
             pause = (pause * 2).min(MAX_CONNECT_RETRY);

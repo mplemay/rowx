@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from time import perf_counter, time
 from typing import TYPE_CHECKING, Final
 
+from rowx_core.backend import ScratchBuild
 from rowx_core.errors import DatabaseError, Error, InterfaceError, MigrateError
 from rowx_core.lifecycle import ORPHAN_AGE_SECONDS, make_tag, tag_age
 
-from rowx.check.runner import CheckError, ScratchBuild, redact
+from rowx.check.runner import CheckError, redact
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -43,7 +44,11 @@ class Scratch:
             msg = "the database URL could not be parsed"
             raise CheckError(msg) from None
 
-    def session(self, migrator: MigrationService) -> AbstractAsyncContextManager[ScratchBuild]:
+    # a server scratch is one database, whatever the number of workers
+    def session(self, migrator: MigrationService, workers: int = 1) -> AbstractAsyncContextManager[ScratchBuild]:
+        if workers < 1:
+            msg = "a scratch database needs at least one worker"
+            raise ValueError(msg)
         return self._session(migrator)
 
     @asynccontextmanager
@@ -57,7 +62,7 @@ class Scratch:
                 await self.sweep_orphans()
             await self._create()
             await self._migrate(migrator, url)
-            yield ScratchBuild(url=url, seconds=perf_counter() - started)
+            yield ScratchBuild(urls=(url,), seconds=perf_counter() - started)
         finally:
             await self._drop_pending()
 

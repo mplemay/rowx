@@ -4,6 +4,7 @@ from rowx_core.errors import ConnectionBusyError, InterfaceError
 
 from rowx_postgres._compiler import COMPILER
 from rowx_postgres._core import connect as connect_impl
+from rowx_postgres._embedded import abandon_if_cancelled, start_owned
 from rowx_postgres._options import ConnectOptions
 from rowx_postgres._shape import native_shape
 from rowx_postgres._transaction import TrackedStream, Transaction
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
     from rowx_core import Compiler, ShapeSpec, StreamHandle
 
     from rowx_postgres._core import Connection as ConnectionImpl, RowShape
+    from rowx_postgres._embedded import EmbeddedDatabase
     from rowx_postgres._pool import Pool
 
 
@@ -27,8 +29,17 @@ class Connection:
     def compiler(self) -> Compiler:
         return COMPILER
 
-    def __init__(self, impl: ConnectionImpl, /, *, pool: Pool | None = None) -> None:
+    def __init__(
+        self,
+        impl: ConnectionImpl,
+        /,
+        *,
+        pool: Pool | None = None,
+        owner: EmbeddedDatabase | None = None,
+    ) -> None:
         self._inner: ConnectionImpl | None = impl
+        # the embedded instance that `connect` started for this connection, closed after it
+        self._owner = owner
         # set while the connection is checked out of a pool
         self._pool = pool
         # the innermost open transaction; failures of statements run on this connection mark it failed
@@ -122,7 +133,15 @@ class Connection:
         if self._pool is not None:
             await self._pool.release(self)
             return
-        await self._impl.close()
+        # before the close, which waits for a statement that is still running
+        if (owner := self._owner) is not None:
+            abandon_if_cancelled(owner)
+        try:
+            await self._impl.close()
+        finally:
+            if (owner := self._owner) is not None:
+                self._owner = None
+                await owner.close()
 
     async def __aenter__(self) -> Self:
         return self
@@ -142,4 +161,13 @@ class Connection:
 
 async def connect(dsn_or_options: str | ConnectOptions, /) -> Connection:
     options = ConnectOptions.from_dsn(dsn_or_options) if isinstance(dsn_or_options, str) else dsn_or_options
-    return Connection(await connect_impl(options))
+    if options.embedded is None:
+        return Connection(await connect_impl(options))
+    # the connection owns a fresh instance, which also closes when the connect fails or is cancelled
+    database = await start_owned(options.embedded.directory)
+    try:
+        impl = await connect_impl(options.with_socket(database.dsn))
+    except BaseException:
+        await database.close()
+        raise
+    return Connection(impl, owner=database)

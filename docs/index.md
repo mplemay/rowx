@@ -16,7 +16,8 @@ The block above is an illustration. The [user guide](guide.md) has samples the t
 
 - [User guide](guide.md): install, queries, rows, executors, the checker, migrations, and testing.
 - [Why rowx](why.md): where SQL lives, and how a live database check compares with other libraries.
-- [Packages](packages.md): the three distributions and the canonical imports.
+- [Embedded Postgres](guide/embedded.md): an in-process Postgres 18 for development, checking and tests, with no server.
+- [Packages](packages.md): the four distributions and the canonical imports.
 - [Postgres type mapping](types.md): what each Postgres type decodes to, and which Python values can be bound.
 - [Known limits](known-limits.md): where nullability inference is less precise than the database.
 - [Changelog](changelog.md): what changed in each release.

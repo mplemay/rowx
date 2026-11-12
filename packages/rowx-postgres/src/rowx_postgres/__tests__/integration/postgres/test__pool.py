@@ -132,6 +132,7 @@ def test_reset_hook_works_across_two_event_loops(schema: str) -> None:
     assert resets == [1, 1]
 
 
+@pytest.mark.server(divergence="backend-pid")
 def test_setup_that_raises_discards_the_connection(schema: str) -> None:
     pids: list[int] = []
 
@@ -168,6 +169,7 @@ def test_pool_size_stays_correct_while_an_early_exited_stream_drains(schema: str
     assert asyncio.run(run()) == (1, 1, 1)
 
 
+@pytest.mark.server(needs="sessions")
 def test_pooled_connections_recover_after_a_migration_through_the_schema_epoch(schema: str) -> None:
     async def run() -> list[int]:
         table = query_unchecked[int](t"SELECT a FROM epoch_t")
@@ -239,6 +241,7 @@ def test_the_first_acquire_opens_the_pool(schema: str) -> None:
     assert asyncio.run(run()) == (0, 1)
 
 
+@pytest.mark.server(needs="sessions")
 def test_more_tasks_than_max_size_all_complete(schema: str) -> None:
     async def run() -> list[int]:
         async with Pool(schema, max_size=3, acquire_timeout=30) as pool:
@@ -429,9 +432,12 @@ def test_a_pool_built_outside_a_loop_works_across_two_runs(schema: str) -> None:
     async def use() -> int:
         return await query[int](t"SELECT 1").one(pool)
 
-    assert asyncio.run(use()) == 1
-    assert asyncio.run(use()) == 1
-    asyncio.run(pool.close())
+    # closed even when an assertion fails, because an open pool keeps its session and starves the next test
+    try:
+        assert asyncio.run(use()) == 1
+        assert asyncio.run(use()) == 1
+    finally:
+        asyncio.run(pool.close())
 
 
 @pytest.mark.timing
@@ -457,6 +463,7 @@ def test_close_waits_for_checked_out_connections(schema: str) -> None:
     assert asyncio.run(run())
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_hand_written_begin_through_the_pool_does_not_leak_a_transaction(schema: str) -> None:
     async def state_after_release(pool: Pool, observer: Connection, pid: int) -> str:
         # the release runs in the background, so wait until the connection is idle again
@@ -476,6 +483,7 @@ def test_a_hand_written_begin_through_the_pool_does_not_leak_a_transaction(schem
     assert asyncio.run(run()) == ("idle", "idle")
 
 
+@pytest.mark.server(needs="sessions")
 def test_begin_stream_rolls_back_when_pool_reset_query_is_disabled(schema: str) -> None:
     async def run() -> None:
         async with Pool(schema, max_size=1, reset_query=None) as pool, await connect(schema) as observer:
@@ -532,6 +540,7 @@ def test_a_busy_connection_is_settled_and_reset_before_the_reset_hook_runs(schem
     assert seen == [original]
 
 
+@pytest.mark.server(needs="sessions")
 def test_pool_is_usable_through_the_shared_query_api(schema: str) -> None:
     async def run() -> tuple[int, list[int], int]:
         async with Pool(schema, max_size=2) as pool:
@@ -572,6 +581,8 @@ def test_construction_does_no_io_and_exposes_the_settings() -> None:
 
 
 @pytest.mark.parametrize("hooked", [False, True])
+@pytest.mark.server(divergence="encoding")
+@pytest.mark.server(divergence="backend-pid")
 def test_a_connection_that_drifted_is_replaced_after_release(schema: str, *, hooked: bool) -> None:
     async def reset(_conn: Connection) -> None:
         await asyncio.sleep(0)
@@ -599,6 +610,7 @@ def test_a_connection_that_drifted_is_replaced_after_release(schema: str, *, hoo
     assert (size, waiting) == (1, 0)
 
 
+@pytest.mark.server(divergence="backend-pid")
 def test_a_drifted_idle_connection_is_not_reused(schema: str) -> None:
     async def run() -> tuple[int, int]:
         async with Pool(schema, max_size=1, acquire_timeout=5) as pool:
@@ -661,6 +673,7 @@ def pool_options(schema: str, **settings: str) -> ConnectOptions:
 
 @pytest.mark.parametrize("statement", ["SET ROLE", "SET SESSION AUTHORIZATION"])
 @pytest.mark.parametrize("startup_role", [False, True])
+@pytest.mark.server(needs="sessions")
 def test_a_changed_role_does_not_survive_a_release(
     schema: str, hostile: str, *, statement: str, startup_role: bool
 ) -> None:
@@ -688,6 +701,7 @@ def test_a_changed_role_does_not_survive_a_release(
         assert first[0] == first[1]
 
 
+@pytest.mark.server(needs="sessions")
 def test_search_path_does_not_survive_a_release(schema: str, hostile: str) -> None:
     async def run() -> tuple[str, str, int, int]:
         async with Pool(schema, max_size=1) as pool:
@@ -724,6 +738,7 @@ def test_a_temp_table_does_not_survive_a_release(schema: str, *, explicit_transa
 
 
 @pytest.mark.parametrize("hooked", [False, True])
+@pytest.mark.server(needs="sessions")
 def test_an_advisory_lock_does_not_survive_a_release_despite_a_shadowing_function(
     schema: str, hostile: str, *, hooked: bool
 ) -> None:
@@ -771,6 +786,7 @@ async def session_state(observer: Connection, pid: int) -> str:
 
 
 @pytest.mark.parametrize("reset_query", [RESET_QUERY, "SET work_mem = '7MB';"], ids=["default", "custom"])
+@pytest.mark.server(needs="sessions")
 def test_a_begin_after_a_carriage_return_comment_is_rolled_back(schema: str, reset_query: str) -> None:
     async def run() -> tuple[str, str, int, int]:
         async with await connect(schema) as observer, Pool(schema, max_size=1, reset_query=reset_query) as pool:
@@ -789,6 +805,7 @@ def test_a_begin_after_a_carriage_return_comment_is_rolled_back(schema: str, res
 
 
 @pytest.mark.parametrize("reset_query", [RESET_QUERY, "SET work_mem = '7MB';"], ids=["default", "custom"])
+@pytest.mark.server(divergence="backend-pid")
 def test_the_idle_guard_discards_a_connection_left_in_a_transaction(
     schema: str, hostile: str, reset_query: str
 ) -> None:
@@ -813,6 +830,7 @@ def test_the_idle_guard_discards_a_connection_left_in_a_transaction(
 
 @pytest.mark.parametrize("opener", [";BEGIN", ";;START TRANSACTION", "/**/;BEGIN", "; -- x\nBEGIN"])
 @pytest.mark.parametrize("hooked", [False, True])
+@pytest.mark.server(needs="sessions")
 def test_a_transaction_opened_after_leading_semicolons_does_not_survive_a_release(
     schema: str, opener: str, *, hooked: bool
 ) -> None:
@@ -861,6 +879,7 @@ def test_a_custom_reset_query_that_cannot_run_in_a_transaction_keeps_the_connect
     assert len(set(asyncio.run(run()))) == 1
 
 
+@pytest.mark.server(divergence="backend-pid")
 def test_a_custom_reset_query_still_discards_a_connection_left_in_a_transaction(schema: str) -> None:
     async def run() -> tuple[int, int]:
         async with Pool(schema, max_size=1, reset_query="DISCARD ALL") as pool:

@@ -79,6 +79,10 @@ rowx check src --database-url postgresql://app@localhost/app
 more diagnostics, and 2 on a bad invocation or config, an unreachable database, a describe failure that is not an SQL
 error, a drift or scratch failure, or an internal error.
 
+No server? `uv add "rowx[embedded]"` adds an in-process Postgres 18, and a database URL of `embedded://` selects it
+anywhere (`connect`, `Pool`, `rowx check`, the pytest plugin), with no Docker. It is for development, checking and
+tests, and it is not for production. See [Embedded Postgres](docs/guide/embedded.md).
+
 A type mismatch is reported like this:
 
 ```text
@@ -115,7 +119,9 @@ The checker uses `--database-url` or `DATABASE_URL` and does not import the appl
   queries, overrides, the checker, CI and poolers.
 - [Why rowx](docs/why.md): where SQL lives, and how a live database check compares with other libraries.
 - [Changelog](docs/changelog.md): what changed in each release.
-- [Packages](docs/packages.md): the three distributions and the canonical imports.
+- [Packages](docs/packages.md): the four distributions and the canonical imports.
+- [Embedded Postgres](docs/guide/embedded.md): `rowx[embedded]`, `embedded://` URLs, the one-session rule, checking,
+  migrating and testing without a server, and its limits ([reference](docs/reference/embedded.md)).
 - [Postgres type mapping](docs/types.md): what each Postgres type decodes to and which Python types can be bound.
 - [Known limits](docs/known-limits.md): where nullability inference is less precise than the database.
 - [Reference](docs/reference/index.md): the full specification.

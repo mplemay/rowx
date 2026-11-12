@@ -22,6 +22,8 @@ class BackendModule(Protocol):
 SCHEMES: Final[dict[str, tuple[str, str]]] = {
     "postgres": ("rowx_postgres._backend", "postgres"),
     "postgresql": ("rowx_postgres._backend", "postgres"),
+    # the PostgreSQL backend runs an embedded database itself; the companion is loaded only when one is started
+    "embedded": ("rowx_postgres._backend", "postgres"),
 }
 LOADED: Final[dict[str, Backend]] = {}
 

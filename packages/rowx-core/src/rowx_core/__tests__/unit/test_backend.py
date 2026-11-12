@@ -1,14 +1,14 @@
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 
 import pytest
 from rowx_core import Compiler
-from rowx_core.backend import Backend, CheckerBackend, UnsupportedCapabilityError
+from rowx_core.backend import Backend, CheckerBackend, ScratchBuild, UnsupportedCapabilityError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from rowx_core import Compiled, TemplatePlan
-    from rowx_core.backend import CheckerSession, ShapeIssue
+    from rowx_core.backend import CheckerSession, EmbeddedService, ShapeIssue
 
 
 class UnusedCompiler(Compiler):
@@ -53,3 +53,26 @@ def test_backend_can_provide_only_query_checking() -> None:
         backend.migrations("fake://example", "migrations")
     with pytest.raises(UnsupportedCapabilityError, match="test database provisioning"):
         backend.testing("fake://example")
+
+
+def test_a_backend_without_an_embedded_factory_has_no_embedded_urls() -> None:
+    assert Backend().embedded("embedded://") is None
+
+
+def test_the_embedded_factory_decides_which_urls_are_embedded() -> None:
+    marker = object()
+    seen: list[str] = []
+
+    def factory(dsn: str) -> EmbeddedService | None:
+        seen.append(dsn)
+        return cast("EmbeddedService", marker) if dsn.startswith("embedded:") else None
+
+    backend = Backend(embedded_factory=factory)
+    assert backend.embedded("embedded://") is marker
+    assert backend.embedded("postgresql://h/db") is None
+    assert seen == ["embedded://", "postgresql://h/db"]
+
+
+def test_a_scratch_build_holds_one_url_per_worker() -> None:
+    build = ScratchBuild(urls=("a", "b"), seconds=1.5)
+    assert (build.urls, build.seconds) == (("a", "b"), 1.5)

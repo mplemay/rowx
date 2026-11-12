@@ -6,8 +6,10 @@ members = [
     "crates/rowx-py-core",
     "packages/rowx-postgres",
 ]
-# cargo-fuzz targets need nightly and unsafe code, so they stay out of the workspace and its lints
-exclude = ["fuzz"]
+# cargo-fuzz targets need nightly and unsafe code, so they stay out of the workspace and its lints.
+# packages/rowx-embedded is its own workspace: the engine pulls in about 440 Wasmer crates (edition 2024, rust-version
+# 1.93), a vendored patch and its own lock file, and none of that may build under `cargo test --workspace` or clippy.
+exclude = ["fuzz", "packages/rowx-embedded"]
 
 [workspace.package]
 version = "0.2.0"

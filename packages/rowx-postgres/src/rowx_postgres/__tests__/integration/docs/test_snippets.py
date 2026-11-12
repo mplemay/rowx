@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 ROOT: Final[Path] = next(parent for parent in Path(__file__).resolve().parents if (parent / "Cargo.lock").is_file())
 # `.agents/skills/` may be absent; the pattern stays so a later skill page is picked up.
 DOC_GLOBS: Final[tuple[str, ...]] = ("README.md", "docs/**/*.md", ".agents/skills/**/*.md")
+# the pages whose snippets run the in-process engine, so they need the companion and not a server
+EMBEDDED_DOCS: Final[frozenset[str]] = frozenset({"docs/guide/embedded.md"})
 SNIPPET: Final[Pattern[str]] = re_compile(r"^```python test\n(?P<body>.*?)^```$", MULTILINE | DOTALL)
 
 
@@ -51,14 +53,62 @@ def _doc_files() -> tuple[Path, ...]:
     return tuple(sorted(found))
 
 
-def _snippets() -> list[tuple[Path, int, str]]:
+def _relative(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+# the snippets that need what one embedded session cannot give, by file (relative to the repository root) and a line
+# that only that snippet holds (an index would shift the marks whenever a snippet is added before it)
+SERVER_SNIPPETS: Final[dict[tuple[str, str], pytest.MarkDecorator]] = {
+    # one connection is enough for it, but a pool that opens before its first query races the release of the connection
+    # it warmed: the acquire that finds nothing idle opens a second one and never looks at the idle list again, which one
+    # session refuses (a pool bug, not an engine limit); about a third of runs time out
+    ("README.md", "Pool(DSN, max_size=10)"): pytest.mark.server(needs="sessions"),
+    ("docs/guide/executors.md", "min_size=1, max_size=4"): pytest.mark.server(needs="sessions"),
+    ("docs/guide/executors.md", 'pool.transaction(isolation="serializable")'): pytest.mark.server(needs="sessions"),
+    ("docs/guide/migrations.md", "0001_create_accounts.up.sql"): pytest.mark.server(needs="sessions"),
+    # the plugin clones a template database
+    ("docs/guide/testing.md", 'pytest_plugins = ["rowx.testing"]'): pytest.mark.server(needs="create-database"),
+    # a client_encoding other than UTF8
+    ("docs/guide/security.md", "client_encoding = 'SJIS'"): pytest.mark.server(divergence="encoding"),
+}
+
+
+def _bodies() -> list[tuple[Path, int, str]]:
     return [(path, i, m["body"]) for path in _doc_files() for i, m in enumerate(SNIPPET.finditer(path.read_text()))]
+
+
+def _marks(path: Path, body: str) -> list[pytest.MarkDecorator]:
+    name = _relative(path)
+    marks = [mark for (file, fragment), mark in SERVER_SNIPPETS.items() if file == name and fragment in body]
+    return [pytest.mark.embedded, *marks] if name in EMBEDDED_DOCS else marks
+
+
+def _snippets() -> list[tuple[Path, int, str] | object]:
+    return [
+        pytest.param(path, i, body, marks=marks) if (marks := _marks(path, body)) else (path, i, body)
+        for path, i, body in _bodies()
+    ]
+
+
+# a fragment that matches no snippet, or two, would leave a snippet unmarked or marked twice, silently
+def test_every_server_snippet_key_matches_exactly_one_snippet() -> None:
+    matches = {
+        key: [i for path, i, body in _bodies() if _relative(path) == key[0] and key[1] in body]
+        for key in SERVER_SNIPPETS
+    }
+    assert {key: len(found) for key, found in matches.items()} == dict.fromkeys(SERVER_SNIPPETS, 1)
 
 
 def test_readme_and_guide_are_discovered() -> None:
     discovered = set(_doc_files())
     assert ROOT / "README.md" in discovered
     assert ROOT / "docs" / "guide.md" in discovered
+
+
+def test_every_embedded_doc_is_discovered_and_has_snippets() -> None:
+    snippeted = {_relative(path) for path, _, _ in _bodies()}
+    assert snippeted >= EMBEDDED_DOCS
 
 
 @pytest.mark.db

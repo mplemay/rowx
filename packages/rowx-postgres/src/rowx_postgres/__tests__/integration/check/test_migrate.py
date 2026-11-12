@@ -339,6 +339,7 @@ def limited_dsn(schema: str) -> Iterator[tuple[str, str]]:
             conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_password_is_never_printed(
     limited_dsn: tuple[str, str],
     migrations: Path,
@@ -623,6 +624,7 @@ def watched_connects(monkeypatch: pytest.MonkeyPatch, on_failure: Callable[[], N
     yield attempts
 
 
+@pytest.mark.server(needs="tcp")
 def test_connect_timeout_retries_until_the_server_accepts(
     schema: str, migrations: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

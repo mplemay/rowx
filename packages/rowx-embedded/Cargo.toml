@@ -1,0 +1,60 @@
+# A separate Cargo workspace (listed in the root `exclude`): the engine pulls in about 440 Wasmer crates (edition 2024,
+# rust-version 1.93), carries a vendored patch and has its own lock file, so none of that may reach the root
+# `cargo test --workspace`, root clippy or `maturin develop` of the other packages.
+[workspace]
+resolver = "3"
+members = [".", "crates/rowx-embedded-host"]
+
+[package]
+name = "rowx-embedded"
+version = "18.4.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+publish = false
+
+[lib]
+name = "_engine"
+crate-type = ["cdylib"]
+# the cdylib does not link into a test binary without libpython; the testable logic lives in the host crate
+test = false
+doctest = false
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["abi3-py314"] }
+rowx-embedded-host = { path = "crates/rowx-embedded-host" }
+thiserror = "2"
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[lints]
+workspace = true
+
+[workspace.dependencies]
+# the full contrib set the engine can ship (32 extensions); the names are mirrored in `host/src/runtime.rs`
+oliphaunt-wasix = { version = "=0.3.2", features = ["extension-amcheck", "extension-auto-explain", "extension-bloom", "extension-btree-gin", "extension-btree-gist", "extension-citext", "extension-cube", "extension-dict-int", "extension-dict-xsyn", "extension-earthdistance", "extension-file-fdw", "extension-fuzzystrmatch", "extension-hstore", "extension-intarray", "extension-isn", "extension-lo", "extension-ltree", "extension-pageinspect", "extension-pg-buffercache", "extension-pg-freespacemap", "extension-pg-surgery", "extension-pg-trgm", "extension-pg-visibility", "extension-pg-walinspect", "extension-pgcrypto", "extension-seg", "extension-tablefunc", "extension-tcn", "extension-tsm-system-rows", "extension-tsm-system-time", "extension-unaccent", "extension-uuid-ossp"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[profile.release]
+debug = false
+
+# wasmer-compiler 7.2.1 with the macOS arm64 compact-unwind `dso_base` fix; see vendor/wasmer-compiler/NOTICE.md
+[patch.crates-io]
+wasmer-compiler = { path = "vendor/wasmer-compiler" }

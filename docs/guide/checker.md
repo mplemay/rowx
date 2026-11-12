@@ -188,3 +188,6 @@ For example, run `docker run --rm -e POSTGRES_PASSWORD=example -p 127.0.0.1:5432
 `ROWX_DATABASE_URL=postgresql://postgres:example@127.0.0.1:5432/postgres`. Pass the URL through `--database-url` or
 `ROWX_DATABASE_URL`; historical configuration does not select the server. The role needs `CREATEDB`. The workflow
 rejects symbolic links and Git submodules in snapshots.
+
+With no server at all, `--database-url embedded://` builds both schemas in memory. See
+[Embedded Postgres](embedded.md#check).

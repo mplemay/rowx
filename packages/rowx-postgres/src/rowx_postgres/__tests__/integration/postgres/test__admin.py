@@ -53,6 +53,7 @@ def test_create_exists_and_drop(server_dsn: str) -> None:
 
 
 @pytest.mark.db
+@pytest.mark.server(needs="create-database")
 def test_name_defaults_to_the_database_in_the_options(server_dsn: str) -> None:
     name = unique("rowx_py_default")
     options = ConnectOptions.from_dsn(server_dsn, database=name)
@@ -83,6 +84,7 @@ def test_unusable_names_are_interface_errors() -> None:
 
 
 @pytest.mark.db
+@pytest.mark.server(needs="create-database")
 def test_template_and_quoted_names(server_dsn: str) -> None:
     template = f'a-b "{unique("tpl")}"'
     clone = unique("rowx_py_clone")
@@ -105,6 +107,7 @@ def test_template_and_quoted_names(server_dsn: str) -> None:
 
 
 @pytest.mark.db
+@pytest.mark.server(needs="create-database")
 def test_force_drops_a_database_with_a_live_session(server_dsn: str) -> None:
     name = unique("rowx_py_force")
 
@@ -124,6 +127,7 @@ def test_force_drops_a_database_with_a_live_session(server_dsn: str) -> None:
 
 
 @pytest.mark.db
+@pytest.mark.server(needs="auth")
 def test_a_wrong_password_never_appears_in_an_error(server_dsn: str) -> None:
     needle = "hunter2-not-the-password"
     options = ConnectOptions.from_dsn(server_dsn, password=needle)

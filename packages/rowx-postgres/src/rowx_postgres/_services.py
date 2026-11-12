@@ -17,6 +17,7 @@ from rowx_postgres._core import (
     drop_database,
     list_databases,
 )
+from rowx_postgres._embedded import reject_embedded
 from rowx_postgres._migrate import Migrator
 from rowx_postgres._options import ConnectOptions
 from rowx_postgres._pool import Pool
@@ -94,11 +95,13 @@ class PostgresCheckerSession(CheckerSession):
 
 
 async def open_checker(dsn: str, timeout_s: float) -> PostgresCheckerSession:
+    reject_embedded(dsn)
     return PostgresCheckerSession(await connect_checker(dsn, timeout_s))
 
 
 class PostgresAdmin:
     def __init__(self, dsn: str) -> None:
+        reject_embedded(dsn)
         self._dsn = dsn
         self._options = ConnectOptions.from_dsn(dsn)
 
@@ -197,6 +200,8 @@ class PostgresMigrations:
         allow_out_of_order: bool = False,
         ignore_missing: bool = False,
     ) -> None:
+        # an embedded URL is accepted so that a scratch can be built from it, but nothing here connects to one: `run_on`
+        # takes the instance's socket DSN and `open` refuses
         self._dsn = dsn
         self._table = table
         self._migrator = Migrator(
@@ -214,6 +219,7 @@ class PostgresMigrations:
     async def open(
         self, *, connect_timeout: float = 10.0, readonly: bool = False, statement_timeout: float = 10.0
     ) -> PostgresMigrationSession:
+        reject_embedded(self._dsn)
         if readonly:
             connection = Connection(await connect_checker(self._dsn, statement_timeout))
         else:
@@ -227,7 +233,13 @@ class PostgresMigrations:
 
 class PostgresProvisioner(Provisioner):
     def __init__(self, dsn: str) -> None:
+        reject_embedded(dsn)
         self._dsn = dsn
+
+    @property
+    @override
+    def identity(self) -> tuple[str, ...]:
+        return ()
 
     @override
     async def ensure_template(

@@ -1,16 +1,41 @@
 import os
+import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psycopg
 import pytest
+from rowx_postgres.__tests__.integration.check.harness import require_companion
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from rowx_core.backend import Describe
 
 pytestmark = pytest.mark.db
+
+
+@pytest.fixture(scope="module")
+def companion() -> None:
+    require_companion()
+
+
+# a short path of its own (a socket path is limited to about 100 bytes), so a leftover can be counted exactly
+@pytest.fixture
+def private_tmp(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    root = Path(tempfile.mkdtemp(prefix="rxk-"))
+    monkeypatch.setenv("TMPDIR", str(root))
+    yield root
+    leftovers = sorted(path.name for path in root.iterdir() if path.name.startswith("rxe-"))
+    shutil.rmtree(root, ignore_errors=True)
+    assert not leftovers, f"an instance left {leftovers} behind"
+
+
+def embedded_only[F: Callable[..., object]](test: F) -> F:
+    return pytest.mark.embedded(pytest.mark.usefixtures("companion", "private_tmp")(test))
 
 
 def git(root: Path, *args: str) -> str:
@@ -31,7 +56,7 @@ def commit(root: Path, source: str, migration: str) -> str:
     return git(root, "rev-parse", "HEAD")
 
 
-def run_compat(root: Path, base: str, head: str) -> subprocess.CompletedProcess[str]:
+def run_compat(root: Path, base: str, head: str, dsn: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         [
             str(Path(sys.executable).parent / "rowx"),
@@ -41,7 +66,7 @@ def run_compat(root: Path, base: str, head: str) -> subprocess.CompletedProcess[
             "--head",
             head,
             "--database-url",
-            os.environ["ROWX_TEST_DSN"],
+            dsn or os.environ["ROWX_TEST_DSN"],
         ],
         cwd=root,
         capture_output=True,
@@ -50,54 +75,55 @@ def run_compat(root: Path, base: str, head: str) -> subprocess.CompletedProcess[
     )
 
 
-@pytest.mark.parametrize(
-    ("base_sql", "head_sql", "base_source", "head_source", "status", "direction"),
-    [
-        (
-            "CREATE TABLE t (old int NOT NULL)",
-            "CREATE TABLE t (new int NOT NULL)",
-            "query[int](t'SELECT old FROM t')",
-            "query[int](t'SELECT new FROM t')",
-            1,
-            "migrate first",
-        ),
-        (
-            "CREATE TABLE t (x int NOT NULL)",
-            "CREATE TABLE t (x int NOT NULL)",
-            "query[int](t'SELECT x FROM t')",
-            "query[int](t'SELECT x FROM t')",
-            0,
-            "compatible checked subset",
-        ),
-        (
-            "CREATE TABLE t (x int NOT NULL)",
-            "CREATE TABLE t (x int)",
-            "query[int](t'SELECT x FROM t')",
-            "query[int | None](t'SELECT x FROM t')",
-            1,
-            "migrate first",
-        ),
-        (
-            "CREATE TABLE t (x int NOT NULL, y int NOT NULL)",
-            "CREATE TABLE t (x xml NOT NULL, y int NOT NULL)",
-            "query[int](t'SELECT x FROM t')",
-            "query[int](t'SELECT y FROM t')",
-            1,
-            "migrate first",
-        ),
-        (
-            "CREATE TABLE t (x int)",
-            "CREATE TABLE t (x int NOT NULL)",
-            "query[int | None](t'SELECT x FROM t')",
-            "query[int | None](t'SELECT x FROM t')",
-            0,
-            "compatible checked subset",
-        ),
-    ],
+ROLLOUT_NAMES = ("base_sql", "head_sql", "base_source", "head_source", "status", "direction")
+ROLLOUT_CASES = [
+    (
+        "CREATE TABLE t (old int NOT NULL)",
+        "CREATE TABLE t (new int NOT NULL)",
+        "query[int](t'SELECT old FROM t')",
+        "query[int](t'SELECT new FROM t')",
+        1,
+        "migrate first",
+    ),
+    (
+        "CREATE TABLE t (x int NOT NULL)",
+        "CREATE TABLE t (x int NOT NULL)",
+        "query[int](t'SELECT x FROM t')",
+        "query[int](t'SELECT x FROM t')",
+        0,
+        "compatible checked subset",
+    ),
+    (
+        "CREATE TABLE t (x int NOT NULL)",
+        "CREATE TABLE t (x int)",
+        "query[int](t'SELECT x FROM t')",
+        "query[int | None](t'SELECT x FROM t')",
+        1,
+        "migrate first",
+    ),
+    (
+        "CREATE TABLE t (x int)",
+        "CREATE TABLE t (x int NOT NULL)",
+        "query[int | None](t'SELECT x FROM t')",
+        "query[int | None](t'SELECT x FROM t')",
+        0,
+        "compatible checked subset",
+    ),
+]
+# the embedded engine has no `xml` type
+XML_ROLLOUT = (
+    "CREATE TABLE t (x int NOT NULL, y int NOT NULL)",
+    "CREATE TABLE t (x xml NOT NULL, y int NOT NULL)",
+    "query[int](t'SELECT x FROM t')",
+    "query[int](t'SELECT y FROM t')",
+    1,
+    "migrate first",
 )
-def test_rollout_directions(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
+
+
+def assert_rollout(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     tmp_path: Path,
-    schema: str,
+    dsn: str | None,
     base_sql: str,
     head_sql: str,
     base_source: str,
@@ -105,14 +131,13 @@ def test_rollout_directions(  # ruff: ignore[too-many-arguments, too-many-positi
     status: int,
     direction: str,
 ) -> None:
-    del schema
     git(tmp_path, "init", "-q")
     (tmp_path / "pyproject.toml").write_text("[tool.rowx.migrate]\n", encoding="utf-8")
     (tmp_path / "migrations").mkdir()
     prefix = "from rowx import query\n"
     base = commit(tmp_path, prefix + base_source, base_sql)
     head = commit(tmp_path, prefix + head_source, head_sql)
-    result = run_compat(tmp_path, base, head)
+    result = run_compat(tmp_path, base, head, dsn)
     assert result.returncode == status, result.stdout + result.stderr
     assert direction in result.stdout
     assert base in result.stdout
@@ -126,6 +151,23 @@ def test_rollout_directions(  # ruff: ignore[too-many-arguments, too-many-positi
             assert "error[" in deploy
 
 
+@pytest.mark.server(needs="create-database")
+@pytest.mark.parametrize(ROLLOUT_NAMES, [*ROLLOUT_CASES, XML_ROLLOUT])
+def test_rollout_directions(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
+    tmp_path: Path,
+    schema: str,
+    base_sql: str,
+    head_sql: str,
+    base_source: str,
+    head_source: str,
+    status: int,
+    direction: str,
+) -> None:
+    del schema
+    assert_rollout(tmp_path, None, base_sql, head_sql, base_source, head_source, status, direction)
+
+
+@pytest.mark.server(needs="create-database")
 def test_historical_source_is_never_executed(tmp_path: Path, schema: str) -> None:
     del schema
     git(tmp_path, "init", "-q")
@@ -150,6 +192,7 @@ def test_historical_source_is_never_executed(tmp_path: Path, schema: str) -> Non
     assert not annotation_marker.exists()
 
 
+@pytest.mark.server(needs="create-database")
 @pytest.mark.parametrize(
     "source", ["query[int | None](t'SELECT {None}::int')", "query[list[int | None] | None](t'SELECT {[None]}::int[]')"]
 )
@@ -164,6 +207,7 @@ def test_known_null_self_compatibility(tmp_path: Path, schema: str, source: str)
     assert "compatible checked subset" in result.stdout
 
 
+@pytest.mark.server(needs="create-database")
 @pytest.mark.parametrize(
     ("source", "migration", "expected"),
     [
@@ -192,6 +236,7 @@ def test_incomplete_runs(tmp_path: Path, schema: str, source: str, migration: st
     assert "compatible checked subset" not in result.stdout
 
 
+@pytest.mark.server(needs="create-database")
 def test_cleanup_after_second_schema_fails(tmp_path: Path, schema: str) -> None:
     del schema
     git(tmp_path, "init", "-q")
@@ -210,6 +255,7 @@ def test_cleanup_after_second_schema_fails(tmp_path: Path, schema: str) -> None:
     assert after == before
 
 
+@pytest.mark.server(needs="create-database")
 def test_checked_subset_reports_skipped_sites(tmp_path: Path, schema: str) -> None:
     del schema
     git(tmp_path, "init", "-q")
@@ -223,6 +269,7 @@ def test_checked_subset_reports_skipped_sites(tmp_path: Path, schema: str) -> No
     assert "compatible checked subset" in result.stdout
 
 
+@pytest.mark.server(needs="create-database")
 def test_cross_schema_timeout_identifies_phase(
     tmp_path: Path, schema: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -259,6 +306,7 @@ def test_cross_schema_timeout_identifies_phase(
     assert "compatible checked subset" not in captured.out
 
 
+@pytest.mark.server(needs="create-database")
 @pytest.mark.parametrize(
     ("sqlstate", "expected"),
     [("53200", 2), ("53100", 2), ("55P03", 2), ("55006", 2), ("42501", 2), ("40P01", 2), ("40001", 2), ("42703", 1)],
@@ -300,3 +348,53 @@ def test_cross_schema_database_failure_classification(  # ruff: ignore[too-many-
     assert status == expected
     assert "sql-error" in output
     assert ("incomplete" in output) == (expected == 2)
+
+
+# `check-compat` builds each revision's schema in memory on `embedded://`, one instance per describe worker
+@embedded_only
+@pytest.mark.parametrize(ROLLOUT_NAMES, ROLLOUT_CASES)
+def test_rollout_directions_on_embedded(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
+    tmp_path: Path,
+    base_sql: str,
+    head_sql: str,
+    base_source: str,
+    head_source: str,
+    status: int,
+    direction: str,
+) -> None:
+    assert_rollout(tmp_path, "embedded://", base_sql, head_sql, base_source, head_source, status, direction)
+
+
+@embedded_only
+def test_embedded_compat_describes_several_statements_on_several_instances(tmp_path: Path) -> None:
+    git(tmp_path, "init", "-q")
+    (tmp_path / "pyproject.toml").write_text("[tool.rowx.migrate]\n", encoding="utf-8")
+    (tmp_path / "migrations").mkdir()
+    source = (
+        "from rowx import query\n"
+        "query[int](t'SELECT x FROM t')\n"
+        "query[int](t'SELECT x FROM t WHERE x > 1')\n"
+        "query[int](t'SELECT x FROM t WHERE x > 2')\n"
+    )
+    revision = commit(tmp_path, source, "CREATE TABLE t (x int NOT NULL)")
+    result = run_compat(tmp_path, revision, revision, "embedded://")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "compatible checked subset" in result.stdout
+    assert "disposable PostgreSQL server" not in result.stderr
+
+
+@embedded_only
+def test_embedded_compat_reports_a_failing_migration_like_a_server_and_leaves_nothing(tmp_path: Path) -> None:
+    git(tmp_path, "init", "-q")
+    (tmp_path / "pyproject.toml").write_text("[tool.rowx.migrate]\n", encoding="utf-8")
+    (tmp_path / "migrations").mkdir()
+    source = "from rowx import query\nquery[int](t'SELECT 1')"
+    base = commit(tmp_path, source, "SELECT 1")
+    head = commit(tmp_path, source, "SELECT nonexistent_function()")
+    result = run_compat(tmp_path, base, head, "embedded://")
+    assert result.returncode == 2
+    assert head in result.stderr
+    assert "building schema" in result.stderr
+    assert "the migrations failed on the scratch database" in result.stderr
+    assert "rxe-" not in result.stdout + result.stderr
+    assert "compatible checked subset" not in result.stdout

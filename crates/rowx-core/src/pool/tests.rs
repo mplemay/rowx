@@ -467,11 +467,26 @@ async fn acquire_timeout_covers_retries() -> TestResult {
     shared.failing_connects.store(usize::MAX, Ordering::Release);
     let start = Instant::now();
     let err = pool.acquire().await.err();
-    assert!(matches!(err, Some(PoolError::Core(CoreError::PoolTimeout))));
+    // the last connect error comes back with the timeout
+    assert!(matches!(err, Some(PoolError::ConnectTimeout(FakeError))));
     assert!(start.elapsed() >= Duration::from_secs(2));
     assert!(start.elapsed() < Duration::from_secs(3));
     assert!(shared.attempts.load(Ordering::Acquire) > 2);
     assert_eq!(pool.size(), 0);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn acquire_timeout_without_a_connect_error_is_a_plain_timeout() -> TestResult {
+    let (pool, shared) = pool(PoolOptions {
+        acquire_timeout: Duration::from_secs(2),
+        connect_timeout: Some(Duration::from_millis(100)),
+        ..options()
+    })?;
+    // every attempt outlasts connect_timeout, so none of them fails with an error
+    shared.connect_ms.store(10_000, Ordering::Release);
+    let err = pool.acquire().await.err();
+    assert!(matches!(err, Some(PoolError::Core(CoreError::PoolTimeout))));
     Ok(())
 }
 

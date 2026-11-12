@@ -32,6 +32,7 @@ def _user_modules(root: Path) -> list[str]:
 
 
 @pytest.mark.parametrize("fmt", ["text", "json"])
+@pytest.mark.server(needs="sessions")
 def test_corpus_output_is_identical_across_job_counts(
     capsys: pytest.CaptureFixture[str],
     schema: str,
@@ -46,6 +47,7 @@ def test_corpus_output_is_identical_across_job_counts(
 
 
 @pytest.mark.parametrize("fmt", ["text", "json"])
+@pytest.mark.server(needs="sessions")
 def test_app_output_is_identical_across_job_counts(
     capsys: pytest.CaptureFixture[str],
     app_schema: str,

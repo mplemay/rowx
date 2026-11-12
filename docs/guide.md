@@ -17,6 +17,7 @@ The `python test` blocks in this guide are executed against a seeded database (u
 - [CI](guide/ci.md): run the checker on a throwaway Postgres.
 - [Migrations](guide/migrations.md): SQL-file migrations.
 - [Testing](guide/testing.md): the `rowx.testing` pytest plugin.
+- [Embedded Postgres](guide/embedded.md): an in-process Postgres 18 for development, checking and tests.
 - [Security](guide/security.md): what to trust, and what stays a bound value.
 
 ## Known limits

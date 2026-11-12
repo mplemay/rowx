@@ -83,6 +83,21 @@ jobs:
       - name: Start the TLS postgres
         run: echo "ROWX_TEST_DSN_SSL=$(scripts/pg.sh up --ssl)" >> "$GITHUB_ENV"
 
+      # packages/rowx-embedded is its own Cargo workspace: neither `just check` nor `cargo test --workspace` may build Wasmer
+      - name: Verify the root workspace does not build Wasmer
+        if: matrix.python-version == '3.14'
+        run: |
+          # `! cmd` does not trip errexit, so each check is an explicit `if`
+          if grep -E '^name = "(wasmer|liboliphaunt|oliphaunt)' Cargo.lock; then
+            echo '::error::Cargo.lock lists Wasmer or engine crates.'
+            exit 1
+          fi
+          if cargo tree --workspace --locked --prefix none --edges all | grep -E '^(wasmer|liboliphaunt|oliphaunt)'; then
+            echo '::error::The root workspace depends on Wasmer or engine crates.'
+            exit 1
+          fi
+          echo "no Wasmer or engine crate in the root workspace"
+
       - name: Test rust
         if: matrix.python-version == '3.14'
         run: just test-rust
@@ -107,6 +122,188 @@ jobs:
           rowx_wheels=(dist/rowx-*.whl)
           uv pip install --refresh --python "$RUNNER_TEMP/rowx-wheel-types/bin/python" "${rowx_wheels[0]}[postgres]" dist/rowx_core-*.whl dist/rowx_postgres-*.whl
           ROWX_TYPING_PYTHON="$RUNNER_TEMP/rowx-wheel-types/bin/python" uv run pytest packages/rowx-postgres/src/rowx_postgres/__tests__/unit/test__executor.py
+
+  # the companion wheel for the embedded lane: a manylinux x86_64 build (release-embedded.yml builds the same wheel for the
+  # other platforms). It builds the whole Wasmer tree, so the Cargo cache (keyed on packages/rowx-embedded/Cargo.lock) is
+  # what keeps a pull request warm; the `embedded` job tests and smoke tests the artifact.
+  embedded-wheel:
+    name: Embedded wheel (Linux x86_64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache the Wasmer build
+        id: cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: packages/rowx-embedded
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Record the cached Wasmer artifacts
+        run: |
+          mkdir -p packages/rowx-embedded/target/release/deps
+          find packages/rowx-embedded/target/release/deps -name 'libwasmer_vm-*.rlib' -exec stat -c '%Y %n' {} + | sort > "$RUNNER_TEMP/wasmer-before.txt"
+          echo "Wasmer artifacts restored from the cache: $(wc -l < "$RUNNER_TEMP/wasmer-before.txt")"
+
+      # the manylinux2014 container (glibc 2.17) gives the wheel a manylinux_2_17 tag; it reads the pinned toolchain from
+      # rust-toolchain.toml and mounts the checkout, so the cached target directory is reused
+      - name: Build the wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: x86_64
+          manylinux: "2014"
+          args: -m packages/rowx-embedded/Cargo.toml --release --locked --out dist-embedded --interpreter python3.14
+
+      - name: Check that a warm cache did not rebuild Wasmer
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: |
+          find packages/rowx-embedded/target/release/deps -name 'libwasmer_vm-*.rlib' -exec stat -c '%Y %n' {} + | sort > "$RUNNER_TEMP/wasmer-after.txt"
+          if ! diff "$RUNNER_TEMP/wasmer-before.txt" "$RUNNER_TEMP/wasmer-after.txt"; then
+            echo '::error::Wasmer was rebuilt although the Cargo cache was restored.'
+            exit 1
+          fi
+
+      - name: Check the wheel (tag, size budget, contents, licenses)
+        run: uv run --no-project --python 3.14 python scripts/validate-embedded-wheels.py dist-embedded --platform _x86_64
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: embedded-wheel
+          path: dist-embedded/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  # the engine host's Rust gates: tests, fmt, clippy and the license check. packages/rowx-embedded is its own Cargo
+  # workspace that builds the Wasmer tree, so `just check` and `cargo test --workspace` in the `linux` job leave it out. A job
+  # of its own rather than steps of `embedded-wheel`: the wheel builds in a manylinux container with a release profile, so
+  # nothing of its target directory is shared with a debug build, and the two then run side by side
+  embedded-rust:
+    name: Embedded Rust (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache the Wasmer build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: packages/rowx-embedded
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test the engine host
+        run: cargo test --manifest-path packages/rowx-embedded/Cargo.toml --workspace --locked
+
+      # the same hooks that `just check-embedded` runs, from the prek version that uv.lock pins
+      - name: Format and clippy
+        run: uvx prek@0.5.10 run cargo-fmt-embedded cargo-clippy-embedded --hook-stage manual --all-files
+
+      # the allowed licenses are in packages/rowx-embedded/deny.toml; the tool is installed from crates.io at a fixed version
+      # (the Cargo cache keeps the binary)
+      - name: Check the licenses of the engine tree
+        run: |
+          command -v cargo-deny > /dev/null || cargo install --locked --version 0.20.2 cargo-deny
+          cargo deny --manifest-path packages/rowx-embedded/Cargo.toml check licenses
+
+  # the engine-neutral db tests and the `embedded` tests against the in-process engine; Docker (the `linux` job) stays the
+  # full-capability lane, and `server` tests (several sessions, cancel, TLS, CREATE DATABASE, ...) skip here
+  embedded:
+    name: Embedded (Linux x86_64)
+    runs-on: ubuntu-latest
+    needs: embedded-wheel
+
+    env:
+      ROWX_REQUIRE_DB: "1"
+      ROWX_REQUIRE_EMBEDDED: "1"
+      ROWX_TEST_DSN: embedded://
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install the dependencies
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
+
+      - name: Build the extension
+        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
+
+      - name: Download the companion wheel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: embedded-wheel
+          path: dist-embedded
+
+      - name: Install the companion wheel
+        run: uv pip install --no-deps dist-embedded/*.whl
+
+      - name: Test the companion
+        run: uv run pytest packages/rowx-embedded/tests
+
+      # the wheel in a clean venv with rowx-core and rowx-postgres only (no rowx CLI): start, connect over the raw socket
+      # DSN, SELECT 1
+      - name: Smoke test the wheel
+        run: |
+          uv build --package rowx-core --wheel --out-dir dist-smoke
+          uv run maturin build -m packages/rowx-postgres/Cargo.toml --out dist-smoke
+          cp dist-embedded/*.whl dist-smoke/
+          scripts/smoke-embedded-wheel.sh dist-smoke
+
+      - name: Test python against the embedded engine
+        run: uv run pytest -m "(db and not server) or embedded" -n auto
+
+      # examples/embedded needs no server: the script runs its migrations in memory, `rowx check` builds a scratch database
+      # for `embedded://`, and the plugin clones a snapshot per test
+      - name: Run the embedded example
+        run: uv run python examples/embedded/notes.py
+
+      - name: Check and test the embedded example
+        working-directory: examples/embedded
+        env:
+          DATABASE_URL: embedded://
+        run: |
+          uv run --project ../.. rowx check -j 4
+          uv run --project ../.. pytest -p no:cacheprovider -o rowx_require_database=true
 
   macos:
     name: macOS

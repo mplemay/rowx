@@ -15,6 +15,11 @@
 | **attrs**, **msgspec** | Named row types | **Not in this version.** Both would need their own detection and field rules. They are part of [#297](https://github.com/mplemay/rowx/issues/297). |
 | **pytest-asyncio** | Plugin loop-scope tests (dev group) | **Yes, dev only.** `rowx.testing` must work from async tests. It is not a dependency of `rowx` or of `rowx[pytest]`. |
 | **pytest-xdist** | Plugin concurrency tests (dev group) | **Yes, dev only.** A session-scoped template must be built once under `-n`. It is not a dependency of `rowx` or of `rowx[pytest]`. |
+| The WASIX engine crates (`oliphaunt-wasix`, `liboliphaunt-wasix-portable`, both `=0.3.2`) and Wasmer (`7.2.1`) | The embedded engine (`rowx-embedded`) | **Yes**, in `rowx-embedded` only. The only maintained in-process PostgreSQL 18 that gives one backend per instance with its own memory. All MIT or compatible (`cargo deny check licenses` over the companion's tree, with its own `deny.toml`). rowx's code needs no `unsafe` (`unsafe_code = "forbid"`); the engine's AOT loading is internal to the dependency. |
+| A vendored `wasmer-compiler` 7.2.1 with the upstream 7.5.0 compact-unwind fix | The embedded engine (`rowx-embedded`) | Yes, temporary. On macOS arm64, stock 7.2.1 truncates 32-bit unwind deltas when the engine is loaded into CPython, and the process dies with SIGBUS on any Postgres error path. `oliphaunt-wasix` 0.3.2 pins `wasmer =7.2.1`, so a `[patch.crates-io]` carries the fix until it allows 7.5.0 or later. See `vendor/wasmer-compiler/NOTICE.md`. The patch removes an `unsafe` block rather than adding one. |
+| wasmtime and WASI | The embedded engine (`rowx-embedded`) | **No**. There is no maintained PostgreSQL 18 build for it. |
+| Native binaries as a child process | The embedded engine (`rowx-embedded`) | **No**. In-process was chosen: no child process, no ports, one lifetime with the Python process. |
+| A third-party wheel of Postgres | The embedded engine (`rowx-embedded`) | **No**. Its contrib set and its versions are not ours to control. |
 
 The lint gate is [Testing](testing.md). `ty` runs in `prek`. pyright and mypy are dev dependencies because the
 conformance reveal test invokes them. They are not runtime dependencies.

@@ -5,6 +5,10 @@ default:
 check:
     uv run prek run --all-files
 
+# clippy for packages/rowx-embedded (a separate workspace: builds the Wasmer tree, so `check` leaves it out)
+check-embedded:
+    uv run prek run cargo-clippy-embedded --hook-stage manual --all-files
+
 # cargo test over the workspace; DB tests run when ROWX_TEST_DSN is set
 test-rust:
     cargo test --workspace
@@ -12,6 +16,14 @@ test-rust:
 # python tests
 test-py:
     uv run pytest
+
+# install the local rowx-embedded companion (a maturin build of the Wasmer engine; `uv sync --all-groups` never does)
+embedded-dev:
+    uv sync --extra embedded
+
+# the tests marked `embedded`; they fail instead of skipping when the companion is missing
+test-embedded:
+    ROWX_REQUIRE_EMBEDDED=1 uv run --extra embedded pytest -m embedded
 
 # long nullability fuzz with a random seed, printing the precision report; needs ROWX_TEST_DSN
 fuzz-nullability count="5000":

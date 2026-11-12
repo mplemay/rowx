@@ -2,6 +2,12 @@
 
 ## 0.3.0 (unreleased)
 
+- `rowx[embedded]` adds an in-process Postgres 18 for development, checking and tests. An `embedded://` URL selects it
+  for `connect`, `Pool`, `rowx check`, `rowx migrate` and the pytest plugin, and `Pool(max_size=None)` defaults to 1 for
+  it. `rowx check-compat` builds both schemas in memory for `embedded://`. See
+  [Embedded Postgres](guide/embedded.md).
+- A pool acquire that times out while connecting now raises `PoolTimeoutError` with the last connect error as its
+  `__cause__`, and the message says so, instead of reporting the timeout alone.
 - `_fetch` / `_stream` take a core `ShapeSpec`, and the Postgres executor builds and caches the native shape.
 - Three lockstep distributions replace the published 0.2.0 wheel. `rowx-core` (import `rowx_core`) has no runtime
   dependencies. `rowx-postgres` (import `rowx_postgres`, native module `rowx_postgres._core`) depends only on matching

@@ -228,7 +228,7 @@ def test_unknown_scheme_on_migrate_and_database_exits_two(tmp_path: Path, argv: 
     assert "rowx[postgres]" not in result.stderr
 
 
-@pytest.mark.parametrize("dsn", ["sqlite://x", "embedded://x"])
+@pytest.mark.parametrize("dsn", ["sqlite://x", "mysql://x"])
 def test_unknown_scheme_does_not_ask_for_the_postgres_extra(dsn: str) -> None:
     with pytest.raises(UnsupportedSchemeError, match="unknown database scheme") as raised:
         module_for(dsn)

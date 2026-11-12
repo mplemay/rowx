@@ -72,7 +72,7 @@ hooks = [
     id = "ty-check",
     name = "ty check",
     entry = "uv run ty check",
-    args = ["src", "packages/rowx-core/src", "packages/rowx-postgres/src"],
+    args = ["src", "packages/rowx-core/src", "packages/rowx-postgres/src", "packages/rowx-embedded/src"],
     env = { TY_UV = "1" },
     language = "python",
     types_or = [
@@ -116,6 +116,28 @@ hooks = [
     files = '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.cargo/config\.toml|(src|crates|packages)/.*\.(rs|toml))$',
     pass_filenames = false,
     require_serial = true,
+  },
+  # packages/rowx-embedded is a separate Cargo workspace (see the root `exclude`), so it gets its own hooks. Formatting
+  # builds nothing and runs by default. Clippy would fetch and check about 440 Wasmer crates, so it is a manual-stage
+  # hook (`just check-embedded`, and the embedded CI job) and `just check` leaves it out.
+  {
+    id = "cargo-fmt-embedded",
+    name = "cargo fmt (rowx-embedded)",
+    entry = "cargo fmt --manifest-path packages/rowx-embedded/Cargo.toml -p rowx-embedded -p rowx-embedded-host --",
+    language = "system",
+    files = '^packages/rowx-embedded/(Cargo\.(toml|lock)|(src|crates)/.*\.(rs|toml))$',
+    pass_filenames = false,
+    require_serial = true,
+  },
+  {
+    id = "cargo-clippy-embedded",
+    name = "cargo clippy (rowx-embedded)",
+    entry = "cargo clippy --manifest-path packages/rowx-embedded/Cargo.toml -p rowx-embedded -p rowx-embedded-host --all-targets --all-features -- -D warnings",
+    language = "system",
+    files = '^packages/rowx-embedded/(Cargo\.(toml|lock)|(src|crates|vendor)/.*\.(rs|toml))$',
+    pass_filenames = false,
+    require_serial = true,
+    stages = ["manual"],
   },
   {
     id = "shfmt",

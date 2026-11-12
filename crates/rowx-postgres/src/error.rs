@@ -30,6 +30,9 @@ pub enum Error {
     },
     #[error(transparent)]
     Core(#[from] CoreError),
+    /// An acquire timed out while connects kept failing; the last connect error is the cause.
+    #[error("timed out waiting for a pooled connection; the last connect failed: {0}")]
+    ConnectTimeout(Box<Self>),
     #[error("{0}")]
     RowShape(String),
     /// A named row's columns do not map onto its fields; the binding renders the text from the indices

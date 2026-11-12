@@ -22,6 +22,12 @@ WHEELS: Final[tuple[str, ...]] = (ROWX_WHEEL, CORE_WHEEL, POSTGRES_WHEEL)
 KEYWORDS: Final[str] = "sql,postgresql,postgres,typed,async,t-string"
 DOTTED_ROWX_POSTGRES: Final[str] = "rowx.postgres==0.2.0"
 REQUESTS_REQUIREMENT: Final[str] = "requests>=2"
+CORE_REQUIREMENT: Final[str] = f"rowx-core=={VERSION}"
+POSTGRES_PIN: Final[str] = f"rowx-postgres=={VERSION}"
+PYTEST_REQUIREMENT: Final[str] = "pytest>=9.2.0 ; extra == 'pytest'"
+DARWIN_CLAUSE: Final[str] = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'embedded'"
+LINUX_AARCH64_CLAUSE: Final[str] = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'embedded'"
+LINUX_X86_CLAUSE: Final[str] = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'embedded'"
 WRONG_NAME: Final[str] = "not-rowx"
 WRONG_VERSION: Final[str] = "9.9.9"
 CLASSIFIERS: Final[tuple[str, ...]] = (
@@ -81,14 +87,20 @@ def _load_validate_wheel() -> ValidateWheel:
 VALIDATE_WHEEL: Final[ValidateWheel] = _load_validate_wheel()
 
 
+def _embedded_requirement(*clauses: str, specifier: str = "rowx-embedded>=18.4,<19") -> str:
+    return f"{specifier} ; " + " or ".join(f"({clause})" for clause in clauses)
+
+
 def _default_requires(namespace: str) -> tuple[str, ...]:
     core = f"rowx-core=={VERSION}"
     if namespace == ROWX:
         return (
             core,
             "pathspec<2,>=1.1.1",
-            f"rowx-postgres=={VERSION} ; extra == 'postgres'",
-            "pytest>=9.2.0 ; extra == 'pytest'",
+            f"{POSTGRES_PIN} ; extra == 'embedded'",
+            _embedded_requirement(DARWIN_CLAUSE, LINUX_AARCH64_CLAUSE, LINUX_X86_CLAUSE),
+            f"{POSTGRES_PIN} ; extra == 'postgres'",
+            PYTEST_REQUIREMENT,
         )
     if namespace == ROWX_CORE:
         return ()
@@ -230,4 +242,142 @@ def test_rowx_name_mismatch_fails(tmp_path: Path) -> None:
 def test_rowx_version_mismatch_fails(tmp_path: Path) -> None:
     path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, metadata_version=WRONG_VERSION))
     with pytest.raises(SystemExit, match=r"Version is '9\.9\.9'"):
+        VALIDATE_WHEEL(path)
+
+
+def _rowx_requires(*requirements: str) -> tuple[str, ...]:
+    return (CORE_REQUIREMENT, "pathspec<2,>=1.1.1", *requirements)
+
+
+EMBEDDED_POSTGRES: Final[str] = f"{POSTGRES_PIN} ; extra == 'embedded'"
+POSTGRES_EXTRA_REQUIREMENT: Final[str] = f"{POSTGRES_PIN} ; extra == 'postgres'"
+ALL_CLAUSES: Final[tuple[str, ...]] = (DARWIN_CLAUSE, LINUX_AARCH64_CLAUSE, LINUX_X86_CLAUSE)
+
+
+def test_rowx_wheel_accepts_reordered_embedded_clauses(tmp_path: Path) -> None:
+    requires = _rowx_requires(
+        POSTGRES_EXTRA_REQUIREMENT,
+        _embedded_requirement(*reversed(ALL_CLAUSES)),
+        PYTEST_REQUIREMENT,
+        EMBEDDED_POSTGRES,
+    )
+    VALIDATE_WHEEL(_write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, requires=requires)))
+
+
+@pytest.mark.parametrize(
+    ("requires", "match"),
+    [
+        pytest.param(
+            _rowx_requires(EMBEDDED_POSTGRES, POSTGRES_EXTRA_REQUIREMENT, PYTEST_REQUIREMENT),
+            "embedded requirements are \\[\\]",
+            id="missing-companion",
+        ),
+        pytest.param(
+            _rowx_requires(
+                POSTGRES_EXTRA_REQUIREMENT,
+                PYTEST_REQUIREMENT,
+                _embedded_requirement(*ALL_CLAUSES),
+            ),
+            "postgres requirements are",
+            id="missing-embedded-postgres",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES.replace(VERSION, WRONG_VERSION),
+                POSTGRES_EXTRA_REQUIREMENT,
+                _embedded_requirement(*ALL_CLAUSES),
+            ),
+            "postgres requirements are",
+            id="embedded-postgres-wrong-pin",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES,
+                POSTGRES_EXTRA_REQUIREMENT,
+                _embedded_requirement(*ALL_CLAUSES, specifier="rowx-embedded>=18.4,<20"),
+            ),
+            "embedded requirements are",
+            id="wrong-range",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES,
+                POSTGRES_EXTRA_REQUIREMENT,
+                _embedded_requirement(*ALL_CLAUSES[:2]),
+            ),
+            "not a single extra",
+            id="missing-platform",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES,
+                POSTGRES_EXTRA_REQUIREMENT,
+                _embedded_requirement(
+                    *ALL_CLAUSES,
+                    "platform_machine == 'AMD64' and sys_platform == 'win32' and extra == 'embedded'",
+                ),
+            ),
+            "not a single extra",
+            id="extra-platform",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES,
+                POSTGRES_EXTRA_REQUIREMENT,
+                _embedded_requirement(*ALL_CLAUSES[:2], LINUX_X86_CLAUSE.replace(" and extra == 'embedded'", "")),
+            ),
+            "not a single extra",
+            id="clause-without-extra",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES,
+                POSTGRES_EXTRA_REQUIREMENT,
+                _embedded_requirement(*(clause.replace("'embedded'", "'postgres'") for clause in ALL_CLAUSES)),
+            ),
+            "not a single extra",
+            id="wrong-extra",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES, POSTGRES_EXTRA_REQUIREMENT, "rowx-embedded>=18.4,<19 ; extra == 'embedded'"
+            ),
+            "embedded requirements are",
+            id="no-platform-marker",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES,
+                POSTGRES_EXTRA_REQUIREMENT,
+                _embedded_requirement(*ALL_CLAUSES),
+                "rowx-embedded>=18.4,<19",
+            ),
+            "direct requirements are",
+            id="unconditional-companion",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES,
+                POSTGRES_EXTRA_REQUIREMENT,
+                _embedded_requirement(*ALL_CLAUSES),
+                _embedded_requirement(*ALL_CLAUSES),
+            ),
+            "embedded requirements are",
+            id="duplicate-companion",
+        ),
+        pytest.param(
+            _rowx_requires(
+                EMBEDDED_POSTGRES,
+                POSTGRES_EXTRA_REQUIREMENT,
+                _embedded_requirement(*ALL_CLAUSES),
+                f"{REQUESTS_REQUIREMENT} ; sys_platform == 'linux' and extra == 'embedded'",
+            ),
+            "not a single extra",
+            id="other-distribution-with-platform-marker",
+        ),
+    ],
+)
+def test_rowx_wheel_rejects_malformed_embedded_extra(tmp_path: Path, requires: tuple[str, ...], match: str) -> None:
+    path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, requires=requires))
+    with pytest.raises(SystemExit, match=match):
         VALIDATE_WHEEL(path)
