@@ -1,6 +1,9 @@
 import asyncio
 import os
+import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
@@ -10,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol
 import pytest
 from rowx_core.errors import DatabaseError, InterfaceError, MigrateError
 
-from rowx._backend import backend_for
+from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
 from rowx.check.config import DEFAULT_MIGRATE_TABLE, ConfigError, load_config
 from rowx.check.migrate import CheckError, load_migrator, resolve_target
 from rowx.check.runner import redact
@@ -18,7 +21,7 @@ from rowx.check.runner import redact
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Iterable, Iterator, Sequence
 
-    from rowx_core.backend import DatabaseConnection, DatabasePool, MigrationService, Provisioner
+    from rowx_core.backend import CacheDirectory, DatabaseConnection, DatabasePool, MigrationService, Provisioner
 
     from rowx.check.config import Config
 
@@ -30,6 +33,7 @@ HASH_LENGTH: Final[int] = 16
 DATABASE_URL_ENV_INI: Final[str] = "rowx_database_url_env"
 MIGRATIONS_INI: Final[str] = "rowx_migrations"
 REQUIRE_DATABASE_INI: Final[str] = "rowx_require_database"
+INTERRUPT_START_WAIT: Final[float] = 5.0
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -48,6 +52,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="keep this project's stale rowx_tpl_* template databases instead of dropping them when a new one is built",
     )
+
+
+# pytest exits through `sys.exit`, which `atexit` cannot see: tell the embedded engine's exit guard (if the companion is
+# loaded) the run's status, so that a hard exit after an abandoned instance keeps it
+def pytest_sessionfinish(exitstatus: int) -> None:
+    if (api := sys.modules.get("rowx_embedded._api")) is not None:
+        api.set_exit_code(int(exitstatus))
 
 
 def rowx_version() -> str:
@@ -74,22 +85,25 @@ class MigrationSource(Protocol):
     def migrations(self) -> Sequence[MigrationIdentity]: ...
 
 
-def template_name(
+def template_name(  # ruff: ignore[too-many-arguments]
     migrator: MigrationSource | None,
     *,
     directory: Path,
     table: str = DEFAULT_MIGRATE_TABLE,
     create_schemas: Iterable[str] = (),
+    identity: Iterable[str] = (),
     rowx: str | None = None,
 ) -> str:
-    # everything that shapes the template: the rowx version, the path, the history table, the schemas created first and
-    # the forward migrations (a `.down.sql` never changes what the template holds)
+    # everything that shapes the template: the rowx version, the path, the history table, the schemas created first, what
+    # the backend says its template depends on (an embedded engine and its snapshot format) and the forward migrations
+    # (a `.down.sql` never changes what the template holds)
     pairs = sorted((m.version, m.checksum) for m in migrator.migrations) if migrator is not None else []
     lines = [
         f"rowx:{rowx if rowx is not None else rowx_version()}",
         f"path:{directory.resolve()}",
         f"table:{table}",
         *(f"schema:{schema}" for schema in sorted(set(create_schemas))),
+        *(f"identity:{line}" for line in identity),
     ]
     lines += [f"{number}:{checksum.hex()}" for number, checksum in pairs]
     digest = sha256("".join(f"{line}\n" for line in lines).encode()).hexdigest()
@@ -128,21 +142,49 @@ def configured(config: pytest.Config) -> tuple[Config, str]:
     return rowx_config, dsn
 
 
+# a runner with its cache disabled has no `cache`, and the backend then keeps what it caches for this session only
+def cache_directory(config: pytest.Config) -> CacheDirectory | None:
+    if isinstance(cache := getattr(config, "cache", None), pytest.Cache):
+        return cache.mkdir
+    return None
+
+
 def blocking[T](work: Coroutine[Any, Any, T]) -> T:
+    started = threading.Event()
+    handle: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[T]]] = []
+
     # on a thread of its own: a fixture can be set up while this thread runs an event loop (`request.getfixturevalue`
     # from an async test), where `asyncio.run` raises, and the thread's current loop is left as it was
     def run() -> T:
-        return asyncio.run(work)
+        with asyncio.Runner() as runner:
+            loop = runner.get_loop()
+            task = loop.create_task(work)
+            handle.append((loop, task))
+            started.set()
+            return runner.run(task)
 
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="rowx-testing") as executor:
-        return executor.submit(run).result()
+        future = executor.submit(run)
+        try:
+            return future.result()
+        except KeyboardInterrupt:
+            # an interrupt cancels the work, so its own cleanup runs (a snapshot directory is removed) before the
+            # executor joins the thread; left alone, the work would finish into a result nobody collects
+            if started.wait(timeout=INTERRUPT_START_WAIT) and not future.done():
+                loop, task = handle[0]
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(task.cancel)
+            raise
 
 
 @pytest.fixture(scope="session")
 def rowx_template(request: pytest.FixtureRequest) -> Iterator[Session]:
     rowx_config, server_dsn = configured(request.config)
-    backend = backend_for(server_dsn)
-    provisioner = backend.testing(server_dsn)
+    try:
+        backend = backend_for(server_dsn)
+        provisioner = backend.testing(server_dsn, cache=cache_directory(request.config))
+    except (BackendMissing, UnsupportedSchemeError, InterfaceError, ValueError) as error:
+        fail(f"rowx: {error}", server_dsn)
     rootdir = Path(request.config.rootpath)
     ini = str(request.config.getini(MIGRATIONS_INI) or "").strip()
     migrator: MigrationService | None = None
@@ -159,7 +201,9 @@ def rowx_template(request: pytest.FixtureRequest) -> Iterator[Session]:
         directory = target.directory
         table = target.migrate.table
         schemas = target.migrate.create_schemas
-    template = template_name(migrator, directory=directory, table=table, create_schemas=schemas)
+    template = template_name(
+        migrator, directory=directory, table=table, create_schemas=schemas, identity=provisioner.identity
+    )
     project = project_prefix(directory)
     try:
         hold = blocking(

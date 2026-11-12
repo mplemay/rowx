@@ -878,6 +878,7 @@ def test_null_in_non_nullable_position(schema: str) -> None:
         run_with_impl(schema, body)
 
 
+@pytest.mark.server(divergence="xml")
 def test_unsupported_type_is_decode_error(schema: str) -> None:
     async def body(c: ConnectionImpl) -> tuple[bool, list[object]]:
         with pytest.raises(DecodeError, match="xml"):

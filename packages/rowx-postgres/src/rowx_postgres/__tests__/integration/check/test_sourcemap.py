@@ -72,7 +72,7 @@ def test_server_error_positions_map_to_the_source(schema: str, corrupted: bool) 
             corrupt(template)
         cases.append((case, SourceMapper(case.source, COMPILER).build(template)))
     statements = sorted({sourcemap.sql for _, sourcemap in cases})
-    outcomes = asyncio.run(describe_all(schema, statements, 1, TIMEOUT_MS))
+    outcomes = asyncio.run(describe_all([schema], statements, TIMEOUT_MS))
     for case, sourcemap in cases:
         error = outcomes[sourcemap.sql]
         assert isinstance(error, DatabaseError), sourcemap.sql

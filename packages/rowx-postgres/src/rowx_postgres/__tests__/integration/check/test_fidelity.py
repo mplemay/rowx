@@ -88,7 +88,7 @@ def _statements() -> list[str]:
 
 
 def _describe(dsn: str, statements: list[str]) -> dict[str, Describe]:
-    outcomes = asyncio.run(describe_all(dsn, statements, 1, TIMEOUT_MS))
+    outcomes = asyncio.run(describe_all([dsn], statements, TIMEOUT_MS))
     described: dict[str, Describe] = {}
     for sql in statements:
         outcome = outcomes[sql]

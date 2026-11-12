@@ -126,3 +126,5 @@ with TemporaryDirectory() as tmp:
 
 A complete project, with migrations, an application module, drift-checked queries and a `conftest.py`, is in
 [`examples/migrations`](https://github.com/mplemay/rowx/tree/main/examples/migrations).
+
+To run these fixtures with no server at all, see [Embedded Postgres](embedded.md#the-pytest-plugin).

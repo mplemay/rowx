@@ -19,6 +19,14 @@ class BoomError(Exception):
     pass
 
 
+def run_with_one[T](dsn: str, body: Callable[[Connection], Awaitable[T]]) -> T:
+    async def run() -> T:
+        async with await connect(dsn) as conn:
+            return await body(conn)
+
+    return asyncio.run(run())
+
+
 def run_with_two[T](dsn: str, body: Callable[[Connection, Connection], Awaitable[T]]) -> T:
     async def run() -> T:
         async with await connect(dsn) as conn, await connect(dsn) as observer:
@@ -45,6 +53,7 @@ async def count_users(conn: Connection, name: str) -> int:
     return await query[int](t"SELECT count(*) FROM users WHERE name = {name}").one(conn)
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_commit_is_visible_from_a_second_connection(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> tuple[int, int]:
         async with conn.transaction() as tx:
@@ -55,6 +64,7 @@ def test_a_commit_is_visible_from_a_second_connection(schema: str) -> None:
     assert run_with_two(schema, body) == (0, 1)
 
 
+@pytest.mark.server(needs="sessions")
 def test_an_exception_rolls_back(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> int:
         async def work() -> None:
@@ -70,6 +80,7 @@ def test_an_exception_rolls_back(schema: str) -> None:
     assert run_with_two(schema, body) == 0
 
 
+@pytest.mark.server(needs="sessions")
 def test_rolling_back_a_savepoint_keeps_the_outer_work(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> tuple[int, int, int]:
         async with conn.transaction() as tx:
@@ -93,6 +104,7 @@ def test_rolling_back_a_savepoint_keeps_the_outer_work(schema: str) -> None:
     assert run_with_two(schema, body) == (1, 0, 1)
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_swallowed_error_followed_by_a_clean_exit_raises(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> int:
         async def work() -> None:
@@ -109,6 +121,7 @@ def test_a_swallowed_error_followed_by_a_clean_exit_raises(schema: str) -> None:
     assert run_with_two(schema, body) == 0
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_savepoint_rollback_clears_the_failed_flag(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> int:
         async with conn.transaction() as tx:
@@ -123,7 +136,7 @@ def test_a_savepoint_rollback_clears_the_failed_flag(schema: str) -> None:
 
 
 def test_isolation_and_readonly_are_applied(schema: str) -> None:
-    async def body(conn: Connection, _observer: Connection) -> tuple[str, str, str, str]:
+    async def body(conn: Connection) -> tuple[str, str, str, str]:
         async with conn.transaction(isolation="serializable", readonly=True, deferrable=True) as tx:
             level = await query[str](t"SHOW transaction_isolation").one(tx)
             readonly = await query[str](t"SHOW transaction_read_only").one(tx)
@@ -132,19 +145,20 @@ def test_isolation_and_readonly_are_applied(schema: str) -> None:
             default_readonly = await query[str](t"SHOW transaction_read_only").one(tx)
         return level, readonly, default_level, default_readonly
 
-    assert run_with_two(schema, body) == ("serializable", "on", "read committed", "off")
+    assert run_with_one(schema, body) == ("serializable", "on", "read committed", "off")
 
 
 def test_an_unknown_isolation_level_is_an_interface_error(schema: str) -> None:
-    async def body(conn: Connection, _observer: Connection) -> None:
+    async def body(conn: Connection) -> None:
         with pytest.raises(InterfaceError):
             async with conn.transaction(isolation="chaos"):
                 pass
         assert await query[int](t"SELECT 1").one(conn) == 1
 
-    run_with_two(schema, body)
+    run_with_one(schema, body)
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_serialization_failure_on_commit_raises_and_the_connection_survives(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> int:
         await query(t"CREATE TABLE ser (k int PRIMARY KEY, v int)").execute(conn)
@@ -263,7 +277,7 @@ def test_a_timeout_during_the_commit_discards_the_connection(schema: str) -> Non
 
 
 def test_a_transaction_cannot_be_used_after_it_ends(schema: str) -> None:
-    async def body(conn: Connection, _observer: Connection) -> None:
+    async def body(conn: Connection) -> None:
         async with conn.transaction() as tx:
             await tx.commit()
             with pytest.raises(InterfaceError):
@@ -280,20 +294,21 @@ def test_a_transaction_cannot_be_used_after_it_ends(schema: str) -> None:
             await reenter()
         assert await query[int](t"SELECT 1").one(conn) == 1
 
-    run_with_two(schema, body)
+    run_with_one(schema, body)
 
 
 def test_isolation_arguments_on_a_savepoint_are_an_interface_error(schema: str) -> None:
-    async def body(conn: Connection, _observer: Connection) -> None:
+    async def body(conn: Connection) -> None:
         async with conn.transaction() as tx:
             with pytest.raises(InterfaceError):
                 tx.transaction(isolation="serializable")
             with pytest.raises(InterfaceError):
                 tx.transaction(readonly=True)
 
-    run_with_two(schema, body)
+    run_with_one(schema, body)
 
 
+@pytest.mark.server(needs="sessions")
 def test_ending_the_outer_transaction_with_a_savepoint_open_is_an_interface_error(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> int:
         async with conn.transaction() as tx:
@@ -309,16 +324,17 @@ def test_ending_the_outer_transaction_with_a_savepoint_open_is_an_interface_erro
 
 
 def test_a_second_transaction_on_a_busy_connection_is_an_interface_error(schema: str) -> None:
-    async def body(conn: Connection, _observer: Connection) -> None:
+    async def body(conn: Connection) -> None:
         async with conn.transaction():
             with pytest.raises(InterfaceError):
                 async with conn.transaction():
                     pass
         assert await query[int](t"SELECT 1").one(conn) == 1
 
-    run_with_two(schema, body)
+    run_with_one(schema, body)
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_swallowed_error_from_a_query_on_the_connection_raises(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> int:
         async def work() -> None:
@@ -334,6 +350,7 @@ def test_a_swallowed_error_from_a_query_on_the_connection_raises(schema: str) ->
     assert run_with_two(schema, body) == 0
 
 
+@pytest.mark.server(needs="sessions")
 def test_ending_on_a_busy_connection_leaves_the_transaction_open(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> int:
         async with conn.transaction() as tx:
@@ -365,6 +382,7 @@ async def count_users_pool(pool: Pool, name: str) -> int:
     return await query[int](t"SELECT count(*) FROM users WHERE name = {name}").one(pool)
 
 
+@pytest.mark.server(needs="sessions")
 def test_an_exception_in_a_pool_transaction_rolls_back(schema: str) -> None:
     async def body(observer: Connection) -> int:
         async with Pool(schema, max_size=1) as pool:

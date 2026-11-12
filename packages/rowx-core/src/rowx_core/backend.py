@@ -5,8 +5,10 @@ from typing import TYPE_CHECKING, Literal, Protocol, Self
 from rowx_core._executor import Connection, Pool
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
     from datetime import datetime, timedelta
     from os import PathLike
+    from pathlib import Path
     from types import TracebackType
 
     from rowx_core._template import Compiler
@@ -255,10 +257,26 @@ class AdminService(Protocol):
     def with_database(self, name: str) -> str: ...
 
 
+# what a session holds on its migrated template until it closes it
+class TemplateHold(Protocol):
+    async def close(self) -> None: ...
+
+
+# `cache` makes a named directory under the test runner's cache, and is `None` when the runner has no cache
+type CacheDirectory = Callable[[str], Path]
+
+
+class ProvisionerFactory(Protocol):
+    def __call__(self, dsn: str, /, *, cache: CacheDirectory | None = None) -> Provisioner: ...
+
+
 class Provisioner(Protocol):
+    # lines that shape the template beyond the migrations (an engine and its snapshot format), folded into its name
+    @property
+    def identity(self) -> Sequence[str]: ...
     async def ensure_template(
         self, migrator: MigrationService | None, name: str, *, keep_stale: bool, project: str
-    ) -> DatabaseConnection: ...
+    ) -> TemplateHold: ...
     async def clone(self, template: str, project: str) -> str: ...
     async def drop(self, name: str) -> None: ...
     def with_database(self, name: str) -> str: ...
@@ -280,6 +298,40 @@ class MigrationFactory(Protocol):
     ) -> MigrationService: ...
 
 
+# `urls` holds one URL per describe worker, or a single URL that every worker shares
+@dataclass(slots=True, kw_only=True, frozen=True)
+class ScratchBuild:
+    urls: tuple[str, ...]
+    seconds: float
+
+
+# builds the database to describe against, and tears it down when the session ends; `sweep` is the last resort from
+# outside the event loop, for a teardown that was interrupted
+# `workers` is how many describe workers will run, so that a scratch that needs one database per worker builds no more
+class ScratchService(Protocol):
+    def session(self, migrator: MigrationService, workers: int) -> AbstractAsyncContextManager[ScratchBuild]: ...
+    def sweep(self) -> None: ...
+
+
+# raised by an embedded factory for a URL it refuses; the message never quotes a value from the URL, so it can be shown
+class EmbeddedTargetError(ValueError):
+    pass
+
+
+# a database that the backend runs inside the process: the caller never connects to a server, it asks the service for
+# the DSN of an instance that it owns while the context is open
+class EmbeddedService(Protocol):
+    # True when the target is a directory that outlives the run, False for a fresh in-memory database
+    @property
+    def persistent(self) -> bool: ...
+    # starts the persistent instance once and yields its DSN; the instance is closed when the context exits
+    def open(self) -> AbstractAsyncContextManager[str]: ...
+    # an in-memory scratch with one instance per worker
+    def scratch(self) -> ScratchService: ...
+    # the last resort from outside the event loop, for an instance that an interrupted run could not close in time
+    def sweep(self) -> None: ...
+
+
 class UnsupportedCapabilityError(Exception):
     def __init__(self, capability: str) -> None:
         super().__init__(f"the selected backend does not support {capability}")
@@ -290,7 +342,9 @@ class Backend:
     checker_factory: Callable[[], CheckerBackend] | None = None
     admin_factory: Callable[[str], AdminService] | None = None
     migration_factory: MigrationFactory | None = None
-    testing_factory: Callable[[str], Provisioner] | None = None
+    testing_factory: ProvisionerFactory | None = None
+    # `None` from the factory means the URL is not an embedded one
+    embedded_factory: Callable[[str], EmbeddedService | None] | None = None
 
     def checker(self) -> CheckerBackend:
         if self.checker_factory is None:
@@ -327,8 +381,13 @@ class Backend:
             ignore_missing=ignore_missing,
         )
 
-    def testing(self, dsn: str) -> Provisioner:
+    def testing(self, dsn: str, *, cache: CacheDirectory | None = None) -> Provisioner:
         if self.testing_factory is None:
             capability = "test database provisioning"
             raise UnsupportedCapabilityError(capability)
-        return self.testing_factory(dsn)
+        return self.testing_factory(dsn, cache=cache)
+
+    def embedded(self, dsn: str) -> EmbeddedService | None:
+        if self.embedded_factory is None:
+            return None
+        return self.embedded_factory(dsn)

@@ -1,0 +1,63 @@
+[project]
+name = "rowx-embedded"
+version = "0.3.0"
+description = "In-process PostgreSQL 18 engine host for rowx (development, checking and tests)"
+readme = "README.md"
+authors = [
+    { name = "Matt LeMay", email = "mplemay@users.noreply.github.com" }
+]
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.14"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Typing :: Typed",
+    "Topic :: Database",
+]
+keywords = ["postgresql", "postgres", "embedded", "wasm", "rowx"]
+dependencies = ["rowx-core==0.3.0", "rowx-postgres==0.3.0"]
+
+[project.urls]
+Repository = "https://github.com/mplemay/rowx"
+Issues = "https://github.com/mplemay/rowx/issues"
+
+[tool.uv.sources]
+rowx-core = { workspace = true }
+rowx-postgres = { workspace = true }
+
+# a maturin build is opaque to uv, so name the inputs that must trigger a rebuild of the editable install
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+    { file = "crates/**/*.rs" },
+    { file = "crates/**/Cargo.toml" },
+    { file = "vendor/**" },
+]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "rowx_embedded._engine"
+python-packages = ["rowx_embedded"]
+python-source = "src"
+# source archives need the local patch; Cargo downloads the remaining dependencies from the registry. The patch lives in
+# the repository's root `vendor/`, and `vendor` here is a symlink to it so that maturin packs it at the path that the
+# root `[patch.crates-io]` entry resolves from inside the archive too
+include = [{ path = "vendor/wasmer-compiler/**/*", format = "sdist" }]
+exclude = [
+    { path = "**/__pycache__/**", format = "wheel" },
+    { path = "**/*.pyc", format = "wheel" },
+    { path = "**/__tests__/**", format = "wheel" },
+]

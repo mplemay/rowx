@@ -129,6 +129,7 @@ def test_drop_confirms_on_a_tty(
     assert not exists(server_dsn, name)
 
 
+@pytest.mark.server(needs="create-database")
 def test_force_drops_a_database_with_a_live_session(
     server_dsn: str, target: tuple[str, str], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -144,6 +145,7 @@ def test_force_drops_a_database_with_a_live_session(
     assert not exists(server_dsn, name)
 
 
+@pytest.mark.server(needs="create-database")
 def test_setup_creates_and_migrates_then_is_idempotent(
     target: tuple[str, str], project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -158,6 +160,7 @@ def test_setup_creates_and_migrates_then_is_idempotent(
     assert applied(dsn) == [1, 2]
 
 
+@pytest.mark.server(needs="create-database")
 def test_reset_recreates_the_database_with_every_migration_applied(
     target: tuple[str, str], project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -171,6 +174,7 @@ def test_reset_recreates_the_database_with_every_migration_applied(
         assert conn.execute("SELECT to_regclass('leftover')").fetchone() == (None,)
 
 
+@pytest.mark.server(needs="create-database")
 def test_reset_without_tty_or_yes_exits_two(
     target: tuple[str, str], project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -198,6 +202,7 @@ def test_a_password_is_never_printed(
     assert secret not in out + err
 
 
+@pytest.mark.server(needs="create-database")
 def test_invalid_migrations_fail_before_any_database_change(
     server_dsn: str, target: tuple[str, str], project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

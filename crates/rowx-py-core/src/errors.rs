@@ -97,6 +97,14 @@ pub fn pool_timeout_error(py: Python<'_>, message: &str) -> PyErr {
     build(py, &POOL_TIMEOUT_ERROR, "PoolTimeoutError", (message,))
 }
 
+/// A pool timeout whose `__cause__` is the connect error that kept the pool from connecting.
+#[must_use]
+pub fn pool_timeout_error_with_cause(py: Python<'_>, message: &str, cause: PyErr) -> PyErr {
+    let err = pool_timeout_error(py, message);
+    err.set_cause(py, Some(cause));
+    err
+}
+
 #[must_use]
 pub fn row_shape_error(py: Python<'_>, message: &str) -> PyErr {
     build(py, &ROW_SHAPE_ERROR, "RowShapeError", (message,))

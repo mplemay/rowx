@@ -1,0 +1,27 @@
+# The in-process PostgreSQL engine. A root workspace member that is not a default member (the engine pulls in about 440
+# Wasmer crates, edition 2024, rust-version 1.93), so select it with `-p rowx-embedded -p rowx-embedded-host`.
+[package]
+name = "rowx-embedded"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+publish = false
+
+[lib]
+name = "_engine"
+crate-type = ["cdylib"]
+# the cdylib does not link into a test binary without libpython; the testable logic lives in the host crate
+test = false
+doctest = false
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["abi3-py314"] }
+rowx-embedded-host = { path = "crates/rowx-embedded-host" }
+thiserror = "2"
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[lints]
+workspace = true

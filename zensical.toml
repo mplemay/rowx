@@ -23,6 +23,7 @@ nav = [
     { "CI" = "guide/ci.md" },
     { "Migrations" = "guide/migrations.md" },
     { "Testing" = "guide/testing.md" },
+    { "Embedded Postgres" = "guide/embedded.md" },
     { "Security" = "guide/security.md" },
   ] },
   { "Packages" = "packages.md" },
@@ -38,6 +39,7 @@ nav = [
     { "Migrations" = "reference/migrations.md" },
     { "Security" = "reference/security.md" },
     { "Driver" = "reference/driver.md" },
+    { "Embedded Postgres" = "reference/embedded.md" },
   ] },
   { "Contributing" = [
     { "Architecture" = "contributing/architecture.md" },

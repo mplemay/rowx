@@ -2,7 +2,8 @@ import asyncio
 import os
 import sys
 from argparse import Action, ArgumentParser, BooleanOptionalAction, Namespace
-from dataclasses import dataclass, replace
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
 from importlib.metadata import version
 from json import dumps
 from pathlib import Path
@@ -12,19 +13,20 @@ from rowx_core.backend import UnsupportedCapabilityError
 
 from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
 from rowx.check.config import Config, ConfigError, database_url, load_config
+from rowx.check.embedded import embedded_for, redact_owned
 from rowx.check.model import Diagnostic, Span
 from rowx.check.render import Report, render_json, render_text, strip_controls
 from rowx.check.rules import apply_levels, resolve_levels
-from rowx.check.runner import CheckError, Hooks, RunResult, redact, run_check
+from rowx.check.runner import CheckError, Hooks, RunResult, run_check
 from rowx.check.suppress import apply_suppressions
 from rowx.check.walk import discover_files
 
 if TYPE_CHECKING:
     from argparse import _SubParsersAction
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable
     from contextlib import AbstractAsyncContextManager
 
-    from rowx.check.runner import ScratchBuild
+    from rowx_core.backend import EmbeddedService, ScratchBuild, ScratchService
 
 EXIT_CLEAN: Final[int] = 0
 EXIT_DIAGNOSTICS: Final[int] = 1
@@ -51,6 +53,11 @@ class _RuleAction(Action):
         setattr(namespace, self.dest, actions)
 
 
+# one describe session per cpu, up to four
+def default_jobs() -> int:
+    return min(4, os.cpu_count() or 1)
+
+
 def _add_check(subparsers: _SubParsersAction[ArgumentParser]) -> None:
     check = subparsers.add_parser("check")
     check.add_argument("--version", action="version", version=version("rowx"))
@@ -72,7 +79,7 @@ def _add_check(subparsers: _SubParsersAction[ArgumentParser]) -> None:
     check.add_argument("--disallow-unchecked", action="store_true", help="reject recognized query_unchecked calls")
     check.add_argument("--scratch", action="store_true", help=SCRATCH_HELP)
     check.add_argument("--no-drift-check", action="store_true")
-    check.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1), metavar="N")
+    check.add_argument("-j", "--jobs", type=int, default=default_jobs(), metavar="N")
 
 
 def _check_parser() -> ArgumentParser:
@@ -95,7 +102,7 @@ def _parser() -> ArgumentParser:
     compat.add_argument("--against", required=True)
     compat.add_argument("--head", required=True)
     compat.add_argument("--database-url", metavar="URL")
-    compat.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1), metavar="N")
+    compat.add_argument("-j", "--jobs", type=int, default=default_jobs(), metavar="N")
     return parser
 
 
@@ -207,10 +214,12 @@ class _Built(Protocol):
 class _HookState:
     built: _Built | None = None
     drift_error: type[CheckError] | None = None
+    # the URLs of the databases that the run owns (an embedded socket DSN), redacted from every message
+    owned: list[str] = field(default_factory=list)
 
 
-def _scratch_hook(config: Config, state: _HookState) -> Callable[[str], AbstractAsyncContextManager[ScratchBuild]]:
-    def _open(url: str) -> AbstractAsyncContextManager[ScratchBuild]:
+def _scratch_hook(config: Config, state: _HookState) -> Callable[[str, int], AbstractAsyncContextManager[ScratchBuild]]:
+    def _open(url: str, workers: int) -> AbstractAsyncContextManager[ScratchBuild]:
         from rowx.check.migrate import load_migrator, resolve_target  # ruff: ignore[import-outside-top-level]
         from rowx.check.scratch import Scratch  # ruff: ignore[import-outside-top-level]
 
@@ -218,7 +227,42 @@ def _scratch_hook(config: Config, state: _HookState) -> Callable[[str], Abstract
         scratch = Scratch(url, backend.admin(url))
         # recorded before the session so an interrupted drop is still swept
         state.built = scratch
-        return scratch.session(load_migrator(resolve_target(config, None), url, backend))
+        return scratch.session(load_migrator(resolve_target(config, None), url, backend), workers)
+
+    return _open
+
+
+def _embedded_scratch_hook(
+    config: Config, state: _HookState, service: EmbeddedService
+) -> Callable[[str, int], AbstractAsyncContextManager[ScratchBuild]]:
+    @asynccontextmanager
+    async def _open(url: str, workers: int) -> AsyncGenerator[ScratchBuild]:
+        from rowx.check.embedded import scratch_session  # ruff: ignore[import-outside-top-level]
+        from rowx.check.migrate import load_migrator, resolve_target  # ruff: ignore[import-outside-top-level]
+
+        scratch: ScratchService = service.scratch()
+        # recorded before the session so an interrupted close is still swept
+        state.built = scratch
+        migrator = load_migrator(resolve_target(config, None), url, backend_for(url))
+        async with scratch_session(scratch, migrator, workers) as build:
+            state.owned.extend(build.urls)
+            yield build
+
+    return _open
+
+
+def _embedded_open_hook(
+    state: _HookState, service: EmbeddedService
+) -> Callable[[str], AbstractAsyncContextManager[str]]:
+    @asynccontextmanager
+    async def _open(_url: str) -> AsyncGenerator[str]:
+        from rowx.check.embedded import open_instance  # ruff: ignore[import-outside-top-level]
+
+        # recorded before the start so a second Ctrl-C, which cannot wait for a statement, still stops the instance
+        state.built = service
+        async with open_instance(service) as url:
+            state.owned.append(url)
+            yield url
 
     return _open
 
@@ -234,12 +278,42 @@ def _drift_hook(config: Config, state: _HookState) -> Callable[[str], Awaitable[
     return _gate
 
 
-def _check_hooks(config: Config, state: _HookState, *, scratch: bool, drift: bool) -> Hooks:
+def _check_hooks(
+    config: Config,
+    state: _HookState,
+    *,
+    scratch: bool,
+    drift: bool,
+    embedded: EmbeddedService | None = None,
+) -> Hooks:
+    if embedded is not None and not embedded.persistent:
+        # an in-memory database is built from the migrations, so there is nothing to drift from
+        return Hooks(scratch=_embedded_scratch_hook(config, state, embedded))
     if scratch:
         return Hooks(scratch=_scratch_hook(config, state))
-    if drift and config.migrate is not None:
-        return Hooks(gate=_drift_hook(config, state))
-    return Hooks()
+    gate = _drift_hook(config, state) if drift and config.migrate is not None else None
+    if embedded is not None:
+        # the directory's instance is started once, and the gate and every query are described on it
+        return Hooks(gate=gate, own=_embedded_open_hook(state, embedded))
+    return Hooks(gate=gate)
+
+
+def _redacted(text: str, dsn: str, state: _HookState) -> str:
+    return redact_owned(text, dsn, state.owned)
+
+
+# whether the run builds a scratch database, or a usage error
+def _scratch_wanted(config: Config, embedded: EmbeddedService | None, *, requested: bool) -> bool:
+    if embedded is not None and embedded.persistent and requested:
+        msg = "`--scratch` builds a database from the migrations; an embedded directory URL is checked as it is"
+        raise CheckError(msg)
+    # an in-memory database only exists to be built from the migrations
+    implied = embedded is not None and not embedded.persistent
+    if (requested or implied) and config.migrate is None:
+        reason = "an in-memory embedded URL implies `--scratch`, which" if implied else "`--scratch`"
+        msg = f"{reason} needs a `[tool.rowx.migrate]` table in pyproject.toml"
+        raise CheckError(msg)
+    return requested or implied
 
 
 def _check(args: Namespace) -> tuple[RunResult, Path]:
@@ -247,10 +321,6 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
     config = load_config(cwd, args.config)
     args.levels = resolve_levels(config.rules, args.rule_actions or [])
     args.error_on_warning = config.error_on_warning and not args.exit_zero_on_warning
-    scratch = bool(args.scratch)
-    if scratch and config.migrate is None:
-        msg = "`--scratch` needs a `[tool.rowx.migrate]` table in pyproject.toml"
-        raise CheckError(msg)
     config = replace(
         config,
         respect_ignore_files=config.respect_ignore_files
@@ -258,8 +328,10 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
         else args.respect_ignore_files,
         force_exclude=config.force_exclude if args.force_exclude is None else args.force_exclude,
     )
-    files = discover_files(config, cwd, args.paths)
     dsn = database_url(config, args.database_url)
+    embedded = embedded_for(dsn)
+    scratch = _scratch_wanted(config, embedded, requested=bool(args.scratch))
+    files = discover_files(config, cwd, args.paths)
     state = _HookState()
     try:
         checked = asyncio.run(
@@ -268,18 +340,18 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
                 files,
                 dsn,
                 args.jobs,
-                _check_hooks(config, state, scratch=scratch, drift=not args.no_drift_check),
+                _check_hooks(config, state, scratch=scratch, drift=not args.no_drift_check, embedded=embedded),
                 inspect=args.inspect,
             ),
         )
     except CheckError as error:
         if state.drift_error is not None and isinstance(error, state.drift_error):
             raise
-        raise CheckError(strip_controls(redact(str(error), dsn))) from None
+        raise CheckError(strip_controls(_redacted(str(error), dsn, state))) from None
     except BackendMissing, UnsupportedSchemeError, UnsupportedCapabilityError:
         raise
     except Exception as error:  # ruff: ignore[blind-except]
-        msg = f"internal error: {type(error).__name__}: {strip_controls(redact(str(error), dsn))}"
+        msg = f"internal error: {type(error).__name__}: {strip_controls(_redacted(str(error), dsn, state))}"
         raise CheckError(msg) from None
     else:
         return checked, config.root
@@ -313,7 +385,22 @@ def _compat(args: Namespace) -> int:
         return EXIT_FAILURE
 
 
+# The console script runs `sys.exit(main())`, which finalizes the interpreter. If an interrupted embedded run abandoned an
+# engine thread that is still inside a statement, that finalization would crash the process, so it leaves at once with
+# the run's own status. The companion is optional and is never imported here: when it was never loaded there is nothing
+# abandoned. Only the script's own call (no `argv`) does this; callers that pass `argv` are in-process and just get the code.
+def _leave(code: int) -> int:
+    if (api := sys.modules.get("rowx_embedded._api")) is not None:
+        api.exit_if_abandoned(code)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
+    code = _main(argv)
+    return code if argv is not None else _leave(code)
+
+
+def _main(argv: list[str] | None) -> int:
     selected = sys.argv[1:] if argv is None else argv
     parser = _check_parser() if selected[:1] == ["check"] else _parser()
     args = parser.parse_args(argv)

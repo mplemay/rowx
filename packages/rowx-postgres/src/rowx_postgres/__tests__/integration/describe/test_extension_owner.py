@@ -21,7 +21,9 @@ if TYPE_CHECKING:
 
 PG_RULES: Final[CheckerBackend] = load().checker()
 
-pytestmark = [pytest.mark.db]
+# every test creates a second database and connects to it, besides the nested connections: the fixture holds an admin
+# session while it opens a second one on the new database
+pytestmark = [pytest.mark.db, pytest.mark.server(needs="create-database"), pytest.mark.server(needs="sessions")]
 
 # the type each extension provides, and the extension that provides it
 EXTENSIONS: Final[dict[str, str]] = {

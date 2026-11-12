@@ -311,9 +311,10 @@ def test_matrix_covers_type_table() -> None:
     assert len({sql.name for sql in sql_types()}) == len(sql_types())
 
 
+@pytest.mark.server(divergence="inet-cidr")
 def test_result_matrix(schema: str) -> None:
     types = sql_types()
-    outcomes = asyncio.run(describe_all(schema, [sql.statement for sql in types], 1, TIMEOUT_MS))
+    outcomes = asyncio.run(describe_all([schema], [sql.statement for sql in types], TIMEOUT_MS))
     values = asyncio.run(run_values(schema, types))
     disagreements: list[str] = []
     cells = 0
@@ -343,7 +344,7 @@ def test_array_depth_is_not_checked(schema: str) -> None:
     flat_sql = next(sql for sql in sql_types() if sql.name == "int4[]")
     nested_sql = next(sql for sql in sql_types() if sql.name == "int4[][]")
     statements = [flat_sql.statement, nested_sql.statement]
-    outcomes = asyncio.run(describe_all(schema, statements, 1, TIMEOUT_MS))
+    outcomes = asyncio.run(describe_all([schema], statements, TIMEOUT_MS))
     values = asyncio.run(run_values(schema, [flat_sql, nested_sql]))
     flat, nested = LEAF_BY_NAME["list[int]"], LEAF_BY_NAME["list[list[int]]"]
     for sql, real in ((flat_sql, flat), (nested_sql, nested)):
@@ -402,12 +403,13 @@ async def run_nullability(dsn: str, cells: list[tuple[str, Leaf, bool]]) -> list
     return outcomes
 
 
+@pytest.mark.server(divergence="inet-cidr")
 def test_nullability_matrix(schema: str) -> None:
     types = column_types()
     create_tables(schema, types)
     statements = [f"SELECT n{index} FROM agree_nullable" for index in range(len(types))]  # ruff: ignore[hardcoded-sql-expression]
     statements += [f"SELECT c{index} FROM agree_not_null" for index in range(len(types))]  # ruff: ignore[hardcoded-sql-expression]
-    outcomes = asyncio.run(describe_all(schema, statements, 1, TIMEOUT_MS))
+    outcomes = asyncio.run(describe_all([schema], statements, TIMEOUT_MS))
     columns = {sql: describe_columns(outcomes, sql)[0] for sql in statements}
 
     cells: list[tuple[str, Leaf, bool]] = []
@@ -563,7 +565,7 @@ async def run_params(dsn: str, cells: list[tuple[str, object]]) -> list[object]:
 def test_param_matrix(schema: str) -> None:
     types = [sql for sql in column_types() if not sql.void]
     statements = {sql.decl: f"SELECT $1::{sql.decl}" for sql in types}
-    outcomes = asyncio.run(describe_all(schema, list(statements.values()), 1, TIMEOUT_MS))
+    outcomes = asyncio.run(describe_all([schema], list(statements.values()), TIMEOUT_MS))
     namespace: dict[str, Any] = {}
     exec(PRELUDE, namespace)  # ruff: ignore[exec-builtin]
     evidence: dict[str, Any] = {}
