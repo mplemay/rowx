@@ -22,6 +22,7 @@ try:  # ruff: ignore[non-empty-init-module]
         Range,
         Transaction,
         connect,
+        embedded,
     )
 except ModuleNotFoundError as error:
     if error.name != "rowx_postgres":
@@ -51,4 +52,5 @@ __all__ = [
     "Range",
     "Transaction",
     "connect",
+    "embedded",
 ]

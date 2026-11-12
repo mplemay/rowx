@@ -104,7 +104,10 @@ fn tokenize(sql: &str) -> Vec<Token> {
             }
             b'"' => {
                 let end = skip_quoted(bytes, at, b'"', false);
-                let inner = &sql[at + 1..end.saturating_sub(1).max(at + 1)];
+                // an unterminated identifier runs to the end of the text, which need not end in a quote: only a
+                // closing quote is dropped, so the slice never ends inside a multibyte character
+                let closed = end > at + 1 && bytes.get(end - 1) == Some(&b'"');
+                let inner = &sql[at + 1..if closed { end - 1 } else { end }];
                 tokens.push(Token::Quoted(inner.replace("\"\"", "\"")));
                 at = end;
             }
@@ -304,6 +307,25 @@ mod tests {
         ] {
             assert_eq!(effects(sql), vec![Effect::All], "{sql:?}");
         }
+    }
+
+    #[test]
+    fn unterminated_text_that_ends_in_a_multibyte_character_is_scanned_to_its_end() {
+        for sql in [
+            "SELECT \"é",
+            "SELECT \"",
+            "SELECT \"é\"\"",
+            "SELECT 'é",
+            "SELECT E'é\\",
+            "SELECT $é$é",
+            "SELECT $$é",
+            "SELECT 1 /* é",
+            "SELECT 1 -- é",
+            "é",
+        ] {
+            assert_eq!(effects(sql), vec![], "{sql:?}");
+        }
+        assert_eq!(effects("RESET ALL; SELECT \"é"), vec![Effect::All]);
     }
 
     #[test]
