@@ -2,7 +2,7 @@
 name: use-rowx
 description: >-
   Write typesafe raw SQL for Postgres with rowx and PEP 750 t-strings, and check it with
-  rowx check. Use when the user mentions rowx, rowx_core, rowx_postgres, t-string SQL,
+  rowx check. Use when the user mentions rowx, rowx.core, rowx.postgres, rowx_core, rowx_postgres, t-string SQL,
   a Postgres query through rowx, or rowx check.
 license: MIT
 compatibility: Requires Python >=3.14
@@ -28,12 +28,12 @@ Invoke this skill when:
 - Choosing `query` or `query_unchecked`, or allowlisting an identifier
 - Configuring a pool reset, migrations, or `rowx.testing`
 - Running or interpreting `rowx check`
-- Code imports `rowx`, `rowx_core`, `rowx_postgres`, or `query`
+- Code imports `rowx`, `rowx.core`, `rowx.postgres`, `rowx_core`, `rowx_postgres`, or `query`
 
 Do **not** use this skill for:
 
 - SQL or Postgres work that does not go through rowx
-- Changing rowx internals when the linked guide already answers the question
+- Changing rowx internals when this skill already answers the question
 
 ## Principles
 
@@ -43,7 +43,10 @@ Do **not** use this skill for:
    compilation and execution.
 3. `{name}` is always a server parameter. It is never pasted into the SQL text.
 4. `rowx check` uses `--database-url` or `DATABASE_URL`. It checks the construction site on `rowx` and `rowx_core`.
-5. Import `query` from `rowx` or `rowx_core`. Import `Pool` and `connect` from `rowx_postgres`.
+5. With the `rowx` package, import `query` from `rowx` and `Pool` and `connect` from `rowx.postgres`. A runtime-only
+   install imports `rowx_core` and `rowx_postgres`. `rowx.query` is `rowx_core.query`, and `Pool` and `connect` from
+   `rowx.postgres` are the `rowx_postgres` objects. `rowx.core` re-exports only the `rowx_core` names that `rowx` and
+   `rowx.errors` do not already export.
 6. `rowx-core` has no runtime dependencies. `rowx-postgres` depends only on matching `rowx-core`. The backend does
    not depend on the CLI. There is no ContextVar, no implicit Postgres target, and no `Any` dispatch.
 
@@ -54,9 +57,10 @@ These rules are **always enforced**. Each links to Incorrect/Correct pairs.
 ### Imports → [rules/imports.md](rules/imports.md)
 
 - `from rowx import query` and `from rowx_core import query` are the same object.
-- `from rowx_postgres import Pool, connect` is the driver import.
-- `rowx.postgres` is a compatibility re-export and still needs the `postgres` extra.
+- `from rowx.postgres import Pool, connect` is the driver import for the `rowx` package. `rowx_postgres` is that same
+  driver when the application does not install `rowx`.
 - Pass the executor into the query method. `Pool` on `rowx` and `rowx_core` is a protocol, not a connection pool.
+  `rowx.core` does not export `Pool`.
 
 ### Parameters → [rules/parameters.md](rules/parameters.md)
 
@@ -94,7 +98,7 @@ Author and checker install: `uv add "rowx[postgres]"`.
 Runtime-only install, with no `rowx` command: `uv add rowx-core rowx-postgres`.
 
 The blocks below run against the seeded `users` table (`alice`, `bob`, `carol`). `DSN` is supplied by the snippet
-runner. See [Get started](../../../docs/guide/get-started.md).
+runner.
 
 ### User names
 
@@ -102,7 +106,7 @@ runner. See [Get started](../../../docs/guide/get-started.md).
 import asyncio
 
 from rowx import query
-from rowx_postgres import connect
+from rowx.postgres import connect
 
 
 async def main() -> None:
@@ -119,8 +123,8 @@ asyncio.run(main())
 ```python test
 import asyncio
 
-from rowx_core import query
-from rowx_postgres import Pool
+from rowx import query
+from rowx.postgres import Pool
 
 
 async def main() -> None:
@@ -153,9 +157,10 @@ Load only the most relevant reference first.
 
 ## Common Gotchas
 
-- Importing `Pool` or `connect` from `rowx.postgres` in new code. That module re-exports `rowx_postgres` and still
-  needs the `postgres` extra.
-- Constructing `Pool` from `rowx` or `rowx_core`. Those names are executor protocols.
+- Constructing `Pool` from `rowx` or `rowx_core`. Those names are executor protocols. `rowx.core` does not export
+  `Pool`.
+- Importing `connect` from `rowx` or `rowx_core`. The connection and the connection pool come from `rowx.postgres`,
+  or from `rowx_postgres` when the application does not install `rowx`.
 - Calling `.all()` or `.one()` with no executor.
 - Pasting a value into SQL, or building `IN ($1, $2)` instead of `= ANY({ids})`.
 - Putting `{name}` inside a SQL string literal. Bind the whole pattern.

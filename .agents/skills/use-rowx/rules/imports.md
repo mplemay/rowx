@@ -1,12 +1,11 @@
 # Imports
 
-See [Packages](../references/packages.md), [the packages page](../../../../docs/packages.md), and
-[Public surface](../../../../docs/reference/api.md#public-surface).
+See [Packages](../references/packages.md).
 
 ## Contents
 
 - Install the distribution that matches the work
-- Import the driver from `rowx_postgres`
+- Import the driver from `rowx.postgres`
 - Pass an executor; do not look one up
 
 ---
@@ -21,18 +20,23 @@ only on matching `rowx-core`. It does not depend on the CLI.
 
 ## Canonical driver import
 
-`rowx.postgres` re-exports `rowx_postgres` and still needs the `postgres` extra. New code imports `rowx_postgres`.
-`Pool` imported from `rowx` or `rowx_core` is the executor protocol, not a connection pool.
+With the `rowx` package, import the query API from `rowx` and the driver from `rowx.postgres`.
+`rowx.postgres` re-exports `rowx_postgres` and still needs the `postgres` extra. A runtime-only install, which does
+not include `rowx`, imports `rowx_core` and `rowx_postgres`. `rowx.query` is `rowx_core.query`, and `Pool` and
+`connect` from `rowx.postgres` are the `rowx_postgres` objects.
 
-`connect` is not exported by `rowx` or `rowx_core`.
+`Pool` imported from `rowx` or `rowx_core` is the executor protocol, not a connection pool. `rowx.core` does not
+export `Pool`.
 
-Import it with `from rowx_postgres import connect`. `rowx.postgres.connect` is only the compatibility re-export.
+`connect` is not exported by `rowx.core`, `rowx`, or `rowx_core`.
+
+Import it with `from rowx.postgres import connect`. `from rowx_postgres import connect` is that same object when the
+application installs `rowx-postgres` without `rowx`.
 
 Incorrect:
 
 ```python
 from rowx import Pool, query
-from rowx.postgres import connect
 
 
 async def open_pool(dsn: str) -> Pool:
@@ -45,7 +49,7 @@ Correct:
 
 ```python
 from rowx import query
-from rowx_postgres import Pool, connect
+from rowx.postgres import Pool, connect
 
 
 async def open_pool(dsn: str) -> None:
@@ -55,13 +59,14 @@ async def open_pool(dsn: str) -> None:
         await query[int](t"SELECT 1").one(conn)
 ```
 
-`from rowx import query` and `from rowx_core import query` are the same object. `import rowx` loads no backend.
+`from rowx import query` and `from rowx_core import query` are the same object.
+`import rowx` loads no backend.
 
 ## Pass the executor
 
 There is no ContextVar and no implicit connection. The object passed to `one`, `optional`, `all`, `fetch`, or
-`execute` compiles and runs the query. Annotate that parameter with a `rowx_postgres` connection, pool, or
-transaction, or with `Executor` from `rowx_core`. Do not annotate it as `Any`.
+`execute` compiles and runs the query. Annotate that parameter with a `rowx.postgres` connection, pool, or
+transaction, or with `Executor` from `rowx`. Do not annotate it as `Any`.
 
 Incorrect:
 
@@ -81,9 +86,8 @@ async def user_names() -> list[str]:
 Correct:
 
 ```python
-from rowx import query
-from rowx_core import Executor
-from rowx_postgres import connect
+from rowx import Executor, query
+from rowx.postgres import connect
 
 
 async def user_names(conn: Executor) -> list[str]:

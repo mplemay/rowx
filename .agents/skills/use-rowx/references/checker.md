@@ -1,8 +1,5 @@
 # Checker
 
-Behavior and configuration are in [The checker](../../../../docs/guide/checker.md). Exit codes and the describe
-rules are in [the checker reference](../../../../docs/reference/checker.md).
-
 ## Exit codes
 
 | Code | Meaning |
@@ -16,7 +13,7 @@ A missing database URL is exit 2 only when at least one statement would be descr
 ## What it checks
 
 `rowx check` uses `--database-url` or `DATABASE_URL` (`database_url_env` defaults to `DATABASE_URL`). It parses
-files and does not import or execute application code. It prepares and describes `query` from `rowx` and from
+files and does not import or execute application code. It prepares and describes `query` from `rowx` and
 `rowx_core`. `query_unchecked` SQL is not described. `T` is still resolved.
 
 There is no implicit Postgres fallback and no ContextVar for the target. The executor that runs a query is the one

@@ -5,7 +5,7 @@ import asyncio
 from dataclasses import dataclass
 
 from rowx import query
-from rowx_postgres import Pool, connect
+from rowx.postgres import Pool, connect
 
 type UserRow = tuple[int, str, str | None]
 
@@ -41,23 +41,34 @@ The block is an illustration. It is not a runnable snippet.
 
 ## Public surface
 
-Three import roots. `from rowx import query` and `from rowx_core import query` are the same object. `import rowx`
-loads no database backend.
+The `rowx` distribution's public imports are `rowx`, `rowx.core`, `rowx.errors`, and `rowx.postgres`.
+`from rowx import query` and `from rowx_core import query` are the same object. `from rowx.postgres import connect`
+and `from rowx_postgres import connect` are the same object. `import rowx` loads no database backend.
 
-`rowx` and `rowx_core` both export `query`, `query_unchecked`, `QueryResult`, `RowStream`, the executor protocols
+A runtime-only install of `rowx-core` and `rowx-postgres` does not include the `rowx` package, so it imports
+`rowx_core` and `rowx_postgres`.
+
+`rowx` and `rowx_core` export `query`, `query_unchecked`, `QueryResult`, `RowStream`, the executor protocols
 `Executor`, `Connection`, `Pool` and `Transaction`, and the errors below. The protocols describe what a query can
-run on. They are not connections. Open a PostgreSQL connection with `rowx_postgres`:
+run on. They are not connections. Open a PostgreSQL connection with `rowx.postgres`.
+
+`rowx.core` exists only in the `rowx` distribution. It re-exports the `rowx_core` names that `rowx` and
+`rowx.errors` do not already export. `rowx_core` exports that same set. A backend that depends only on `rowx-core`
+imports them from `rowx_core`.
+
+The template surface is `Compiled`, `Compiler`, `TemplatePlan`, `Parameter`, `Identifier`, `capture_template`, and
+`iter_parts`. The row plan is `FieldPlan`, `ShapeSpec`, and `ValueClass`. The executor protocols in that set are
+`Acquire` and `StreamHandle`.
 
 | Module | Exports |
 |---|---|
-| `rowx_core`, re-exported by `rowx` | `query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor`, `Connection`, `Pool`, `Transaction`, and the errors |
-| `rowx_postgres` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `RESET_QUERY`, `Range`, `Interval`, `Money`, `Cube`, `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle`, `Migrator`, `Migration`, `MigrationStatus`, `MigrationResult` |
+| `rowx`, also `rowx_core` | `query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor`, `Connection`, `Pool`, `Transaction`, and the errors |
+| `rowx.core`, also `rowx_core` | `Acquire`, `Compiled`, `Compiler`, `FieldPlan`, `Identifier`, `Parameter`, `ShapeSpec`, `StreamHandle`, `TemplatePlan`, `ValueClass`, `capture_template`, `iter_parts` |
+| `rowx.postgres`, also `rowx_postgres` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `RESET_QUERY`, `Range`, `Interval`, `Money`, `Cube`, `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle`, `Migrator`, `Migration`, `MigrationStatus`, `MigrationResult` |
 | `rowx.errors` | the same error classes, defined in `rowx_core.errors` |
 | `rowx.testing` | opt-in pytest plugin ([Test plugin](../contributing/testing.md#test-plugin)) |
 
-`rowx_core` also exports the template and row-plan types (`Compiled`, `Compiler`, `TemplatePlan`, `Parameter`,
-`Identifier`, `capture_template`, `FieldPlan`, `ShapeSpec`, `ValueClass`) for a backend implementer. Application
-code uses `query` and `rowx_postgres`.
+Application code uses `query` from `rowx` and the driver from `rowx.postgres`.
 
 `query` and `query_unchecked` are siblings. Neither subclasses the other, and user code must not subclass either.
 The checker reports `indirect-query` if it does. `query` and `query_unchecked` set no `__slots__`, so each instance
@@ -92,11 +103,13 @@ uses. A query is not permanently bound to the first executor.
 `one`, `optional`, `all` and `execute` are `async def`. `fetch` is a plain `def`. `RowStream.__anext__`, `aclose`,
 `__aenter__` and `__aexit__` are `async def`.
 
-### `rowx_postgres`
+### `rowx.postgres`
 
 ```python
-from rowx_postgres import RESET_QUERY, ConnectOptions, Connection, Pool, Transaction, connect
+from rowx.postgres import RESET_QUERY, ConnectOptions, Connection, Pool, Transaction, connect
 ```
+
+The `rowx-postgres` distribution imports the same objects from `rowx_postgres`.
 
 `RESET_QUERY` is
 `RESET SESSION AUTHORIZATION; RESET ALL; SELECT pg_catalog.pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; DISCARD TEMP;`.

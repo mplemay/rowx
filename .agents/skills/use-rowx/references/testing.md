@@ -1,9 +1,5 @@
 # Testing
 
-The plugin, fixtures, and template database are in [Testing](../../../../docs/guide/testing.md). How this
-repository runs tests, including the snippet glob, is in
-[Testing](../../../../docs/contributing/testing.md#test-plugin).
-
 ## Opt in
 
 `rowx.testing` is opt-in. Nothing registers it as a pytest entry point.

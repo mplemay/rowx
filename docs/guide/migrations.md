@@ -42,7 +42,7 @@ import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from rowx_postgres import Migrator, Pool
+from rowx.postgres import Migrator, Pool
 
 FILES = {
     "0001_create_accounts.up.sql": "CREATE TABLE accounts (id int PRIMARY KEY, name text NOT NULL);\n",
@@ -93,7 +93,7 @@ with TemporaryDirectory() as tmp:
 At startup, in the application, or as a deploy step. The lock makes both safe when several instances start together.
 
 ```python
-from rowx_postgres import Migrator, Pool
+from rowx.postgres import Migrator, Pool
 
 migrator = Migrator("migrations")
 
@@ -231,8 +231,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from rowx import query_unchecked
-from rowx_core.errors import DirtyMigrationError, MigrationChecksumError, MigrationFailedError, MigrationOrderError
-from rowx_postgres import Migrator, connect
+from rowx import DirtyMigrationError, MigrationChecksumError, MigrationFailedError, MigrationOrderError
+from rowx.postgres import Migrator, connect
 
 TABLE = "_rowx_migrations"
 
@@ -344,7 +344,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from rowx import query_unchecked
-from rowx_postgres import Migrator, connect
+from rowx.postgres import Migrator, connect
 
 # sqlx stores the SHA-384 of the file bytes: `printf 'CREATE TABLE people (id int PRIMARY KEY);\n' | shasum -a 384`
 CHECKSUM = bytes.fromhex(

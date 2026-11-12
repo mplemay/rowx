@@ -1,7 +1,6 @@
 # Quickstart
 
-Install, a first query, and the method table are in [Get started](../../../../docs/guide/get-started.md).
-Distributions are in [Packages](packages.md) and [the packages page](../../../../docs/packages.md).
+Distributions are in [Packages](packages.md).
 
 ## Install
 
@@ -21,7 +20,7 @@ Python is `>=3.14`. `rowx-core` has no runtime dependencies.
 import asyncio
 
 from rowx import query
-from rowx_postgres import connect
+from rowx.postgres import connect
 
 
 async def user_names(dsn: str) -> list[str]:

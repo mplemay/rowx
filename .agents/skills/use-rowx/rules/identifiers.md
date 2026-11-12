@@ -1,6 +1,6 @@
 # Identifiers
 
-See [Security](../references/security.md) and [the security guide](../../../../docs/guide/security.md).
+See [Security](../references/security.md).
 
 ## Contents
 
@@ -31,7 +31,7 @@ Correct:
 from enum import StrEnum
 
 from rowx import query_unchecked
-from rowx_postgres import Connection
+from rowx.postgres import Connection
 
 
 class UserColumn(StrEnum):
@@ -72,7 +72,7 @@ Correct:
 from enum import StrEnum
 
 from rowx import query_unchecked
-from rowx_postgres import Connection
+from rowx.postgres import Connection
 
 
 class SortColumn(StrEnum):

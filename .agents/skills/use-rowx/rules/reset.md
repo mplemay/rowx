@@ -1,7 +1,6 @@
 # Pool reset
 
-See [Security](../references/security.md), [Pool reset](../../../../docs/guide/security.md#pool-reset), and
-[Hooks and the reset](../../../../docs/guide/executors.md#hooks-and-the-reset).
+See [Security](../references/security.md).
 
 ## Contents
 
@@ -20,7 +19,7 @@ tenant or role: nothing then clears `SET ROLE`, `search_path`, temporary tables,
 Incorrect:
 
 ```python
-from rowx_postgres import Pool
+from rowx.postgres import Pool
 
 
 def shared_pool(dsn: str) -> Pool:
@@ -30,7 +29,7 @@ def shared_pool(dsn: str) -> Pool:
 Correct:
 
 ```python
-from rowx_postgres import Pool
+from rowx.postgres import Pool
 
 
 def shared_pool(dsn: str) -> Pool:
@@ -44,12 +43,18 @@ Any string passed as `reset_query` replaces `RESET_QUERY` entirely.
 `RESET ALL` resets neither the role nor session authorization.
 
 It still does not discard temporary tables, advisory locks, cursors, or `LISTEN`s. Keep every part you rely on. The
-statement list is [Hooks and the reset](../../../../docs/guide/executors.md#hooks-and-the-reset).
+default is `RESET_QUERY`:
+
+```text
+RESET SESSION AUTHORIZATION; RESET ALL; SELECT pg_catalog.pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; DISCARD TEMP;
+```
+
+A custom `reset_query` replaces that list.
 
 Incorrect:
 
 ```python
-from rowx_postgres import Pool
+from rowx.postgres import Pool
 
 
 def shared_pool(dsn: str) -> Pool:
@@ -59,7 +64,7 @@ def shared_pool(dsn: str) -> Pool:
 Correct:
 
 ```python
-from rowx_postgres import RESET_QUERY, Pool
+from rowx.postgres import RESET_QUERY, Pool
 
 
 def shared_pool(dsn: str) -> Pool:

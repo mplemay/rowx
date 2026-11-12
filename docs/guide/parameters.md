@@ -27,7 +27,7 @@ truncates identifiers at 63 bytes, which would drop the suffix; the checker repo
 ```python test
 import asyncio
 
-from rowx_postgres import connect
+from rowx.postgres import connect
 from rowx import query
 
 

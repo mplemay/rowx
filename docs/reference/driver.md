@@ -1,7 +1,8 @@
 # Driver
 
-PostgreSQL connections, execution, codecs and pooling. Open them from `rowx_postgres`. The query methods that run on
-an executor are in [API](api.md).
+PostgreSQL connections, execution, codecs and pooling. Open them from `rowx.postgres`. The `rowx-postgres`
+distribution imports the same objects from `rowx_postgres`. The query methods that run on an executor are in
+[API](api.md).
 
 The native module is `rowx_postgres._core`. Pure Rust lives in `crates/rowx-postgres/src/` (`dsn`, `tls`, `conn`,
 `stmt_cache`, `exec`, `cancel`, `pool`, `wire/`) and in `crates/rowx-core/src/` (`state.rs` for claim and settle,
@@ -11,7 +12,7 @@ live under `packages/rowx-postgres/src/`. `crates/rowx-postgres` and `crates/row
 ## Connection and DSN
 
 ```python
-from rowx_postgres import ConnectOptions, Pool, connect
+from rowx.postgres import ConnectOptions, Pool, connect
 
 async with await connect("postgresql://app@localhost/app") as conn:
     ...
@@ -112,7 +113,7 @@ not cancel. It drains. See [Streaming](api.md#streaming).
 
 ## Pool
 
-`rowx_postgres.Pool` does no IO in the constructor. `async with` calls `open` and `close`. Defaults are
+`rowx.postgres.Pool` does no IO in the constructor. `async with` calls `open` and `close`. Defaults are
 `min_size=0`, `max_size=10`, `acquire_timeout=30`, `idle_timeout=600`, `max_lifetime=1800`, `max_queries=None` and
 `ping_after=30`. `min_size` must sit between 0 and `max_size`. A closed pool raises `InterfaceError`.
 

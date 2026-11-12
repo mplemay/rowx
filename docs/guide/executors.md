@@ -1,15 +1,17 @@
 # Executors
 
-`rowx_postgres.connect(dsn)` returns a `Connection`. Use it as an async context manager, or call `close()`. Pass a
+`rowx.postgres.connect(dsn)` returns a `Connection`. Use it as an async context manager, or call `close()`. Pass a
 `ConnectOptions` instead of a DSN to set `connect_timeout`, `statement_cache_size`, `server_settings` and more
 (`ConnectOptions.from_dsn(dsn, connect_timeout=5)`).
 
 ## Pools
 
-`rowx_postgres` holds the Postgres backend (`connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`). The
+`rowx.postgres` holds the Postgres backend (`connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`). The
 shared pieces (`query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor` and the errors) belong to
-`rowx_core` and are re-exported by `rowx`. `import rowx` loads no backend. Install `rowx[postgres]` for both the CLI
-and PostgreSQL, or `rowx-postgres` to use the backend and core without the CLI.
+`rowx_core` and are re-exported by `rowx`. The shared pieces are the same objects as the `rowx_core` exports. `Pool`
+imported from `rowx` is the executor protocol, not a connection pool. `import rowx` loads no backend. Install
+`rowx[postgres]` for both the CLI and PostgreSQL. A runtime-only install of `rowx-postgres` imports the backend as
+`rowx_postgres` and does not include the CLI.
 
 A query captures its template without selecting a database. The connection, pool or transaction passed to a query
 supplies its compiler and execution behavior. Construction rejects a bad template, including a bad `:ident` value,
@@ -24,7 +26,7 @@ acquire also opens it.
 ```python test
 import asyncio
 
-from rowx_postgres import Pool
+from rowx.postgres import Pool
 from rowx import query
 
 
@@ -69,9 +71,9 @@ metrics.
 ```python test
 import asyncio
 
-from rowx_postgres import Pool
+from rowx.postgres import Pool
 from rowx import query
-from rowx_core.errors import PoolTimeoutError
+from rowx import PoolTimeoutError
 
 
 async def main() -> None:
@@ -114,7 +116,7 @@ are part of the startup options) while a `SET` run in `init` does not: put setti
 ```python test
 import asyncio
 
-from rowx_postgres import ConnectOptions, Connection, Pool
+from rowx.postgres import ConnectOptions, Connection, Pool
 from rowx import query
 
 
@@ -190,7 +192,7 @@ rolls back. `commit()` and `rollback()` end it early, and using the transaction 
 ```python test
 import asyncio
 
-from rowx_postgres import Pool
+from rowx.postgres import Pool
 from rowx import query
 
 
@@ -245,7 +247,7 @@ server connection than the one that prepared it. Either connect with `statement_
 newer with `max_prepared_statements` set.
 
 ```python
-from rowx_postgres import ConnectOptions, Pool
+from rowx.postgres import ConnectOptions, Pool
 
 pool = Pool(ConnectOptions.from_dsn("postgresql://app@pooler:6432/app", statement_cache_size=0), max_size=5)
 ```

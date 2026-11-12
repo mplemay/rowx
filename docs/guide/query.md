@@ -7,7 +7,7 @@ its SQL, but it still resolves `T`.
 ```python test
 import asyncio
 
-from rowx_postgres import connect
+from rowx.postgres import connect
 from rowx import query, query_unchecked
 
 

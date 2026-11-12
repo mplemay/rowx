@@ -3,6 +3,12 @@
 rowx publishes three distributions. Install matching versions of the ones you use. Each distribution has its own
 import root.
 
+An application that installs `rowx[postgres]` imports `from rowx import ...` and `from rowx.postgres import ...`.
+`from rowx import query` is the same object as `from rowx_core import query`, and `from rowx.postgres import connect`
+is the same object as `from rowx_postgres import connect`. A runtime-only install imports `rowx_core` and
+`rowx_postgres`. `Pool` imported from `rowx` is the executor protocol, not a connection pool. `import rowx` loads no
+backend.
+
 ## rowx-core
 
 The `rowx-core` distribution's import root is `rowx_core`. It is pure Python and has no runtime dependencies. It holds
@@ -32,10 +38,13 @@ The `postgres` extra adds the matching `rowx-postgres`:
 uv add "rowx[postgres]"
 ```
 
-`rowx` re-exports the query API. `from rowx import query` and `from rowx_core import query` are the same object.
+`rowx` re-exports the query API. `rowx.core` re-exports the `rowx_core` names that `rowx` and `rowx.errors` do not
+already export. `rowx.postgres` re-exports the driver and needs the `postgres` extra. `from rowx import query` and
+`from rowx_core import query` are the same object.
 
 ```python
 from rowx import query
+from rowx.postgres import Pool, connect
 ```
 
 A query runs on the connection or pool you pass to it. `rowx check` reads `--database-url` or `DATABASE_URL` and does
