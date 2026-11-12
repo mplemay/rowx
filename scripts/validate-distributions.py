@@ -126,7 +126,12 @@ def validate_wheel(path: Path) -> None:
 def _reject_development_files(path: Path, namespace: str, names: list[str]) -> None:
     for name in names:
         parts = Path(name).parts
-        if "__tests__" in parts or "__pycache__" in parts or name.endswith((".rs", ".pyc", "Cargo.toml")):
+        if (
+            "__tests__" in parts
+            or "__pycache__" in parts
+            or ".agents" in parts
+            or name.endswith((".rs", ".pyc", "Cargo.toml", "SKILL.md"))
+        ):
             message = f"{path.name} contains a development file: {name}"
             raise SystemExit(message)
         if parts and parts[0] != namespace and not parts[0].endswith(".dist-info"):

@@ -28,8 +28,9 @@ not use `public`. The nullability evidence cases live in
 `integration/describe/test_nullability_regression.py`, one case per row of the
 [evidence table](../reference/nullability.md#evidence), in that order. Known-limit cases live in
 `integration/describe/test_known_limits.py`. Checker fixtures live under `integration/check/cases/`. Snippet tests
-execute fences tagged `python test` in `integration/docs/test_snippets.py`. Ordinary `python` fences are not
-executed.
+execute fences tagged `python test` in `integration/docs/test_snippets.py`. The snippet glob includes the
+[use-rowx skill](https://github.com/mplemay/rowx/blob/main/.agents/skills/use-rowx/SKILL.md). Ordinary `python`
+fences are not executed.
 
 Rust tests are `cargo test --workspace` (`just test-rust`). Database tests in `crates/rowx-postgres/tests/` use the
 same DSN. `crates/rowx-core` has no database.

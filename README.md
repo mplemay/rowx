@@ -125,3 +125,4 @@ The checker uses `--database-url` or `DATABASE_URL` and does not import the appl
 - [Postgres type mapping](docs/types.md): what each Postgres type decodes to and which Python types can be bound.
 - [Known limits](docs/known-limits.md): where nullability inference is less precise than the database.
 - [Reference](docs/reference/index.md): the full specification.
+- [use-rowx skill](.agents/skills/use-rowx/SKILL.md): agent guidance for queries, the package split, and `rowx check`.
