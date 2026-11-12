@@ -219,10 +219,134 @@ jobs:
       - name: Smoke test the wheel
         run: scripts/smoke-wheel.sh dist
 
+  check-distributions:
+    name: Check distributions
+    needs: [validate, build-wheels, build-pure, build-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pure-distributions
+          path: dist/
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdist
+          path: dist/
+
+      - name: Validate distributions
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: python scripts/validate-distributions.py
+
+  rebuild-sdists:
+    name: Rebuild sdists offline
+    needs: [build-pure, build-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install maturin
+        run: |
+          uv tool install "maturin>=1.0,<2.0"
+          uv tool dir --bin >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pure-distributions
+          path: ${{ runner.temp }}/release-artifacts
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdist
+          path: ${{ runner.temp }}/release-artifacts
+
+      - name: Warm the uv build backend cache
+        run: uv build --package rowx --out-dir "$RUNNER_TEMP/uv-build-warm"
+
+      - name: Rebuild pure sdists offline
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          stage="$RUNNER_TEMP/unpacked-pure"
+          mkdir -p "$stage"
+          tar -xzf "$RUNNER_TEMP/release-artifacts"/rowx-[0-9]*.tar.gz -C "$stage"
+          tar -xzf "$RUNNER_TEMP/release-artifacts"/rowx_core-*.tar.gz -C "$stage"
+          projects=( "$stage"/rowx-[0-9]*/ "$stage"/rowx_core-*/ )
+          if (( ${#projects[@]} != 2 )); then
+            echo "expected rowx and rowx-core sdists" >&2
+            exit 1
+          fi
+          for project in "${projects[@]}"; do
+            uv build --offline --out-dir "$RUNNER_TEMP/rebuilt-pure" "$project"
+          done
+
+      - name: Fetch rowx-postgres crates
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          stage="$RUNNER_TEMP/unpacked-postgres"
+          mkdir -p "$stage"
+          tar -xzf "$RUNNER_TEMP/release-artifacts"/rowx_postgres-*.tar.gz -C "$stage"
+          projects=( "$stage"/rowx_postgres-*/ )
+          if (( ${#projects[@]} != 1 )); then
+            echo "expected one rowx-postgres sdist" >&2
+            exit 1
+          fi
+          # rustup reads rust-toolchain.toml from the build directory; the sdist is outside the checkout
+          cp "$GITHUB_WORKSPACE/rust-toolchain.toml" "${projects[0]}/rust-toolchain.toml"
+          cargo fetch --locked --manifest-path "${projects[0]}/Cargo.toml"
+
+      - name: Rebuild rowx-postgres offline
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          projects=( "$RUNNER_TEMP/unpacked-postgres"/rowx_postgres-*/ )
+          cd "${projects[0]}"
+          PYO3_PYTHON="$(uv python find 3.14)"
+          export PYO3_PYTHON
+          maturin build --offline --locked --out "$RUNNER_TEMP/rebuilt-postgres"
+
   publish:
     name: Publish to PyPI
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [validate, build-wheels, build-pure, build-sdist, smoke-install, smoke]
+    needs:
+      [
+        validate,
+        build-wheels,
+        build-pure,
+        build-sdist,
+        smoke-install,
+        smoke,
+        check-distributions,
+        rebuild-sdists,
+      ]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -249,4 +373,55 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: python scripts/validate-distributions.py
 
-      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - name: Split distributions by package
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p dist/rowx-core dist/rowx-postgres dist/rowx
+          for path in dist/*; do
+            if [[ ! -f "$path" ]]; then
+              continue
+            fi
+            name="$(basename "$path")"
+            case "$name" in
+              rowx_core-*)
+                mv "$path" dist/rowx-core/
+                ;;
+              rowx_postgres-*)
+                mv "$path" dist/rowx-postgres/
+                ;;
+              rowx-*)
+                mv "$path" dist/rowx/
+                ;;
+              *)
+                echo "unexpected release artifact: $name" >&2
+                exit 1
+                ;;
+            esac
+          done
+          for package in rowx-core rowx-postgres rowx; do
+            files=( "dist/${package}/"* )
+            if (( ${#files[@]} == 0 )); then
+              echo "$package has no distributions" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish rowx-core
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/rowx-core
+          skip-existing: true
+
+      - name: Publish rowx-postgres
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/rowx-postgres
+          skip-existing: true
+
+      - name: Publish rowx
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/rowx
+          skip-existing: true
