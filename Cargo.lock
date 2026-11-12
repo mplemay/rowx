@@ -2846,7 +2846,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "sha2 0.11.1",
  "tempfile",
@@ -2856,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-embedded"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "pyo3",
  "rowx-embedded-host",
@@ -2865,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-embedded-host"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "liboliphaunt-wasix-portable",
  "oliphaunt-wasix",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-postgres"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -2900,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-postgres-py"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-py-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "pyo3",
  "pyo3-async-runtimes",

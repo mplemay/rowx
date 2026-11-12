@@ -1,6 +1,6 @@
 # Packages
 
-rowx publishes four distributions, all released together under one version (0.3.0). Install matching versions of the
+rowx publishes four distributions, all released together under one version (0.4.0). Install matching versions of the
 ones you use. Each distribution has its own import root.
 
 An application that installs `rowx[postgres]` imports `from rowx import ...` and `from rowx.postgres import ...`.

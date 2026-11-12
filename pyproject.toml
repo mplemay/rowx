@@ -1,6 +1,6 @@
 [project]
 name = "rowx"
-version = "0.3.0"
+version = "0.4.0"
 description = "Typesafe SQL queries for python without an ORM"
 readme = "README.md"
 authors = [
@@ -20,15 +20,15 @@ classifiers = [
     "Framework :: AsyncIO",
 ]
 keywords = ["sql", "postgresql", "postgres", "typed", "async", "t-string"]
-dependencies = ["rowx-core==0.3.0", "pathspec>=1.1.1,<2"]
+dependencies = ["rowx-core==0.4.0", "pathspec>=1.1.1,<2"]
 
 [project.optional-dependencies]
-postgres = ["rowx-postgres==0.3.0"]
+postgres = ["rowx-postgres==0.4.0"]
 # rowx-embedded releases in lockstep with rowx; it ships wheels for macOS arm64 and Linux x86_64/aarch64 only, so the
 # marker leaves it out elsewhere and `rowx[embedded]` still installs (using it then raises InterfaceError)
 embedded = [
-    "rowx-postgres==0.3.0",
-    "rowx-embedded==0.3.0; (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))",
+    "rowx-postgres==0.4.0",
+    "rowx-embedded==0.4.0; (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))",
 ]
 # only for the opt-in `rowx.testing` pytest plugin; `import rowx` never imports pytest
 pytest = ["pytest>=9.2.0"]
@@ -62,8 +62,8 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "rowx-postgres==0.3.0",
-    "rowx-embedded==0.3.0",
+    "rowx-postgres==0.4.0",
+    "rowx-embedded==0.4.0",
     "anyio>=4.16.0",
     "maturin>=1.0,<2.0",
     "mypy==2.4.1",
