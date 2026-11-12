@@ -333,8 +333,8 @@ jobs:
           export PYO3_PYTHON
           maturin build --offline --locked --out "$RUNNER_TEMP/rebuilt-postgres"
 
-  publish:
-    name: Publish to PyPI
+  publish-core:
+    name: Publish rowx-core
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
       [
@@ -361,52 +361,21 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          path: dist/
-          merge-multiple: true
+          name: pure-distributions
+          path: dist/pure
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.14"
-
-      - name: Validate distributions
-        env:
-          VERSION: ${{ needs.validate.outputs.version }}
-        run: python scripts/validate-distributions.py
-
-      - name: Split distributions by package
+      - name: Select rowx-core distributions
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
-          mkdir -p dist/rowx-core dist/rowx-postgres dist/rowx
-          for path in dist/*; do
-            if [[ ! -f "$path" ]]; then
-              continue
-            fi
-            name="$(basename "$path")"
-            case "$name" in
-              rowx_core-*)
-                mv "$path" dist/rowx-core/
-                ;;
-              rowx_postgres-*)
-                mv "$path" dist/rowx-postgres/
-                ;;
-              rowx-*)
-                mv "$path" dist/rowx/
-                ;;
-              *)
-                echo "unexpected release artifact: $name" >&2
-                exit 1
-                ;;
-            esac
-          done
-          for package in rowx-core rowx-postgres rowx; do
-            files=( "dist/${package}/"* )
-            if (( ${#files[@]} == 0 )); then
-              echo "$package has no distributions" >&2
-              exit 1
-            fi
-          done
+          mkdir -p dist/rowx-core
+          files=( dist/pure/rowx_core-* )
+          if (( ${#files[@]} == 0 )); then
+            echo "rowx-core has no distributions" >&2
+            exit 1
+          fi
+          cp "${files[@]}" dist/rowx-core/
 
       - name: Publish rowx-core
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
@@ -414,11 +383,119 @@ jobs:
           packages-dir: dist/rowx-core
           skip-existing: true
 
+  publish-postgres:
+    name: Publish rowx-postgres
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      needs.publish-core.result == 'success'
+    needs: publish-core
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rowx
+    permissions:
+      id-token: write # PyPI trusted publishing (OIDC)
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheel-*
+          path: dist/rowx-postgres
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdist
+          path: dist/rowx-postgres
+
+      - name: Select rowx-postgres distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=( dist/rowx-postgres/* )
+          wheels=( dist/rowx-postgres/rowx_postgres-*.whl )
+          sdists=( dist/rowx-postgres/rowx_postgres-*.tar.gz )
+          if (( ${#wheels[@]} == 0 || ${#sdists[@]} == 0 )); then
+            echo "rowx-postgres wheels or sdist are missing" >&2
+            exit 1
+          fi
+          for path in "${files[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "unexpected release artifact: $path" >&2
+              exit 1
+            fi
+            name="$(basename "$path")"
+            case "$name" in
+              rowx_postgres-*) ;;
+              *)
+                echo "unexpected release artifact: $name" >&2
+                exit 1
+                ;;
+            esac
+          done
+
       - name: Publish rowx-postgres
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist/rowx-postgres
           skip-existing: true
+
+  publish-rowx:
+    name: Publish rowx
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      needs.publish-postgres.result == 'success'
+    needs: publish-postgres
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rowx
+    permissions:
+      id-token: write # PyPI trusted publishing (OIDC)
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pure-distributions
+          path: dist/pure
+
+      - name: Select rowx distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p dist/rowx
+          copied=0
+          for path in dist/pure/*; do
+            if [[ ! -f "$path" ]]; then
+              continue
+            fi
+            name="$(basename "$path")"
+            case "$name" in
+              rowx_core-* | rowx_postgres-*) ;;
+              rowx-*)
+                cp "$path" dist/rowx/
+                copied=$((copied + 1))
+                ;;
+              *)
+                echo "unexpected release artifact: $name" >&2
+                exit 1
+                ;;
+            esac
+          done
+          if (( copied == 0 )); then
+            echo "rowx has no distributions" >&2
+            exit 1
+          fi
 
       - name: Publish rowx
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
