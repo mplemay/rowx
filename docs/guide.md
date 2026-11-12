@@ -1,6 +1,7 @@
 # rowx user guide
 
-You write the SQL, name the row in ordinary Python, and `rowx check` fails the build when Postgres disagrees.
+rowx is typesafe raw SQL for Python 3.14+, with no ORM. You write SQL as a t-string and say what a row looks like.
+`rowx check` prepares every query against a live Postgres 18 database.
 
 The `python test` blocks in this guide run against a seeded database (users `alice`, `bob`, and `carol`, plus
 `orders`). The test suite sets `DSN`.

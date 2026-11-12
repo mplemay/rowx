@@ -1,10 +1,9 @@
 # rowx
 
-rowx is for when you would otherwise reach for SQLAlchemy and you would rather write the SQL. A query is a
-[PEP 750](https://peps.python.org/pep-0750/) t-string plus the Python type of the row.
+Typesafe raw SQL for Python 3.14+, with no ORM. You write SQL as a [PEP 750](https://peps.python.org/pep-0750/)
+t-string and say what a row looks like.
 
-`rowx check` prepares each checked `query` against a live Postgres 18 database. It reports a mismatch before the
-program runs. There is no session and no query builder.
+`rowx check` prepares each checked `query` against a live Postgres 18 database. `query_unchecked` SQL is not described.
 
 - **SQL stays SQL.** You write the statement you would write in psql. `{name}` is a bound parameter. It is never pasted
   into the SQL text.

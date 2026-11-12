@@ -1,9 +1,7 @@
 # Why rowx
 
-You keep the SQL you would have written in psql, you name the row in ordinary Python, and the build fails when Postgres
-disagrees.
-
-A query is a [PEP 750](https://peps.python.org/pep-0750/) t-string plus the Python type of the row. `rowx check` finds
+rowx is typesafe raw SQL for Python 3.14+, with no ORM. A query is a [PEP 750](https://peps.python.org/pep-0750/)
+t-string plus the Python type of the row. `rowx check` finds
 `query[T](t"...")` in your files. The checker never imports or executes application code. It asks Postgres to prepare
 and describe each checked statement, using `--database-url` or `DATABASE_URL`, and compares the columns and parameters
 with `T`. `query_unchecked` SQL is not described. Described metadata is not written to disk, so a check needs a

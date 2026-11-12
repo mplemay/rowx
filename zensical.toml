@@ -1,6 +1,6 @@
 [project]
 site_name = "rowx"
-site_description = "Write the SQL, name the row in Python, and fail the build when Postgres disagrees."
+site_description = "Typesafe raw SQL for Python without an ORM."
 site_url = "https://mplemay.github.io/rowx/"
 repo_url = "https://github.com/mplemay/rowx"
 repo_name = "mplemay/rowx"

@@ -1,7 +1,6 @@
 # rowx-postgres
 
-You keep the SQL, name the row in ordinary Python, and the build fails when Postgres disagrees. This package is the
-async Postgres driver that runs the query.
+PostgreSQL execution, migrations and database services for rowx.
 
 `rowx-postgres` depends only on matching `rowx-core`.
 
