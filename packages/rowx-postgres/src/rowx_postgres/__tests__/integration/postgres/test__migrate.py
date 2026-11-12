@@ -511,17 +511,22 @@ def test_a_connection_inside_a_transaction_is_an_interface_error(schema: str, tm
     asyncio.run(run())
 
 
+@pytest.mark.timing
 def test_a_second_operation_on_a_busy_connection_is_a_busy_error(schema: str, tmp_path: Path) -> None:
+    write(tmp_path, "1_slow.sql", "SELECT pg_sleep(30);")
     migrator = Migrator(tmp_path)
 
     async def run() -> None:
-        async with await connect(schema) as conn:
-            first = asyncio.ensure_future(migrator.info(conn))
-            # lets the first call claim the connection
-            await asyncio.sleep(0)
+        async with await connect(schema) as conn, await connect(schema) as observer:
+            pid = await backend_pid(conn)
+            first = asyncio.ensure_future(migrator.run(conn))
+            # the first operation holds the connection for as long as its statement runs
+            await wait_for_statement(observer, [pid], "%pg_sleep(30)%")
             with pytest.raises(ConnectionBusyError):
                 await migrator.info(conn)
-            await first
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
 
     asyncio.run(run())
 

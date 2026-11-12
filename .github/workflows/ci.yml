@@ -114,7 +114,11 @@ jobs:
 
       - name: Build package wheels
         if: matrix.python-version == '3.14'
-        run: uv build --package rowx --package rowx-core --package rowx-postgres --wheel --out-dir dist
+        # `uv build` takes one `--package`, and `--all-packages` would also build rowx-embedded, which has its own job
+        run: |
+          uv build --package rowx --wheel --out-dir dist
+          uv build --package rowx-core --wheel --out-dir dist
+          uv build --package rowx-postgres --wheel --out-dir dist
 
       - name: Verify standalone package boundaries
         if: matrix.python-version == '3.14'
