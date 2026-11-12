@@ -33,11 +33,12 @@ Rust crates:
 | `crates/rowx-py-core` | Shared PyO3 support: the tokio runtime (`runtime.rs`) and the exception-class registry (`errors.rs`). |
 | `packages/rowx-postgres` | The cdylib. Cargo package name `rowx-postgres-py`, library name `_core`. This is the binding crate, not a separate distribution. |
 
-Workspace members are those four paths; the embedded companion is excluded from the workspace (see
-[Embedded companion](#embedded-companion)). `pyo3` and `pyo3-async-runtimes` are workspace dependencies and their minor
-versions move together. `uv sync` installs the workspace. `ty` checks each package in place, with no merged type-check
-tree and no cross-package symlink. Build the extension with
-`uv run maturin develop -m packages/rowx-postgres/Cargo.toml`. Do not `cargo build` the cdylib on its own.
+The default workspace members are those four paths. The embedded companion (`packages/rowx-embedded` and its
+`crates/rowx-embedded-host`) is a member too, but not a default one (see [Embedded companion](#embedded-companion)).
+`pyo3` and `pyo3-async-runtimes` are workspace dependencies and their minor versions move together. `uv sync` installs
+the workspace. `ty` checks each package in place, with no merged type-check tree and no cross-package symlink. Build the
+extension with `uv run maturin develop -m packages/rowx-postgres/Cargo.toml`. Do not `cargo build` the cdylib on its
+own.
 
 ## Native module and runtimes
 
@@ -125,19 +126,21 @@ in a forked child.
 
 ### Build isolation
 
-The companion is **its own Cargo workspace**, listed in the root `Cargo.toml` `exclude`. The engine pulls in about 440
-Wasmer crates (edition 2024, rust-version 1.93), a vendored patch and its own `Cargo.lock`. A root workspace member
-would be built by `cargo test --workspace`, `cargo clippy --workspace` and `maturin develop` of the other packages, and
-the exclusion could not be promised alongside the membership. It carries the same lint table as the root.
+The companion is a **workspace member that is not a default member** (`default-members` in the root `Cargo.toml`). The
+engine pulls in about 440 Wasmer crates (edition 2024, rust-version 1.93) and a vendored patch (`[patch.crates-io]` in
+the root manifest), all in the one root `Cargo.lock`, `target/` and lint table. Plain `cargo test`, `cargo clippy` and
+`cargo tree` select only the default members, so they never build Wasmer; `maturin develop` of the other packages builds
+only its own package. `--workspace` selects every member, so the everyday gates never pass it. Select the companion with
+`-p rowx-embedded -p rowx-embedded-host`.
 
 The Python side is one root lock: `rowx-embedded` is a uv workspace member in the `dev` group, so every `uv sync`
 installs it (a maturin build of the engine, cached until its sources change), locally and in CI alike. Users get it
 through the `embedded` extra. Its version is the lockstep release version, and `scripts/validate-release-versions.py`
-checks its pyproject and both Cargo manifests and lock entries, and that its lint table equals the root one.
+checks its pyproject, both Cargo manifests and their entries in the root lock.
 
 | Gate | What it does |
 |---|---|
-| `just check` (prek) | Formats the companion (`cargo-fmt-embedded`) and type-checks `packages/rowx-embedded/src`. Its root clippy never builds Wasmer. |
+| `just check` (prek) | Formats the companion (`cargo fmt --all`) and type-checks `packages/rowx-embedded/src`. Its clippy runs over the default members and never builds Wasmer. |
 | `just check-embedded` | Clippy for the companion: the manual-stage hook `cargo-clippy-embedded`. |
 | `just test-embedded` | The embedded lane: `ROWX_TEST_DSN=embedded:// uv run pytest -m "(db and not server) or embedded"`. |
 

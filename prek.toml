@@ -111,30 +111,22 @@ hooks = [
   {
     id = "cargo-clippy",
     name = "cargo clippy",
-    entry = "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    # no `--workspace`: it would also select the embedded members (see `default-members` in Cargo.toml)
+    entry = "cargo clippy --all-targets --all-features -- -D warnings",
     language = "system",
     files = '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.cargo/config\.toml|(src|crates|packages)/.*\.(rs|toml))$',
     pass_filenames = false,
     require_serial = true,
   },
-  # packages/rowx-embedded is a separate Cargo workspace (see the root `exclude`), so it gets its own hooks. Formatting
-  # builds nothing and runs by default. Clippy would fetch and check about 440 Wasmer crates, so it is a manual-stage
-  # hook (`just check-embedded`, and the embedded CI job) and `just check` leaves it out.
-  {
-    id = "cargo-fmt-embedded",
-    name = "cargo fmt (rowx-embedded)",
-    entry = "cargo fmt --manifest-path packages/rowx-embedded/Cargo.toml -p rowx-embedded -p rowx-embedded-host --",
-    language = "system",
-    files = '^packages/rowx-embedded/(Cargo\.(toml|lock)|(src|crates)/.*\.(rs|toml))$',
-    pass_filenames = false,
-    require_serial = true,
-  },
+  # `cargo fmt --all` above already formats the embedded members, since formatting builds nothing. Clippy would fetch and
+  # check about 440 Wasmer crates, so the embedded run is a manual-stage hook (`just check-embedded`, and the embedded CI
+  # job) and `just check` leaves it out.
   {
     id = "cargo-clippy-embedded",
     name = "cargo clippy (rowx-embedded)",
-    entry = "cargo clippy --manifest-path packages/rowx-embedded/Cargo.toml -p rowx-embedded -p rowx-embedded-host --all-targets --all-features -- -D warnings",
+    entry = "cargo clippy -p rowx-embedded -p rowx-embedded-host --all-targets --all-features -- -D warnings",
     language = "system",
-    files = '^packages/rowx-embedded/(Cargo\.(toml|lock)|(src|crates|vendor)/.*\.(rs|toml))$',
+    files = '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|\.cargo/config\.toml|(packages/rowx-embedded/(src|crates)|vendor)/.*\.(rs|toml))$',
     pass_filenames = false,
     require_serial = true,
     stages = ["manual"],

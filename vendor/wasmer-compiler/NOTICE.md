@@ -1,7 +1,7 @@
 # Vendored `wasmer-compiler` 7.2.1
 
 This directory is `wasmer-compiler` 7.2.1 from crates.io (MIT, (c) Wasmer Engineering Team), with one change. It is
-wired in through `[patch.crates-io]` in `packages/rowx-embedded/Cargo.toml`, and it is exempt from rowx's lint rules.
+wired in through `[patch.crates-io]` in the root `Cargo.toml`, and it is exempt from rowx's lint rules.
 
 ## What changed
 

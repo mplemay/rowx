@@ -21,7 +21,6 @@ VERSION_FILES: Final[tuple[str, ...]] = (
     "packages/rowx-postgres/pyproject.toml",
     "packages/rowx-embedded/pyproject.toml",
     "packages/rowx-embedded/Cargo.toml",
-    "packages/rowx-embedded/Cargo.lock",
     "packages/rowx-embedded/crates/rowx-embedded-host/Cargo.toml",
 )
 
@@ -151,11 +150,4 @@ def test_mismatched_embedded_cargo_version_fails(monkeypatch: pytest.MonkeyPatch
         f'version = "{MISMATCH_VERSION}"',
     )
     with pytest.raises(SystemExit, match="Release version mismatch"):
-        _run(monkeypatch, "pull_request", root=tmp_path)
-
-
-def test_embedded_lint_table_drift_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _copy_version_files(tmp_path)
-    _replace_once(tmp_path / "packages/rowx-embedded/Cargo.toml", 'todo = "deny"', 'todo = "warn"')
-    with pytest.raises(SystemExit, match=r"\[workspace.lints\]"):
         _run(monkeypatch, "pull_request", root=tmp_path)

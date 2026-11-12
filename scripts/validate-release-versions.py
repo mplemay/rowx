@@ -10,8 +10,6 @@ PUSH_EVENT: Final[str] = "push"
 PACKAGE_NAME: Final[str] = "rowx"
 PYTHON_PACKAGES: Final[tuple[str, ...]] = ("rowx", "rowx-core", "rowx-postgres", "rowx-embedded")
 EMBEDDED_DIR: Final[str] = "packages/rowx-embedded"
-# the embedded Cargo workspace is separate from the root one; its crates share the release version
-EMBEDDED_CRATES: Final[frozenset[str]] = frozenset({"rowx-embedded", "rowx-embedded-host"})
 EMBEDDED_MARKER: Final[str] = (
     "(sys_platform == 'darwin' and platform_machine == 'arm64') or "
     "(sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))"
@@ -21,6 +19,8 @@ WORKSPACE_PACKAGES: Final[frozenset[str]] = frozenset({
     "rowx-postgres",
     "rowx-postgres-py",
     "rowx-py-core",
+    "rowx-embedded",
+    "rowx-embedded-host",
 })
 
 
@@ -83,20 +83,6 @@ def _check_embedded(root: Path, version: str, versions: dict[str, str]) -> None:
     versions["rowx-embedded-host/Cargo.toml"] = _version(
         package / "crates/rowx-embedded-host/Cargo.toml", ("package", "version")
     )
-    locked = _package_versions(package / "Cargo.lock", EMBEDDED_CRATES)
-    if locked.keys() != EMBEDDED_CRATES:
-        message = f"{EMBEDDED_DIR}/Cargo.lock holds {sorted(locked)}, expected {sorted(EMBEDDED_CRATES)}"
-        raise SystemExit(message)
-    versions.update({f"embedded Cargo.lock:{name}": found for name, found in locked.items()})
-    # the embedded workspace repeats the root lint table, so a lint change must land in both
-    if _lints(root / "Cargo.toml") != _lints(package / "Cargo.toml"):
-        message = f"[workspace.lints] in {EMBEDDED_DIR}/Cargo.toml differs from the root Cargo.toml"
-        raise SystemExit(message)
-
-
-def _lints(path: Path) -> object:
-    workspace = _read(path).get("workspace")
-    return workspace.get("lints") if isinstance(workspace, dict) else None
 
 
 def _require_dev_pins(project: dict[str, object], version: str) -> None:

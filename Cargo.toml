@@ -5,11 +5,19 @@ members = [
     "crates/rowx-postgres",
     "crates/rowx-py-core",
     "packages/rowx-postgres",
+    "packages/rowx-embedded",
+    "packages/rowx-embedded/crates/rowx-embedded-host",
+]
+# The embedded engine pulls in about 440 Wasmer crates, so plain `cargo build|test|clippy|tree` leave it out. Select it
+# with `-p rowx-embedded -p rowx-embedded-host`; `--workspace` also selects it, so the everyday gates never pass that flag.
+default-members = [
+    "crates/rowx-core",
+    "crates/rowx-postgres",
+    "crates/rowx-py-core",
+    "packages/rowx-postgres",
 ]
 # cargo-fuzz targets need nightly and unsafe code, so they stay out of the workspace and its lints.
-# packages/rowx-embedded is its own workspace: the engine pulls in about 440 Wasmer crates (edition 2024, rust-version
-# 1.93), a vendored patch and its own lock file, and none of that may build under `cargo test --workspace` or clippy.
-exclude = ["fuzz", "packages/rowx-embedded"]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.3.0"
@@ -25,6 +33,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 rowx-core = { path = "crates/rowx-core" }
 rowx-postgres = { path = "crates/rowx-postgres" }
 rowx-py-core = { path = "crates/rowx-py-core" }
+# the full contrib set the engine can ship (32 extensions); the names are mirrored in `host/src/runtime.rs`
+oliphaunt-wasix = { version = "=0.3.2", features = ["extension-amcheck", "extension-auto-explain", "extension-bloom", "extension-btree-gin", "extension-btree-gist", "extension-citext", "extension-cube", "extension-dict-int", "extension-dict-xsyn", "extension-earthdistance", "extension-file-fdw", "extension-fuzzystrmatch", "extension-hstore", "extension-intarray", "extension-isn", "extension-lo", "extension-ltree", "extension-pageinspect", "extension-pg-buffercache", "extension-pg-freespacemap", "extension-pg-surgery", "extension-pg-trgm", "extension-pg-visibility", "extension-pg-walinspect", "extension-pgcrypto", "extension-seg", "extension-tablefunc", "extension-tcn", "extension-tsm-system-rows", "extension-tsm-system-time", "extension-unaccent", "extension-uuid-ossp"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -42,3 +52,10 @@ dbg_macro = "deny"
 todo = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
+
+[profile.release]
+debug = false
+
+# wasmer-compiler 7.2.1 with the macOS arm64 compact-unwind `dso_base` fix; see vendor/wasmer-compiler/NOTICE.md
+[patch.crates-io]
+wasmer-compiler = { path = "vendor/wasmer-compiler" }

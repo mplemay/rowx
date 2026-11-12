@@ -52,7 +52,9 @@ features = ["pyo3/extension-module"]
 module-name = "rowx_embedded._engine"
 python-packages = ["rowx_embedded"]
 python-source = "src"
-# source archives need the local patch; Cargo downloads the remaining dependencies from the registry
+# source archives need the local patch; Cargo downloads the remaining dependencies from the registry. The patch lives in
+# the repository's root `vendor/`, and `vendor` here is a symlink to it so that maturin packs it at the path that the
+# root `[patch.crates-io]` entry resolves from inside the archive too
 include = [{ path = "vendor/wasmer-compiler/**/*", format = "sdist" }]
 exclude = [
     { path = "**/__pycache__/**", format = "wheel" },

@@ -54,9 +54,10 @@ def validate_archive(archive: Path, destination: Path) -> None:
         if not packaged.is_file() or packaged.read_bytes() != path.read_bytes():
             message = f"{archive.name}: {relative} is missing or differs from the checkout"
             raise SystemExit(message)
-    # Resolving outside the checkout proves that its vendor tree and workspace cannot hide missing archive inputs.
+    # Resolving outside the checkout proves that its vendor tree and workspace cannot hide missing archive inputs. Not
+    # `--locked`: the archive carries the root Cargo.lock, which also lists crates of the members it leaves out.
     result = run(  # ruff: ignore[subprocess-without-shell-equals-true]
-        [_executable("cargo"), "metadata", "--locked", "--format-version", "1"],
+        [_executable("cargo"), "metadata", "--format-version", "1"],
         cwd=extracted,
         check=True,
         stdout=PIPE,

@@ -14,7 +14,7 @@ CLI tests use fake executors or services and need no database. Database tests be
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/support/schema.sql` | The per-test schema. |
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/support/engine.py` | The embedded engine's recorded divergences ([Embedded lane](#embedded-lane)). |
 | `packages/rowx-embedded/src/rowx_embedded/__tests__/unit/` | The embedded glue (`Database`, URL grammar, scratch, snapshot cache) against a fake engine. |
-| `packages/rowx-embedded/src/rowx_embedded/__tests__/integration/` | The glue and the engine binding (`test__engine.py`, slow) against the real engine. They run with the rest of `just test-py`; the glue tests are also marked `embedded`, so the embedded lane runs them. The host's Rust tests run with `cargo test --manifest-path packages/rowx-embedded/Cargo.toml --workspace`. |
+| `packages/rowx-embedded/src/rowx_embedded/__tests__/integration/` | The glue and the engine binding (`test__engine.py`, slow) against the real engine. They run with the rest of `just test-py`; the glue tests are also marked `embedded`, so the embedded lane runs them. The host's Rust tests run with `just test-rust-embedded` (`cargo test -p rowx-embedded-host`). |
 
 A test file is `test_<module>.py` for the module it covers.
 
@@ -33,8 +33,8 @@ execute fences tagged `python test` in `integration/docs/test_snippets.py`. The 
 [use-rowx skill](https://github.com/mplemay/rowx/blob/main/.agents/skills/use-rowx/SKILL.md). Ordinary `python`
 fences are not executed.
 
-Rust tests are `cargo test --workspace` (`just test-rust`). Database tests in `crates/rowx-postgres/tests/` use the
-same DSN. `crates/rowx-core` has no database.
+Rust tests are `cargo test` over the default workspace members (`just test-rust`). Database tests in
+`crates/rowx-postgres/tests/` use the same DSN. `crates/rowx-core` has no database.
 
 ## Commands
 
@@ -42,9 +42,10 @@ same DSN. `crates/rowx-core` has no database.
 |---|---|
 | `just check` | `uv run prek run --all-files`: rumdl, ruff, `ty check` on `src`, `packages/rowx-core/src` and `packages/rowx-postgres/src`, `cargo fmt`, `cargo clippy`. |
 | `just test-py` | `uv run pytest`. |
-| `just test-rust` | `cargo test --workspace`. |
+| `just test-rust` | `cargo test` over the default members (no Wasmer). |
+| `just test-rust-embedded` | `cargo test -p rowx-embedded-host`. |
 | `just docs-build` | `zensical build --clean --strict`. |
-| `just check-embedded` | Clippy for the embedded companion, a separate Cargo workspace: `uv run prek run cargo-clippy-embedded --hook-stage manual`. |
+| `just check-embedded` | Clippy for the embedded companion, a non-default workspace member: `uv run prek run cargo-clippy-embedded --hook-stage manual`. |
 | `just test-embedded` | The embedded lane: `ROWX_TEST_DSN=embedded:// uv run pytest -m "(db and not server) or embedded"`. |
 
 `ty` is the type-check gate. pyright and mypy stay in the dev group because

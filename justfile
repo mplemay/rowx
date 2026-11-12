@@ -5,13 +5,17 @@ default:
 check:
     uv run prek run --all-files
 
-# clippy for packages/rowx-embedded (a separate workspace: builds the Wasmer tree, so `check` leaves it out)
+# clippy for packages/rowx-embedded (it builds the Wasmer tree, so it is not a default workspace member and `check` leaves it out)
 check-embedded:
     uv run prek run cargo-clippy-embedded --hook-stage manual --all-files
 
-# cargo test over the workspace; DB tests run when ROWX_TEST_DSN is set
+# cargo test over the default workspace members; DB tests run when ROWX_TEST_DSN is set
 test-rust:
-    cargo test --workspace
+    cargo test
+
+# cargo test for the embedded engine host (builds the Wasmer tree)
+test-rust-embedded:
+    cargo test -p rowx-embedded-host
 
 # python tests
 test-py:

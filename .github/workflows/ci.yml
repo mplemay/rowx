@@ -64,10 +64,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # the root workspace, and the engine's own one that `uv sync` builds with Wasmer
-          workspaces: |
-            . -> target
-            packages/rowx-embedded -> target
+          # one workspace: `uv sync` builds the engine (and Wasmer) into the same target directory
+          workspaces: . -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install just
@@ -96,20 +94,16 @@ jobs:
       - name: Start the TLS postgres
         run: echo "ROWX_TEST_DSN_SSL=$(scripts/pg.sh up --ssl)" >> "$GITHUB_ENV"
 
-      # packages/rowx-embedded is its own Cargo workspace: neither `just check` nor `cargo test --workspace` may build Wasmer
-      - name: Verify the root workspace does not build Wasmer
+      # rowx-embedded is a workspace member but not a default one: neither `just check` nor `cargo test` may build Wasmer
+      - name: Verify the default workspace members do not build Wasmer
         if: matrix.python-version == '3.14'
         run: |
-          # `! cmd` does not trip errexit, so each check is an explicit `if`
-          if grep -E '^name = "(wasmer|liboliphaunt|oliphaunt)' Cargo.lock; then
-            echo '::error::Cargo.lock lists Wasmer or engine crates.'
+          # `! cmd` does not trip errexit, so the check is an explicit `if`; no `--workspace`, which selects every member
+          if cargo tree --locked --prefix none --edges all | grep -E '^(wasmer|liboliphaunt|oliphaunt)'; then
+            echo '::error::The default workspace members depend on Wasmer or engine crates.'
             exit 1
           fi
-          if cargo tree --workspace --locked --prefix none --edges all | grep -E '^(wasmer|liboliphaunt|oliphaunt)'; then
-            echo '::error::The root workspace depends on Wasmer or engine crates.'
-            exit 1
-          fi
-          echo "no Wasmer or engine crate in the root workspace"
+          echo "no Wasmer or engine crate in the default workspace members"
 
       - name: Test rust
         if: matrix.python-version == '3.14'
@@ -137,7 +131,7 @@ jobs:
           ROWX_TYPING_PYTHON="$RUNNER_TEMP/rowx-wheel-types/bin/python" uv run pytest packages/rowx-postgres/src/rowx_postgres/__tests__/unit/test__executor.py
 
   # the companion wheel for the embedded lane: a manylinux x86_64 build (release.yml builds the same wheel for the
-  # other platforms). It builds the whole Wasmer tree, so the Cargo cache (keyed on packages/rowx-embedded/Cargo.lock) is
+  # other platforms). It builds the whole Wasmer tree, so the Cargo cache (keyed on Cargo.lock) is
   # what keeps a pull request warm; the `embedded` job tests and smoke tests the artifact.
   embedded-wheel:
     name: Embedded wheel (Linux x86_64)
@@ -161,14 +155,14 @@ jobs:
         id: cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: packages/rowx-embedded
+          workspaces: . -> target
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Record the cached Wasmer artifacts
         run: |
-          mkdir -p packages/rowx-embedded/target/release/deps
-          find packages/rowx-embedded/target/release/deps -name 'libwasmer_vm-*.rlib' -exec stat -c '%Y %n' {} + | sort > "$RUNNER_TEMP/wasmer-before.txt"
+          mkdir -p target/release/deps
+          find target/release/deps -name 'libwasmer_vm-*.rlib' -exec stat -c '%Y %n' {} + | sort > "$RUNNER_TEMP/wasmer-before.txt"
           echo "Wasmer artifacts restored from the cache: $(wc -l < "$RUNNER_TEMP/wasmer-before.txt")"
 
       # the manylinux2014 container (glibc 2.17) gives the wheel a manylinux_2_17 tag; it reads the pinned toolchain from
@@ -183,7 +177,7 @@ jobs:
       - name: Check that a warm cache did not rebuild Wasmer
         if: steps.cache.outputs.cache-hit == 'true'
         run: |
-          find packages/rowx-embedded/target/release/deps -name 'libwasmer_vm-*.rlib' -exec stat -c '%Y %n' {} + | sort > "$RUNNER_TEMP/wasmer-after.txt"
+          find target/release/deps -name 'libwasmer_vm-*.rlib' -exec stat -c '%Y %n' {} + | sort > "$RUNNER_TEMP/wasmer-after.txt"
           if ! diff "$RUNNER_TEMP/wasmer-before.txt" "$RUNNER_TEMP/wasmer-after.txt"; then
             echo '::error::Wasmer was rebuilt although the Cargo cache was restored.'
             exit 1
@@ -200,8 +194,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # the engine host's Rust gates: tests, fmt, clippy and the license check. packages/rowx-embedded is its own Cargo
-  # workspace that builds the Wasmer tree, so `just check` and `cargo test --workspace` in the `linux` job leave it out. A job
+  # the engine host's Rust gates: tests, fmt, clippy and the license check. packages/rowx-embedded builds the Wasmer tree
+  # and is not a default workspace member, so `just check` and `cargo test` in the `linux` job leave it out. A job
   # of its own rather than steps of `embedded-wheel`: the wheel builds in a manylinux container with a release profile, so
   # nothing of its target directory is shared with a debug build, and the two then run side by side
   embedded-rust:
@@ -225,25 +219,25 @@ jobs:
       - name: Cache the Wasmer build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: packages/rowx-embedded
+          workspaces: . -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test the engine host
-        run: cargo test --manifest-path packages/rowx-embedded/Cargo.toml --workspace --locked
+        run: cargo test -p rowx-embedded-host --locked
 
       - name: Check the embedded source archive
         run: uv run --no-project --python 3.14 python scripts/validate-embedded-sdist.py
 
       # the same hooks that `just check-embedded` runs, from the prek version that uv.lock pins
       - name: Format and clippy
-        run: uvx prek@0.5.10 run cargo-fmt-embedded cargo-clippy-embedded --hook-stage manual --all-files
+        run: uvx prek@0.5.10 run cargo-fmt cargo-clippy-embedded --hook-stage manual --all-files
 
-      # the allowed licenses are in packages/rowx-embedded/deny.toml; the tool is installed from crates.io at a fixed version
+      # the allowed licenses are in deny.toml; the tool is installed from crates.io at a fixed version
       # (the Cargo cache keeps the binary)
       - name: Check the licenses of the engine tree
         run: |
           command -v cargo-deny > /dev/null || cargo install --locked --version 0.20.2 cargo-deny
-          cargo deny --manifest-path packages/rowx-embedded/Cargo.toml check licenses
+          cargo deny --workspace check licenses
 
   # the engine-neutral db tests and the `embedded` tests against the in-process engine; Docker (the `linux` job) stays the
   # full-capability lane, and `server` tests (several sessions, cancel, TLS, CREATE DATABASE, ...) skip here
@@ -275,10 +269,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # the root workspace, and the engine's own one that `uv sync` builds with Wasmer
-          workspaces: |
-            . -> target
-            packages/rowx-embedded -> target
+          # one workspace: `uv sync` builds the engine (and Wasmer) into the same target directory
+          workspaces: . -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
@@ -340,10 +332,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # the root workspace, and the engine's own one that `uv sync` builds with Wasmer
-          workspaces: |
-            . -> target
-            packages/rowx-embedded -> target
+          # one workspace: `uv sync` builds the engine (and Wasmer) into the same target directory
+          workspaces: . -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install just
@@ -398,10 +388,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # the root workspace, and the engine's own one that `uv sync` builds with Wasmer
-          workspaces: |
-            . -> target
-            packages/rowx-embedded -> target
+          # one workspace: `uv sync` builds the engine (and Wasmer) into the same target directory
+          workspaces: . -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
