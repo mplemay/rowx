@@ -27,7 +27,7 @@ its asyncio backend, and Trio does not.
 ```python
 # test_signup.py
 from rowx import query
-from rowx_postgres import Pool
+from rowx.postgres import Pool
 
 
 async def test_signup(rowx_pool: Pool) -> None:  # with pytest-asyncio or anyio's asyncio backend

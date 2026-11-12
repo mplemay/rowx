@@ -1,7 +1,6 @@
 # Diagnostics
 
-See [The checker](../references/checker.md), [the checker guide](../../../../docs/guide/checker.md), and
-[the checker reference](../../../../docs/reference/checker.md).
+See [The checker](../references/checker.md).
 
 ## Contents
 
@@ -43,8 +42,8 @@ def interpret(code: int) -> str:
 
 ## The checker does not import the application
 
-The checker parses source. It does not import or execute application code. It prepares and describes `query` on both
-`from rowx import query` and `from rowx_core import query`. There is no implicit Postgres target: the database is
+The checker parses source. It does not import or execute application code. It prepares and describes `query` from
+`rowx` and `rowx_core`. There is no implicit Postgres target: the database is
 `--database-url` or the variable named by `database_url_env`, which defaults to `DATABASE_URL`.
 
 Incorrect:

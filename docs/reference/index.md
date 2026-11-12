@@ -15,12 +15,17 @@ rowx publishes three distributions. Install matching versions of the ones you us
 `rowx-core` is pure Python and holds the shared query and executor primitives. `rowx` re-exports that query API and
 supplies the checker, the `rowx` command and the opt-in pytest plugin. `rowx-postgres` is the PostgreSQL driver.
 
-`from rowx import query` and `from rowx_core import query` are the same object. Open connections from the backend:
+`from rowx import query` and `from rowx_core import query` are the same object.
+`from rowx.postgres import Pool, connect` and `from rowx_postgres import Pool, connect` are the same objects.
+`Pool` imported from `rowx` is the executor protocol, not a connection pool. `import rowx` loads no backend.
+With the `rowx` distribution, open connections from `rowx.postgres`:
 
 ```python
 from rowx import query
-from rowx_postgres import Pool, connect
+from rowx.postgres import Pool, connect
 ```
+
+A runtime-only install of `rowx-core` and `rowx-postgres` imports `rowx_core` and `rowx_postgres`.
 
 A runtime query compiles with the executor passed to `one`, `optional`, `all`, `fetch` or `execute`. It is not bound
 to the first executor that ran it. `rowx check` selects one database from `--database-url` or the configured URL

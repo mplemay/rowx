@@ -11,7 +11,7 @@ Use `all()` when the result is known to be small, and `fetch` when it is large o
 ```python test
 import asyncio
 
-from rowx_postgres import connect
+from rowx.postgres import connect
 from rowx import query
 
 
@@ -52,9 +52,9 @@ asyncio.run(main())
 ```python test
 import asyncio
 
-from rowx_postgres import connect
+from rowx.postgres import connect
 from rowx import query
-from rowx_core.errors import ConnectionBusyError
+from rowx import ConnectionBusyError
 
 
 async def main() -> None:

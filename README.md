@@ -94,8 +94,10 @@ contract for the exit codes.
 
 ## Distributions
 
-`rowx` is the optional CLI and re-exports `query`. `from rowx import query` and `from rowx_core import query` are the
-same object. With `rowx[postgres]`, the backend is `rowx.postgres`.
+`rowx` is the optional CLI. With `rowx[postgres]`, import the query API from `rowx` and the driver from
+`rowx.postgres`. `from rowx import query` and `from rowx_core import query` are the same object. `Pool` imported
+from `rowx` is the executor protocol, not a connection pool. `rowx.core` re-exports only the `rowx_core` names that
+`rowx` and `rowx.errors` do not already export.
 
 `rowx-core` (`rowx_core`) has no runtime dependencies. `rowx-postgres` depends only on matching `rowx-core`.
 `rowx.postgres` re-exports that driver and needs the `postgres` extra.
