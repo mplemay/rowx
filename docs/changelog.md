@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0
+## 0.4.1
 
 - `rowx[embedded]` adds an in-process Postgres 18 for development, checking and tests. In code,
   `rowx.embedded.Database` is a pool-shaped executor that owns one instance (`Database()` in memory,
@@ -8,10 +8,10 @@
   `rowx migrate` and the pytest plugin; generic `connect`, `Pool` and `ConnectOptions.from_dsn` do not accept one. All
   of it lives in `rowx-embedded`, and `rowx-postgres` does not know about it. See
   [Embedded Postgres](guide/embedded.md).
-- `rowx-embedded` releases in lockstep with the other distributions (0.4.0, from the `v*` tag and `release.yml`)
+- `rowx-embedded` releases in lockstep with the other distributions (0.4.1, from the `v*` tag and `release.yml`)
   instead of as `18.4.0` on its own `embedded-v*` tag. It depends on the matching `rowx-postgres`, and `rowx[embedded]`
-  pins `rowx-embedded==0.4.0`. The engine is still PostgreSQL 18.4. This tree is version 0.4.0. 0.4.0 is not on PyPI
-  until the `v0.4.0` tag is published.
+  pins `rowx-embedded==0.4.1`. The engine is still PostgreSQL 18.4. This tree is version 0.4.1. 0.4.1 is not on PyPI
+  until the `v0.4.1` tag is published.
 - A pool acquire that is retrying a connect now takes a connection that another caller returns meanwhile. Before, it
   kept retrying until its timeout, so a pool whose server was at its connection limit could time out next to an idle
   connection of its own.
