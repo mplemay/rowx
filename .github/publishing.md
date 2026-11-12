@@ -13,8 +13,8 @@ later publish job was skipped because an earlier one failed, re-run that skipped
 `workflow_dispatch` builds, checks, and rebuilds the artifacts. It does not publish. Publishing runs
 only on a `v*` tag push.
 
-0.3.0 does not ship explicit cp314t wheels. Free-threaded CPython 3.14t cannot install the abi3
-wheels, so pip builds `rowx-postgres` from the source distribution.
+The abi3 wheels do not include a free-threaded cp314t build. Free-threaded CPython 3.14t cannot install
+them, so pip builds `rowx-postgres` from the source distribution.
 
 ## rowx-embedded
 
