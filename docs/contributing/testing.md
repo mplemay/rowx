@@ -70,8 +70,8 @@ not start a database.
 - **Distributions.** `src/rowx/__tests__/unit/test_validate_distributions.py` checks the three lockstep packages:
   `rowx-core` has no runtime dependencies, `rowx-postgres` depends only on `rowx-core`, and `rowx` does not depend on
   `rowx-postgres` unless the extra is selected. Its `embedded` extra must add exactly `rowx-postgres` and the platform
-  gated `rowx-embedded>=18.4,<19`. The embedded wheels have their own checks, `scripts/validate-embedded-wheels.py`
-  and `scripts/validate-embedded-release.sh`.
+  gated `rowx-embedded==<version>`. The embedded wheels have their own check, `scripts/validate-embedded-wheels.py`,
+  and the version agreement is in `scripts/validate-release-versions.py`.
 
 ## Test plugin
 

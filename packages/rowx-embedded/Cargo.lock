@@ -2569,7 +2569,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-embedded"
-version = "18.4.0"
+version = "0.3.0"
 dependencies = [
  "pyo3",
  "rowx-embedded-host",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "rowx-embedded-host"
-version = "18.4.0"
+version = "0.3.0"
 dependencies = [
  "liboliphaunt-wasix-portable",
  "oliphaunt-wasix",

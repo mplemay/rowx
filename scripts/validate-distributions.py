@@ -42,7 +42,6 @@ POSTGRES_EXTRA: Final[str] = "postgres"
 PYTEST_EXTRA: Final[str] = "pytest"
 EMBEDDED_DISTRIBUTION: Final[str] = "rowx-embedded"
 EMBEDDED_EXTRA: Final[str] = "embedded"
-EMBEDDED_REQUIREMENT: Final[str] = "rowx-embedded>=18.4,<19"
 # the platforms the companion ships wheels for; every disjunct of its marker is one of these plus the extra
 EMBEDDED_PLATFORMS: Final[frozenset[frozenset[tuple[str, str]]]] = frozenset({
     frozenset({("sys_platform", "darwin"), ("platform_machine", "arm64")}),
@@ -312,8 +311,9 @@ def _validate_rowx_requires(path: Path, version: str, requirements: list[Require
     if postgres != expected_pairs:
         message = f"{path.name} postgres requirements are {postgres}, expected {expected_pairs}"
         raise SystemExit(message)
-    if embedded != [EMBEDDED_REQUIREMENT]:
-        message = f"{path.name} embedded requirements are {embedded}, expected [{EMBEDDED_REQUIREMENT}]"
+    expected_embedded = f"{EMBEDDED_DISTRIBUTION}=={version}"
+    if embedded != [expected_embedded]:
+        message = f"{path.name} embedded requirements are {embedded}, expected [{expected_embedded}]"
         raise SystemExit(message)
     for requirement, extra in extras:
         if _distribution_name(requirement) == POSTGRES_DISTRIBUTION:

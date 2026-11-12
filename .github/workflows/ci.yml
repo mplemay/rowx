@@ -70,7 +70,7 @@ jobs:
         run: uv tool install rust-just
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
@@ -116,7 +116,7 @@ jobs:
 
       - name: Build package wheels
         if: matrix.python-version == '3.14'
-        run: uv build --all-packages --wheel --out-dir dist
+        run: uv build --package rowx --package rowx-core --package rowx-postgres --wheel --out-dir dist
 
       - name: Verify standalone package boundaries
         if: matrix.python-version == '3.14'
@@ -132,7 +132,7 @@ jobs:
           uv pip install --refresh --python "$RUNNER_TEMP/rowx-wheel-types/bin/python" "${rowx_wheels[0]}[postgres]" dist/rowx_core-*.whl dist/rowx_postgres-*.whl
           ROWX_TYPING_PYTHON="$RUNNER_TEMP/rowx-wheel-types/bin/python" uv run pytest packages/rowx-postgres/src/rowx_postgres/__tests__/unit/test__executor.py
 
-  # the companion wheel for the embedded lane: a manylinux x86_64 build (release-embedded.yml builds the same wheel for the
+  # the companion wheel for the embedded lane: a manylinux x86_64 build (release.yml builds the same wheel for the
   # other platforms). It builds the whole Wasmer tree, so the Cargo cache (keyed on packages/rowx-embedded/Cargo.lock) is
   # what keeps a pull request warm; the `embedded` job tests and smoke tests the artifact.
   embedded-wheel:
@@ -275,7 +275,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
@@ -345,7 +345,7 @@ jobs:
         run: uv tool install rust-just
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
@@ -396,7 +396,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml

@@ -1,6 +1,6 @@
 [project]
 name = "rowx-embedded"
-version = "18.4.0"
+version = "0.3.0"
 description = "In-process PostgreSQL 18 engine host for rowx (development, checking and tests)"
 readme = "README.md"
 authors = [
@@ -21,11 +21,26 @@ classifiers = [
     "Topic :: Database",
 ]
 keywords = ["postgresql", "postgres", "embedded", "wasm", "rowx"]
-dependencies = []
+dependencies = ["rowx-postgres==0.3.0"]
 
 [project.urls]
 Repository = "https://github.com/mplemay/rowx"
 Issues = "https://github.com/mplemay/rowx/issues"
+
+[tool.uv.sources]
+rowx-postgres = { workspace = true }
+
+# a maturin build is opaque to uv, so name the inputs that must trigger a rebuild of the editable install
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+    { file = "crates/**/*.rs" },
+    { file = "crates/**/Cargo.toml" },
+    { file = "vendor/**" },
+]
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
@@ -41,4 +56,5 @@ include = [{ path = "vendor/wasmer-compiler/**/*", format = "sdist" }]
 exclude = [
     { path = "**/__pycache__/**", format = "wheel" },
     { path = "**/*.pyc", format = "wheel" },
+    { path = "**/__tests__/**", format = "wheel" },
 ]

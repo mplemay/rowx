@@ -124,8 +124,8 @@ def _validate_metadata(path: Path, wheel: ZipFile, names: list[str], version: st
         problems.append(f"Name is {metadata.get('Name')!r}")
     if metadata.get("Version") != version:
         problems.append(f"Version is {metadata.get('Version')!r}, expected {version!r}")
-    if metadata.get_all("Requires-Dist"):
-        problems.append(f"it must not depend on anything, found {metadata.get_all('Requires-Dist')}")
+    if (requires := metadata.get_all("Requires-Dist")) != [f"rowx-postgres=={version}"]:
+        problems.append(f"it must depend only on rowx-postgres=={version}, found {requires}")
     if sorted(metadata.get_all("License-File", [])) != sorted(LICENSE_FILES):
         problems.append(f"License-File is {metadata.get_all('License-File')}")
     if problems:

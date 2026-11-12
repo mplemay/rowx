@@ -40,14 +40,14 @@ db-down:
 
 # release build plus bench/fetch_100k.py and bench/pool_one.py; needs ROWX_TEST_DSN
 bench:
-    uv sync --all-packages --group bench
+    uv sync --all-packages --no-install-package rowx-embedded --group bench
     uv run --no-sync maturin develop -m packages/rowx-postgres/Cargo.toml --release
     uv run --no-sync python bench/fetch_100k.py
     uv run --no-sync python bench/pool_one.py
 
 # release build plus bench/fetch_drivers.py; needs ROWX_TEST_DSN
 bench-drivers:
-    uv sync --all-packages --group bench-drivers
+    uv sync --all-packages --no-install-package rowx-embedded --group bench-drivers
     uv run --no-sync maturin develop -m packages/rowx-postgres/Cargo.toml --release
     uv run --no-sync python bench/fetch_drivers.py
 

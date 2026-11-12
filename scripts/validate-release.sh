@@ -27,3 +27,4 @@ fi
 
 python "$root/scripts/validate-release-versions.py"
 cargo metadata --locked --format-version 1 --no-deps >/dev/null
+cargo metadata --locked --format-version 1 --no-deps --manifest-path packages/rowx-embedded/Cargo.toml >/dev/null

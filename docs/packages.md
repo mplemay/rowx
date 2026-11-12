@@ -1,7 +1,7 @@
 # Packages
 
-rowx publishes four distributions. Install matching versions of the ones you use. Each distribution has its own
-import root.
+rowx publishes four distributions, all released together under one version (0.3.0). Install matching versions of the
+ones you use. Each distribution has its own import root.
 
 An application that installs `rowx[postgres]` imports `from rowx import ...` and `from rowx.postgres import ...`.
 `from rowx import query` is the same object as `from rowx_core import query`, and `from rowx.postgres import connect`
@@ -56,10 +56,10 @@ not import your application.
 ## rowx-embedded
 
 The `rowx-embedded` distribution's import root is `rowx_embedded`. It is an optional in-process PostgreSQL 18 for
-development, checking and tests, and it is not for production. It depends on no other rowx distribution, and
-`import rowx_postgres` never imports it. It is a per-platform wheel (macOS arm64, Linux x86_64 and aarch64) and has no
-sdist. `rowx[embedded]` installs it, and `rowx.postgres.embedded.Database` (or an `embedded://` URL for the CLI and the
-pytest plugin) then uses it:
+development, checking and tests, and it is not for production. It depends on the matching `rowx-postgres`, and
+`import rowx_postgres` never imports it. It is released with the other distributions, under the same version and tag. It
+is a per-platform wheel (macOS arm64, Linux x86_64 and aarch64) and has no sdist. `rowx[embedded]` installs it, and
+`rowx.postgres.embedded.Database` (or an `embedded://` URL for the CLI and the pytest plugin) then uses it:
 
 ```sh
 uv add "rowx[embedded]"

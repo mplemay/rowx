@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "rowx",
     "rowx-core",
+    "rowx-embedded",
     "rowx-postgres",
 ]
 
@@ -890,8 +891,14 @@ source = { editable = "packages/rowx-core" }
 
 [[package]]
 name = "rowx-embedded"
-version = "18.4.0"
+version = "0.3.0"
 source = { editable = "packages/rowx-embedded" }
+dependencies = [
+    { name = "rowx-postgres" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "rowx-postgres", editable = "packages/rowx-postgres" }]
 
 [[package]]
 name = "rowx-postgres"

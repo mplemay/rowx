@@ -26,6 +26,7 @@ DOTTED_ROWX_POSTGRES: Final[str] = "rowx.postgres==0.2.0"
 REQUESTS_REQUIREMENT: Final[str] = "requests>=2"
 CORE_REQUIREMENT: Final[str] = f"rowx-core=={VERSION}"
 POSTGRES_PIN: Final[str] = f"rowx-postgres=={VERSION}"
+EMBEDDED_PIN: Final[str] = f"rowx-embedded=={VERSION}"
 PYTEST_REQUIREMENT: Final[str] = "pytest>=9.2.0 ; extra == 'pytest'"
 DARWIN_CLAUSE: Final[str] = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'embedded'"
 LINUX_AARCH64_CLAUSE: Final[str] = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'embedded'"
@@ -95,7 +96,7 @@ VALIDATE_WHEEL: Final[ValidateWheel] = CHECKERS[0]
 VALIDATE_PURE_SDIST: Final[ValidateSdist] = CHECKERS[1]
 
 
-def _embedded_requirement(*clauses: str, specifier: str = "rowx-embedded>=18.4,<19") -> str:
+def _embedded_requirement(*clauses: str, specifier: str = EMBEDDED_PIN) -> str:
     return f"{specifier} ; " + " or ".join(f"({clause})" for clause in clauses)
 
 
@@ -309,7 +310,7 @@ def test_rowx_wheel_accepts_reordered_embedded_clauses(tmp_path: Path) -> None:
             _rowx_requires(
                 EMBEDDED_POSTGRES,
                 POSTGRES_EXTRA_REQUIREMENT,
-                _embedded_requirement(*ALL_CLAUSES, specifier="rowx-embedded>=18.4,<20"),
+                _embedded_requirement(*ALL_CLAUSES, specifier=f"rowx-embedded=={WRONG_VERSION}"),
             ),
             "embedded requirements are",
             id="wrong-range",
@@ -354,9 +355,7 @@ def test_rowx_wheel_accepts_reordered_embedded_clauses(tmp_path: Path) -> None:
             id="wrong-extra",
         ),
         pytest.param(
-            _rowx_requires(
-                EMBEDDED_POSTGRES, POSTGRES_EXTRA_REQUIREMENT, "rowx-embedded>=18.4,<19 ; extra == 'embedded'"
-            ),
+            _rowx_requires(EMBEDDED_POSTGRES, POSTGRES_EXTRA_REQUIREMENT, f"{EMBEDDED_PIN} ; extra == 'embedded'"),
             "embedded requirements are",
             id="no-platform-marker",
         ),
@@ -365,7 +364,7 @@ def test_rowx_wheel_accepts_reordered_embedded_clauses(tmp_path: Path) -> None:
                 EMBEDDED_POSTGRES,
                 POSTGRES_EXTRA_REQUIREMENT,
                 _embedded_requirement(*ALL_CLAUSES),
-                "rowx-embedded>=18.4,<19",
+                EMBEDDED_PIN,
             ),
             "direct requirements are",
             id="unconditional-companion",

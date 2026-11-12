@@ -8,7 +8,14 @@ from typing import Final
 ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 PUSH_EVENT: Final[str] = "push"
 PACKAGE_NAME: Final[str] = "rowx"
-PYTHON_PACKAGES: Final[tuple[str, ...]] = ("rowx", "rowx-core", "rowx-postgres")
+PYTHON_PACKAGES: Final[tuple[str, ...]] = ("rowx", "rowx-core", "rowx-postgres", "rowx-embedded")
+EMBEDDED_DIR: Final[str] = "packages/rowx-embedded"
+# the embedded Cargo workspace is separate from the root one; its crates share the release version
+EMBEDDED_CRATES: Final[frozenset[str]] = frozenset({"rowx-embedded", "rowx-embedded-host"})
+EMBEDDED_MARKER: Final[str] = (
+    "(sys_platform == 'darwin' and platform_machine == 'arm64') or "
+    "(sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))"
+)
 WORKSPACE_PACKAGES: Final[frozenset[str]] = frozenset({
     "rowx-core",
     "rowx-postgres",
@@ -48,6 +55,11 @@ def main() -> int:
     if not isinstance(extras, dict) or extras.get("postgres") != [f"rowx-postgres=={version}"]:
         message = "rowx[postgres] must pin the matching rowx-postgres"
         raise SystemExit(message)
+    expected_embedded = [f"rowx-postgres=={version}", f"rowx-embedded=={version}; {EMBEDDED_MARKER}"]
+    if extras.get("embedded") != expected_embedded:
+        message = f"rowx[embedded] must be exactly {expected_embedded}"
+        raise SystemExit(message)
+    _check_embedded(root, version, versions)
     _require_dev_postgres_pin(project, version)
     if _required("EVENT_NAME") == PUSH_EVENT:
         versions["tag"] = _required("TAG_NAME")[1:]
@@ -58,6 +70,33 @@ def main() -> int:
         with Path(output).open("a", encoding="utf-8") as handle:
             handle.write(f"version={version}\n")
     return 0
+
+
+def _check_embedded(root: Path, version: str, versions: dict[str, str]) -> None:
+    package = root / EMBEDDED_DIR
+    embedded_project = _read(package / "pyproject.toml")["project"]
+    required_postgres = [f"rowx-postgres=={version}"]
+    if not isinstance(embedded_project, dict) or embedded_project.get("dependencies") != required_postgres:
+        message = f"rowx-embedded must depend exactly on {required_postgres}"
+        raise SystemExit(message)
+    versions["rowx-embedded/Cargo.toml"] = _version(package / "Cargo.toml", ("package", "version"))
+    versions["rowx-embedded-host/Cargo.toml"] = _version(
+        package / "crates/rowx-embedded-host/Cargo.toml", ("package", "version")
+    )
+    locked = _package_versions(package / "Cargo.lock", EMBEDDED_CRATES)
+    if locked.keys() != EMBEDDED_CRATES:
+        message = f"{EMBEDDED_DIR}/Cargo.lock holds {sorted(locked)}, expected {sorted(EMBEDDED_CRATES)}"
+        raise SystemExit(message)
+    versions.update({f"embedded Cargo.lock:{name}": found for name, found in locked.items()})
+    # the embedded workspace repeats the root lint table, so a lint change must land in both
+    if _lints(root / "Cargo.toml") != _lints(package / "Cargo.toml"):
+        message = f"[workspace.lints] in {EMBEDDED_DIR}/Cargo.toml differs from the root Cargo.toml"
+        raise SystemExit(message)
+
+
+def _lints(path: Path) -> object:
+    workspace = _read(path).get("workspace")
+    return workspace.get("lints") if isinstance(workspace, dict) else None
 
 
 def _require_dev_postgres_pin(project: dict[str, object], version: str) -> None:
@@ -99,7 +138,7 @@ def _version(path: Path, keys: tuple[str, ...]) -> str:
     return current
 
 
-def _package_versions(path: Path) -> dict[str, str]:
+def _package_versions(path: Path, names: frozenset[str] = WORKSPACE_PACKAGES) -> dict[str, str]:
     packages = _read(path).get("package")
     if not isinstance(packages, list):
         message = f"{path.name} is missing package"
@@ -110,7 +149,7 @@ def _package_versions(path: Path) -> dict[str, str]:
             continue
         name = package.get("name")
         version = package.get("version")
-        if isinstance(name, str) and name in WORKSPACE_PACKAGES and isinstance(version, str):
+        if isinstance(name, str) and name in names and isinstance(version, str):
             versions[name] = version
     return versions
 

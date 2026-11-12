@@ -68,7 +68,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml

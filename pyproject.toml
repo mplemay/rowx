@@ -25,11 +25,11 @@ dependencies = ["rowx-core==0.3.0", "pathspec>=1.1.1,<2"]
 
 [project.optional-dependencies]
 postgres = ["rowx-postgres==0.3.0"]
-# the engine ships wheels for macOS arm64 and Linux x86_64/aarch64 only, so the marker leaves the companion out
-# elsewhere and `rowx[embedded]` still installs (using it then raises InterfaceError)
+# rowx-embedded releases in lockstep with rowx; it ships wheels for macOS arm64 and Linux x86_64/aarch64 only, so the
+# marker leaves it out elsewhere and `rowx[embedded]` still installs (using it then raises InterfaceError)
 embedded = [
     "rowx-postgres==0.3.0",
-    "rowx-embedded>=18.4,<19; (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))",
+    "rowx-embedded==0.3.0; (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))",
 ]
 # only for the opt-in `rowx.testing` pytest plugin; `import rowx` never imports pytest
 pytest = ["pytest>=9.2.0"]
@@ -46,14 +46,15 @@ rowx = "rowx.check.cli:main"
 [tool.uv]
 
 [tool.uv.workspace]
-members = ["packages/rowx-core", "packages/rowx-postgres"]
+members = ["packages/rowx-core", "packages/rowx-postgres", "packages/rowx-embedded"]
 
 [tool.uv.sources]
 rowx-core = { workspace = true }
 rowx-postgres = { workspace = true }
-# a path source, not a workspace member: the companion is its own Cargo workspace and builds Wasmer, so it is installed
-# only with `--extra embedded` (`just embedded-dev`), never by `uv sync --all-groups`
-rowx-embedded = { path = "packages/rowx-embedded", editable = true }
+# a workspace member that is not in any dependency group: the companion is its own Cargo workspace and builds Wasmer, so
+# it is installed only with `--extra embedded` (`just embedded-dev`); `--all-packages` syncs must pass
+# `--no-install-package rowx-embedded`
+rowx-embedded = { workspace = true }
 
 [tool.uv.build-backend]
 wheel-exclude = ["**/__tests__/**", "**/*.so", "**/*.pyd", "**/*.dll", "**/*.dylib", "**/*.rs", "**/Cargo.toml"]

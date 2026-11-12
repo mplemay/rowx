@@ -122,8 +122,10 @@ Wasmer crates (edition 2024, rust-version 1.93), a vendored patch and its own `C
 would be built by `cargo test --workspace`, `cargo clippy --workspace` and `maturin develop` of the other packages, and
 the exclusion could not be promised alongside the membership. It carries the same lint table as the root.
 
-The Python side is one root lock: `rowx-embedded` is a `path` source in `[tool.uv.sources]`, not a uv workspace member,
-so `uv sync --all-groups` never builds it. It is installed only through the `embedded` extra.
+The Python side is one root lock: `rowx-embedded` is a uv workspace member that no dependency group lists, so a plain
+`uv sync` never builds it, and `--all-packages` syncs pass `--no-install-package rowx-embedded`. It is installed only
+through the `embedded` extra. Its version is the lockstep release version, and `scripts/validate-release-versions.py`
+checks its pyproject and both Cargo manifests and lock entries, and that its lint table equals the root one.
 
 | Gate | What it does |
 |---|---|
