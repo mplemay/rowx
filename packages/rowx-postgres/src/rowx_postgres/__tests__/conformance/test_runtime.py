@@ -4,7 +4,7 @@ import types
 from dataclasses import dataclass, field
 from importlib import import_module
 from string.templatelib import Template
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, cast, clear_overloads
 
 import pytest
 import rowx_postgres._core as core_postgres
@@ -54,6 +54,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Evaluate:
     def run(source: str) -> object:
         # a class resolves its annotations in its module, so the source runs in a registered one that goes with the test
         module = types.ModuleType("conformance_row")
+        clear_overloads()
         monkeypatch.setitem(sys.modules, "conformance_row", module)
         exec(PRELUDE + source, module.__dict__)  # ruff: ignore[exec-builtin]
         return module.T

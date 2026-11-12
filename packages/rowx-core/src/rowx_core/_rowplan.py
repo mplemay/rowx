@@ -1,6 +1,8 @@
 import datetime as dt
 import decimal
+import inspect
 import ipaddress
+import keyword
 import re
 import sys
 import types
@@ -28,6 +30,7 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    get_overloads,
     get_type_hints,
     is_protocol,
     is_typeddict,
@@ -401,6 +404,11 @@ def _is_namedtuple(t: type) -> bool:
     return issubclass(t, tuple) and isinstance(getattr(t, "_fields", None), tuple)
 
 
+def _is_attrs(t: type) -> bool:
+    module = sys.modules.get("attrs") or sys.modules.get("attr")
+    return module is not None and bool(module.has(t))
+
+
 def _is_protocol(t: type) -> bool:
     return is_protocol(t)
 
@@ -411,6 +419,7 @@ NAMED_FORMS: Final[tuple[tuple[str, Callable[[type], bool]], ...]] = (
     ("pydantic", _is_pydantic),
     ("typeddict", _is_typeddict),
     ("namedtuple", _is_namedtuple),
+    ("attrs", _is_attrs),
     ("dataclass", is_dataclass),
 )
 
@@ -581,6 +590,134 @@ def _dataclass_specs(t: type) -> list[Spec]:
 def _namedtuple_specs(t: type) -> list[Spec]:
     defaults = getattr(t, "_field_defaults", {})
     return [Spec(key=key, required=key not in defaults, names=(key,)) for key in t._fields]  # ty: ignore[missing-attribute]
+
+
+class _AttrsInfo(Protocol):
+    name: str
+    alias: object
+    init: bool
+    default: object
+    kw_only: bool
+    type: object
+    converter: object
+
+
+def _attrs_constructor(t: type, infos: tuple[_AttrsInfo, ...], nothing: object) -> list[Spec]:
+    init = getattr(t, "__init__", None)
+    code = getattr(init, "__code__", None)
+    if code is None or not code.co_filename.startswith("<attrs generated ") or not callable(init):
+        raise _reject(t, "an attrs class with a custom constructor is not supported")
+    specs: list[Spec] = []
+    names: set[str] = set()
+    for info in infos:
+        if not info.init:
+            continue
+        alias = info.alias
+        if not isinstance(alias, str) or not alias.isidentifier() or keyword.iskeyword(alias) or alias in names:
+            raise _reject(t, f"field {info.name!r} has an invalid or duplicate constructor name")
+        names.add(alias)
+        specs.append(Spec(key=info.name, names=(alias,), required=info.default is nothing))
+    parameters = tuple(inspect.signature(init).parameters.values())
+    if not parameters or {param.name for param in parameters[1:]} != names:
+        raise _reject(t, "the attrs constructor does not match its fields")
+    by_name = {param.name: param for param in parameters[1:]}
+    for info in infos:
+        if not info.init:
+            continue
+        alias = info.alias
+        if not isinstance(alias, str):
+            raise _reject(t, f"field {info.name!r} has an invalid constructor name")
+        param = by_name[alias]
+        if (
+            (param.default is inspect.Parameter.empty) != (info.default is nothing)
+            or (param.kind is inspect.Parameter.KEYWORD_ONLY) != info.kw_only
+            or param.kind not in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+        ):
+            raise _reject(t, f"field {info.name!r} does not match the attrs constructor")
+    return specs
+
+
+def _attrs_metadata(t: type, infos: tuple[_AttrsInfo, ...], hints: dict[str, object], bindings: Bindings) -> None:
+    declared = _declared(t)
+    for info in infos:
+        if not info.init or info.name not in hints:
+            continue
+        owner = declared.get(info.name, (t, None))[0]
+        try:
+            metadata_type = _subst(_resolve(owner, info.type, info.name), bindings.get(owner, {}))
+        except NameError as err:
+            raise _reject(t, f"field {info.name!r} has an unresolved attrs type") from err
+        if metadata_type != hints[info.name]:
+            raise _reject(t, f"field {info.name!r} has conflicting attrs type metadata")
+
+
+def _concrete(t: object, depth: int = 0) -> bool:
+    if depth > MAX_ALIAS_DEPTH:
+        raise _reject(t, f"annotation deeper than {MAX_ALIAS_DEPTH}")
+    t = _unwrap(_unwrap_field(t))
+    if t is Any or t is object:
+        return False
+    return all(_concrete(arg, depth + 1) for arg in get_args(t))
+
+
+def _attrs_annotation_key(t: object, depth: int = 0) -> object:
+    if depth > MAX_ALIAS_DEPTH:
+        raise _reject(t, f"annotation deeper than {MAX_ALIAS_DEPTH}")
+    t = _unwrap(t)
+    origin = get_origin(t)
+    if origin is None:
+        return t
+    args = tuple(_attrs_annotation_key(arg, depth + 1) for arg in get_args(t))
+    if origin in {Union, types.UnionType}:
+        return (Union, frozenset(args))
+    return (origin, args)
+
+
+def _attrs_converter(t: type, info: _AttrsInfo, converter_type: type, hints: dict[str, object]) -> None:
+    converter = info.converter
+    if isinstance(converter, converter_type):
+        if getattr(converter, "takes_self", False) or getattr(converter, "takes_field", False):
+            raise _reject(t, f"field {info.name!r} has an instance- or field-dependent converter")
+        converter = getattr(converter, "converter", None)
+    if not callable(converter):
+        raise _reject(t, f"field {info.name!r} has an uninspectable converter")
+    if inspect.iscoroutinefunction(converter):
+        raise _reject(t, f"field {info.name!r} has an unsupported converter signature")
+    if get_overloads(converter) or (
+        getattr(converter, "__module__", None) == "attr._make"
+        and getattr(converter, "__qualname__", None) == "pipe.<locals>.pipe_converter"
+    ):
+        raise _reject(t, f"field {info.name!r} has an overloaded or composed converter")
+    try:
+        parameters = tuple(inspect.signature(converter).parameters.values())
+        annotations = get_type_hints(converter, include_extras=True)
+    except (TypeError, ValueError, NameError) as err:
+        raise _reject(t, f"field {info.name!r} has an uninspectable converter") from err
+    if len(parameters) != 1 or parameters[0].kind not in {
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    }:
+        raise _reject(t, f"field {info.name!r} has an unsupported converter signature")
+    input_type = annotations.get(parameters[0].name)
+    output = annotations.get("return")
+    if input_type is None or output is None or info.name not in hints:
+        raise _reject(t, f"field {info.name!r} has an unsupported converter signature")
+    if _attrs_annotation_key(output) != _attrs_annotation_key(hints[info.name]) or not _concrete(input_type):
+        raise _reject(t, f"field {info.name!r} has an unsupported converter signature")
+    _elem(_unwrap_field(output))
+    hints[info.name] = input_type
+
+
+def _attrs_specs(t: type, bindings: Bindings) -> tuple[list[Spec], dict[str, object]]:
+    module = sys.modules.get("attrs") or sys.modules["attr"]
+    infos = cast("tuple[_AttrsInfo, ...]", module.fields(t))
+    specs = _attrs_constructor(t, infos, module.NOTHING)
+    hints = _hints(t, [spec.key for spec in specs], bindings)
+    _attrs_metadata(t, infos, hints, bindings)
+    for info in infos:
+        if info.init and info.converter is not None:
+            _attrs_converter(t, info, module.Converter, hints)
+    return specs, hints
 
 
 def _typeddict_required(t: type, key: str, hint: object) -> bool:
@@ -763,7 +900,11 @@ def _named(t: type, kind: str, args: tuple[object, ...] | None = None) -> RowPla
     bindings = {t: mapping} if kind == "pydantic" and not _pydantic_dataclass(t) else _class_bindings(t, mapping)
     ctor: object = t
     validate = True
-    if kind == "pydantic":
+    if kind == "attrs":
+        specs, hints = _attrs_specs(t, bindings)
+        # Validator form without validation passes the normalized column names as constructor keywords.
+        form, matching, validate = "validator", "by_name", False
+    elif kind == "pydantic":
         dataclass = _pydantic_dataclass(t)
         _pydantic_complete(t, dataclass=dataclass)
         specs, hints = _pydantic_specs(t, bindings, dataclass=dataclass)

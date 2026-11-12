@@ -65,6 +65,7 @@ dev = [
     "rowx-postgres==0.4.1",
     "rowx-embedded==0.4.1",
     "anyio>=4.16.0",
+    "attrs>=25.3,<26",
     "maturin>=1.0,<2.0",
     "mypy==2.4.1",
     "prek>=0.5.9",
