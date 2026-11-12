@@ -18,12 +18,14 @@ from rowx_postgres._core import Describe, type_table
 
 from rowx import query
 from rowx.check.compare import ColumnDesc, DescribeDesc, compare, compare_param, compare_param_result
+from rowx.check.discover import discover_file
 from rowx.check.params import ParamInference, ParamType
-from rowx.check.resolve import Elem, RowType
+from rowx.check.resolve import Elem, ModuleGraph, RowType, resolve_row_type
 from rowx.check.runner import describe_all
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path as FilePath
 
     from rowx_core.backend import CheckerBackend
     from rowx_postgres._core import ColumnInfo
@@ -267,6 +269,34 @@ def describe_columns(outcomes: dict[str, Any], sql: str) -> list[ColumnDesc]:
     described = outcomes[sql]
     assert isinstance(described, Describe), f"{sql}: {described}"
     return [column_desc(info) for info in described.columns]
+
+
+def test_attrs_converter_compares_input_type_and_nullability(schema: str, tmp_path: FilePath) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\n"
+        "def convert(value: int | None) -> str: return str(value)\n"
+        "@attrs.define\nclass Row:\n    value: str = attrs.field(converter=convert)\n"
+        'query[Row](t"SELECT 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,), backend=PG_RULES)
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    statements = ['SELECT NULL::int4 AS "value?"', 'SELECT 1::int4 AS "value!"', 'SELECT NULL::text AS "value?"']
+    outcomes = asyncio.run(describe_all(schema, statements, 1, TIMEOUT_MS))
+    findings = [
+        {
+            finding.rule
+            for finding in compare(
+                DescribeDesc(columns=tuple(describe_columns(outcomes, sql))), result.row_type, backend=PG_RULES
+            )
+        }
+        for sql in statements
+    ]
+    assert not findings[0]
+    assert "nullability-mismatch" in findings[1]
+    assert "type-mismatch" in findings[2]
 
 
 # what the checker is documented to say regardless of the runtime value; `None` defers to the runtime oracle

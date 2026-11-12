@@ -2,6 +2,7 @@ import ast
 import builtins
 from dataclasses import dataclass, field, replace
 from io import BytesIO
+from keyword import iskeyword
 from pathlib import Path
 from sys import stdlib_module_names
 from tokenize import detect_encoding
@@ -58,6 +59,8 @@ KNOWN_ROOTS: Final[frozenset[str]] = stdlib_module_names | {
     "rowx",
     "rowx_core",
     "pydantic",
+    "attrs",
+    "attr",
 }
 FIELD_QUALIFIERS: Final[frozenset[str]] = frozenset({"typing.Required", "typing.NotRequired", "typing.ReadOnly"})
 TYPED_DICT_KEYWORDS: Final[frozenset[str]] = frozenset({"total", "closed", "extra_items"})
@@ -117,7 +120,7 @@ type RowKind = Literal["none", "scalar", "tuple", "named"]
 type BindingKind = Literal["import", "from", "alias", "class", "call", "invalid", "other"]
 type RowForm = Literal["positional", "keyword", "dict", "validator"]
 type Matching = Literal["by_name", "positional"]
-type Form = Literal["dataclass", "namedtuple", "typeddict", "model", "pydantic_dataclass"]
+type Form = Literal["dataclass", "namedtuple", "typeddict", "model", "pydantic_dataclass", "attrs"]
 
 FORMS: Final[dict[Form, tuple[RowForm, Matching]]] = {
     "dataclass": ("keyword", "by_name"),
@@ -125,6 +128,7 @@ FORMS: Final[dict[Form, tuple[RowForm, Matching]]] = {
     "typeddict": ("dict", "by_name"),
     "model": ("validator", "by_name"),
     "pydantic_dataclass": ("validator", "by_name"),
+    "attrs": ("validator", "by_name"),
 }
 DIRECT_FORMS: Final[dict[str, Form]] = {"NamedTuple": "namedtuple", "TypedDict": "typeddict", "BaseModel": "model"}
 FUNCTIONAL_ARGS: Final[int] = 2
@@ -372,6 +376,8 @@ class _Source:
     default: bool = False
     total: bool = True
     pydantic: _PydField | None = None
+    attrs_alias: str | None = None
+    converter: ast.expr | None = None
     # the class that declares the field, whose type parameters its annotation names
     owner: _Class | None = None
 
@@ -560,7 +566,7 @@ def _collect_definition(module: _Module, stmt: ast.stmt, *, tc: bool) -> None:
         case ast.ClassDef():
             module.bind(stmt.name, _Binding("class", name=stmt.name, node=stmt, site=site, tc=tc))
         case ast.FunctionDef() | ast.AsyncFunctionDef():
-            module.bind(stmt.name, _Binding("invalid", name=stmt.name, site=site, tc=tc))
+            module.bind(stmt.name, _Binding("invalid", name=stmt.name, node=stmt, site=site, tc=tc))
         case ast.Assign() | ast.AnnAssign() | ast.AugAssign():
             targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
             for target in targets:
@@ -1414,6 +1420,48 @@ class _Resolver:
         msg = f"{what} isn't a literal"
         raise _unresolved(msg)
 
+    @staticmethod
+    def _attrs_bool(keyword: ast.keyword, what: str) -> bool:
+        if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, bool):
+            return keyword.value.value
+        msg = f"{what} isn't a literal boolean"
+        raise _invalid(msg)
+
+    @staticmethod
+    def _attrs_decorator_option(keyword: ast.keyword, klass: _Class) -> None:
+        if keyword.arg == "collect_by_mro" and (
+            not isinstance(keyword.value, ast.Constant) or keyword.value.value is not True
+        ):
+            msg = f"the `collect_by_mro` option of `{klass.name}` is unsupported"
+            raise _invalid(msg)
+        if keyword.arg in {"these", "field_transformer", "auto_attribs"}:
+            if not isinstance(keyword.value, ast.Constant) or keyword.value.value is not None:
+                msg = f"the `{keyword.arg}` option of `{klass.name}` is unsupported"
+                raise _invalid(msg)
+        elif keyword.arg not in {
+            "init",
+            "kw_only",
+            "slots",
+            "frozen",
+            "repr",
+            "eq",
+            "order",
+            "hash",
+            "weakref_slot",
+            "auto_exc",
+            "getstate_setstate",
+            "on_setattr",
+            "collect_by_mro",
+            "match_args",
+            "unsafe_hash",
+            "force_kw_only",
+        }:
+            msg = f"the `{keyword.arg}` option of `{klass.name}` is unsupported"
+            raise _invalid(msg)
+        elif keyword.arg != "on_setattr" and not isinstance(keyword.value, ast.Constant):
+            msg = f"the `{keyword.arg}` option of `{klass.name}` is dynamic"
+            raise _invalid(msg)
+
     # None for a decorator that is ignored (`final`), else the form a dataclass decorator makes and its `init`
     def _decorator(self, decorator: ast.expr, klass: _Class) -> _Decor | None:
         call = decorator if isinstance(decorator, ast.Call) else None
@@ -1428,23 +1476,33 @@ class _Resolver:
         if name == "typing.final":
             return None
         kind: Form = "pydantic_dataclass" if name in PYDANTIC_DATACLASSES else "dataclass"
-        if name != "dataclasses.dataclass" and kind != "pydantic_dataclass":
+        if name in {"attrs.define", "attrs.frozen", "attr.define", "attr.frozen"}:
+            kind = "attrs"
+        if name != "dataclasses.dataclass" and kind not in {"pydantic_dataclass", "attrs"}:
             msg = f"the decorator `{ast.unparse(func)}` on `{klass.name}` is unknown, so its effect on the constructor is not checked"
             raise _invalid(msg, help_=DECORATOR_HELP)
+        if kind == "attrs" and call is not None and call.args:
+            msg = f"the attrs decorator on `{klass.name}` has unsupported positional arguments"
+            raise _invalid(msg)
+        init, config = self._decorator_options(call, klass, kind)
+        # pydantic's decorator only takes `init=False`, which keeps its own validating `__init__`
+        return _Decor(kind=kind, init=True if kind == "pydantic_dataclass" else init, config=config)
+
+    def _decorator_options(self, call: ast.Call | None, klass: _Class, kind: Form) -> tuple[bool, ast.expr | None]:
         init, config = True, None
         for keyword in call.keywords if call is not None else ():
             if keyword.arg is None:
                 msg = f"the dataclass decorator on `{klass.name}` takes `**` arguments"
-                raise _unresolved(msg)
+                raise _invalid(msg) if kind == "attrs" else _unresolved(msg)
             if keyword.arg == "config":
                 config = keyword.value
+            if kind == "attrs":
+                self._attrs_decorator_option(keyword, klass)
             if keyword.arg in {"init", "kw_only"}:
-                literal = self._literal_bool(
-                    keyword, f"the `{keyword.arg}` of the dataclass decorator on `{klass.name}`"
-                )
+                literal_bool = self._attrs_bool if kind == "attrs" else self._literal_bool
+                literal = literal_bool(keyword, f"the `{keyword.arg}` of the dataclass decorator on `{klass.name}`")
                 init = literal if keyword.arg == "init" else init
-        # pydantic's decorator only takes `init=False`, which keeps its own validating `__init__`
-        return _Decor(kind=kind, init=True if kind == "pydantic_dataclass" else init, config=config)
+        return init, config
 
     # the form of the dataclass decorator on the class, if there is one
     def _decorators(self, node: ast.ClassDef, klass: _Class) -> _Decor | None:
@@ -1514,10 +1572,14 @@ class _Resolver:
             self._check_keywords(node, known=TYPED_DICT_KEYWORDS if form == "typeddict" else frozenset())
         decorated = decor is not None
         info = _Info(form=form, decorated=decorated, init=decor.init if decor is not None else True)
+        if form == "attrs":
+            self._attrs_check_bases(klass, infos)
         raw = self._raw_attrs(node, klass)
         match form:
             case "dataclass" | "pydantic_dataclass":
                 self._dataclass_fields(info, node, klass, raw)
+            case "attrs":
+                self._attrs_fields(info, node, klass)
             case "model":
                 self._model_fields(info, node, klass, infos)
             case "namedtuple":
@@ -1877,6 +1939,128 @@ class _Resolver:
                         if pydantic
                         else self._dataclass_field(stmt, key, klass, inherited)
                     )
+
+    def _attrs_fields(self, info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+        rest = [self._info(member, ()) for member in self._mro(klass)[1:]]
+        if any(
+            isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef) and stmt.name == "__init__" for stmt in node.body
+        ):
+            msg = f"`{klass.name}` defines a custom constructor"
+            raise _invalid(msg)
+        if not info.decorated:
+            if (first := next((base for base in rest if base.decorated), None)) is not None:
+                info.fields = dict(first.fields)
+                info.init = first.init
+            return
+        for base in reversed(rest):
+            for key, source in base.fields.items():
+                info.fields.pop(key, None)
+                info.fields[key] = source
+        for stmt, key in self._annotated(node):
+            info.fields.pop(key, None)
+            info.fields[key] = self._attrs_field(stmt, key, klass)
+        self._attrs_default_hooks(info, node, klass)
+
+    @staticmethod
+    def _attrs_check_bases(klass: _Class, bases: list[_Info]) -> None:
+        owners: dict[str, _Class | None] = {}
+        for base in bases:
+            for key, source in base.fields.items():
+                if source is None:
+                    continue
+                if key in owners and owners[key] is not source.owner:
+                    msg = f"`{klass.name}` inherits ambiguous attrs field `{key}`"
+                    raise _invalid(msg)
+                owners[key] = source.owner
+
+    def _attrs_field(self, stmt: ast.AnnAssign, key: str, klass: _Class) -> _Source | None:
+        if self._special(stmt.annotation, klass.module) == "ClassVar":
+            return None
+        source = self._source(stmt, key, klass)
+        source.attrs_alias = key.lstrip("_")
+        value = stmt.value
+        if isinstance(value, ast.Call) and self._external_name(value.func, klass.module) in {
+            "attrs.field",
+            "attr.field",
+        }:
+            if value.args:
+                msg = f"field `{key}` has unsupported positional options"
+                raise _invalid(msg)
+            for option in value.keywords:
+                if not self._attrs_field_option(source, option, klass):
+                    return None
+        elif value is not None:
+            source.default = self._attrs_default(value, klass.module)
+        return source
+
+    def _attrs_field_option(self, source: _Source, option: ast.keyword, klass: _Class) -> bool:
+        key = source.key
+        if option.arg is None:
+            msg = f"field `{key}` uses dynamic options"
+            raise _invalid(msg)
+        if option.arg == "init":
+            return self._attrs_bool(option, f"field `{key}` init")
+        if option.arg in {"default", "factory"}:
+            source.default = option.arg == "factory" or self._attrs_default(option.value, klass.module)
+        elif option.arg == "alias":
+            if isinstance(option.value, ast.Constant) and option.value.value is None:
+                return True
+            if not isinstance(option.value, ast.Constant) or not isinstance(option.value.value, str):
+                msg = f"field `{key}` has a dynamic alias"
+                raise _invalid(msg)
+            source.attrs_alias = option.value.value
+        elif option.arg == "converter":
+            if not isinstance(option.value, ast.Constant) or option.value.value is not None:
+                source.converter = option.value
+        else:
+            self._attrs_field_other_option(option, key)
+        return True
+
+    @staticmethod
+    def _attrs_field_other_option(option: ast.keyword, key: str) -> None:
+        if option.arg not in {"validator", "repr", "hash", "metadata", "kw_only", "eq", "order", "on_setattr"}:
+            msg = f"field `{key}` has an unsupported option `{option.arg}`"
+            raise _invalid(msg)
+        if option.arg in {"kw_only", "repr", "hash", "eq", "order"} and not isinstance(option.value, ast.Constant):
+            msg = f"field `{key}` has a dynamic `{option.arg}` option"
+            raise _invalid(msg)
+
+    @staticmethod
+    def _attrs_default_hooks(info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+        for stmt in node.body:
+            if not isinstance(stmt, ast.FunctionDef):
+                continue
+            for decorator in stmt.decorator_list:
+                if (
+                    isinstance(decorator, ast.Attribute)
+                    and decorator.attr == "default"
+                    and isinstance(decorator.value, ast.Name)
+                ):
+                    source = info.fields.get(_mangle(node.name, decorator.value.id))
+                    if source is None:
+                        msg = f"`{klass.name}` has an untraceable attrs default"
+                        raise _invalid(msg)
+                    info.fields[source.key] = replace(source, default=True)
+
+    def _attrs_default(self, expr: ast.expr, module: _Module) -> bool:
+        if self._external_name(expr, module) in {"attrs.NOTHING", "attr.NOTHING"}:
+            return False
+        if isinstance(expr, ast.Call) and self._external_name(expr.func, module) in {"attrs.Factory", "attr.Factory"}:
+            if len(expr.args) != 1 or any(
+                item.arg != "takes_self"
+                or not isinstance(item.value, ast.Constant)
+                or not isinstance(item.value.value, bool)
+                for item in expr.keywords
+            ):
+                msg = "an attrs Factory has dynamic or unsupported options"
+                raise _invalid(msg)
+            return True
+        try:
+            ast.literal_eval(expr)
+        except ValueError, TypeError, SyntaxError:
+            msg = "an attrs field has a dynamic default"
+            raise _invalid(msg) from None
+        return True
 
     # a pydantic dataclass field reads its `Field(...)` like a model's, and takes a base's default the same way
     def _pydantic_dataclass_field(
@@ -2303,10 +2487,17 @@ class _Resolver:
         if info.form is None:
             msg = f"`{klass.name}` isn't a dataclass, NamedTuple or TypedDict"
             raise _invalid(msg)
-        if info.form == "dataclass" and not info.init:
+        if info.form in {"dataclass", "attrs"} and not info.init:
             msg = f"`{klass.name}` is a dataclass with init=False, which is not supported"
             raise _invalid(msg)
         sources = [source for source in info.fields.values() if source is not None]
+        if info.form == "attrs":
+            aliases = [source.attrs_alias for source in sources]
+            if any(alias is None or not alias.isidentifier() or iskeyword(alias) for alias in aliases) or len(
+                set(aliases)
+            ) != len(aliases):
+                msg = f"`{klass.name}` has invalid or duplicate constructor names"
+                raise _invalid(msg)
         if not sources:
             msg = f"`{klass.name}` has no fields"
             raise _invalid(msg)
@@ -2318,7 +2509,11 @@ class _Resolver:
             self._field(source, owner, names=names, reason=reason)
             for source in sources
             for names, reason in [
-                self._pydantic_names(info, source) if info.form in PYDANTIC_FORMS else ((source.key,), None)
+                self._pydantic_names(info, source)
+                if info.form in PYDANTIC_FORMS
+                else ((source.attrs_alias,), None)
+                if info.form == "attrs" and source.attrs_alias is not None
+                else ((source.key,), None)
             ]
         )
         form, matching = FORMS[info.form]
@@ -2353,6 +2548,70 @@ class _Resolver:
             env = self._bind(step.klass.name, self._params(step.klass), site)
         return env
 
+    @staticmethod
+    def _attrs_concrete(elem: Elem) -> bool:
+        return elem.leaf != "any" and (elem.item is None or _Resolver._attrs_concrete(elem.item))
+
+    def _attrs_converter_node(self, expr: ast.expr | None, module: _Module) -> tuple[ast.FunctionDef, _Module] | None:
+        seen: set[tuple[Path, str]] = set()
+        while isinstance(expr, ast.Name | ast.Attribute):
+            if isinstance(expr, ast.Attribute):
+                try:
+                    target = self._resolve_ref(expr.value, module, ())
+                except RejectError:
+                    target = None
+                if not isinstance(target, _ModuleRef):
+                    return None
+                module, expr = target.module, ast.Name(id=expr.attr, ctx=ast.Load())
+            key = (module.path, expr.id)
+            bindings = module.bindings.get(expr.id, [])
+            if key in seen or len(bindings) != 1 or bindings[0].tc:
+                return None
+            seen.add(key)
+            binding = bindings[0]
+            if binding.kind == "from":
+                target = self._find(module, binding.level, binding.module)
+                if target is None:
+                    return None
+                module, expr = target, ast.Name(id=binding.name, ctx=ast.Load())
+            elif binding.kind == "alias" and binding.expr is not None:
+                expr = binding.expr
+            elif isinstance(binding.node, ast.FunctionDef) and not binding.node.decorator_list:
+                return binding.node, module
+            else:
+                return None
+        return None
+
+    def _attrs_converter(self, source: _Source, output: Elem) -> Elem:
+        expr = source.converter
+        if isinstance(expr, ast.Call) and self._external_name(expr.func, source.module) in {
+            "attrs.Converter",
+            "attr.Converter",
+        }:
+            if len(expr.args) != 1 or any(
+                option.arg not in {"takes_self", "takes_field"}
+                or not isinstance(option.value, ast.Constant)
+                or option.value.value is not False
+                for option in expr.keywords
+            ):
+                msg = f"field `{source.key}` has an unsupported converter"
+                raise _invalid(msg)
+            expr = expr.args[0]
+        found = self._attrs_converter_node(expr, source.module)
+        if found is not None:
+            node, module = found
+            args = node.args
+            positional = [*args.posonlyargs, *args.args]
+            if len(positional) == 1 and not (args.vararg or args.kwarg or args.kwonlyargs) and node.returns is not None:
+                annotation = positional[0].annotation
+                if annotation is not None:
+                    result = _to_elem(self._scoped(node.returns, module, (), {}), allow_none=True)
+                    input_ = _to_elem(self._scoped(annotation, module, (), {}), allow_none=True)
+                    if result == output and self._attrs_concrete(input_):
+                        return input_
+        msg = f"field `{source.key}` has an unsupported converter signature"
+        raise _invalid(msg)
+
     def _field(
         self, source: _Source, owner: _Owner, *, names: tuple[str, ...] | None, reason: str | None
     ) -> NamedField:
@@ -2361,6 +2620,8 @@ class _Resolver:
         try:
             expr, override = self._strip_field(source.annotation, source.module)
             elem = _to_elem(self._scoped(expr, source.module, (), self._field_env(owner, source)), allow_none=True)
+            if source.converter is not None:
+                elem = self._attrs_converter(source, elem)
         except RejectError as reject:
             notes = [f"field defined at {source.module.path}:{span.line}:{span.col}"]
             if owner.generic is not None:

@@ -58,6 +58,7 @@ build-backend = "uv_build"
 dev = [
     "rowx-postgres==0.3.0",
     "anyio>=4.16.0",
+    "attrs>=25.3,<26",
     "maturin>=1.0,<2.0",
     "mypy==2.4.1",
     "prek>=0.5.9",

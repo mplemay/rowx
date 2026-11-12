@@ -8,6 +8,7 @@ from decimal import Decimal
 from string.templatelib import Interpolation, Template
 from typing import TYPE_CHECKING, Final, NamedTuple, NotRequired, TypedDict
 
+import attrs
 import pytest
 from pydantic import (
     AliasChoices,
@@ -35,6 +36,127 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.db]
 
 SQL: Final[str] = "SELECT 1::int4 AS id, 'a'::text AS name"
+
+
+def attrs_convert(value: int | None) -> str:
+    if value == 2:
+        msg = "bad value"
+        raise ValueError(msg)
+    return str(value)
+
+
+@attrs.define
+class AttrsRow:
+    _id: int
+    label: str = attrs.field(alias="name", default="default")
+
+
+@attrs.define
+class AttrsConverted:
+    value: str = attrs.field(converter=attrs_convert)
+
+
+def attrs_optional(value: int) -> str | None:
+    return str(value)
+
+
+@attrs.define
+class AttrsOptionalOutput:
+    value: str | None = attrs.field(converter=attrs_optional)
+
+
+def attrs_validate(_instance: object, _attribute: object, value: int) -> None:
+    if value == 3:
+        msg = "invalid value"
+        raise ValueError(msg)
+
+
+@attrs.define
+class AttrsValidated:
+    value: int = attrs.field(validator=attrs_validate)
+
+
+@attrs.define
+class AttrsPostInit:
+    value: int
+
+    def __attrs_post_init__(self) -> None:
+        if self.value == 3:
+            msg = "invalid value"
+            raise ValueError(msg)
+
+
+ATTRS_FACTORY_CALLS: Final[list[int]] = []
+
+
+def attrs_factory() -> str:
+    ATTRS_FACTORY_CALLS.append(1)
+    return "factory"
+
+
+@attrs.define
+class AttrsFactory:
+    id: int
+    label: str = attrs.field(factory=attrs_factory)
+
+
+def test_attrs_aliases_defaults_and_empty_results(schema: str) -> None:
+    row = run_on(schema, "connection", query[AttrsRow](t"SELECT 7::int4 AS id").one)
+    assert row == AttrsRow(7)
+    q = query[AttrsRow](t"SELECT 7::int4 AS id, 'z'::text AS name WHERE false")
+    assert run_on(schema, "connection", q.all) == []
+    with pytest.raises(RowShapeError):
+        run_on(schema, "connection", query[AttrsRow](t"SELECT 7::int4 AS wrong WHERE false").all)
+
+
+def test_attrs_converter_null_and_failure(schema: str) -> None:
+    row = run_on(schema, "connection", query[AttrsConverted](t"SELECT NULL::int4 AS value").one)
+    assert row.value == "None"
+    with pytest.raises(RowConstructError) as caught:
+        run_on(schema, "connection", query[AttrsConverted](t"SELECT 2::int4 AS value").one)
+    assert caught.value.row_index == 0
+    assert isinstance(caught.value.__cause__, ValueError)
+
+
+def test_attrs_converter_null_checks_input_not_output(schema: str) -> None:
+    with pytest.raises(RowShapeError, match='NULL in column 1 "value"'):
+        run_on(schema, "connection", query[AttrsOptionalOutput](t"SELECT NULL::int4 AS value").one)
+
+
+@pytest.mark.parametrize("row_type", [AttrsValidated, AttrsPostInit])
+def test_attrs_constructor_failures_preserve_later_stream_index(schema: str, row_type: type) -> None:
+    q = query[row_type](t"SELECT g::int4 AS value FROM generate_series(1, 3) g ORDER BY g")  # ty: ignore[invalid-type-form]
+
+    async def body(conn: Executor) -> None:
+        await collect_rows(q.fetch(conn, batch_size=1))
+
+    with pytest.raises(RowConstructError) as caught:
+        run_on(schema, "connection", body)
+    assert caught.value.row_index == 2
+    assert isinstance(caught.value.__cause__, ValueError)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1::int4 AS wrong WHERE false",
+        "SELECT 1::int4 AS id, 2::int4 AS extra WHERE false",
+        "SELECT 1::int4 AS id, 2::int4 AS id WHERE false",
+    ],
+)
+def test_attrs_shape_errors_are_checked_on_empty_results(schema: str, sql: str) -> None:
+    with pytest.raises(RowShapeError):
+        run_on(schema, "connection", query[AttrsRow](Template(sql)).all)
+
+
+def test_attrs_factory_runs_only_for_constructed_rows(schema: str) -> None:
+    ATTRS_FACTORY_CALLS.clear()
+    q = query[AttrsFactory](t"SELECT 1::int4 AS id WHERE false")
+    assert run_on(schema, "connection", q.all) == []
+    assert not ATTRS_FACTORY_CALLS
+    row = run_on(schema, "connection", query[AttrsFactory](t"SELECT 1::int4 AS id").one)
+    assert row.label == "factory"
+    assert ATTRS_FACTORY_CALLS == [1]
 
 
 @dataclass
@@ -108,6 +230,7 @@ class Strict:
 
 
 FORMS: Final[list[tuple[type, object]]] = [
+    (AttrsRow, AttrsRow(1, "a")),
     (User, User(id=1, name="a")),
     (UserRow, UserRow(1, "a")),
     (UserDict, {"id": 1, "name": "a"}),

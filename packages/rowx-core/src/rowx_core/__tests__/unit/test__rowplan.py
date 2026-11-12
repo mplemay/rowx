@@ -3,7 +3,7 @@ import re
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 import types
-from typing import TYPE_CHECKING, ClassVar, Final, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Final, TypeVar, clear_overloads
 
 import pytest
 from rowx_core.__tests__.support.row_types import PRELUDE, ROWS, NamedPlan, Plan
@@ -24,6 +24,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Evaluate:
     def run(source: str) -> object:
         # a class resolves its annotations in its module, so the source runs in a registered one that goes with the test
         module = types.ModuleType("conformance_row")
+        clear_overloads()
         monkeypatch.setitem(sys.modules, "conformance_row", module)
         exec(PRELUDE + source, module.__dict__)  # ruff: ignore[exec-builtin]
         return module.T
@@ -54,6 +55,51 @@ def test_conformance_row(source: str, expected: Plan | NamedPlan | str, _verdict
 
 def test_none_is_shared_no_rows_plan() -> None:
     assert row_plan(None) is NO_ROWS
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "@attrs.define(init=False)\nclass T:\n    x: int",
+        "def convert(value): return value\n@attrs.define\nclass T:\n    x: int = attrs.field(converter=convert)",
+        "def convert(value: int, extra: int) -> int: return value\n@attrs.define\nclass T:\n    x: int = attrs.field(converter=convert)",
+        "def convert(value: Any) -> int: return 1\n@attrs.define\nclass T:\n    x: int = attrs.field(converter=convert)",
+        "def convert(value: str) -> str: return value\n@attrs.define\nclass T:\n    x: int = attrs.field(converter=convert)",
+        "@attrs.define\nclass T:\n    x: int\n    def __init__(self, x: int): self.x = x",
+    ],
+)
+def test_attrs_rejects_unsupported_constructors_and_converters(source: str, evaluate: Evaluate) -> None:
+    with pytest.raises(InterfaceError):
+        row_plan(evaluate(source))
+
+
+def test_attrs_factory_is_not_called_during_planning(evaluate: Evaluate) -> None:
+    row_type = evaluate(
+        "calls = []\ndef make() -> int:\n    calls.append(1)\n    return 1\n"
+        "@attrs.define\nclass T:\n    value: int = attrs.field(factory=make)"
+    )
+    plan = row_plan(row_type)
+    assert not plan.fields[0].required
+    assert sys.modules["conformance_row"].calls == []
+
+
+def test_attrs_rejects_duplicate_observable_aliases(evaluate: Evaluate) -> None:
+    row_type = evaluate(
+        "@attrs.define\nclass T:\n    a: int\n    b: int\n"
+        "T.__attrs_attrs__ = (attrs.fields(T).a, attrs.fields(T).b.evolve(alias='a'))"
+    )
+    with pytest.raises(InterfaceError, match="duplicate constructor name"):
+        row_plan(row_type)
+
+
+def test_attrs_uses_observable_alias_metadata(evaluate: Evaluate) -> None:
+    row_type = evaluate("alias = 'external'\n@attrs.define\nclass T:\n    value: int = attrs.field(alias=alias)")
+    assert row_plan(row_type).fields[0].names == ("external",)
+
+
+def test_attrs_value_class_takes_precedence(evaluate: Evaluate) -> None:
+    row_type = evaluate("@attrs.frozen\nclass T(ValueClass):\n    value: int")
+    assert row_plan(row_type).kind == "scalar"
 
 
 def test_plan_is_cached_per_type(evaluate: Evaluate) -> None:
@@ -834,6 +880,7 @@ for t in (D, N, Z):
 extra = sorted(m for m in set(sys.modules) - before if not m.startswith("rowx.") and not stdlib(m))
 assert not extra, extra
 assert "pydantic" not in sys.modules, "pydantic was imported"
+assert "attrs" not in sys.modules and "attr" not in sys.modules, "attrs was imported"
 """
 
 
