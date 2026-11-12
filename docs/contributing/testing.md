@@ -14,7 +14,7 @@ CLI tests use fake executors or services and need no database. Database tests be
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/support/schema.sql` | The per-test schema. |
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/support/engine.py` | The embedded engine's recorded divergences ([Embedded lane](#embedded-lane)). |
 | `packages/rowx-embedded/src/rowx_embedded/__tests__/unit/` | The embedded glue (`Database`, URL grammar, scratch, snapshot cache) against a fake engine. |
-| `packages/rowx-embedded/src/rowx_embedded/__tests__/integration/` | The glue and the engine binding (`test__engine.py`, slow) against the real engine. Not collected without the companion, and an error with `ROWX_REQUIRE_EMBEDDED=1`. The host's Rust tests run with `cargo test --manifest-path packages/rowx-embedded/Cargo.toml --workspace`. |
+| `packages/rowx-embedded/src/rowx_embedded/__tests__/integration/` | The glue and the engine binding (`test__engine.py`, slow) against the real engine. Outside the default `testpaths` (the package imports only where its engine is installed); `just test-embedded` runs them, and `ROWX_REQUIRE_EMBEDDED=1` turns a missing engine into an error. The host's Rust tests run with `cargo test --manifest-path packages/rowx-embedded/Cargo.toml --workspace`. |
 
 A test file is `test_<module>.py` for the module it covers.
 

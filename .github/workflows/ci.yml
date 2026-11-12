@@ -304,6 +304,10 @@ jobs:
       - name: Test python against the embedded engine
         run: uv run pytest -m "(db and not server) or embedded" -n auto
 
+      # the glue's own tests are outside the default testpaths, which never import rowx_embedded
+      - name: Test the embedded glue
+        run: uv run pytest -m embedded -n auto packages/rowx-embedded/src/rowx_embedded/__tests__
+
       # examples/embedded needs no server: the script runs its migrations in memory, `rowx check` builds a scratch database
       # for `embedded://`, and the plugin clones a snapshot per test
       - name: Run the embedded example

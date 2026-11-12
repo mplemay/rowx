@@ -144,6 +144,9 @@ preview = true
 
 [tool.ty.environment]
 python-version = "3.14"
+# rowx-embedded is installed only on request (it builds Wasmer), so its sources resolve from the tree; `_engine.pyi`
+# stands in for the extension
+extra-paths = ["packages/rowx-embedded/src"]
 
 [tool.ty.analysis]
 return-type-inference = "always"
@@ -164,7 +167,9 @@ missing-direct-dependency = "ignore"
 addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
 # pytest-asyncio warns while this is unset, and filterwarnings = "error" fails the session
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["src/rowx/__tests__", "packages/rowx-core/src/rowx_core/__tests__", "packages/rowx-postgres/src/rowx_postgres/__tests__", "packages/rowx-embedded/src/rowx_embedded/__tests__"]
+testpaths = ["src/rowx/__tests__", "packages/rowx-core/src/rowx_core/__tests__", "packages/rowx-postgres/src/rowx_postgres/__tests__"]
+# rowx_embedded is importable only where its engine is installed, so its tests are selected by path
+# (`just test-embedded`, the CI embedded job) and never by the default run
 norecursedirs = ["target", "dist", "build", ".venv"]
 markers = [
     "db: marks tests that need a live Postgres (ROWX_TEST_DSN)",

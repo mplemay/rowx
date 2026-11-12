@@ -24,6 +24,7 @@ embedded-dev:
 # the tests marked `embedded`; they fail instead of skipping when the companion is missing
 test-embedded:
     ROWX_REQUIRE_EMBEDDED=1 uv run --extra embedded pytest -m embedded
+    ROWX_REQUIRE_EMBEDDED=1 uv run --extra embedded pytest packages/rowx-embedded/src/rowx_embedded/__tests__
 
 # long nullability fuzz with a random seed, printing the precision report; needs ROWX_TEST_DSN
 fuzz-nullability count="5000":
