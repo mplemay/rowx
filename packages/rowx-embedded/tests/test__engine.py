@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -771,6 +772,56 @@ def test_a_process_that_abandoned_an_instance_exits_without_waiting_for_its_stat
     # the atexit close of the engine must not wait for the statement that is still running
     expect_true(time.monotonic() - started < ABANDON_LIMIT)
     expect(leftovers(private_tmp), [])
+
+
+ABANDON_RUNS: Final[int] = 20
+STUCK_CLOSE: Final[str] = (
+    "import threading, time, psycopg, rowx_embedded as e\n"
+    "db = e.Instance.start()\n"
+    "dsn = db.dsn\n"
+    "def sleep():\n"
+    "    try:\n"
+    "        psycopg.connect(dsn, autocommit=True).execute('SELECT pg_sleep(30)')\n"
+    "    except psycopg.Error:\n"
+    "        pass\n"
+    "threading.Thread(target=sleep, daemon=True).start()\n"
+    "time.sleep(1)\n"
+)
+
+
+def abandoning(tail: str) -> str:
+    return STUCK_CLOSE + tail
+
+
+def test_a_normal_exit_after_an_abandon_never_crashes_the_process(private_tmp: Path) -> None:
+    # the engine thread is still inside `pg_sleep` when the interpreter finalizes: it used to die by SIGSEGV (-11)
+    code = abandoning("db.abandon()\n")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        codes = list(pool.map(lambda _: python(code, private_tmp).returncode, range(ABANDON_RUNS)))
+    expect(codes, [0] * ABANDON_RUNS)
+    expect(leftovers(private_tmp), [])
+
+
+def test_an_abandoned_engine_keeps_the_exit_status_the_program_chose(private_tmp: Path) -> None:
+    explicit = python(abandoning("db.abandon()\nimport rowx_embedded._api as a\na.exit_if_abandoned(3)\n"), private_tmp)
+    expect(explicit.returncode, 3)
+    # nothing abandoned: the explicit exit is a no-op and the program ends normally
+    idle = python("import rowx_embedded._api as a\na.exit_if_abandoned(3)\n", private_tmp)
+    expect(idle.returncode, 0)
+    crashed = python(abandoning("db.abandon()\nraise RuntimeError('boom')\n"), private_tmp)
+    expect(crashed.returncode, 1)
+    expect_true("RuntimeError: boom" in crashed.stderr)
+    recorded = python(abandoning("db.abandon()\nimport rowx_embedded._api as a\na.set_exit_code(4)\n"), private_tmp)
+    expect(recorded.returncode, 4)
+
+
+def test_the_exit_sweep_does_not_wait_for_a_background_close_stuck_on_a_long_statement(private_tmp: Path) -> None:
+    # the instance is dropped (not closed) while a statement runs: its background close queues behind the statement
+    code = STUCK_CLOSE + "del db\nimport gc\ngc.collect()\n"
+    started = time.monotonic()
+    result = python(code, private_tmp)
+    expect(result.returncode, 0)
+    expect_true(time.monotonic() - started < ABANDON_LIMIT)
 
 
 def test_a_killed_process_leaves_a_root_that_the_next_start_sweeps(private_tmp: Path) -> None:

@@ -385,7 +385,22 @@ def _compat(args: Namespace) -> int:
         return EXIT_FAILURE
 
 
+# The console script runs `sys.exit(main())`, which finalizes the interpreter. If an interrupted embedded run abandoned an
+# engine thread that is still inside a statement, that finalization would crash the process, so it leaves at once with
+# the run's own status. The companion is optional and is never imported here: when it was never loaded there is nothing
+# abandoned. Only the script's own call (no `argv`) does this; callers that pass `argv` are in-process and just get the code.
+def _leave(code: int) -> int:
+    if (api := sys.modules.get("rowx_embedded._api")) is not None:
+        api.exit_if_abandoned(code)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
+    code = _main(argv)
+    return code if argv is not None else _leave(code)
+
+
+def _main(argv: list[str] | None) -> int:
     selected = sys.argv[1:] if argv is None else argv
     parser = _check_parser() if selected[:1] == ["check"] else _parser()
     args = parser.parse_args(argv)

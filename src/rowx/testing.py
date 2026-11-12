@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
@@ -51,6 +52,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="keep this project's stale rowx_tpl_* template databases instead of dropping them when a new one is built",
     )
+
+
+# pytest exits through `sys.exit`, which `atexit` cannot see: tell the embedded engine's exit guard (if the companion is
+# loaded) the run's status, so that a hard exit after an abandoned instance keeps it
+def pytest_sessionfinish(exitstatus: int) -> None:
+    if (api := sys.modules.get("rowx_embedded._api")) is not None:
+        api.set_exit_code(int(exitstatus))
 
 
 def rowx_version() -> str:

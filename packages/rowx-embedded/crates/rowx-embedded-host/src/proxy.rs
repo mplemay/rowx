@@ -43,7 +43,10 @@ const ABANDONED_WAIT: Duration = Duration::from_secs(30);
 const ACCEPT_POLL: Duration = Duration::from_millis(200);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 // the whole data of a COPY FROM STDIN is held in memory until its CopyDone
-const MAX_COPY_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_COPY_BYTES: usize = 256 * 1024 * 1024;
+// how long one write to a client may block: a client that stops reading must not hold the engine thread (which streams
+// into it) for ever
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const COPY_SAVEPOINT: &str = "rowx_copy_probe";
 const BUSY_HINT: &str = "an embedded database serves one session at a time; use max_size=1";
 const REPORTED: &str = "'server_version','server_encoding','client_encoding','DateStyle','TimeZone','integer_datetimes',\
@@ -257,6 +260,8 @@ fn session(
         ))?;
         return Ok(());
     }
+    // a clone shares the socket option, so the engine's sink is bound by it too
+    stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))?;
     if let (Ok(clone), Ok(mut peer)) = (stream.try_clone(), shared.active_peer.lock()) {
         *peer = Some(clone);
     }
@@ -941,6 +946,23 @@ impl<'a> Session<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_write_to_a_client_that_stops_reading_times_out() -> io::Result<()> {
+        let (mut writer, _reader) = UnixStream::pair()?;
+        writer.set_write_timeout(Some(Duration::from_millis(50)))?;
+        let chunk = vec![0_u8; 64 * 1024];
+        let error = loop {
+            if let Err(error) = writer.write_all(&chunk) {
+                break error;
+            }
+        };
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ));
+        Ok(())
+    }
 
     #[test]
     fn trailing_messages_are_cut_off_the_end() {

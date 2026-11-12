@@ -6,6 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use oliphaunt_wasix::{Oliphaunt, StorageErrorCode};
 
@@ -46,18 +47,34 @@ impl Boot {
 // background closes still running, so exit can wait for them instead of leaving their directories behind
 static REAPERS: Mutex<Vec<(u32, std::thread::JoinHandle<()>)>> = Mutex::new(Vec::new());
 
-/// Waits for every close started by [`Embedded::close_in_background`] in this process.
+// how long exit waits for background closes: one stuck behind a long statement must not hold the process
+const REAPER_WAIT: Duration = Duration::from_secs(2);
+const REAPER_POLL: Duration = Duration::from_millis(10);
+
+/// Waits for the closes started by [`Embedded::close_in_background`] (two seconds in all).
+///
+/// A close that is still running after that (it is stuck behind a long statement) is left to die with the process, and
+/// counts as a running engine thread for [`crate::engine::abandoned_running`].
 pub fn join_background_closes() {
     let handles = REAPERS
         .lock()
         .map(|mut reapers| std::mem::take(&mut *reapers))
         .unwrap_or_default();
+    let deadline = Instant::now() + REAPER_WAIT;
     for (pid, handle) in handles {
-        if pid == std::process::id() {
-            let _ = handle.join();
-        } else {
+        if pid != std::process::id() {
             // a thread of the parent: it does not exist in a forked child and must not be joined
             std::mem::forget(handle);
+            continue;
+        }
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(REAPER_POLL);
+        }
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            // it stays tracked, so exit knows an engine thread is still busy
+            crate::engine::track_running(handle);
         }
     }
 }

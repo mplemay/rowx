@@ -6,12 +6,13 @@ use pyo3::types::PyTuple;
 use rowx_embedded_host::{runtime, snapshot};
 
 use crate::errors::{DirectoryInUseError, EngineError, Error, SnapshotError};
-use crate::instance::{Instance, close_all};
+use crate::instance::{Instance, abandoned_running, close_all};
 
 #[pymodule]
 fn _engine(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Instance>()?;
     module.add_function(wrap_pyfunction!(close_all, module)?)?;
+    module.add_function(wrap_pyfunction!(abandoned_running, module)?)?;
     module.add("EngineError", py.get_type::<EngineError>())?;
     module.add("DirectoryInUseError", py.get_type::<DirectoryInUseError>())?;
     module.add("SnapshotError", py.get_type::<SnapshotError>())?;

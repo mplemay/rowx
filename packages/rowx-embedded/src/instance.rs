@@ -50,6 +50,14 @@ pub fn close_all(py: Python<'_>) {
     py.detach(join_background_closes);
 }
 
+/// Whether an abandoned instance's engine thread is still inside a statement. Normal interpreter exit would then tear
+/// down the process under a running thread, so the caller leaves with `os._exit` instead.
+#[pyfunction]
+#[must_use]
+pub fn abandoned_running() -> bool {
+    rowx_embedded_host::engine::abandoned_running()
+}
+
 #[pyclass(module = "rowx_embedded._engine", name = "Instance", frozen)]
 #[derive(Debug)]
 pub struct Instance {

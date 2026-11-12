@@ -17,6 +17,31 @@ use crate::wire::simple_query;
 
 const ENGINE_STACK: usize = 8 * 1024 * 1024;
 
+// engine threads that `abandon` let go of, with the process that owns them. The handles are kept (never dropped) so
+// the process can tell whether one is still inside a statement: libc teardown under a running Wasmer thread crashes
+static ABANDONED: Mutex<Vec<(u32, JoinHandle<()>)>> = Mutex::new(Vec::new());
+
+/// Records a thread of this process that may still be inside the engine (a close stuck behind a long statement), so
+/// that [`abandoned_running`] reports it until it finishes.
+pub fn track_running(handle: JoinHandle<()>) {
+    if let Ok(mut abandoned) = ABANDONED.lock() {
+        abandoned.push((std::process::id(), handle));
+    }
+}
+
+/// Whether an abandoned engine thread of this process is still running.
+///
+/// A normal interpreter exit must not tear the process down under such a thread, so the caller leaves with a hard
+/// exit instead.
+#[must_use]
+pub fn abandoned_running() -> bool {
+    let pid = std::process::id();
+    ABANDONED.lock().is_ok_and(|mut abandoned| {
+        abandoned.retain(|(owner, handle)| *owner != pid || !handle.is_finished());
+        abandoned.iter().any(|(owner, _)| *owner == pid)
+    })
+}
+
 #[derive(Debug, Clone)]
 pub enum Storage {
     Memory,
@@ -244,7 +269,7 @@ impl Engine {
         self.call(|reply| Cmd::Backup { reply })
     }
 
-    /// Lets go of the engine without waiting for it: the command channel is dropped and the thread is detached, so a
+    /// Lets go of the engine without waiting for it: the command channel is dropped and the thread is left running (tracked by [`abandoned_running`]), so a
     /// running statement finishes (or dies with the process) on its own. A later `close` finds nothing to wait for.
     pub fn abandon(&self) {
         if std::process::id() != self.pid {
@@ -253,9 +278,11 @@ impl Engine {
         if let Ok(mut tx) = self.tx.lock() {
             tx.take();
         }
-        // dropping a `JoinHandle` detaches the thread
-        if let Ok(mut thread) = self.thread.lock() {
-            thread.take();
+        let handle = self.thread.lock().ok().and_then(|mut thread| thread.take());
+        if let Some(handle) = handle
+            && !handle.is_finished()
+        {
+            track_running(handle);
         }
     }
 
@@ -296,5 +323,32 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_abandoned_thread_counts_until_it_finishes() {
+        assert!(!abandoned_running());
+        let (release, wait) = channel::<()>();
+        let handle = thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        if let Ok(mut abandoned) = ABANDONED.lock() {
+            abandoned.push((std::process::id(), handle));
+        }
+        assert!(abandoned_running());
+        // a thread of another process (a fork's inherited entry) never counts
+        if let Ok(mut abandoned) = ABANDONED.lock() {
+            abandoned.push((std::process::id().wrapping_add(1), thread::spawn(|| {})));
+        }
+        drop(release);
+        while abandoned_running() {
+            thread::yield_now();
+        }
+        assert!(!abandoned_running());
     }
 }
