@@ -6,9 +6,15 @@ map for the other two wheels, and for `Pool` imported from `rowx`, which is the 
 
 An application that installs `rowx[postgres]` imports `from rowx import ...` and `from rowx.postgres import ...`.
 `from rowx import query` is the same object as `from rowx_core import query`, and `from rowx.postgres import connect`
-is the same object as `from rowx_postgres import connect`. A runtime-only install imports `rowx_core` and
-`rowx_postgres`. `Pool` imported from `rowx` is the executor protocol, not a connection pool. `import rowx` loads no
-backend.
+is the same object as `from rowx_postgres import connect`. `Pool` imported from `rowx` is the executor protocol, not a
+connection pool. `import rowx` loads no backend.
+
+Install the two packages separately when the application should not include the `rowx` command. That install imports
+`rowx_core` and `rowx_postgres`.
+
+```sh
+uv add rowx-core rowx-postgres
+```
 
 ## rowx-core
 
