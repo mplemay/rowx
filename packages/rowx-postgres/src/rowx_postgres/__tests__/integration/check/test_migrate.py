@@ -709,6 +709,9 @@ def test_connect_timeout_bounds_an_attempt_to_a_server_that_never_answers(
     assert attempts == [True]
 
 
+# a wrong password is refused only by a server that asks for one, here reached over TCP on the loopback
+@pytest.mark.server(needs="auth")
+@pytest.mark.server(needs="tcp")
 def test_a_wrong_password_is_not_retried(
     limited_dsn: tuple[str, str],
     migrations: Path,
