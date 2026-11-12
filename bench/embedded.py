@@ -1,7 +1,7 @@
 # Embedded Postgres benchmarks (#203): cold start, boot from a snapshot, `rowx check` on examples/embedded (embedded at
 # `-j 4` against a server) and fetch_100k over embedded. The numbers are recorded, never gated.
 #
-#   uv sync --all-packages --extra embedded && uv run maturin develop -m packages/rowx-postgres/Cargo.toml --release
+#   uv sync --all-packages && uv run maturin develop -m packages/rowx-postgres/Cargo.toml --release
 #   uv run --no-sync python bench/embedded.py [--only cold boot check fetch] [--server-dsn DSN]
 #
 # `--server-dsn` (default: ROWX_TEST_DSN when it is a server) adds the server rows; the role needs CREATEDB.

@@ -14,7 +14,7 @@ CLI tests use fake executors or services and need no database. Database tests be
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/support/schema.sql` | The per-test schema. |
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/support/engine.py` | The embedded engine's recorded divergences ([Embedded lane](#embedded-lane)). |
 | `packages/rowx-embedded/src/rowx_embedded/__tests__/unit/` | The embedded glue (`Database`, URL grammar, scratch, snapshot cache) against a fake engine. |
-| `packages/rowx-embedded/src/rowx_embedded/__tests__/integration/` | The glue and the engine binding (`test__engine.py`, slow) against the real engine. Outside the default `testpaths` (the package imports only where its engine is installed); `just test-embedded` runs them, and `ROWX_REQUIRE_EMBEDDED=1` turns a missing engine into an error. The host's Rust tests run with `cargo test --manifest-path packages/rowx-embedded/Cargo.toml --workspace`. |
+| `packages/rowx-embedded/src/rowx_embedded/__tests__/integration/` | The glue and the engine binding (`test__engine.py`, slow) against the real engine. They run with the rest of `just test-py`; the glue tests are also marked `embedded`, so the embedded lane runs them. The host's Rust tests run with `cargo test --manifest-path packages/rowx-embedded/Cargo.toml --workspace`. |
 
 A test file is `test_<module>.py` for the module it covers.
 
@@ -45,8 +45,7 @@ same DSN. `crates/rowx-core` has no database.
 | `just test-rust` | `cargo test --workspace`. |
 | `just docs-build` | `zensical build --clean --strict`. |
 | `just check-embedded` | Clippy for the embedded companion, a separate Cargo workspace: `uv run prek run cargo-clippy-embedded --hook-stage manual`. |
-| `just embedded-dev` | `uv sync --extra embedded`: builds the engine into the venv. |
-| `just test-embedded` | `ROWX_REQUIRE_EMBEDDED=1 uv run --extra embedded pytest -m embedded`. |
+| `just test-embedded` | The embedded lane: `ROWX_TEST_DSN=embedded:// uv run pytest -m "(db and not server) or embedded"`. |
 
 `ty` is the type-check gate. pyright and mypy stay in the dev group because
 `conformance/test_typecheckers.py` runs both against the public query annotations. They are not part of `just check`.
@@ -89,7 +88,7 @@ tests under `src/rowx/__tests__/unit/test_testing.py` use fakes and do not conne
 | `db` | Needs a live Postgres (`ROWX_TEST_DSN`). |
 | `server(needs=...)` | Needs a real server: `sessions`, `cancel`, `tls`, `create-database`, `pg-stat-activity`, `timing`, `auth` or `tcp`. `timing` implies `server`. |
 | `server(divergence=...)` | Hits an engine divergence: `inet-cidr`, `xml`, `encoding`, `locale` or `backend-pid`. |
-| `embedded` | Needs the companion; fails instead of skipping when `ROWX_REQUIRE_EMBEDDED=1`. |
+| `embedded` | Runs the embedded engine and needs no server; the embedded lane selects it. |
 
 With `ROWX_TEST_DSN=embedded://` the suite starts one instance per process (per xdist worker) and points the tests at
 it; `server` tests skip, a test that skips for any other reason fails (so a lost precondition cannot shrink the lane),

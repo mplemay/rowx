@@ -64,13 +64,17 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # the root workspace, and the engine's own one that `uv sync` builds with Wasmer
+          workspaces: |
+            . -> target
+            packages/rowx-embedded -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install just
         run: uv tool install rust-just
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
@@ -250,7 +254,6 @@ jobs:
 
     env:
       ROWX_REQUIRE_DB: "1"
-      ROWX_REQUIRE_EMBEDDED: "1"
       ROWX_TEST_DSN: embedded://
 
     steps:
@@ -272,10 +275,14 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # the root workspace, and the engine's own one that `uv sync` builds with Wasmer
+          workspaces: |
+            . -> target
+            packages/rowx-embedded -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
@@ -285,12 +292,6 @@ jobs:
         with:
           name: embedded-wheel
           path: dist-embedded
-
-      - name: Install the companion wheel
-        run: uv pip install --no-deps dist-embedded/*.whl
-
-      - name: Test the companion
-        run: uv run pytest -p no:cacheprovider packages/rowx-embedded/src/rowx_embedded/__tests__/integration/test__engine.py
 
       # the wheel in a clean venv with rowx-core and rowx-postgres only (no rowx CLI): start, connect over the raw socket
       # DSN, SELECT 1
@@ -303,10 +304,6 @@ jobs:
 
       - name: Test python against the embedded engine
         run: uv run pytest -m "(db and not server) or embedded" -n auto
-
-      # the glue's own tests are outside the default testpaths, which never import rowx_embedded
-      - name: Test the embedded glue
-        run: uv run pytest -m embedded -n auto packages/rowx-embedded/src/rowx_embedded/__tests__
 
       # examples/embedded needs no server: the script runs its migrations in memory, `rowx check` builds a scratch database
       # for `embedded://`, and the plugin clones a snapshot per test
@@ -343,13 +340,17 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # the root workspace, and the engine's own one that `uv sync` builds with Wasmer
+          workspaces: |
+            . -> target
+            packages/rowx-embedded -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install just
         run: uv tool install rust-just
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
@@ -397,10 +398,14 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # the root workspace, and the engine's own one that `uv sync` builds with Wasmer
+          workspaces: |
+            . -> target
+            packages/rowx-embedded -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml

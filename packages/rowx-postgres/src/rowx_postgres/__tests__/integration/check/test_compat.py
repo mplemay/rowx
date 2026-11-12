@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import psycopg
 import pytest
-from rowx_postgres.__tests__.integration.check.harness import require_companion
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -16,11 +15,6 @@ if TYPE_CHECKING:
     from rowx_core.backend import Describe
 
 pytestmark = pytest.mark.db
-
-
-@pytest.fixture(scope="module")
-def companion() -> None:
-    require_companion()
 
 
 # a short path of its own (a socket path is limited to about 100 bytes), so a leftover can be counted exactly
@@ -35,7 +29,7 @@ def private_tmp(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
 
 
 def embedded_only[F: Callable[..., object]](test: F) -> F:
-    return pytest.mark.embedded(pytest.mark.usefixtures("companion", "private_tmp")(test))
+    return pytest.mark.embedded(pytest.mark.usefixtures("private_tmp")(test))
 
 
 def git(root: Path, *args: str) -> str:

@@ -13,6 +13,7 @@ import psycopg
 import pytest
 from psycopg import sql
 from rowx_core.lifecycle import make_tag
+from rowx_embedded._testing import publish_blocking
 from rowx_postgres import Migrator
 from rowx_postgres._admin import with_database
 from rowx_postgres._testing import LOCK_DATABASE, build_key
@@ -1135,8 +1136,6 @@ def test_embedded_a_damaged_or_refused_snapshot_is_rebuilt(embedded_project: Emb
         path.write_bytes(b"not a snapshot")
     else:
         # a whole file with a good digest that only the engine can refuse, at the first boot
-        from rowx_embedded._testing import publish_blocking  # ruff: ignore[import-outside-top-level]
-
         publish_blocking(path, embedded_project.prefix, b"not a snapshot either")
     embedded_project.run().assert_outcomes(passed=2)
     assert embedded_project.builds() == 2

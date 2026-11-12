@@ -18,6 +18,7 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from rowx_core.errors import DatabaseError
+from rowx_embedded import Database
 from rowx_postgres import Connection, Migrator
 from rowx_postgres.__tests__.integration.check.harness import (
     CASES_DIR,
@@ -25,7 +26,6 @@ from rowx_postgres.__tests__.integration.check.harness import (
     check_case,
     diff,
     parse_markers,
-    require_companion,
 )
 from rowx_postgres.__tests__.integration.check.test_render import (
     GENERIC_MODELS,
@@ -1044,14 +1044,9 @@ EMBEDDED_DRIFT_QUERY: Final[str] = 'from rowx import query\n\nquery[tuple[int | 
 EMBEDDED_CLEAN_QUERY: Final[str] = 'from rowx import query\n\nquery[tuple[int, str]](t"SELECT id, name FROM users")\n'
 
 
-@pytest.fixture(scope="module")
-def companion() -> None:
-    require_companion()
-
-
-# the embedded tests skip without the companion, and each one counts what its instances leave in a TMPDIR of its own
+# each embedded test counts what its instances leave in a TMPDIR of its own
 def embedded_only[F: Callable[..., object]](test: F) -> F:
-    return pytest.mark.embedded(pytest.mark.usefixtures("companion", "private_tmp")(test))
+    return pytest.mark.embedded(pytest.mark.usefixtures("private_tmp")(test))
 
 
 # a short path of its own (a socket path is limited to about 100 bytes), so a leftover can be counted exactly
@@ -1355,8 +1350,6 @@ def test_a_directory_that_is_in_use_fails_at_once_instead_of_retrying(
     _write_dirs(tmp_path, "pyproject.toml", "")
     _write_dirs(tmp_path / "migrations", "1_create_a.sql", "CREATE TABLE a (id int4);")
     directory = tmp_path / "db"
-    # the companion is optional, so it is imported only by the tests that need it
-    from rowx_embedded import Database  # ruff: ignore[import-outside-top-level]
 
     holder = Database(directory)
     asyncio.run(holder.open())

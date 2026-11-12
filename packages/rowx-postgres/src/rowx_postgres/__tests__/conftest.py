@@ -2,7 +2,6 @@ import gc
 import os
 import secrets
 import time
-from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -10,6 +9,7 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
+from rowx_embedded._instance import parse_embedded_url, start_blocking
 from rowx_postgres.__tests__.support.engine import (
     ALLOWED_RUNTIME_SKIPS,
     EMBEDDED_DATABASE_KEY,
@@ -22,8 +22,6 @@ from rowx_postgres.__tests__.support.engine import (
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
 
-ENGINE_MODULE: Final[str] = "rowx_embedded"
-REQUIRE_ENV: Final[str] = "ROWX_REQUIRE_EMBEDDED"
 TESTS_DIR: Final[Path] = Path(__file__).resolve().parent
 SCHEMA_SQL: Final[Path] = TESTS_DIR / "support" / "schema.sql"
 SEED_SQL: Final[Path] = TESTS_DIR / "support" / "seed_data.sql"
@@ -50,12 +48,6 @@ def pytest_configure(config: pytest.Config) -> None:
     dsn = os.environ.get("ROWX_TEST_DSN")
     if dsn is None or not is_embedded_url(dsn) or _is_xdist_controller(config):
         return
-    if find_spec(ENGINE_MODULE) is None:
-        message = f"ROWX_TEST_DSN is {dsn} but {ENGINE_MODULE} is not installed"
-        raise pytest.UsageError(message)
-    # the engine is optional, so nothing of it is imported unless the lane asks for it
-    from rowx_embedded._instance import parse_embedded_url, start_blocking  # ruff: ignore[import-outside-top-level]
-
     target, _ = parse_embedded_url(dsn)
     database = start_blocking(target.directory)
     config.stash[EMBEDDED_DATABASE_KEY] = database
@@ -186,17 +178,11 @@ def pytest_runtest_makereport(item: pytest.Item) -> Generator[None, pytest.TestR
     return report
 
 
-# a worker whose instance a test left occupied fails every later test with one line naming the culprit; and `embedded`
-# tests need the companion: they skip without it, and fail instead when ROWX_REQUIRE_EMBEDDED=1
+# a worker whose instance a test left occupied fails every later test with one line naming the culprit
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
     if (culprit := item.config.stash.get(POISONED_KEY, None)) is not None:
         pytest.fail(f"this worker's embedded database is held by a session that {culprit} left open", pytrace=False)
-    if item.get_closest_marker("embedded") is None or find_spec(ENGINE_MODULE) is not None:
-        return
-    if os.environ.get(REQUIRE_ENV) == "1":
-        pytest.fail(f"{REQUIRE_ENV}=1 but {ENGINE_MODULE} is not installed")
-    pytest.skip(f"{ENGINE_MODULE} is not installed")
 
 
 def _require_dsn() -> str:

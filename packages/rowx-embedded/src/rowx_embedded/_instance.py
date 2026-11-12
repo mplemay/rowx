@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from rowx_postgres import ConnectOptions
 
 EMBEDDED_SCHEME: Final[str] = "embedded"
-REQUIRE_ENV: Final[str] = "ROWX_REQUIRE_EMBEDDED"
 # parts of the socket DSN that the engine owns; none of them may be set from an embedded URL or from `ConnectOptions`
 RESERVED_PARAMETERS: Final[frozenset[str]] = frozenset({"host", "hostaddr", "port", "user", "password", "sslmode"})
 

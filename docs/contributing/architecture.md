@@ -130,17 +130,16 @@ Wasmer crates (edition 2024, rust-version 1.93), a vendored patch and its own `C
 would be built by `cargo test --workspace`, `cargo clippy --workspace` and `maturin develop` of the other packages, and
 the exclusion could not be promised alongside the membership. It carries the same lint table as the root.
 
-The Python side is one root lock: `rowx-embedded` is a uv workspace member that no dependency group lists, so a plain
-`uv sync` never builds it, and `--all-packages` syncs pass `--no-install-package rowx-embedded`. It is installed only
+The Python side is one root lock: `rowx-embedded` is a uv workspace member in the `dev` group, so every `uv sync`
+installs it (a maturin build of the engine, cached until its sources change), locally and in CI alike. Users get it
 through the `embedded` extra. Its version is the lockstep release version, and `scripts/validate-release-versions.py`
 checks its pyproject and both Cargo manifests and lock entries, and that its lint table equals the root one.
 
 | Gate | What it does |
 |---|---|
-| `just check` (prek) | Formats the companion (`cargo-fmt-embedded`) and type-checks `packages/rowx-embedded/src`. It never builds Wasmer. |
+| `just check` (prek) | Formats the companion (`cargo-fmt-embedded`) and type-checks `packages/rowx-embedded/src`. Its root clippy never builds Wasmer. |
 | `just check-embedded` | Clippy for the companion: the manual-stage hook `cargo-clippy-embedded`. |
-| `just embedded-dev` | `uv sync --extra embedded`: a maturin build of the engine into the venv. |
-| `just test-embedded` | `ROWX_REQUIRE_EMBEDDED=1 uv run --extra embedded pytest -m embedded`. |
+| `just test-embedded` | The embedded lane: `ROWX_TEST_DSN=embedded:// uv run pytest -m "(db and not server) or embedded"`. |
 
 ### Threads and runtime ownership
 

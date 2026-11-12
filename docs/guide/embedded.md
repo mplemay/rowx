@@ -463,5 +463,3 @@ that CI needs no service container for that.
 - `ROWX_EMBEDDED_LOG=1` traces fallbacks and dropped connections to stderr.
 - `TMPDIR` is where each instance makes its private root (`rxe-<pid>-...`). A process that dies without closing leaves
   one, and the next start sweeps the roots of dead processes.
-- `ROWX_REQUIRE_EMBEDDED=1` is for rowx's own tests: a test marked `embedded` fails instead of skipping when the
-  companion is missing.

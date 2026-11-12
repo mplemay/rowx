@@ -51,9 +51,6 @@ members = ["packages/rowx-core", "packages/rowx-postgres", "packages/rowx-embedd
 [tool.uv.sources]
 rowx-core = { workspace = true }
 rowx-postgres = { workspace = true }
-# a workspace member that is not in any dependency group: the companion is its own Cargo workspace and builds Wasmer, so
-# it is installed only with `--extra embedded` (`just embedded-dev`); `--all-packages` syncs must pass
-# `--no-install-package rowx-embedded`
 rowx-embedded = { workspace = true }
 
 [tool.uv.build-backend]
@@ -67,6 +64,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "rowx-postgres==0.3.0",
+    "rowx-embedded==0.3.0",
     "anyio>=4.16.0",
     "maturin>=1.0,<2.0",
     "mypy==2.4.1",
@@ -144,9 +142,6 @@ preview = true
 
 [tool.ty.environment]
 python-version = "3.14"
-# rowx-embedded is installed only on request (it builds Wasmer), so its sources resolve from the tree; `_engine.pyi`
-# stands in for the extension
-extra-paths = ["packages/rowx-embedded/src"]
 
 [tool.ty.analysis]
 return-type-inference = "always"
@@ -167,15 +162,13 @@ missing-direct-dependency = "ignore"
 addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
 # pytest-asyncio warns while this is unset, and filterwarnings = "error" fails the session
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["src/rowx/__tests__", "packages/rowx-core/src/rowx_core/__tests__", "packages/rowx-postgres/src/rowx_postgres/__tests__"]
-# rowx_embedded is importable only where its engine is installed, so its tests are selected by path
-# (`just test-embedded`, the CI embedded job) and never by the default run
+testpaths = ["src/rowx/__tests__", "packages/rowx-core/src/rowx_core/__tests__", "packages/rowx-postgres/src/rowx_postgres/__tests__", "packages/rowx-embedded/src/rowx_embedded/__tests__"]
 norecursedirs = ["target", "dist", "build", ".venv"]
 markers = [
     "db: marks tests that need a live Postgres (ROWX_TEST_DSN)",
     "timing: marks tests that synchronise on pg_stat_activity (implies server)",
     "server: marks tests that need a real server (several sessions, cancel, TLS, CREATE DATABASE, pg_stat_activity, timing, password auth or a TCP port; needs=...) or that hit an embedded engine divergence (divergence=...); they skip when ROWX_TEST_DSN is embedded://",
-    "embedded: marks tests that need the rowx-embedded companion (they fail instead of skipping with ROWX_REQUIRE_EMBEDDED=1)",
+    "embedded: marks tests that run the embedded engine (the embedded lane selects them)",
 ]
 filterwarnings = ["error"]
 

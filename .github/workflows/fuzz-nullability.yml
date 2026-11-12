@@ -65,10 +65,14 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # the root workspace, and the engine's own one that `uv sync` builds with Wasmer
+          workspaces: |
+            . -> target
+            packages/rowx-embedded -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-embedded
+        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml

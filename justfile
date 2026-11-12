@@ -17,14 +17,9 @@ test-rust:
 test-py:
     uv run pytest
 
-# install the local rowx-embedded companion (a maturin build of the Wasmer engine; `uv sync --all-groups` never does)
-embedded-dev:
-    uv sync --extra embedded
-
-# the tests marked `embedded`; they fail instead of skipping when the companion is missing
+# the embedded lane: the database tests that one embedded session can serve, plus the tests marked `embedded`
 test-embedded:
-    ROWX_REQUIRE_EMBEDDED=1 uv run --extra embedded pytest -m embedded
-    ROWX_REQUIRE_EMBEDDED=1 uv run --extra embedded pytest packages/rowx-embedded/src/rowx_embedded/__tests__
+    ROWX_TEST_DSN=embedded:// uv run pytest -m "(db and not server) or embedded"
 
 # long nullability fuzz with a random seed, printing the precision report; needs ROWX_TEST_DSN
 fuzz-nullability count="5000":
@@ -41,14 +36,14 @@ db-down:
 
 # release build plus bench/fetch_100k.py and bench/pool_one.py; needs ROWX_TEST_DSN
 bench:
-    uv sync --all-packages --no-install-package rowx-embedded --group bench
+    uv sync --all-packages --group bench
     uv run --no-sync maturin develop -m packages/rowx-postgres/Cargo.toml --release
     uv run --no-sync python bench/fetch_100k.py
     uv run --no-sync python bench/pool_one.py
 
 # release build plus bench/fetch_drivers.py; needs ROWX_TEST_DSN
 bench-drivers:
-    uv sync --all-packages --no-install-package rowx-embedded --group bench-drivers
+    uv sync --all-packages --group bench-drivers
     uv run --no-sync maturin develop -m packages/rowx-postgres/Cargo.toml --release
     uv run --no-sync python bench/fetch_drivers.py
 

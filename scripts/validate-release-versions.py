@@ -60,7 +60,7 @@ def main() -> int:
         message = f"rowx[embedded] must be exactly {expected_embedded}"
         raise SystemExit(message)
     _check_embedded(root, version, versions)
-    _require_dev_postgres_pin(project, version)
+    _require_dev_pins(project, version)
     if _required("EVENT_NAME") == PUSH_EVENT:
         versions["tag"] = _required("TAG_NAME")[1:]
     if any(value != version for value in versions.values()):
@@ -99,13 +99,13 @@ def _lints(path: Path) -> object:
     return workspace.get("lints") if isinstance(workspace, dict) else None
 
 
-def _require_dev_postgres_pin(project: dict[str, object], version: str) -> None:
-    required = f"rowx-postgres=={version}"
+def _require_dev_pins(project: dict[str, object], version: str) -> None:
     groups = project.get("dependency-groups")
     dev = groups.get("dev") if isinstance(groups, dict) else None
-    if not isinstance(dev, list) or required not in dev:
-        message = "dev dependency group must pin rowx-postgres to the release version"
-        raise SystemExit(message)
+    for name in ("rowx-postgres", "rowx-embedded"):
+        if not isinstance(dev, list) or f"{name}=={version}" not in dev:
+            message = f"dev dependency group must pin {name} to the release version"
+            raise SystemExit(message)
 
 
 def _required(name: str) -> str:

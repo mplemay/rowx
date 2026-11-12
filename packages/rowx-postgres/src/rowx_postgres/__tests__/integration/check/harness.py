@@ -1,12 +1,8 @@
 import asyncio
-import os
 from dataclasses import dataclass
-from importlib.util import find_spec
 from pathlib import Path
 from re import Pattern, compile as re_compile
 from typing import TYPE_CHECKING, Final
-
-import pytest
 
 from rowx.check.config import load_config
 from rowx.check.runner import run_check
@@ -17,7 +13,6 @@ if TYPE_CHECKING:
 
     from rowx.check.render import Report
 
-REQUIRE_ENV: Final[str] = "ROWX_REQUIRE_EMBEDDED"
 CASES_DIR: Final[Path] = Path(__file__).resolve().parent / "cases"
 MARKER: Final[Pattern[str]] = re_compile(r"#\s*error:\s*\[([^\]]*)\]")
 
@@ -57,12 +52,3 @@ def check_case(path: Path, database_url: str) -> list[str]:
     files = discover_files(config, path.parent, [path])
     result = asyncio.run(run_check(config, files, database_url, 1))
     return diff(parse_markers(path.read_text(encoding="utf-8")), actual_diagnostics(result.reports))
-
-
-# the embedded tests skip without the companion, and fail instead when ROWX_REQUIRE_EMBEDDED=1
-def require_companion() -> None:
-    if find_spec("rowx_embedded") is not None:
-        return
-    if os.environ.get(REQUIRE_ENV) == "1":
-        pytest.fail(f"{REQUIRE_ENV}=1 but rowx_embedded is not installed")
-    pytest.skip("rowx_embedded is not installed")

@@ -86,18 +86,18 @@ def test_push_without_tag_fails(monkeypatch: pytest.MonkeyPatch) -> None:
         _run(monkeypatch, "push")
 
 
-def test_mismatched_dev_pin_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["rowx-postgres", "rowx-embedded"])
+def test_mismatched_dev_pin_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str) -> None:
     _copy_version_files(tmp_path)
     project = tmp_path / "pyproject.toml"
     version = _release_version(tmp_path)
     text = project.read_text(encoding="utf-8")
-    # the embedded extra repeats the same pin, so anchor on the dev group
-    needle = f'dev = [\n    "rowx-postgres=={version}",\n'
+    # the embedded extra repeats the rowx-postgres pin, so the dev group's line is found by its position after it
+    needle = f'dev = [\n    "rowx-postgres=={version}",\n    "rowx-embedded=={version}",\n'
     assert text.count(needle) == 1
-    project.write_text(
-        text.replace(needle, f'dev = [\n    "rowx-postgres=={MISMATCH_VERSION}",\n', 1), encoding="utf-8"
-    )
-    with pytest.raises(SystemExit, match="dev dependency group"):
+    mismatched = needle.replace(f'"{name}=={version}"', f'"{name}=={MISMATCH_VERSION}"')
+    project.write_text(text.replace(needle, mismatched, 1), encoding="utf-8")
+    with pytest.raises(SystemExit, match=f"dev dependency group must pin {name}"):
         _run(monkeypatch, "pull_request", root=tmp_path)
 
 
