@@ -101,19 +101,27 @@ member of the workspace. This section says how it is built and linked.
 | Piece | Where | What it is |
 |---|---|---|
 | `rowx-embedded` | `packages/rowx-embedded/` | The distribution. A per-platform wheel built by maturin, with **static metadata** (no `dynamic` fields) so that the `uv-lock` hook never runs maturin or builds Wasmer. No sdist. |
-| `rowx_embedded` | `src/rowx_embedded/` | The Python package: `Instance`, `API_VERSION`, `ENGINE_VERSION`, `RUNTIME_VERSION`, `WASM_SHA256`, `SNAPSHOT_FORMAT`, `EXTENSIONS` and the errors `EngineError`, `DirectoryInUseError` and `SnapshotError`, typed by `_engine.pyi`. |
+| `rowx_embedded` | `src/rowx_embedded/` | The Python package. `__init__.py` exports `Database`, `Instance`, `ENGINE_VERSION`, `RUNTIME_VERSION`, `WASM_SHA256`, `SNAPSHOT_FORMAT`, `EXTENSIONS` and the errors `EngineError`, `DirectoryInUseError` and `SnapshotError`; `_engine.pyi` types the cdylib and `_api.py` holds the exit guard. |
 | `rowx_embedded._engine` | `src/*.rs` | The pyo3 cdylib (abi3-py314): the Python surface only. |
 | `rowx-embedded-host` | `crates/rowx-embedded-host/` | The host, with no pyo3: the engine thread, the front proxy, the slot state machine, snapshots and ownership. Its logic is unit-tested as pure functions. |
-| `rowx_postgres.embedded` | `packages/rowx-postgres/src/rowx_postgres/` | The adapter: `_database.py` (the public `Database`, a `Pool` subclass that starts its instance lazily), `_embedded.py` (URL grammar, the lazy `importlib` load, ownership), `_scratch.py`, `_embedded_testing.py`. |
+| the glue | `src/rowx_embedded/` | Pure Python on top of `rowx_postgres`: `_database.py` (the public `Database`, a `Pool` subclass that starts its instance lazily), `_instance.py` (the URL grammar, instance ownership and the socket DSN helpers), `_scratch.py` (the embedded service and the scratch databases for the checker), `_testing.py` (the pytest plugin's snapshot provisioner) and `_backend.py` (the backend for the `embedded` scheme). |
+| `rowx.embedded` | `src/rowx/embedded.py` | The facade that re-exports `Database` and explains the missing extra. |
 
-`rowx-embedded` does not depend on `rowx`, `rowx-core` or `rowx-postgres`, and nothing in the repository's Rust crates
-changed for it: the engine is reached over a Unix socket, which the existing `Host::Unix` path of the driver already
-handles. The engine never shares native objects with the driver's extension.
+`rowx-embedded` depends on the matching `rowx-core` and `rowx-postgres`, never the other way round:
+`rowx-postgres` and `rowx-core` know nothing about the engine, and `import rowx_postgres` never imports it. The
+`embedded` URL scheme is registered in `rowx._backend` against `rowx_embedded._backend`, whose `load()` is the
+PostgreSQL backend (`dataclasses.replace`) with the embedded provisioner and embedded service in place of the server
+ones. The only generic seams that `rowx-postgres` and `rowx-core` keep for it are the protected hooks of `Pool`
+(`_build`, `_native`, `_inner`, `_started` and `_via_python`, which a subclass uses to build its native pool after
+construction), `Provisioner.identity`, the `EmbeddedService` and `ScratchService` protocols of `rowx_core.backend`, and
+the driver's connect timeout. Nothing in the repository's Rust crates changed for the engine: it is reached over a Unix
+socket, which the existing `Host::Unix` path of the driver already handles, and it never shares native objects with the
+driver's extension.
 
-The `rowx_postgres` side loads the companion lazily, with `importlib.import_module("rowx_embedded")` on first use, and
-types the surface it uses with a `Protocol`, so that `ty` passes and `import rowx_postgres` works without the package.
-`rowx_embedded.API_VERSION` (an `int`, currently 1) is checked on that first use, and a mismatch is an `InterfaceError`
-naming both versions. The engine load is per process: an engine loaded before a `fork` is refused in the child.
+The engine is imported directly, so a wheel whose engine cannot be loaded fails the import of `rowx_embedded` with the
+cause. The distributions are pinned to one version (`rowx-embedded` requires `rowx-postgres==<version>`), so there is no
+version handshake. The engine's threads exist only in the process that started an instance, and an instance is refused
+in a forked child.
 
 ### Build isolation
 

@@ -12,24 +12,25 @@ It is development, checking and tests only. Production keeps a real server.
 
 - An embedded database **is** a live Postgres 18 for the purposes of the checker's "always needs a live database" rule:
   the engine reports `server_version` 18.4 and answers `PREPARE` and describe like a server.
-- In code, `rowx.postgres.embedded.Database` opens one. The DSN grammar gains the `embedded` scheme, accepted by the
-  URL-taking entry points (`rowx check`, `rowx check-compat`, `rowx migrate` and the pytest plugin), and refused by
+- In code, `rowx.embedded.Database` opens one. The DSN grammar gains the `embedded` scheme, accepted by the
+  URL-taking entry points (`rowx check`, `rowx check-compat`, `rowx migrate` and the pytest plugin), and not accepted by
   `connect`, `Pool` and `ConnectOptions.from_dsn`.
-- It is optional. `rowx-core` keeps zero runtime dependencies and no WASM payload; `import rowx_postgres` never imports
-  the engine.
+- It is optional, and all of it is in `rowx-embedded`. `rowx-core` keeps zero runtime dependencies and no WASM payload,
+  and `rowx-postgres` has no embedded code: `import rowx_postgres` never imports `rowx_embedded`.
 
 ## Architecture
 
-The layout of the companion (`rowx-embedded`, `rowx-embedded-host` and the adapter in `rowx_postgres`), build isolation,
-threads and runtime ownership, and the front proxy are under
+The layout of the companion (`rowx-embedded`, `rowx-embedded-host` and the Python glue in `rowx_embedded`), build
+isolation, threads and runtime ownership, and the front proxy are under
 [Architecture](../contributing/architecture.md#embedded-companion). The rules the front proxy enforces are in
 [Driver](#driver).
 
 ## API
 
-### `rowx.postgres.embedded`
+### `rowx.embedded`
 
-`rowx.postgres.embedded` re-exports `rowx_postgres.embedded`, which exports only `Database`.
+`rowx.embedded` re-exports `rowx_embedded`'s `Database` (and `rowx_embedded` exports it too). Importing it without the
+extra raises an `ImportError`: `Install "rowx[embedded]" to use rowx.embedded.`
 
 ```python
 class Database(rowx_postgres.Pool):
@@ -39,23 +40,16 @@ class Database(rowx_postgres.Pool):
         /,
         *,
         options: ConnectOptions | None = None,
-        max_size: int = 1,
         acquire_timeout: float = 30.0,
-        idle_timeout: float | None = 600.0,
-        max_lifetime: float | None = 1800.0,
-        max_queries: int | None = None,
-        ping_after: float | None = 30.0,
         init: Hook | None = None,
         setup: Hook | None = None,
         reset: Hook | None = None,
-        reset_query: str | None = RESET_QUERY,
     ) -> None
 
     directory: str | None   # the normalised absolute path, or None for memory
     ready: bool             # the instance has started and the native pool is built
     closed: bool
     dsn: str                # a plain Unix-socket DSN
-    async def wait_ready(self) -> None   # the same as open()
     # inherited: open, close, terminate, acquire, transaction, size, idle, waiting, min_size, max_size,
     # expire_connections, async with
 ```
@@ -67,12 +61,15 @@ class Database(rowx_postgres.Pool):
 - `options` carries `application_name`, `server_settings`, `statement_cache_size`, `connect_timeout`, `extra` and
   `database`. A `host`, `port`, `user`, `password` or `sslmode` is a `ValueError` ("... cannot be set for an embedded
   database"). The options are pointed at the instance's socket DSN when it starts.
-- `max_size` is 1, and any other value is a `ValueError`. `min_size` is always 0, because a native `min_size` of 1 would
-  hold the only session as soon as the pool opens.
+- The pool is fixed at one session: `max_size` is 1 and `min_size` is 0 (a native `min_size` of 1 would hold the only
+  session as soon as the pool opens). There is no `max_size`, `idle_timeout`, `max_lifetime`, `max_queries`,
+  `ping_after` or `reset_query` argument; the pool uses the `Pool` defaults for them (`reset_query` is `RESET_QUERY`).
 - `dsn` is `postgresql://postgres@/postgres?host=<dir>&sslmode=disable`. Reading it before the database has started
-  ("call open() first"), after `close`, or in a forked child raises `InterfaceError`. Another client can use it only
-  while the database holds no session, checked out or idle; after a query the idle connection holds the session until
-  `idle_timeout`, so call `expire_connections()` first.
+  ("call open() first"), after `close`, or in a forked child of a started database raises `InterfaceError`. Another
+  client can use it only while the database holds no session, checked out or idle; after a query the idle connection
+  holds the session until the default idle timeout (600 s), so call `expire_connections()` first.
+- `terminate()` does not block the caller for a running statement when the database is in memory: the instance is
+  abandoned at once. A directory database is closed properly, so `terminate()` waits for a running statement.
 - Snapshots are not public API in v1: `start_from_snapshot` and `take_snapshot` are used only by the checker and the
   plugin, and the instance type (`EmbeddedDatabase`) is private.
 
@@ -89,14 +86,14 @@ value:
 Other parameters (`options`, `application_name`, `connect_timeout`, `dbname`, ...) are forwarded to the socket DSN, so
 `options=-c search_path=...` works. Rust never receives `embedded://` or a missing host.
 
-`connect`, `Pool` and `ConnectOptions.from_dsn` refuse an embedded URL with an `InterfaceError` that names
-`rowx.postgres.embedded.Database(directory)`. Server-only entry points (`rowx database`, the admin service,
-`open_checker` and the server provisioner) reject one with an `InterfaceError` too.
+`connect`, `Pool` and `ConnectOptions.from_dsn` do not accept an embedded URL: it is not a connection string, and they
+raise `InterfaceError` ("invalid connection string"). `rowx database ...` reports an embedded URL as unsupported (exit
+2).
 
 ### Ownership and the pool
 
 - A `Database` owns one instance, started **on first use** (`open`, `acquire` or a query) in a thread whose future every
-  first-use caller shares. The constructor does no IO and never imports the engine, so a module-level database is fine
+  first-use caller shares. The constructor does no IO, so a module-level database is fine
   and works across event loops. A failed start leaves nothing behind and the next use tries again. Closing or
   terminating the database closes the instance, a close that races the start waits for it, and a database that was
   never opened closes cleanly.
@@ -104,23 +101,23 @@ Other parameters (`options`, `application_name`, `connect_timeout`, `dbname`, ..
   database's own state.
 - A database goes through Python for every query (as a pool with hooks does), because the native pool is built only
   once the instance has started.
-- The first use is bounded by the acquire timeout; the start continues in its thread, and a timeout is a
-  `PoolTimeoutError`.
+- The first use (`open`, `acquire` or a query) is bounded by the acquire timeout; the start continues in its thread, and
+  a timeout is a `PoolTimeoutError`.
 
 ### Fork rules and errors
 
 | Condition | Result |
 |---|---|
-| Companion not installed, supported platform | `InterfaceError`, with `help: uv add "rowx[embedded]"`. |
-| Unsupported platform (not macOS arm64, Linux x86_64/aarch64) | `InterfaceError`: "embedded Postgres is not available on this platform". |
-| `API_VERSION` mismatch | `InterfaceError` naming both versions. |
-| An engine that fails to import or start | `InterfaceError` with the cause. |
+| Companion not installed (or no wheel for the platform: not macOS arm64, Linux x86_64/aarch64) | `import rowx.embedded`: `ImportError` `Install "rowx[embedded]" to use rowx.embedded.`. An `embedded://` URL: "install `rowx[embedded]`". |
+| An engine that fails to import | `ImportError` ("the embedded engine could not be loaded") with the cause. |
+| An engine that fails to start | `InterfaceError` with the cause. |
 | A directory another instance holds | `InterfaceError`: "database directory ... is in use by pid N". |
 | A snapshot the engine refuses (corrupt, or from another build) | `InterfaceError` (internally a `SnapshotRejectedError`, which the plugin rebuilds once). |
 | A second concurrent session | `DatabaseError` `53300`, with a hint. |
-| A `Database` used after a `fork` | `InterfaceError`. The parent's instance survives. |
-| `connect`, `Pool` or `ConnectOptions.from_dsn` given an `embedded://` URL | `InterfaceError` naming `rowx.postgres.embedded.Database(directory)`. |
-| Grammar violations, a relative directory, `max_size` other than 1, or server options on a `Database` | `ValueError`. |
+| A `Database` that started in the parent, used after a `fork` | `InterfaceError`. The parent's instance survives. |
+| A `Database` that never started in the parent, used after a `fork` | It starts its own instance in the child. |
+| `connect`, `Pool` or `ConnectOptions.from_dsn` given an `embedded://` URL | `InterfaceError` (not a connection string). |
+| Grammar violations, a relative directory, or server options on a `Database` | `ValueError`. |
 
 ## Driver
 
@@ -255,4 +252,4 @@ The engine is the WASIX build of PostgreSQL 18 and Wasmer, in `rowx-embedded` on
 
 ## Decisions
 
-The decision table E1 to E12 is under [Decisions](../contributing/decisions.md#embedded-postgres-194).
+The decision table E1 to E13 is under [Decisions](../contributing/decisions.md#embedded-postgres-194).

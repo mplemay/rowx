@@ -11,11 +11,12 @@ rowx publishes four distributions. Install matching versions of the ones you use
 | `rowx-core` | `rowx_core` | nothing |
 | `rowx-postgres` | `rowx_postgres` | matching `rowx-core` |
 | `rowx` | `rowx` | matching `rowx-core`; `rowx[postgres]` adds matching `rowx-postgres`, and `rowx[embedded]` adds `rowx-embedded` as well |
-| `rowx-embedded` | `rowx_embedded` | nothing |
+| `rowx-embedded` | `rowx_embedded` | matching `rowx-core` and `rowx-postgres` |
 
 `rowx-core` is pure Python and holds the shared query and executor primitives. `rowx` re-exports that query API and
 supplies the checker, the `rowx` command and the opt-in pytest plugin. `rowx-postgres` is the PostgreSQL driver.
-`rowx-embedded` is the optional in-process Postgres 18 engine for development, checking and tests.
+`rowx-embedded` is the optional in-process Postgres 18 engine for development, checking and tests, with all of its
+Python glue; `rowx.embedded` re-exports its `Database`.
 
 `from rowx import query` and `from rowx_core import query` are the same object.
 `from rowx.postgres import Pool, connect` and `from rowx_postgres import Pool, connect` are the same objects.

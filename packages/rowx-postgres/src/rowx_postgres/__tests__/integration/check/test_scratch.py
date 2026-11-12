@@ -17,7 +17,6 @@ from rowx_core.lifecycle import ORPHAN_AGE_SECONDS, make_tag
 from rowx_postgres import connect
 from rowx_postgres.__tests__.integration.check.harness import require_companion
 from rowx_postgres._core import create_database, drop_database, list_databases
-from rowx_postgres._scratch import EmbeddedScratch
 from rowx_postgres._services import PostgresAdmin, PostgresMigrations
 
 from rowx import query_unchecked
@@ -204,6 +203,8 @@ def test_an_embedded_scratch_builds_one_independent_migrated_instance_per_worker
     workers: int, tmp_path: Path, private_tmp: Path
 ) -> None:
     migrations = migrations_in(tmp_path, "CREATE TABLE t (id int4);")
+    from rowx_embedded._scratch import EmbeddedScratch  # ruff: ignore[import-outside-top-level]
+
     scratch = EmbeddedScratch()
     during: list[int] = []
 
@@ -234,6 +235,8 @@ def test_cancelling_a_scratch_mid_migration_returns_at_once_and_removes_the_inst
     tmp_path: Path, private_tmp: Path
 ) -> None:
     migrations = migrations_in(tmp_path, SLOW_EMBEDDED_MIGRATION)
+    from rowx_embedded._scratch import EmbeddedScratch  # ruff: ignore[import-outside-top-level]
+
     scratch = EmbeddedScratch()
 
     async def run() -> float:

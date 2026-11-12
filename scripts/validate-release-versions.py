@@ -75,9 +75,9 @@ def main() -> int:
 def _check_embedded(root: Path, version: str, versions: dict[str, str]) -> None:
     package = root / EMBEDDED_DIR
     embedded_project = _read(package / "pyproject.toml")["project"]
-    required_postgres = [f"rowx-postgres=={version}"]
-    if not isinstance(embedded_project, dict) or embedded_project.get("dependencies") != required_postgres:
-        message = f"rowx-embedded must depend exactly on {required_postgres}"
+    required = [f"rowx-core=={version}", f"rowx-postgres=={version}"]
+    if not isinstance(embedded_project, dict) or embedded_project.get("dependencies") != required:
+        message = f"rowx-embedded must depend exactly on {required}"
         raise SystemExit(message)
     versions["rowx-embedded/Cargo.toml"] = _version(package / "Cargo.toml", ("package", "version"))
     versions["rowx-embedded-host/Cargo.toml"] = _version(

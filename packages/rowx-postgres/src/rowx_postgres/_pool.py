@@ -233,12 +233,15 @@ class Pool:
                 reset_query=reset_query,
             )
 
+        # Protected hooks for subclasses in other distributions (`rowx_embedded.Database`), which build the native pool
+        # after construction: `_build` makes a native pool for the given options, `_native` is the pool the constructor
+        # makes (`None` defers it), `_inner` holds the built pool, `_started` returns it (starting it first when it
+        # does not exist yet, within `limit` seconds), and `_via_python` sends every query through a checked-out
+        # connection (as hooks do) rather than straight to the native pool.
         self._build: Callable[[ConnectOptions], PoolImpl] = build
         self._inner: PoolImpl | None = self._native(resolved)
-        # the native pool streams rows straight to the caller; a subclass that has to start first goes through Python
         self._via_python = self._hooked
 
-    # a subclass that builds its native pool later returns `None` here
     def _native(self, options: ConnectOptions, /) -> PoolImpl | None:
         return self._build(options)
 
@@ -253,7 +256,7 @@ class Pool:
         return self._impl
 
     async def open(self) -> None:
-        await (await self._started()).open()
+        await (await self._started(self._acquire_timeout)).open()
 
     async def close(self, *, timeout: float | None = None) -> None:  # ruff: ignore[async-function-with-timeout]
         await self._impl.close(timeout)

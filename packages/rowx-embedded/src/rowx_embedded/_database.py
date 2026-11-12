@@ -2,37 +2,33 @@ import asyncio
 import os
 from concurrent.futures import Future
 from contextlib import suppress
-from dataclasses import replace
 from threading import Lock, Thread
 from typing import TYPE_CHECKING, Final, override
 
 from rowx_core.errors import InterfaceError, PoolTimeoutError
+from rowx_postgres import ConnectOptions, Pool as BasePool
 
-from rowx_postgres._connection import RESET_QUERY
-from rowx_postgres._core import Pool as PoolImpl, parse_dsn
-from rowx_postgres._embedded import (
+# `Database` is a `Pool` that builds its native pool late, through the protected hooks of `Pool`, so it needs the
+# internals that it shares a version with
+from rowx_postgres._pool import DEFAULT_ACQUIRE_TIMEOUT, Hook  # ruff: ignore[import-private-name]
+
+from rowx_embedded._instance import (
+    RESERVED_PARAMETERS,
     EmbeddedDatabase,
     abandon_if_cancelled,
     check_directory,
     start_blocking,
-)
-from rowx_postgres._options import ConnectOptions
-from rowx_postgres._pool import (
-    DEFAULT_ACQUIRE_TIMEOUT,
-    DEFAULT_IDLE_TIMEOUT,
-    DEFAULT_MAX_LIFETIME,
-    DEFAULT_PING_AFTER,
-    Hook,
-    Pool as BasePool,
+    with_socket,
 )
 
 if TYPE_CHECKING:
     from os import PathLike
 
+    from rowx_postgres._core import Pool as PoolImpl
+
 # an embedded instance serves one session at a time
 MAX_SIZE: Final[int] = 1
-# parts of the socket DSN that the engine owns
-RESERVED_OPTIONS: Final[tuple[str, ...]] = ("host", "port", "user", "password", "sslmode")
+CLOSED: Final[str] = "the pool is closed"
 
 
 def check_directory_argument(directory: str | PathLike[str] | None, /) -> str | None:
@@ -41,24 +37,12 @@ def check_directory_argument(directory: str | PathLike[str] | None, /) -> str | 
 
 def check_options(options: ConnectOptions | None, /) -> ConnectOptions:
     resolved = ConnectOptions() if options is None else options
-    for name in RESERVED_OPTIONS:
-        if getattr(resolved, name) is not None:
+    # `hostaddr` is not an option field, so only the names that `ConnectOptions` has are looked up
+    for name in sorted(RESERVED_PARAMETERS):
+        if getattr(resolved, name, None) is not None:
             msg = f"{name} cannot be set for an embedded database"
             raise ValueError(msg)
     return resolved
-
-
-# the same options pointed at the instance's socket DSN; Rust never sees an embedded target
-def with_socket(options: ConnectOptions, dsn: str, /) -> ConnectOptions:
-    socket = parse_dsn(dsn)
-    return replace(
-        options,
-        host=socket["host"],
-        port=socket["port"],
-        user=socket["user"],
-        sslmode=socket["sslmode"],
-        database=options.database if options.database is not None else socket["database"],
-    )
 
 
 class Database(BasePool):
@@ -68,35 +52,22 @@ class Database(BasePool):
         /,
         *,
         options: ConnectOptions | None = None,
-        max_size: int = MAX_SIZE,
         acquire_timeout: float = DEFAULT_ACQUIRE_TIMEOUT,
-        idle_timeout: float | None = DEFAULT_IDLE_TIMEOUT,
-        max_lifetime: float | None = DEFAULT_MAX_LIFETIME,
-        max_queries: int | None = None,
-        ping_after: float | None = DEFAULT_PING_AFTER,
         init: Hook | None = None,
         setup: Hook | None = None,
         reset: Hook | None = None,
-        reset_query: str | None = RESET_QUERY,
     ) -> None:
-        if max_size != MAX_SIZE:
-            msg = "an embedded database serves one session at a time; min_size and max_size cannot exceed 1"
-            raise ValueError(msg)
         self._target = check_directory_argument(directory)
         resolved = check_options(options)
+        # `min_size` is 0 because a native `min_size` of 1 would hold the only session as soon as the pool opens
         super().__init__(
             resolved,
             min_size=0,
             max_size=MAX_SIZE,
             acquire_timeout=acquire_timeout,
-            idle_timeout=idle_timeout,
-            max_lifetime=max_lifetime,
-            max_queries=max_queries,
-            ping_after=ping_after,
             init=init,
             setup=setup,
             reset=reset,
-            reset_query=reset_query,
         )
         self._resolved = resolved
         self._pid = os.getpid()
@@ -123,20 +94,23 @@ class Database(BasePool):
         with self._state_lock:
             terminated, database = self._terminated, self._database
         if terminated:
-            msg = "the pool is closed"
+            msg = CLOSED
             raise InterfaceError(msg)
         if database is None:
             msg = "the embedded database has not started; call open() first"
             raise InterfaceError(msg)
         return database.dsn
 
-    async def wait_ready(self) -> None:
-        await self.open()
-
     def _check_process(self) -> None:
-        if os.getpid() != self._pid:
-            msg = "the pool was used in a forked process; create the pool after fork"
+        if os.getpid() == self._pid:
+            return
+        # a database that never started owns nothing of the parent's, so a forked child may start it for itself
+        if self._start is not None or self._database is not None:
+            msg = "the database was started in another process; create the database after the fork"
             raise InterfaceError(msg)
+        # the parent's lock may have been held by one of its other threads at the fork
+        self._state_lock = Lock()
+        self._pid = os.getpid()
 
     @override
     def _native(self, options: ConnectOptions, /) -> PoolImpl | None:
@@ -164,7 +138,7 @@ class Database(BasePool):
     def _begin_start(self) -> Future[PoolImpl]:
         with self._state_lock:
             if self._terminated:
-                msg = "the pool is closed"
+                msg = CLOSED
                 raise InterfaceError(msg)
             if self._start is None:
                 self._start = Future()
@@ -184,7 +158,7 @@ class Database(BasePool):
 
     def _start_instance(self) -> PoolImpl:
         if self._is_stopped():
-            msg = "the pool is closed"
+            msg = CLOSED
             raise InterfaceError(msg)
         database = start_blocking(self._target)
         try:
@@ -200,7 +174,7 @@ class Database(BasePool):
                 return inner
         inner.terminate()
         database.close_blocking()
-        msg = "the pool is closed"
+        msg = CLOSED
         raise InterfaceError(msg)
 
     @override
@@ -229,7 +203,14 @@ class Database(BasePool):
             inner, database = self._inner, self._database
         if inner is not None:
             inner.terminate()
-        if database is not None:
+        if database is None:
+            pass
+        elif database.directory is None:
+            # a memory database holds nothing worth waiting for, and a close would block the caller (often the event
+            # loop) for as long as a running statement does
+            database.abandon()
+        else:
+            # a directory is always closed properly, which does wait for a running statement
             database.close_blocking()
         # a sync call can't wait for a start that is still running; that thread closes the instance itself
 

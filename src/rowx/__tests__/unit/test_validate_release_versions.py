@@ -135,8 +135,8 @@ def test_embedded_must_depend_on_matching_postgres(monkeypatch: pytest.MonkeyPat
     version = _release_version(tmp_path)
     _replace_once(
         tmp_path / "packages/rowx-embedded/pyproject.toml",
-        f'dependencies = ["rowx-postgres=={version}"]',
-        f'dependencies = ["rowx-postgres=={MISMATCH_VERSION}"]',
+        f'dependencies = ["rowx-core=={version}", "rowx-postgres=={version}"]',
+        f'dependencies = ["rowx-core=={version}", "rowx-postgres=={MISMATCH_VERSION}"]',
     )
     with pytest.raises(SystemExit, match="rowx-embedded must depend exactly"):
         _run(monkeypatch, "pull_request", root=tmp_path)

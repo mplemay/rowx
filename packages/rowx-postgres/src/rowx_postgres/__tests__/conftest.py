@@ -1,7 +1,6 @@
 import gc
 import os
 import secrets
-import sys
 import time
 from importlib.util import find_spec
 from pathlib import Path
@@ -11,7 +10,6 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
-from rowx_postgres import _embedded as embedded_module
 from rowx_postgres.__tests__.support.engine import (
     ALLOWED_RUNTIME_SKIPS,
     EMBEDDED_DATABASE_KEY,
@@ -20,18 +18,22 @@ from rowx_postgres.__tests__.support.engine import (
     SERVER_NEEDS,
     SKIPPED_KEY,
 )
-from rowx_postgres.__tests__.support.fake_engine import FakeEngine
-from rowx_postgres._embedded import ENGINE_MODULE, REQUIRE_ENV, is_embedded_url, parse_embedded_url, start_blocking
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
 
+ENGINE_MODULE: Final[str] = "rowx_embedded"
+REQUIRE_ENV: Final[str] = "ROWX_REQUIRE_EMBEDDED"
 TESTS_DIR: Final[Path] = Path(__file__).resolve().parent
 SCHEMA_SQL: Final[Path] = TESTS_DIR / "support" / "schema.sql"
 SEED_SQL: Final[Path] = TESTS_DIR / "support" / "seed_data.sql"
 ROOT: Final[Path] = next(parent for parent in TESTS_DIR.parents if (parent / "Cargo.lock").is_file())
 APP_SCHEMA_SQL: Final[Path] = ROOT / "examples" / "app" / "schema.sql"
 SECURITY_SCHEMA_SQL: Final[Path] = ROOT / "examples" / "security" / "schema.sql"
+
+
+def is_embedded_url(dsn: str) -> bool:
+    return dsn.strip().lower().startswith("embedded:")
 
 
 # an xdist controller only schedules; each worker starts its own instance
@@ -51,6 +53,9 @@ def pytest_configure(config: pytest.Config) -> None:
     if find_spec(ENGINE_MODULE) is None:
         message = f"ROWX_TEST_DSN is {dsn} but {ENGINE_MODULE} is not installed"
         raise pytest.UsageError(message)
+    # the engine is optional, so nothing of it is imported unless the lane asks for it
+    from rowx_embedded._instance import parse_embedded_url, start_blocking  # ruff: ignore[import-outside-top-level]
+
     target, _ = parse_embedded_url(dsn)
     database = start_blocking(target.directory)
     config.stash[EMBEDDED_DATABASE_KEY] = database
@@ -259,12 +264,3 @@ def app_schema() -> Iterator[str]:
 @pytest.fixture
 def security_schema() -> Iterator[str]:
     yield from _example_schema(SECURITY_SCHEMA_SQL)
-
-
-@pytest.fixture
-def engine(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeEngine]:
-    fake = FakeEngine()
-    monkeypatch.setitem(sys.modules, "rowx_embedded", fake)
-    embedded_module.load_cached.cache_clear()
-    yield fake
-    embedded_module.load_cached.cache_clear()

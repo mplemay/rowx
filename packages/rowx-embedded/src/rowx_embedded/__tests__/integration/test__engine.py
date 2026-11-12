@@ -19,14 +19,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import pytest
+import rowx_core.errors as rowx_core_errors
+import rowx_embedded
+import rowx_postgres
+from rowx_core import query
 
-# the companion is optional: without it (the root `just test-py` never installs it) this module skips cleanly
-rowx_embedded = pytest.importorskip("rowx_embedded")
+# an untyped driver module, as the test helpers use it
 psycopg = pytest.importorskip("psycopg")
-rowx_postgres = pytest.importorskip("rowx_postgres")
-rowx_core = pytest.importorskip("rowx_core")
-rowx_core_errors = pytest.importorskip("rowx_core.errors")
-query = rowx_core.query
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -131,7 +130,6 @@ def python(code: str, root: Path, *, timeout: float = STARTUP_WAIT) -> subproces
 
 
 def test_the_module_exports_its_versions_and_the_cache_key_inputs() -> None:
-    expect(rowx_embedded.API_VERSION, 1)
     expect(rowx_embedded.ENGINE_VERSION, "18.4")
     expect(rowx_embedded.SNAPSHOT_FORMAT, 1)
     expect(len(rowx_embedded.EXTENSIONS), 32)
@@ -152,7 +150,7 @@ def test_a_memory_instance_starts_serves_and_removes_its_socket_directory(privat
     expect(directory.stat().st_mode & 0o777, 0o700)
     expect(instance.boot, "fresh")
     expect(instance.directory, None)
-    expect_true(rowx_embedded.ENGINE_VERSION in raw_one(instance.dsn, "SHOW server_version"))
+    expect_true(rowx_embedded.ENGINE_VERSION in str(raw_one(instance.dsn, "SHOW server_version")))
 
     async def body() -> int:
         async with await rowx_postgres.connect(instance.dsn) as conn:
@@ -877,7 +875,7 @@ def test_a_forked_childs_close_never_touches_the_parents_instance(private_tmp: P
         status = 1
         try:
             instance.close()
-            rowx_embedded._engine.close_all()  # ruff: ignore[private-member-access]
+            rowx_embedded._engine.close_all()
             del instance
             gc.collect()
             status = 0 if directory.exists() else 2
@@ -957,7 +955,7 @@ class Wire:
         self.buffer += data
 
     def message(self) -> tuple[bytes, bytes]:
-        while len(self.buffer) < 5:  # ruff: ignore[magic-value-comparison]
+        while len(self.buffer) < 5:
             self.fill()
         (length,) = struct.unpack("!i", self.buffer[1:5])
         while len(self.buffer) < 1 + length:

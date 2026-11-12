@@ -214,8 +214,17 @@ def test_embedded_directory_url_is_refused(
     assert not captured.out
 
 
+# never more instances than distinct statements, as in a plain check
+@pytest.mark.parametrize(
+    ("statements", "workers"),
+    [(("select 1", "select 2"), 2), (("select 1",), 1), (("select 1", "select 2", "select 3"), 2)],
+)
 def test_embedded_url_builds_each_schema_with_one_instance_per_worker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    statements: tuple[str, ...],
+    workers: int,
 ) -> None:
     from rowx_core.backend import ScratchBuild  # ruff: ignore[import-outside-top-level]
 
@@ -223,7 +232,8 @@ def test_embedded_url_builds_each_schema_with_one_instance_per_worker(
     from rowx.check.runner import Hooks, RunResult, SiteCoverage, Statistics  # ruff: ignore[import-outside-top-level]
 
     revision(tmp_path, "[tool.rowx.migrate]\n")
-    (tmp_path / "good.py").write_text('from rowx import query\nquery[tuple[int]](t"select 1")\n', encoding="utf-8")
+    body = "".join(f'query[tuple[int]](t"{statement}")\n' for statement in statements)
+    (tmp_path / "good.py").write_text(f"from rowx import query\n{body}", encoding="utf-8")
     git(tmp_path, "add", "good.py")
     git(tmp_path, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "query")
     monkeypatch.chdir(tmp_path)
@@ -279,9 +289,9 @@ def test_embedded_url_builds_each_schema_with_one_instance_per_worker(
     ])
     captured = capsys.readouterr()
     assert status == 0
-    assert requested == [2, 2]
+    assert requested == [workers, workers]
     assert [dsn for dsn, _ in seen] == [urls[0] for _, urls in seen]
-    assert [len(urls) for _, urls in seen] == [2, 2, 2, 2]
+    assert [len(urls) for _, urls in seen] == [workers] * 4
     assert len({urls for _, urls in seen}) == 2
     assert "compatible checked subset" in captured.out
     assert "disposable PostgreSQL server" not in captured.err

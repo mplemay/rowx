@@ -1,16 +1,15 @@
 import asyncio
-import sys
 import threading
-from types import ModuleType
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from rowx_core.errors import InterfaceError, MigrateError
-from rowx_postgres import _embedded as embedded_module
-from rowx_postgres._scratch import EmbeddedScratch, PostgresEmbedded, embedded_service, socket_url
+from rowx_embedded import _instance as instance_module
+from rowx_embedded._instance import socket_url
+from rowx_embedded._scratch import EmbeddedScratch, PostgresEmbedded, embedded_service
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
     from rowx_core.backend import MigrationService
 
@@ -59,13 +58,8 @@ class FakeInstance:
         self.closed = True
 
 
-class FakeEngine(ModuleType):
+class FakeEngine:
     def __init__(self) -> None:
-        super().__init__("rowx_embedded")
-        self.API_VERSION = embedded_module.EXPECTED_API_VERSION
-        self.EngineError = FakeEngineError
-        self.SnapshotError = FakeSnapshotError
-        self.Instance = self
         self.started: list[FakeInstance] = []
         # the 1-based start numbers that fail
         self.failing: set[int] = set()
@@ -85,12 +79,12 @@ class FakeEngine(ModuleType):
 
 
 @pytest.fixture
-def engine(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeEngine]:
+def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
     fake = FakeEngine()
-    monkeypatch.setitem(sys.modules, "rowx_embedded", fake)
-    embedded_module.load_cached.cache_clear()
-    yield fake
-    embedded_module.load_cached.cache_clear()
+    monkeypatch.setattr(instance_module, "Instance", fake)
+    monkeypatch.setattr(instance_module, "EngineError", FakeEngineError)
+    monkeypatch.setattr(instance_module, "SnapshotError", FakeSnapshotError)
+    return fake
 
 
 class FakeMigrator:

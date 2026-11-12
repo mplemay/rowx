@@ -7,7 +7,6 @@ from re import Pattern, compile as re_compile
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from rowx_postgres._embedded import REQUIRE_ENV
 
 from rowx.check.config import load_config
 from rowx.check.runner import run_check
@@ -18,6 +17,7 @@ if TYPE_CHECKING:
 
     from rowx.check.render import Report
 
+REQUIRE_ENV: Final[str] = "ROWX_REQUIRE_EMBEDDED"
 CASES_DIR: Final[Path] = Path(__file__).resolve().parent / "cases"
 MARKER: Final[Pattern[str]] = re_compile(r"#\s*error:\s*\[([^\]]*)\]")
 

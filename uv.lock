@@ -894,11 +894,15 @@ name = "rowx-embedded"
 version = "0.3.0"
 source = { editable = "packages/rowx-embedded" }
 dependencies = [
+    { name = "rowx-core" },
     { name = "rowx-postgres" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "rowx-postgres", editable = "packages/rowx-postgres" }]
+requires-dist = [
+    { name = "rowx-core", editable = "packages/rowx-core" },
+    { name = "rowx-postgres", editable = "packages/rowx-postgres" },
+]
 
 [[package]]
 name = "rowx-postgres"

@@ -72,7 +72,7 @@ def _core_sources() -> list[tuple[str, str]]:
                 parts = parts[:-1]
             name = ".".join((package.__name__, *parts))
             # This opt-in facade intentionally imports the PostgreSQL package.
-            if name in {"rowx.postgres", "rowx.postgres.embedded"}:
+            if name in {"rowx.postgres", "rowx.embedded"}:
                 continue
             found.append((name, path.read_text(encoding="utf-8")))
     return found

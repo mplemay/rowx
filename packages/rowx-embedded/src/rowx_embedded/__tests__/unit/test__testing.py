@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from rowx_core.errors import InterfaceError
-from rowx_postgres import _embedded_testing as module
-from rowx_postgres._embedded import SnapshotRejectedError
-from rowx_postgres._embedded_testing import (
+from rowx_embedded import _testing as module
+from rowx_embedded._instance import SnapshotRejectedError
+from rowx_embedded._testing import (
     EmbeddedProvisioner,
     lock,
     publish_blocking,
@@ -308,6 +308,21 @@ def test_teardown_abandons_the_instance_and_never_closes_it(tmp_path: Path, fake
         await hold.close()
         assert fakes.databases[1].abandoned == 1
         assert fakes.databases[0].abandoned == 1
+
+    run(scenario)
+
+
+def test_with_database_names_a_live_instance_and_refuses_a_dropped_one(tmp_path: Path, fakes: Fakes) -> None:
+    async def scenario() -> None:
+        target = provisioner(tmp_path)
+        await target.ensure_template(None, NAME, keep_stale=False, project=PROJECT)
+        handle = await target.clone(NAME, PROJECT)
+        assert target.with_database(handle) == fakes.databases[0].dsn
+        await target.drop(handle)
+        with pytest.raises(InterfaceError, match="does not exist"):
+            target.with_database(handle)
+        with pytest.raises(InterfaceError, match="does not exist"):
+            target.with_database("never_cloned")
 
     run(scenario)
 

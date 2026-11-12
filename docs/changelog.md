@@ -3,9 +3,10 @@
 ## 0.3.0 (unreleased)
 
 - `rowx[embedded]` adds an in-process Postgres 18 for development, checking and tests. In code,
-  `rowx.postgres.embedded.Database` is a pool-shaped executor that owns one instance (`Database()` in memory,
+  `rowx.embedded.Database` is a pool-shaped executor that owns one instance (`Database()` in memory,
   `Database("/abs/dir")` persistent). An `embedded://` URL selects it for `rowx check`, `rowx check-compat`,
-  `rowx migrate` and the pytest plugin; generic `connect`, `Pool` and `ConnectOptions.from_dsn` refuse one. See
+  `rowx migrate` and the pytest plugin; generic `connect`, `Pool` and `ConnectOptions.from_dsn` do not accept one. All
+  of it lives in `rowx-embedded`, and `rowx-postgres` does not know about it. See
   [Embedded Postgres](guide/embedded.md).
 - `rowx-embedded` now releases in lockstep with the other distributions (0.3.0, from the `v*` tag and `release.yml`)
   instead of as `18.4.0` on its own `embedded-v*` tag. It depends on the matching `rowx-postgres`, and `rowx[embedded]`

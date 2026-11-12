@@ -42,8 +42,9 @@ The `embedded` extra adds `rowx-postgres` and the matching `rowx-embedded` as we
 [rowx-embedded](#rowx-embedded)).
 
 `rowx` re-exports the query API. `rowx.core` re-exports the `rowx_core` names that `rowx` and `rowx.errors` do not
-already export. `rowx.postgres` re-exports the driver and needs the `postgres` extra. `from rowx import query` and
-`from rowx_core import query` are the same object.
+already export. `rowx.postgres` re-exports the driver and needs the `postgres` extra. `rowx.embedded` re-exports
+`rowx_embedded.Database` and needs the `embedded` extra. `from rowx import query` and `from rowx_core import query` are
+the same object.
 
 ```python
 from rowx import query
@@ -56,10 +57,11 @@ not import your application.
 ## rowx-embedded
 
 The `rowx-embedded` distribution's import root is `rowx_embedded`. It is an optional in-process PostgreSQL 18 for
-development, checking and tests, and it is not for production. It depends on the matching `rowx-postgres`, and
-`import rowx_postgres` never imports it. It is released with the other distributions, under the same version and tag. It
-is a per-platform wheel (macOS arm64, Linux x86_64 and aarch64) and has no sdist. `rowx[embedded]` installs it, and
-`rowx.postgres.embedded.Database` (or an `embedded://` URL for the CLI and the pytest plugin) then uses it:
+development, checking and tests, and it is not for production. It holds all of the embedded support (the `Database`
+class, the `embedded://` backend, the scratch and the test provisioner) on top of the matching `rowx-postgres`, which it
+depends on; `rowx-postgres` never imports it. It is released with the other distributions, under the same version and
+tag. It is a per-platform wheel (macOS arm64, Linux x86_64 and aarch64) and has no sdist. `rowx[embedded]` installs it,
+and `rowx.embedded.Database` (or an `embedded://` URL for the CLI and the pytest plugin) then uses it:
 
 ```sh
 uv add "rowx[embedded]"

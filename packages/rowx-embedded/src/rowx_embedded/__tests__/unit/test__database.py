@@ -1,12 +1,9 @@
 import asyncio
-import subprocess  # ruff: ignore[suspicious-subprocess-import]
-import sys
 import threading
 
 import pytest
 from rowx_core.errors import InterfaceError, PoolTimeoutError
-from rowx_postgres import Connection, ConnectOptions, Pool, _embedded as embedded_module
-from rowx_postgres.__tests__.support.fake_engine import (
+from rowx_embedded.__tests__.support.fake_engine import (
     SOCKET_DSN,
     WAIT_SECONDS,
     FakeDirectoryInUseError,
@@ -14,8 +11,9 @@ from rowx_postgres.__tests__.support.fake_engine import (
     fork_and_run,
     run,
 )
-from rowx_postgres._database import with_socket
-from rowx_postgres.embedded import Database
+from rowx_embedded._database import Database
+from rowx_embedded._instance import with_socket
+from rowx_postgres import Connection, ConnectOptions, Pool
 
 
 def test_a_database_starts_its_instance_on_first_use_once_and_closes_it(engine: FakeEngine) -> None:
@@ -51,12 +49,20 @@ def test_a_closed_pool_never_starts_an_instance(engine: FakeEngine) -> None:
     assert engine.started == []
 
 
-def test_terminate_closes_the_instance(engine: FakeEngine) -> None:
+def test_terminate_abandons_a_memory_instance_instead_of_waiting_for_it(engine: FakeEngine) -> None:
     pool = Database()
     run(pool.open)
     pool.terminate()
     assert pool.closed
-    assert engine.started[0].closes == 1
+    assert (engine.started[0].abandoned, engine.started[0].closes) == (True, 0)
+
+
+def test_terminate_closes_a_directory_instance_properly(engine: FakeEngine) -> None:
+    pool = Database("/var/lib/db")
+    run(pool.open)
+    pool.terminate()
+    assert pool.closed
+    assert (engine.started[0].abandoned, engine.started[0].closes) == (False, 1)
 
 
 def test_terminate_before_the_first_use_starts_nothing(engine: FakeEngine) -> None:
@@ -167,6 +173,22 @@ def test_a_first_use_is_bounded_by_the_acquire_timeout(engine: FakeEngine) -> No
     assert engine.started[0].closes == 1
 
 
+def test_open_is_bounded_by_the_acquire_timeout(engine: FakeEngine) -> None:
+    engine.gate = threading.Event()
+
+    async def main() -> None:
+        pool = Database(acquire_timeout=0.1)
+        with pytest.raises(PoolTimeoutError, match="start"):
+            await pool.open()
+        assert engine.gate is not None
+        engine.gate.set()
+        await pool.open()
+        await pool.close()
+
+    run(main)
+    assert engine.started[0].closes == 1
+
+
 def test_hooks_work_with_the_lazy_database(engine: FakeEngine) -> None:
     calls: list[str] = []
 
@@ -201,12 +223,6 @@ def test_a_database_is_a_pool_with_one_session() -> None:
     assert (db.min_size, db.max_size, db.directory, db.ready, db.closed) == (0, 1, None, False, False)
 
 
-@pytest.mark.parametrize("max_size", [0, 2, 10])
-def test_a_database_of_any_other_size_than_one_is_a_value_error(max_size: int) -> None:
-    with pytest.raises(ValueError, match="one session at a time"):
-        Database(max_size=max_size)
-
-
 @pytest.mark.parametrize(
     ("name", "options"),
     [
@@ -235,40 +251,20 @@ def test_a_database_still_validates_the_usual_bounds() -> None:
         Database(acquire_timeout=-1)
 
 
-def test_a_constructed_database_does_no_io_and_never_loads_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail() -> None:
-        pytest.fail("the engine was loaded")
-
-    monkeypatch.setattr(embedded_module, "load_cached", fail)
+def test_a_constructed_database_does_no_io(engine: FakeEngine) -> None:
     db = Database("/var/lib/db")
     assert (db.size, db.idle, db.waiting, db.closed, db.ready) == (0, 0, 0, False, False)
     db.expire_connections()
+    assert engine.started == []
 
 
-def test_a_module_level_database_imports_without_the_companion() -> None:
-    code = (
-        "import sys\n"
-        "sys.modules['rowx_embedded'] = None\n"
-        "from rowx_postgres.embedded import Database\n"
-        "db = Database()\n"
-        "assert db.max_size == 1 and db.size == 0 and not db.closed and not db.ready\n"
-    )
-    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
-        [sys.executable, "-I", "-c", code],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def test_ready_and_wait_ready_follow_the_start(engine: FakeEngine) -> None:
+def test_ready_follows_the_start(engine: FakeEngine) -> None:
     async def main() -> None:
         db = Database()
         assert not db.ready
-        await db.wait_ready()
+        await db.open()
         assert db.ready
-        await db.wait_ready()
+        await db.open()
         await db.close()
         assert not db.ready
         assert db.closed
@@ -299,7 +295,7 @@ def test_a_never_opened_database_closes_cleanly(engine: FakeEngine) -> None:
     assert engine.started == []
 
 
-def test_the_dsn_of_a_forked_child_raises(engine: FakeEngine) -> None:
+def test_a_database_that_started_in_the_parent_refuses_a_forked_child(engine: FakeEngine) -> None:
     db = Database()
     run(db.open)
 
@@ -307,13 +303,51 @@ def test_the_dsn_of_a_forked_child_raises(engine: FakeEngine) -> None:
         try:
             _ = db.dsn
         except InterfaceError:
+            pass
+        else:
+            return 1
+        try:
+            asyncio.run(db.open())
+        except InterfaceError:
             return 0
-        return 1
+        return 2
 
     assert fork_and_run(child) == 0
     assert db.dsn == SOCKET_DSN
     run(db.close)
+    assert len(engine.started) == 1
     assert engine.started[0].closes == 1
+
+
+def test_a_database_that_never_started_in_the_parent_starts_in_a_forked_child(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeImpl:
+        def __init__(self, options: ConnectOptions, **_: object) -> None:
+            self.options = options
+
+        async def open(self) -> None:
+            pass
+
+        async def close(self, limit: float | None, /) -> None:
+            del limit, self.options
+
+    # the native pool's runtime does not survive a fork, so the child must not build a real one
+    monkeypatch.setattr("rowx_postgres._pool.PoolImpl", FakeImpl)
+    db = Database()
+
+    def child() -> int:
+        async def main() -> int:
+            await db.open()
+            dsn = db.dsn
+            await db.close()
+            return 0 if dsn == SOCKET_DSN else 1
+
+        return asyncio.run(main())
+
+    assert fork_and_run(child) == 0
+    # the child's own instance is its own; the parent never started one
+    assert engine.started == []
 
 
 def test_options_are_pointed_at_the_instance_socket() -> None:

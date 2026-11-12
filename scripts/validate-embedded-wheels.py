@@ -95,7 +95,7 @@ def _validate_contents(path: Path, names: list[str]) -> None:
         if parts[0] != NAMESPACE and not parts[0].endswith(".dist-info"):
             message = f"{path.name} owns an unexpected top-level entry: {name}"
             raise SystemExit(message)
-        if name.endswith(DEVELOPMENT_SUFFIXES) or "__pycache__" in parts or "tests" in parts:
+        if name.endswith(DEVELOPMENT_SUFFIXES) or "__pycache__" in parts or "tests" in parts or "__tests__" in parts:
             message = f"{path.name} contains a development file: {name}"
             raise SystemExit(message)
 
@@ -124,8 +124,9 @@ def _validate_metadata(path: Path, wheel: ZipFile, names: list[str], version: st
         problems.append(f"Name is {metadata.get('Name')!r}")
     if metadata.get("Version") != version:
         problems.append(f"Version is {metadata.get('Version')!r}, expected {version!r}")
-    if (requires := metadata.get_all("Requires-Dist")) != [f"rowx-postgres=={version}"]:
-        problems.append(f"it must depend only on rowx-postgres=={version}, found {requires}")
+    expected = [f"rowx-core=={version}", f"rowx-postgres=={version}"]
+    if sorted(requires := metadata.get_all("Requires-Dist") or []) != expected:
+        problems.append(f"it must depend only on {expected}, found {requires}")
     if sorted(metadata.get_all("License-File", [])) != sorted(LICENSE_FILES):
         problems.append(f"License-File is {metadata.get_all('License-File')}")
     if problems:

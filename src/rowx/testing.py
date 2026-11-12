@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol
 import pytest
 from rowx_core.errors import DatabaseError, InterfaceError, MigrateError
 
-from rowx._backend import backend_for
+from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
 from rowx.check.config import DEFAULT_MIGRATE_TABLE, ConfigError, load_config
 from rowx.check.migrate import CheckError, load_migrator, resolve_target
 from rowx.check.runner import redact
@@ -180,10 +180,10 @@ def blocking[T](work: Coroutine[Any, Any, T]) -> T:
 @pytest.fixture(scope="session")
 def rowx_template(request: pytest.FixtureRequest) -> Iterator[Session]:
     rowx_config, server_dsn = configured(request.config)
-    backend = backend_for(server_dsn)
     try:
+        backend = backend_for(server_dsn)
         provisioner = backend.testing(server_dsn, cache=cache_directory(request.config))
-    except (InterfaceError, ValueError) as error:
+    except (BackendMissing, UnsupportedSchemeError, InterfaceError, ValueError) as error:
         fail(f"rowx: {error}", server_dsn)
     rootdir = Path(request.config.rootpath)
     ini = str(request.config.getini(MIGRATIONS_INI) or "").strip()

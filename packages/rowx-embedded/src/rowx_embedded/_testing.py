@@ -12,21 +12,18 @@ from typing import TYPE_CHECKING, Final, override
 
 from rowx_core.backend import Provisioner
 from rowx_core.errors import InterfaceError
+from rowx_postgres import Connection, Pool, connect
 
-from rowx_postgres._connection import Connection, connect
-from rowx_postgres._embedded import (
+from rowx_embedded._api import ENGINE_VERSION, EXTENSIONS, RUNTIME_VERSION, SNAPSHOT_FORMAT, WASM_SHA256
+from rowx_embedded._instance import (
     EmbeddedDatabase,
     SnapshotRejectedError,
-    is_embedded_url,
-    load_engine,
     parse_embedded_url,
+    socket_url,
     start_from_snapshot,
     start_owned,
     take_snapshot,
 )
-from rowx_postgres._pool import Pool
-from rowx_postgres._scratch import socket_url
-from rowx_postgres._services import PostgresProvisioner
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -53,18 +50,17 @@ LOCK_POLL: Final[float] = 0.05
 # everything a snapshot is only valid for: the companion, the engine, the runtime and module that booted it, the
 # container layout and the extensions in it
 def identity() -> tuple[str, ...]:
-    engine = load_engine()
     try:
         companion = version(COMPANION_DISTRIBUTION)
     except PackageNotFoundError:
         companion = "unknown"
     return (
         f"rowx-embedded:{companion}",
-        f"engine:{engine.ENGINE_VERSION}",
-        f"runtime:{engine.RUNTIME_VERSION}",
-        f"wasm:{engine.WASM_SHA256}",
-        f"snapshot-format:{engine.SNAPSHOT_FORMAT}",
-        f"extensions:{','.join(sorted(engine.EXTENSIONS))}",
+        f"engine:{ENGINE_VERSION}",
+        f"runtime:{RUNTIME_VERSION}",
+        f"wasm:{WASM_SHA256}",
+        f"snapshot-format:{SNAPSHOT_FORMAT}",
+        f"extensions:{','.join(sorted(EXTENSIONS))}",
     )
 
 
@@ -205,8 +201,7 @@ class EmbeddedProvisioner(Provisioner):
             )
             raise ValueError(msg)
         self._cache = cache
-        # loads the engine now, so a missing extra fails before anything is built. The query is forwarded to the
-        # migration run, so it shapes the snapshot too
+        # the query is forwarded to the migration run, so it shapes the snapshot too
         self._identity = (*identity(), *((f"query:{self._query}",) if self._query else ()))
         self._snapshot: bytes | None = None
         # until one boot has worked, a snapshot the engine rejects is rebuilt once
@@ -302,7 +297,10 @@ class EmbeddedProvisioner(Provisioner):
 
     @override
     def with_database(self, name: str) -> str:
-        return socket_url(self._live[name].dsn, self._query)
+        if (database := self._live.get(name)) is None:
+            msg = "the embedded test database does not exist (it was dropped, or never cloned)"
+            raise InterfaceError(msg)
+        return socket_url(database.dsn, self._query)
 
     @override
     async def connect(self, dsn: str) -> Connection:
@@ -314,6 +312,4 @@ class EmbeddedProvisioner(Provisioner):
 
 
 def provisioner(dsn: str, /, *, cache: CacheDirectory | None = None) -> Provisioner:
-    if is_embedded_url(dsn):
-        return EmbeddedProvisioner(dsn, cache=cache)
-    return PostgresProvisioner(dsn)
+    return EmbeddedProvisioner(dsn, cache=cache)

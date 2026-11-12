@@ -37,7 +37,6 @@ from rowx_postgres.__tests__.integration.check.test_render import (
 )
 from rowx_postgres._core import connect_checker
 from rowx_postgres._services import PostgresMigrationSession
-from rowx_postgres.embedded import Database
 
 from rowx import query_unchecked
 from rowx.check.cli import main
@@ -1356,6 +1355,9 @@ def test_a_directory_that_is_in_use_fails_at_once_instead_of_retrying(
     _write_dirs(tmp_path, "pyproject.toml", "")
     _write_dirs(tmp_path / "migrations", "1_create_a.sql", "CREATE TABLE a (id int4);")
     directory = tmp_path / "db"
+    # the companion is optional, so it is imported only by the tests that need it
+    from rowx_embedded import Database  # ruff: ignore[import-outside-top-level]
+
     holder = Database(directory)
     asyncio.run(holder.open())
     try:

@@ -21,13 +21,14 @@ classifiers = [
     "Topic :: Database",
 ]
 keywords = ["postgresql", "postgres", "embedded", "wasm", "rowx"]
-dependencies = ["rowx-postgres==0.3.0"]
+dependencies = ["rowx-core==0.3.0", "rowx-postgres==0.3.0"]
 
 [project.urls]
 Repository = "https://github.com/mplemay/rowx"
 Issues = "https://github.com/mplemay/rowx/issues"
 
 [tool.uv.sources]
+rowx-core = { workspace = true }
 rowx-postgres = { workspace = true }
 
 # a maturin build is opaque to uv, so name the inputs that must trigger a rebuild of the editable install

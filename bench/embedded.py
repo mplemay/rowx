@@ -275,7 +275,7 @@ async def fetch_numbers(dsn: str) -> dict[str, float]:
 
 
 async def embedded_fetch() -> dict[str, float]:
-    from rowx_postgres.embedded import Database  # ruff: ignore[import-outside-top-level]
+    from rowx_embedded import Database  # ruff: ignore[import-outside-top-level]
 
     async with Database() as database:
         return await fetch_numbers(database.dsn)

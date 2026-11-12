@@ -1,7 +1,6 @@
 from typing import Final
 from urllib.parse import quote, unquote, urlencode, urlparse, urlunparse
 
-from rowx_postgres._embedded import reject_embedded
 from rowx_postgres._options import ConnectOptions
 
 URL_SCHEMES: Final[tuple[str, ...]] = ("postgres://", "postgresql://")
@@ -9,7 +8,6 @@ URL_SCHEMES: Final[tuple[str, ...]] = ("postgres://", "postgresql://")
 
 # `dsn` (a URL or a key=value string) pointed at another database, as a string the driver reads back as `name`
 def with_database(dsn: str, name: str) -> str:
-    reject_embedded(dsn)
     dsn = dsn.strip()
     if dsn.startswith(URL_SCHEMES):
         parts = urlparse(dsn)

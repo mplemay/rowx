@@ -735,6 +735,12 @@ def _collect(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     return sites, reports, sources, backend
 
 
+# how many distinct statements a run over `files` describes, for sizing a scratch before that run starts
+def count_statements(config: Config, files: Iterable[Path], dsn: str, boundary: Path | None = None) -> int:
+    sites, _, _, _ = _collect(config, files, Statistics(), None, dsn, None, boundary)
+    return len({site.sourcemap.sql for site in sites})
+
+
 async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     config: Config,
     files: Iterable[Path],

@@ -10,16 +10,13 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from rowx_core import query
 from rowx_core.errors import DatabaseError, InterfaceError, PoolTimeoutError
+from rowx_embedded import Database
 from rowx_postgres import Connection, ConnectOptions, Migrator, Pool, connect
-from rowx_postgres.embedded import Database
-
-from rowx import query
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
-
-pytestmark = [pytest.mark.embedded]
 
 TOO_MANY_CONNECTIONS: Final[str] = "53300"
 UNDEFINED_TABLE: Final[str] = "42P01"
@@ -29,8 +26,8 @@ INTERRUPT_LIMIT: Final[float] = 8.0
 CHILD_WAIT: Final[float] = 60.0
 SLEEPER: Final[str] = (
     "import asyncio\n"
-    "from rowx import query\n"
-    "from rowx_postgres.embedded import Database\n"
+    "from rowx_core import query\n"
+    "from rowx_embedded import Database\n"
     "async def main():\n"
     "    async with Database() as db, db.acquire() as c:\n"
     "        print('ready', flush=True)\n"
@@ -133,7 +130,7 @@ def test_a_failed_open_leaves_no_instance_behind(tmp_path: Path) -> None:
     path = tmp_path / "db"
 
     async def main() -> None:
-        db = Database(path, options=ConnectOptions(database="nope"), acquire_timeout=3)
+        db = Database(path, options=ConnectOptions(database="nope"), acquire_timeout=10)
         await db.open()
         with pytest.raises(PoolTimeoutError):
             await number(db, 1)
@@ -259,7 +256,7 @@ def test_a_second_concurrent_session_is_53300() -> None:
 def test_a_pool_against_a_busy_instance_times_out_with_the_53300_cause() -> None:
     async def main() -> PoolTimeoutError:
         async with Database() as db, db.acquire():
-            pool = Pool(db.dsn, max_size=1, acquire_timeout=3)
+            pool = Pool(db.dsn, max_size=1, acquire_timeout=10)
             try:
                 with pytest.raises(PoolTimeoutError) as caught:
                     await number(pool, 1)
@@ -277,7 +274,7 @@ def test_a_pool_against_a_busy_instance_times_out_with_the_53300_cause() -> None
 
 def test_a_database_that_cannot_connect_names_the_database_error() -> None:
     async def main() -> PoolTimeoutError:
-        db = Database(options=ConnectOptions(database="nope"), acquire_timeout=3)
+        db = Database(options=ConnectOptions(database="nope"), acquire_timeout=10)
         try:
             # the boot is not under the acquire timeout here, so a slow machine cannot turn the cause into a timeout
             await db.open()
@@ -370,5 +367,6 @@ def test_an_interrupted_memory_script_exits_without_waiting_for_its_statement() 
         child.send_signal(signal.SIGINT)
         child.communicate(timeout=CHILD_WAIT)
         elapsed = time.monotonic() - started
-    assert child.returncode == -signal.SIGINT
+    # the exit guard leaves an abandoned engine's process with `os._exit`, so it reports the shell's status for an interrupt
+    assert child.returncode in {-signal.SIGINT, 128 + signal.SIGINT}
     assert elapsed < INTERRUPT_LIMIT

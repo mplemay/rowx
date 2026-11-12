@@ -79,9 +79,9 @@ rowx check src --database-url postgresql://app@localhost/app
 more diagnostics, and 2 on a bad invocation or config, an unreachable database, a describe failure that is not an SQL
 error, a drift or scratch failure, or an internal error.
 
-No server? `uv add "rowx[embedded]"` adds an in-process Postgres 18: use `rowx.postgres.embedded.Database()` in code, or
-an `embedded://` database URL for `rowx check` and the pytest plugin, with no Docker. It is for development, checking
-and tests, and it is not for production. See [Embedded Postgres](docs/guide/embedded.md).
+No server? `uv add "rowx[embedded]"` adds an in-process Postgres 18: use `rowx.embedded.Database()` in code, or an
+`embedded://` database URL for `rowx check`, `rowx migrate` and the pytest plugin, with no Docker. It is for
+development, checking and tests, and it is not for production. See [Embedded Postgres](docs/guide/embedded.md).
 
 A type mismatch is reported like this:
 

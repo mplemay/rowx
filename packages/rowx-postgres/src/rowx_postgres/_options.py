@@ -2,7 +2,6 @@ from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Final, Literal, Self, override
 
 from rowx_postgres._core import parse_dsn as parse_dsn_impl
-from rowx_postgres._embedded import reject_embedded_open
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -28,7 +27,6 @@ class ConnectOptions:
 
     @classmethod
     def from_dsn(cls, dsn: str, /, **overrides: object) -> Self:
-        reject_embedded_open(dsn)
         return replace(cls(**parse_dsn_impl(dsn)), **overrides)
 
     def with_connect_timeout(self, seconds: float) -> Self:

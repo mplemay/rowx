@@ -15,7 +15,6 @@ from psycopg import sql
 from rowx_core.lifecycle import make_tag
 from rowx_postgres import Migrator
 from rowx_postgres._admin import with_database
-from rowx_postgres._embedded_testing import publish_blocking
 from rowx_postgres._testing import LOCK_DATABASE, build_key
 
 from rowx.testing import TEMPLATE_PREFIX, TEST_PREFIX, project_prefix, template_name
@@ -769,7 +768,7 @@ EMBEDDED_COUNTING_CONFTEST: Final[str] = textwrap.dedent(
     """
     from pathlib import Path
 
-    import rowx_postgres._embedded_testing as plugin
+    import rowx_embedded._testing as plugin
 
     original = plugin.build_snapshot
 
@@ -1067,7 +1066,7 @@ EMBEDDED_WORKERS_CONFTEST: Final[str] = textwrap.dedent(
     import os
     from pathlib import Path
 
-    import rowx_postgres._embedded_testing as plugin
+    import rowx_embedded._testing as plugin
 
     original_ensure = plugin.EmbeddedProvisioner.ensure_template
 
@@ -1136,6 +1135,8 @@ def test_embedded_a_damaged_or_refused_snapshot_is_rebuilt(embedded_project: Emb
         path.write_bytes(b"not a snapshot")
     else:
         # a whole file with a good digest that only the engine can refuse, at the first boot
+        from rowx_embedded._testing import publish_blocking  # ruff: ignore[import-outside-top-level]
+
         publish_blocking(path, embedded_project.prefix, b"not a snapshot either")
     embedded_project.run().assert_outcomes(passed=2)
     assert embedded_project.builds() == 2
@@ -1216,7 +1217,7 @@ def test_embedded_url_without_the_extra_fails_clearly(embedded_project: Embedded
     conftest.write_text("import sys\n\nsys.modules['rowx_embedded'] = None\n", encoding="utf-8")
     result = embedded_project.run("test_inner.py")
     result.assert_outcomes(errors=2)
-    result.stdout.fnmatch_lines(["*rowx_embedded package, which is not installed*", "*uv add*rowx*"])
+    result.stdout.fnmatch_lines(["*install `rowx[[]embedded]`*"])
     # the premise: the blocked import is what the plugin reported, not a leftover of the counting conftest
     assert embedded_project.builds() == 0
 

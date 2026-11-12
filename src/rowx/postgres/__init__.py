@@ -29,8 +29,6 @@ except ModuleNotFoundError as error:
     msg = 'Install "rowx[postgres]" to use rowx.postgres.'
     raise ImportError(msg) from error
 
-from rowx.postgres import embedded
-
 __all__ = [
     "RESET_QUERY",
     "Box",
@@ -53,5 +51,4 @@ __all__ = [
     "Range",
     "Transaction",
     "connect",
-    "embedded",
 ]

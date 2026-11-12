@@ -5,9 +5,7 @@ from rowx_core.backend import Backend, CheckerBackend, TypeEntry
 from rowx_postgres._checker import SQL_ERROR_HELP, override_issues
 from rowx_postgres._compiler import COMPILER
 from rowx_postgres._core import map_columns, type_table
-from rowx_postgres._embedded_testing import provisioner
-from rowx_postgres._scratch import embedded_service
-from rowx_postgres._services import PostgresAdmin, PostgresMigrations, open_checker
+from rowx_postgres._services import PostgresAdmin, PostgresMigrations, PostgresProvisioner, open_checker
 
 VALUE_LEAVES: Final[dict[str, str]] = {
     "rowx.postgres.Money": "rowx_postgres.Money",
@@ -88,6 +86,5 @@ def load() -> Backend:
         checker_factory=checker,
         admin_factory=PostgresAdmin,
         migration_factory=PostgresMigrations,
-        testing_factory=provisioner,
-        embedded_factory=embedded_service,
+        testing_factory=PostgresProvisioner,
     )

@@ -3,15 +3,15 @@ import sys
 from contextlib import asynccontextmanager, suppress
 from time import perf_counter
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from rowx_core.backend import ScratchBuild, ScratchService
 from rowx_core.errors import InterfaceError
 
-from rowx_postgres._embedded import (
+from rowx_embedded._instance import (
     EmbeddedDatabase,
     is_embedded_url,
     parse_embedded_url,
+    socket_url,
     start_from_snapshot,
     start_owned,
     take_snapshot,
@@ -22,15 +22,6 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from rowx_core.backend import EmbeddedService, MigrationService
-
-
-# the instance's socket DSN with the other parameters of the embedded URL (`options=-c search_path=x`) added to it
-def socket_url(dsn: str, query: str) -> str:
-    if not query:
-        return dsn
-    parts = urlsplit(dsn)
-    merged = urlencode([*parse_qsl(parts.query, keep_blank_values=True), *parse_qsl(query, keep_blank_values=True)])
-    return urlunsplit(parts._replace(query=merged))
 
 
 async def close_all(databases: Sequence[EmbeddedDatabase]) -> list[BaseException]:
@@ -171,4 +162,4 @@ def embedded_service(url: str) -> EmbeddedService | None:
     return PostgresEmbedded(url) if is_embedded_url(url) else None
 
 
-__all__ = ["EmbeddedScratch", "PostgresEmbedded", "embedded_service", "socket_url"]
+__all__ = ["EmbeddedScratch", "PostgresEmbedded", "embedded_service"]

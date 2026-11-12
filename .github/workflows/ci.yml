@@ -290,7 +290,7 @@ jobs:
         run: uv pip install --no-deps dist-embedded/*.whl
 
       - name: Test the companion
-        run: uv run pytest packages/rowx-embedded/tests
+        run: uv run pytest -p no:cacheprovider packages/rowx-embedded/src/rowx_embedded/__tests__/integration/test__engine.py
 
       # the wheel in a clean venv with rowx-core and rowx-postgres only (no rowx CLI): start, connect over the raw socket
       # DSN, SELECT 1

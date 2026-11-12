@@ -5,7 +5,7 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from rowx_postgres._embedded import EmbeddedDatabase
+    from rowx_embedded._instance import EmbeddedDatabase
 
 # what a `server` test needs that one embedded session cannot give; a test names exactly one with `needs=`. `auth` is
 # password authentication (the engine is trust-only) and `tcp` is a TCP host and port (the engine has a Unix socket)

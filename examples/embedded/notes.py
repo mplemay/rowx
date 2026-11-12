@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from rowx_postgres import Migrator
-from rowx_postgres.embedded import Database
 
 from rowx import query
+from rowx.embedded import Database
 
 if TYPE_CHECKING:
     from rowx import Executor

@@ -2,8 +2,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, reveal_type
 
-from rowx_postgres.embedded import Database
-
 from rowx import query, query_unchecked
 
 if TYPE_CHECKING:
@@ -210,19 +208,3 @@ async def negative_migrator_arguments(migrator: Migrator, conn: Connection) -> N
     await migrator.undo(conn)  # error  # ty: ignore[missing-attribute]
     await migrator.revert(conn, 1)  # error  # ty: ignore[too-many-positional-arguments]
     await migrator.info(conn, dry_run=True)  # error  # ty: ignore[unknown-argument]
-
-
-async def embedded_database() -> None:
-    db = Database()
-    reveal_type(db)  # reveal: Database
-    reveal_type(db.directory)  # reveal: str | None
-    reveal_type(db.ready)  # reveal: bool
-    await db.wait_ready()
-    async with db.acquire() as conn:
-        reveal_type(conn)  # reveal: Connection
-    async with Database("/var/lib/app/db") as owned:
-        reveal_type(owned.dsn)  # reveal: str
-        reveal_type(await query[int](t"SELECT 1").one(owned))  # reveal: int
-    Database(1)  # error  # ty: ignore[invalid-argument-type]
-    embedded_pool: Pool = Database()
-    del embedded_pool

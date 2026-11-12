@@ -2,10 +2,7 @@ import asyncio
 import os
 import threading
 import warnings
-from types import ModuleType
 from typing import TYPE_CHECKING, Any, Final
-
-from rowx_postgres import _embedded as embedded_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,14 +51,12 @@ class FakeInstance:
         self.closed_event.set()
 
 
-class FakeEngine(ModuleType):
+# stands in for the engine's `Instance` class (`start`) and its error types
+class FakeEngine:
     def __init__(self) -> None:
-        super().__init__("rowx_embedded")
-        self.API_VERSION = embedded_module.EXPECTED_API_VERSION
         self.EngineError = FakeEngineError
         self.DirectoryInUseError = FakeDirectoryInUseError
         self.SnapshotError = FakeSnapshotError
-        self.Instance = self
         self.started: list[FakeInstance] = []
         self.failure: Exception | None = None
         self.gate: threading.Event | None = None

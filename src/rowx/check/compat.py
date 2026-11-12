@@ -15,7 +15,7 @@ from rowx.check.config import Config, ConfigError, load_config
 from rowx.check.embedded import embedded_for, redact_owned, scratch_session
 from rowx.check.migrate import load_migrator, resolve_target
 from rowx.check.render import render_text, strip_controls
-from rowx.check.runner import CheckError, Hooks, RunResult, SiteCoverage, run_check
+from rowx.check.runner import CheckError, Hooks, RunResult, SiteCoverage, count_statements, run_check
 from rowx.check.scratch import Scratch
 from rowx.check.walk import discover_files
 
@@ -206,12 +206,14 @@ class Target:
 
 # one scratch per revision: a server database, or (for `embedded://`) in-memory instances, one per describe worker
 def _open_scratch(
-    target: Target, backend: Backend, migrator: MigrationService
+    target: Target, backend: Backend, migrator: MigrationService, snapshot: Snapshot
 ) -> AbstractAsyncContextManager[ScratchBuild]:
     if target.embedded is not None:
         service = target.embedded.scratch()
         target.scratches.append(service)
-        return scratch_session(service, migrator, target.jobs)
+        # never more instances than statements, as in a plain check; at least one, so that the migrations still run
+        statements = count_statements(snapshot.config, snapshot.files, target.dsn, snapshot.root)
+        return scratch_session(service, migrator, max(1, min(target.jobs, statements)))
     scratch = Scratch(target.dsn, backend.admin(target.dsn), sweep_previous=False)
     target.scratches.append(scratch)
     return scratch.session(migrator, target.jobs)
@@ -225,7 +227,7 @@ async def _run(base: Snapshot, head: Snapshot, target: Target) -> int:
         for snapshot in (base, head):
             try:
                 migrator = load_migrator(resolve_target(snapshot.config, None), target.dsn, backend)
-                built = await stack.enter_async_context(_open_scratch(target, backend, migrator))
+                built = await stack.enter_async_context(_open_scratch(target, backend, migrator, snapshot))
             except (CheckError, DatabaseError, InterfaceError, OSError) as error:
                 msg = f"incomplete: building schema for revision {snapshot.sha}: {error}"
                 raise CheckError(msg) from None

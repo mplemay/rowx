@@ -1,63 +1,28 @@
 import asyncio
 import os
-import platform
 import posixpath
-import sys
 from concurrent.futures import Future
-from dataclasses import dataclass
-from functools import cache
-from importlib import import_module
+from dataclasses import dataclass, replace
 from threading import Lock, Thread
-from typing import TYPE_CHECKING, Final, Protocol, Self, cast
-from urllib.parse import parse_qsl, unquote, urlsplit
+from typing import TYPE_CHECKING, Final, Self
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from rowx_core.backend import EmbeddedTargetError
 from rowx_core.errors import InterfaceError
+from rowx_postgres._core import parse_dsn  # ruff: ignore[import-private-name]
+
+from rowx_embedded._engine import EngineError, Instance, SnapshotError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from types import TracebackType
 
+    from rowx_postgres import ConnectOptions
+
 EMBEDDED_SCHEME: Final[str] = "embedded"
-ENGINE_MODULE: Final[str] = "rowx_embedded"
-# the `rowx_embedded.API_VERSION` this adapter was written against
-EXPECTED_API_VERSION: Final[int] = 1
 REQUIRE_ENV: Final[str] = "ROWX_REQUIRE_EMBEDDED"
-# the engine ships wheels for these platforms only (the `embedded` extra carries the same marker)
-SUPPORTED_PLATFORMS: Final[frozenset[tuple[str, str]]] = frozenset(
-    {("darwin", "arm64"), ("linux", "x86_64"), ("linux", "aarch64")},
-)
-# parts of the socket DSN that the engine owns; none of them may be set from an embedded URL
+# parts of the socket DSN that the engine owns; none of them may be set from an embedded URL or from `ConnectOptions`
 RESERVED_PARAMETERS: Final[frozenset[str]] = frozenset({"host", "hostaddr", "port", "user", "password", "sslmode"})
-INSTALL_HELP: Final[str] = 'help: uv add "rowx[embedded]"'
-
-
-class EngineInstance(Protocol):
-    @property
-    def dsn(self) -> str: ...
-
-    def snapshot(self) -> bytes: ...
-
-    def close(self) -> None: ...
-
-    def abandon(self, *, force: bool = False) -> None: ...
-
-
-class EngineInstanceType(Protocol):
-    def start(self, directory: str | None = None, snapshot: bytes | None = None) -> EngineInstance: ...
-
-
-# the surface of `rowx_embedded` that this module uses, so that `ty` passes without the companion installed
-class Engine(Protocol):
-    API_VERSION: int
-    ENGINE_VERSION: str
-    RUNTIME_VERSION: str
-    WASM_SHA256: str
-    SNAPSHOT_FORMAT: int
-    EXTENSIONS: tuple[str, ...]
-    Instance: EngineInstanceType
-    EngineError: type[Exception]
-    SnapshotError: type[Exception]
 
 
 # the engine refused a snapshot it was asked to boot (corrupt, or built by another engine): the only start failure that
@@ -70,12 +35,6 @@ class SnapshotRejectedError(InterfaceError):
 class EmbeddedTarget:
     # `None` is a fresh in-memory database; otherwise an absolute directory with one owner at a time
     directory: str | None = None
-
-
-@dataclass(slots=True, kw_only=True, frozen=True)
-class LoadedEngine:
-    engine: Engine
-    pid: int
 
 
 def is_embedded_url(dsn: str) -> bool:
@@ -93,26 +52,6 @@ def check_directory(directory: str) -> str:
         msg = "an embedded database directory cannot be the root"
         raise EmbeddedTargetError(msg)
     return normal
-
-
-# for the entry points that take a server URL only (the admin, checker and provisioning services)
-def reject_embedded(dsn: str, /) -> None:
-    if is_embedded_url(dsn):
-        msg = (
-            "embedded URLs are not supported here; use a server URL "
-            "(to open an embedded database from code, use rowx.postgres.embedded)"
-        )
-        raise InterfaceError(msg)
-
-
-# for `connect`, `Pool` and `ConnectOptions.from_dsn`, which never open an embedded database
-def reject_embedded_open(dsn: str, /) -> None:
-    if is_embedded_url(dsn):
-        msg = (
-            "embedded:// URLs are not opened by connect or Pool; use rowx.postgres.embedded.Database(directory) "
-            "(embedded:///abs/path -> directory '/abs/path', embedded:// -> no directory)"
-        )
-        raise InterfaceError(msg)
 
 
 # returns the target and the query string, which is forwarded to the socket DSN
@@ -145,47 +84,26 @@ def parse_embedded_url(url: str) -> tuple[EmbeddedTarget, str]:
     return EmbeddedTarget(directory=check_directory(path) if path else None), parts.query
 
 
-def current_platform() -> tuple[str, str]:
-    return sys.platform, platform.machine().lower()
+# the instance's socket DSN with the other parameters of the embedded URL (`options=-c search_path=x`) added to it
+def socket_url(dsn: str, query: str) -> str:
+    if not query:
+        return dsn
+    parts = urlsplit(dsn)
+    merged = urlencode([*parse_qsl(parts.query, keep_blank_values=True), *parse_qsl(query, keep_blank_values=True)])
+    return urlunsplit(parts._replace(query=merged))
 
 
-def missing_engine_error() -> InterfaceError:
-    if current_platform() not in SUPPORTED_PLATFORMS:
-        msg = "embedded Postgres is not available on this platform"
-    else:
-        msg = f"embedded Postgres needs the {ENGINE_MODULE} package, which is not installed\n{INSTALL_HELP}"
-    return InterfaceError(msg)
-
-
-@cache
-def load_cached() -> LoadedEngine:
-    try:
-        module = import_module(ENGINE_MODULE)
-    except ModuleNotFoundError as error:
-        if error.name != ENGINE_MODULE:
-            raise
-        raise missing_engine_error() from error
-    except ImportError as error:
-        msg = f"{ENGINE_MODULE} could not be loaded: {error}"
-        raise InterfaceError(msg) from error
-    engine = cast("Engine", module)
-    found = engine.API_VERSION
-    if found != EXPECTED_API_VERSION:
-        msg = (
-            f"{ENGINE_MODULE} has API version {found}, but this rowx_postgres needs {EXPECTED_API_VERSION}\n"
-            'help: uv add --upgrade "rowx[embedded]"'
-        )
-        raise InterfaceError(msg)
-    return LoadedEngine(engine=engine, pid=os.getpid())
-
-
-def load_engine() -> Engine:
-    loaded = load_cached()
-    # the engine threads exist only in the process that loaded it
-    if loaded.pid != os.getpid():
-        msg = "embedded Postgres was loaded in another process; start it after the fork"
-        raise InterfaceError(msg)
-    return loaded.engine
+# the options pointed at the instance's socket DSN; Rust never sees an embedded target
+def with_socket(options: ConnectOptions, dsn: str, /) -> ConnectOptions:
+    socket = parse_dsn(dsn)
+    return replace(
+        options,
+        host=socket["host"],
+        port=socket["port"],
+        user=socket["user"],
+        sslmode=socket["sslmode"],
+        database=options.database if options.database is not None else socket["database"],
+    )
 
 
 # runs `work` in a daemon thread of its own rather than the loop's executor, whose shutdown waits for every thread: an
@@ -204,7 +122,7 @@ def in_thread[T](work: Callable[[], T]) -> Awaitable[T]:
 
 
 class EmbeddedDatabase:
-    def __init__(self, instance: EngineInstance, /, *, directory: str | None) -> None:
+    def __init__(self, instance: Instance, /, *, directory: str | None) -> None:
         self._instance = instance
         self._directory = directory
         self._pid = os.getpid()
@@ -285,12 +203,11 @@ def abandon_if_cancelled(database: EmbeddedDatabase) -> None:
 
 
 def start_blocking(directory: str | None, snapshot: bytes | None = None) -> EmbeddedDatabase:
-    engine = load_engine()
     try:
-        instance = engine.Instance.start(directory, snapshot)
-    except engine.EngineError as error:
+        instance = Instance.start(directory, snapshot)
+    except EngineError as error:
         # only a start from a snapshot can have one rejected
-        if snapshot is not None and isinstance(error, engine.SnapshotError):
+        if snapshot is not None and isinstance(error, SnapshotError):
             raise SnapshotRejectedError(str(error)) from error
         raise InterfaceError(str(error)) from error
     except Exception as error:
