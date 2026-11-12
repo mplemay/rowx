@@ -29,7 +29,6 @@ WRONG_VERSION: Final[str] = "9.9.9"
 CLASSIFIERS: Final[tuple[str, ...]] = (
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",

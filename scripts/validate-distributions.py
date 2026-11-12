@@ -43,7 +43,6 @@ PYTEST_EXTRA: Final[str] = "pytest"
 EXPECTED_CLASSIFIERS: Final[frozenset[str]] = frozenset({
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
