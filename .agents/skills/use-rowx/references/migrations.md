@@ -1,8 +1,5 @@
 # Migrations
 
-File format, the CLI, and safety rules are in [Migrations](../../../../docs/guide/migrations.md). Filename grammar,
-the plan, and validation order are in [the migrations reference](../../../../docs/reference/migrations.md).
-
 ## Add without a backend
 
 `rowx migrate add "add email"` writes the next file with no database and no backend, including when the directory
@@ -20,7 +17,7 @@ not match the grammar, a duplicate version, an unpaired `.up.sql` or `.down.sql`
 `MigrationSourceError`.
 
 ```python
-from rowx_postgres import Migrator
+from rowx.postgres import Migrator
 
 
 def load_migrator(directory: str) -> Migrator:

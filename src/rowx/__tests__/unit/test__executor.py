@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Final
 
 import rowx_core
+import rowx_postgres
 
 import rowx
+import rowx.postgres as postgres_facade
 
 SCRIPT: Final[str] = (
     "import sys, rowx, rowx_core\n"
@@ -34,6 +36,12 @@ def test_backend_names_are_removed_from_rowx() -> None:
     assert not any(hasattr(rowx, name) for name in ("connect", "ping"))
     assert rowx.Connection is rowx_core.Connection
     assert rowx.Executor is rowx_core.Executor
+
+
+def test_postgres_facade_reexports_the_driver() -> None:
+    assert postgres_facade.connect is rowx_postgres.connect
+    assert postgres_facade.Pool is rowx_postgres.Pool
+    assert postgres_facade.RESET_QUERY is rowx_postgres.RESET_QUERY
 
 
 def _backend_import(source: str) -> str | None:

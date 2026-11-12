@@ -18,7 +18,7 @@ nullability. `type` aliases and `Annotated[...]` are followed.
 import asyncio
 from decimal import Decimal
 
-from rowx_postgres import connect
+from rowx.postgres import connect
 from rowx import query
 
 type OrderRow = tuple[int, Decimal, str | None]
@@ -63,7 +63,7 @@ from decimal import Decimal
 from typing import NamedTuple, TypedDict
 
 from rowx import query
-from rowx_postgres import connect
+from rowx.postgres import connect
 
 
 @dataclass(slots=True, frozen=True)
@@ -168,7 +168,7 @@ from typing import Annotated
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from rowx import query
-from rowx_postgres import connect
+from rowx.postgres import connect
 
 
 def lower(value: str) -> str:
@@ -238,7 +238,7 @@ from typing import Annotated
 from pydantic import AfterValidator, BaseModel, ValidationError
 
 from rowx import RowConstructError, query
-from rowx_postgres import connect
+from rowx.postgres import connect
 
 
 def not_bob(name: str) -> str:
@@ -282,7 +282,7 @@ import asyncio
 from dataclasses import dataclass
 
 from rowx import query
-from rowx_postgres import connect
+from rowx.postgres import connect
 
 
 @dataclass

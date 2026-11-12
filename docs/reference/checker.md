@@ -1,11 +1,11 @@
 # Checker
 
-`rowx check` finds every `query[T]` and `query_unchecked[T]` built from `rowx` or `rowx_core`, prepares each checked
-statement against a live Postgres 18 database, describes it, and compares the result with `T`. It never imports or
-executes application code. A query is checked at its construction site, including a declaration nothing calls.
-Runtime compilation uses the executor you pass. The checker does not infer that flow.
+`rowx check` finds every `query[T]` and `query_unchecked[T]` built from `rowx` or `rowx_core`, prepares
+each checked statement against a live Postgres 18 database, describes it, and compares the result with `T`. It never
+imports or executes application code. A query is checked at its construction site, including a declaration nothing
+calls. Runtime compilation uses the executor you pass. The checker does not infer that flow.
 
-Both public import roots are checked: `from rowx import query` and `from rowx_core import query`.
+The checked import roots are `from rowx import query` and `from rowx_core import query`.
 
 ## CLI
 
@@ -133,7 +133,7 @@ a file, its parent. Filtering selects files for checking; it does not change run
 
 - A call is a candidate when the callee resolves to `query` or `query_unchecked` on `rowx` or `rowx_core`, including
   `import rowx` / `import rowx_core` and aliases. A relative import is not. `from rowx import *` and
-  `from rowx_core import *` are reported as an indirect use.
+  `from rowx_core import *` are reported as an indirect use. `rowx.core` does not export `query`.
 - Resolution is lexical and best-effort. A name that is also bound another way in the same scope is an ambiguous
   indirect use, and that call is not described.
 

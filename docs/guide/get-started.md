@@ -7,11 +7,13 @@ uv add "rowx[postgres]"
 ```
 
 `rowx` depends on matching `rowx-core`, and the `postgres` extra installs matching `rowx-postgres`.
-`from rowx import query` and `from rowx_core import query` are the same object. Connections are
-`from rowx_postgres import connect, Pool`. `import rowx` loads no backend.
+With that install, import the query API from `rowx` and connections from `rowx.postgres`.
+`from rowx import query` and `from rowx_core import query` are the same object.
+`Pool` imported from `rowx` is the executor protocol, not a connection pool. `import rowx` loads no backend.
 
 A standalone application installs matching `rowx-core` and `rowx-postgres`. That pair is the query API and the
-driver. It does not include the `rowx` command, which is the `rowx` distribution above.
+driver. It does not include the `rowx` command, which is the `rowx` distribution above, and it imports `rowx_core`
+and `rowx_postgres`.
 
 ```sh
 uv add rowx-core rowx-postgres
@@ -25,8 +27,8 @@ The `python test` blocks on this page are executed against a seeded database (us
 ```python test
 import asyncio
 
-from rowx_postgres import connect
-from rowx_core import query
+from rowx.postgres import connect
+from rowx import query
 
 
 async def main() -> None:
@@ -42,7 +44,7 @@ asyncio.run(main())
 ```python test
 import asyncio
 
-from rowx_postgres import connect
+from rowx.postgres import connect
 from rowx import query
 
 type UserRow = tuple[int, str, str | None]
@@ -76,7 +78,7 @@ Use a tuple row type (`query[tuple[int | None]]`) when the difference matters. T
 ```python test
 import asyncio
 
-from rowx_postgres import connect
+from rowx.postgres import connect
 from rowx import query
 
 
@@ -103,11 +105,12 @@ asyncio.run(main())
 The unreleased 0.3.0 split ships three lockstep wheels. `rowx-core` is pure Python, imports as `rowx_core`, and has
 no runtime dependencies. `rowx-postgres` imports as `rowx_postgres`, its native module is `rowx_postgres._core`, and
 it depends only on matching `rowx-core`. `rowx` is pure Python, imports as `rowx`, and depends on matching
-`rowx-core`. The `postgres` extra installs matching `rowx-postgres`. The version in this tree is still 0.2.0 until
-[#270](https://github.com/mplemay/rowx/issues/270). The first published split is 0.3.0. It is not on PyPI.
+`rowx-core`. The `postgres` extra installs matching `rowx-postgres`. This tree is version 0.3.0. The first
+published split is 0.3.0. It is not on PyPI until the `v0.3.0` tag is published.
 
-`rowx.postgres` remains a compatibility re-export of `rowx_postgres`. It still needs the `postgres` extra. The
-import this guide uses is `from rowx_postgres import connect, Pool`.
+`rowx` re-exports the query API of `rowx_core`. `rowx.core` re-exports the `rowx_core` names that `rowx` and
+`rowx.errors` do not already export. `rowx.postgres` re-exports `rowx_postgres` and still needs the `postgres` extra.
+The import this guide uses is `from rowx import query` and `from rowx.postgres import connect, Pool`.
 
 `query(...)` captures a neutral template and selects no compiler. Each call compiles with `compiler.compile` on the
 executor passed to the method (`packages/rowx-core/src/rowx_core/_query.py`). A later call on another executor
@@ -119,6 +122,6 @@ non-empty `str` (or a tuple of them) without a NUL or a control character. When 
 `rowx_postgres._compiler` emits `$n` and the adjacency space, quotes the captured identifier, and raises
 `TypeError` for an `:ident` outside plain code, a name longer than 63 bytes, and more than 65535 parameters.
 
-Each exception class is defined in `rowx_core.errors` and re-exported from `rowx` and `rowx.errors` as that same
-object. The native error registry uses those classes. There is no Postgres-specific exception tree. See
+Each exception class is defined in `rowx_core.errors` and re-exported from `rowx` and `rowx.errors`
+as that same object. The native error registry uses those classes. There is no Postgres-specific exception tree. See
 [Errors](errors.md).

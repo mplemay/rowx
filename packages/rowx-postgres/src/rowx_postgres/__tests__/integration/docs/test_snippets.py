@@ -142,6 +142,7 @@ def test_published_readmes_use_canonical_imports() -> None:
     assert "rowx[postgres]" in readme
     assert "from rowx_postgres import" not in readme
     index = (ROOT / "docs" / "index.md").read_text()
+    assert "from rowx import query" in index
     assert "from rowx.postgres import connect" in index
     assert "from rowx_postgres import" not in index
     assert "docs/why.md" in readme
@@ -213,13 +214,14 @@ def test_use_rowx_skill_is_linked() -> None:
 
 def test_use_rowx_skill_links_resolve() -> None:
     sources = sorted(USE_ROWX_SKILL.parent.rglob("*.md"))
+    skill_root = USE_ROWX_SKILL.parent.resolve()
     assert sources
     for source in sources:
         for destination in _link_destinations(source.read_text()):
             if (relative := _relative_target(destination)) is None:
                 continue
             resolved = (source.parent / relative).resolve()
-            assert resolved.is_relative_to(ROOT), f"{source.relative_to(ROOT)} -> {destination}"
+            assert resolved.is_relative_to(skill_root), f"{source.relative_to(ROOT)} -> {destination}"
             assert resolved.is_file(), f"{source.relative_to(ROOT)} -> {destination}"
 
 
@@ -233,7 +235,8 @@ def _python_fence_after(text: str, label: str) -> str:
 def test_skill_import_rule_does_not_export_connect() -> None:
     text = (USE_ROWX_SKILL.parent / "rules" / "imports.md").read_text()
     assert "`connect` imported from `rowx` or `rowx_core`" not in text
-    assert "`connect` is not exported by `rowx` or `rowx_core`" in text
+    assert "`connect` is not exported by `rowx.core`, `rowx`, or `rowx_core`" in text
+    assert "from rowx_postgres import" not in _python_fence_after(text, "Incorrect")
 
 
 def test_skill_reset_rule_names_the_role() -> None:

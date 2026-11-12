@@ -1,6 +1,6 @@
 # Parameters
 
-See [Parameters](../references/parameters.md) and [the parameters guide](../../../../docs/guide/parameters.md).
+See [Parameters](../references/parameters.md).
 
 ## Contents
 

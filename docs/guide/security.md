@@ -29,7 +29,7 @@ in [Security and safety](../reference/security.md); this section is what it asks
 import asyncio
 
 from rowx import query
-from rowx_postgres import connect
+from rowx.postgres import connect
 
 
 async def main() -> None:
@@ -70,7 +70,7 @@ import asyncio
 from decimal import Decimal
 
 from rowx import query, query_unchecked
-from rowx_postgres import Connection, connect
+from rowx.postgres import Connection, connect
 
 
 async def by_id(conn: Connection, ids: list[int]) -> list[str]:
@@ -146,7 +146,7 @@ from string.templatelib import Template
 from typing import Literal, assert_never
 
 from rowx import query, query_unchecked
-from rowx_postgres import Connection, connect
+from rowx.postgres import Connection, connect
 
 
 class SortColumn(StrEnum):
@@ -259,7 +259,7 @@ every part you rely on.
 import asyncio
 
 from rowx import query
-from rowx_postgres import Connection, Pool
+from rowx.postgres import Connection, Pool
 
 type Leftovers = tuple[str | None, bool, int, int]
 
@@ -336,8 +336,8 @@ or ECDSA-with-SHA-512 server certificate `channel_binding=require` fails to conn
 offer `SCRAM-SHA-256-PLUS` (`trust`, `md5`, `password` or plain `scram-sha-256` authentication). Use `prefer` there.
 
 ```python test
-from rowx_core.errors import InterfaceError
-from rowx_postgres import ConnectOptions
+from rowx import InterfaceError
+from rowx.postgres import ConnectOptions
 
 # the DSN above, parsed into typed fields; nothing connects
 options = ConnectOptions.from_dsn(
@@ -374,8 +374,8 @@ protection for arrays and ranges, which are always sent in binary format. See "S
 import asyncio
 
 from rowx import query
-from rowx_core.errors import InterfaceError
-from rowx_postgres import Pool
+from rowx import InterfaceError
+from rowx.postgres import Pool
 
 
 async def pid(pool: Pool) -> int:
@@ -427,8 +427,8 @@ diagnostic, whichever form of DSN carried it, and `ConnectOptions.__repr__` hide
 ```python test
 import asyncio
 
-from rowx_core.errors import InterfaceError
-from rowx_postgres import ConnectOptions, connect
+from rowx import InterfaceError
+from rowx.postgres import ConnectOptions, connect
 
 
 async def main() -> None:

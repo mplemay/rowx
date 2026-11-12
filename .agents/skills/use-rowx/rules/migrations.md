@@ -1,7 +1,6 @@
 # Migrations
 
-See [Migrations](../references/migrations.md), [the migrations guide](../../../../docs/guide/migrations.md), and
-[the migrations reference](../../../../docs/reference/migrations.md).
+See [Migrations](../references/migrations.md).
 
 ## Contents
 
@@ -20,7 +19,7 @@ Incorrect:
 
 ```python
 from rowx import query
-from rowx_postgres import connect
+from rowx.postgres import connect
 
 
 async def next_version(dsn: str) -> int:
@@ -49,7 +48,7 @@ Incorrect:
 
 ```python
 from rowx import query
-from rowx_postgres import Migrator, connect
+from rowx.postgres import Migrator, connect
 
 
 async def reset(dsn: str, directory: str) -> None:

@@ -13,7 +13,7 @@
 - Three lockstep distributions replace the published 0.2.0 wheel. `rowx-core` (import `rowx_core`) has no runtime
   dependencies. `rowx-postgres` (import `rowx_postgres`, native module `rowx_postgres._core`) depends only on matching
   `rowx-core`. `rowx` (import `rowx`) depends on matching `rowx-core`, and `rowx[postgres]` installs matching
-  `rowx-postgres`. The packages in this tree are still version 0.2.0 until #270. 0.3.0 is unreleased and is not on PyPI.
+  `rowx-postgres`. This tree is version 0.3.0. 0.3.0 is not on PyPI until the `v0.3.0` tag is published.
 - `query(...)` captures a neutral template and selects no compiler. Each call uses that executor's `compiler`. A
   later call on another executor compiles again.
 - The `query` constructor rejects a non-template, a NUL in static text, a conversion, an unsupported format spec,
@@ -21,6 +21,11 @@
   When the method runs, `rowx_postgres._compiler` emits `$n` and the adjacency space, quotes the captured
   identifier, and raises `TypeError` for an `:ident` outside plain code, a name longer than 63 bytes, and more
   than 65535 parameters.
+- `rowx` re-exports the query API, and `rowx.postgres` is the public driver import for the `rowx` distribution.
+  `from rowx import query` is the same object as `from rowx_core import query`. `from rowx.postgres import connect`
+  is the same object as `from rowx_postgres import connect`. `rowx.core` re-exports only the `rowx_core` names that
+  `rowx` and `rowx.errors` do not already export. A runtime-only install still imports `rowx_core` and
+  `rowx_postgres`.
 - Each exception class is defined in `rowx_core.errors` and re-exported from `rowx` and `rowx.errors` as the same
   object. The native error registry uses those classes. There is no Postgres-specific exception tree.
 - `rowx check --coverage` lists recognized direct query sites and whether each was described and compared.

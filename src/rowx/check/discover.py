@@ -774,7 +774,7 @@ class _Finder(ast.NodeVisitor):
                         IndirectUse(kind="private", name=alias.name, span=self._lines.span(alias)),
                     )
             elif module in ROWX_MODULES and alias.name == "*":
-                self._indirect(node, "`from rowx import *`")
+                self._indirect(node, f"`from {module} import *`")
 
     @override
     def visit_MatchClass(self, node: ast.MatchClass) -> None:

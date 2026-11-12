@@ -793,7 +793,7 @@ wheels = [
 
 [[package]]
 name = "rowx"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "pathspec" },
@@ -885,7 +885,7 @@ docs = [{ name = "zensical", specifier = "==0.1.1" }]
 
 [[package]]
 name = "rowx-core"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/rowx-core" }
 
 [[package]]
@@ -895,7 +895,7 @@ source = { editable = "packages/rowx-embedded" }
 
 [[package]]
 name = "rowx-postgres"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/rowx-postgres" }
 dependencies = [
     { name = "rowx-core" },

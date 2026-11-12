@@ -1,6 +1,6 @@
 [project]
 name = "rowx-postgres"
-version = "0.2.0"
+version = "0.3.0"
 description = "PostgreSQL driver and database services for rowx"
 readme = "README.md"
 authors = [
@@ -21,7 +21,7 @@ classifiers = [
     "Framework :: AsyncIO",
 ]
 keywords = ["sql", "postgresql", "postgres", "typed", "async", "t-string"]
-dependencies = ["rowx-core==0.2.0"]
+dependencies = ["rowx-core==0.3.0"]
 
 [project.urls]
 Documentation = "https://mplemay.github.io/rowx/"

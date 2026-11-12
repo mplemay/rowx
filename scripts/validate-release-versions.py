@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from argparse import ArgumentParser
 from os import environ
 from pathlib import Path
 from tomllib import TOMLDecodeError, loads
@@ -17,20 +18,25 @@ WORKSPACE_PACKAGES: Final[frozenset[str]] = frozenset({
 
 
 def main() -> int:
-    version = _version(ROOT / "pyproject.toml", ("project", "version"))
-    versions: dict[str, str] = {"Cargo.toml": _version(ROOT / "Cargo.toml", ("workspace", "package", "version"))}
-    locked = _package_versions(ROOT / "Cargo.lock")
+    parser = ArgumentParser()
+    # CI checks this repository; tests pass --root to point at a fixture copy
+    parser.add_argument("--root", type=Path, default=ROOT)
+    root = parser.parse_args().root.resolve()
+    version = _version(root / "pyproject.toml", ("project", "version"))
+    versions: dict[str, str] = {"Cargo.toml": _version(root / "Cargo.toml", ("workspace", "package", "version"))}
+    locked = _package_versions(root / "Cargo.lock")
     if not locked.keys() >= WORKSPACE_PACKAGES:
         message = "Missing workspace packages in Cargo.lock"
         raise SystemExit(message)
     versions.update(locked)
-    versions.update({f"uv.lock:{name}": _named_version(ROOT / "uv.lock", name) for name in PYTHON_PACKAGES})
+    versions.update({f"uv.lock:{name}": _named_version(root / "uv.lock", name) for name in PYTHON_PACKAGES})
     for name in PYTHON_PACKAGES[1:]:
         versions[f"{name}/pyproject.toml"] = _version(
-            ROOT / "packages" / name / "pyproject.toml", ("project", "version")
+            root / "packages" / name / "pyproject.toml", ("project", "version")
         )
-    root_project = _read(ROOT / "pyproject.toml")["project"]
-    postgres_project = _read(ROOT / "packages/rowx-postgres/pyproject.toml")["project"]
+    project = _read(root / "pyproject.toml")
+    root_project = project["project"]
+    postgres_project = _read(root / "packages/rowx-postgres/pyproject.toml")["project"]
     required_core = f"rowx-core=={version}"
     if not isinstance(root_project, dict) or required_core not in root_project.get("dependencies", []):
         message = "rowx must pin rowx-core to its own version"
@@ -42,15 +48,25 @@ def main() -> int:
     if not isinstance(extras, dict) or extras.get("postgres") != [f"rowx-postgres=={version}"]:
         message = "rowx[postgres] must pin the matching rowx-postgres"
         raise SystemExit(message)
+    _require_dev_postgres_pin(project, version)
     if _required("EVENT_NAME") == PUSH_EVENT:
         versions["tag"] = _required("TAG_NAME")[1:]
     if any(value != version for value in versions.values()):
         message = f"Release version mismatch: expected {version}, got {versions}"
         raise SystemExit(message)
-    output = Path(_required("GITHUB_OUTPUT"))
-    with output.open("a", encoding="utf-8") as handle:
-        handle.write(f"version={version}\n")
+    if output := environ.get("GITHUB_OUTPUT"):
+        with Path(output).open("a", encoding="utf-8") as handle:
+            handle.write(f"version={version}\n")
     return 0
+
+
+def _require_dev_postgres_pin(project: dict[str, object], version: str) -> None:
+    required = f"rowx-postgres=={version}"
+    groups = project.get("dependency-groups")
+    dev = groups.get("dev") if isinstance(groups, dict) else None
+    if not isinstance(dev, list) or required not in dev:
+        message = "dev dependency group must pin rowx-postgres to the release version"
+        raise SystemExit(message)
 
 
 def _required(name: str) -> str:
