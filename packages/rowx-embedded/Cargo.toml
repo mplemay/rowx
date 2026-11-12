@@ -2,7 +2,7 @@
 # Wasmer crates, edition 2024, rust-version 1.93), so select it with `-p rowx-embedded -p rowx-embedded-host`.
 [package]
 name = "rowx-embedded"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"

@@ -1,6 +1,6 @@
 [project]
 name = "rowx-embedded"
-version = "0.4.0"
+version = "0.4.1"
 description = "In-process PostgreSQL 18 engine host for rowx (development, checking and tests)"
 readme = "README.md"
 authors = [
@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Database",
 ]
 keywords = ["postgresql", "postgres", "embedded", "wasm", "rowx"]
-dependencies = ["rowx-core==0.4.0", "rowx-postgres==0.4.0"]
+dependencies = ["rowx-core==0.4.1", "rowx-postgres==0.4.1"]
 
 [project.urls]
 Repository = "https://github.com/mplemay/rowx"
