@@ -2,7 +2,9 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
+from io import BytesIO
 from pathlib import Path
+from tarfile import TarInfo, open as tar_open
 from typing import Final, cast
 from zipfile import ZipFile
 
@@ -53,6 +55,7 @@ LICENSE_PATHS: Final[dict[str, Path]] = {
 }
 
 type ValidateWheel = Callable[[Path], None]
+type ValidateSdist = Callable[[Path], None]
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -68,17 +71,22 @@ class WheelBuild:
     extras: tuple[tuple[str, bytes], ...] = ()
 
 
-def _load_validate_wheel() -> ValidateWheel:
+def _load_checkers() -> tuple[ValidateWheel, ValidateSdist]:
     spec = spec_from_file_location(CHECKER_MODULE, SCRIPT)
     assert spec is not None
     assert spec.loader is not None
     module = module_from_spec(spec)
     sys.modules[CHECKER_MODULE] = module
     spec.loader.exec_module(module)
-    return cast("ValidateWheel", module.__dict__["validate_wheel"])
+    return (
+        cast("ValidateWheel", module.__dict__["validate_wheel"]),
+        cast("ValidateSdist", module.__dict__["validate_pure_sdist"]),
+    )
 
 
-VALIDATE_WHEEL: Final[ValidateWheel] = _load_validate_wheel()
+CHECKERS: Final[tuple[ValidateWheel, ValidateSdist]] = _load_checkers()
+VALIDATE_WHEEL: Final[ValidateWheel] = CHECKERS[0]
+VALIDATE_PURE_SDIST: Final[ValidateSdist] = CHECKERS[1]
 
 
 def _default_requires(namespace: str) -> tuple[str, ...]:
@@ -238,3 +246,39 @@ def test_rowx_version_mismatch_fails(tmp_path: Path) -> None:
     path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, metadata_version=WRONG_VERSION))
     with pytest.raises(SystemExit, match=r"Version is '9\.9\.9'"):
         VALIDATE_WHEEL(path)
+
+
+def test_second_import_root_fails(tmp_path: Path) -> None:
+    path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, extras=(("rowx_core/__init__.py", b""),)))
+    with pytest.raises(SystemExit, match="unexpected namespace"):
+        VALIDATE_WHEEL(path)
+
+
+def _write_sdist(directory: Path, name: str, members: tuple[tuple[str, bytes], ...]) -> Path:
+    path = directory / name
+    with tar_open(path, "w:gz") as archive:
+        for member_name, body in members:
+            info = TarInfo(member_name)
+            info.size = len(body)
+            archive.addfile(info, BytesIO(body))
+    return path
+
+
+@pytest.mark.parametrize(
+    ("filename", "member"),
+    [
+        ("rowx-0.2.0.tar.gz", "rowx-0.2.0/rowx/_core.so"),
+        ("rowx_core-0.2.0.tar.gz", "rowx_core-0.2.0/rowx_core/_core.pyd"),
+        ("rowx-0.2.0.tar.gz", "rowx-0.2.0/rowx/_core.dll"),
+        ("rowx_core-0.2.0.tar.gz", "rowx_core-0.2.0/rowx_core/_core.dylib"),
+    ],
+)
+def test_pure_sdist_rejects_native_extension(tmp_path: Path, filename: str, member: str) -> None:
+    path = _write_sdist(tmp_path, filename, ((member, b"native"),))
+    with pytest.raises(SystemExit, match="must be pure Python"):
+        VALIDATE_PURE_SDIST(path)
+
+
+def test_pure_sdist_allows_python_sources(tmp_path: Path) -> None:
+    path = _write_sdist(tmp_path, "rowx-0.2.0.tar.gz", (("rowx-0.2.0/rowx/__init__.py", b""),))
+    VALIDATE_PURE_SDIST(path)

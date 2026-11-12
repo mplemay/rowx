@@ -3,6 +3,7 @@ from argparse import ArgumentParser
 from email.parser import Parser
 from os import environ
 from pathlib import Path, PurePosixPath
+from tarfile import TarFile
 from typing import TYPE_CHECKING, Final
 from zipfile import ZipFile
 
@@ -67,6 +68,8 @@ LICENSE_SOURCES: Final[dict[str, Path]] = {
     ROWX_CORE: ROOT / "packages" / "rowx-core" / "LICENSE",
     ROWX_POSTGRES: ROOT / "packages" / "rowx-postgres" / "LICENSE",
 }
+NATIVE_SUFFIXES: Final[tuple[str, ...]] = (".so", ".pyd", ".dll", ".dylib")
+PURE_SDIST_PREFIXES: Final[tuple[str, ...]] = ("rowx-", "rowx_core-")
 
 type Requirement = tuple[str, str | None]
 
@@ -98,10 +101,16 @@ def main() -> int:
         if not (args.directory / f"{name}-{version}-py3-none-any.whl").is_file():
             message = f"{name} pure Python wheel is missing"
             raise SystemExit(message)
+    _validate_archive_contents(files)
+    return 0
+
+
+def _validate_archive_contents(files: list[Path]) -> None:
     for path in files:
         if path.suffix == ".whl":
             validate_wheel(path)
-    return 0
+        elif _pure_sdist(path):
+            validate_pure_sdist(path)
 
 
 def validate_wheel(path: Path) -> None:
@@ -128,12 +137,26 @@ def _reject_development_files(path: Path, namespace: str, names: list[str]) -> N
         if parts and parts[0] != namespace and not parts[0].endswith(".dist-info"):
             message = f"{path.name} owns an unexpected namespace: {name}"
             raise SystemExit(message)
-        if namespace != ROWX_POSTGRES and name.endswith((".so", ".pyd", ".dll", ".dylib")):
+        if namespace != ROWX_POSTGRES and name.endswith(NATIVE_SUFFIXES):
             message = f"{path.name} must be pure Python"
             raise SystemExit(message)
     if f"{namespace}/py.typed" not in names:
         message = f"{path.name} is missing its typing marker"
         raise SystemExit(message)
+
+
+def _pure_sdist(path: Path) -> bool:
+    # rowx_postgres is absent from PURE_SDIST_PREFIXES; it stays a native source build
+    name = path.name
+    return name.endswith(".tar.gz") and name.startswith(PURE_SDIST_PREFIXES)
+
+
+def validate_pure_sdist(path: Path) -> None:
+    with TarFile.open(path, "r:gz") as archive:
+        for member in archive.getmembers():
+            if member.name.endswith(NATIVE_SUFFIXES):
+                message = f"{path.name} must be pure Python"
+                raise SystemExit(message)
 
 
 def _validate_metadata(path: Path, namespace: str, metadata: Message, license_bytes: bytes) -> None:

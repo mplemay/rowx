@@ -105,8 +105,8 @@ asyncio.run(main())
 The unreleased 0.3.0 split ships three lockstep wheels. `rowx-core` is pure Python, imports as `rowx_core`, and has
 no runtime dependencies. `rowx-postgres` imports as `rowx_postgres`, its native module is `rowx_postgres._core`, and
 it depends only on matching `rowx-core`. `rowx` is pure Python, imports as `rowx`, and depends on matching
-`rowx-core`. The `postgres` extra installs matching `rowx-postgres`. The version in this tree is still 0.2.0 until
-[#270](https://github.com/mplemay/rowx/issues/270). The first published split is 0.3.0. It is not on PyPI.
+`rowx-core`. The `postgres` extra installs matching `rowx-postgres`. This tree is version 0.3.0. The first
+published split is 0.3.0. It is not on PyPI until the `v0.3.0` tag is published.
 
 `rowx` re-exports the query API of `rowx_core`. `rowx.core` re-exports the `rowx_core` names that `rowx` and
 `rowx.errors` do not already export. `rowx.postgres` re-exports `rowx_postgres` and still needs the `postgres` extra.

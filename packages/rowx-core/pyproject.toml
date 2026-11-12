@@ -1,6 +1,6 @@
 [project]
 name = "rowx-core"
-version = "0.2.0"
+version = "0.3.0"
 description = "Shared typed query primitives for rowx database implementations"
 readme = "README.md"
 authors = [

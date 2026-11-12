@@ -79,6 +79,15 @@ jobs:
         if: matrix.python-version == '3.14'
         run: just check
 
+      - name: Validate lockstep versions
+        if: matrix.python-version == '3.14'
+        env:
+          EVENT_NAME: pull_request
+          GITHUB_OUTPUT: ${{ runner.temp }}/rowx-release-version.txt
+        run: |
+          uv run python scripts/validate-release-versions.py
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+
       # a service container can't mount certs or override the entrypoint, so the TLS postgres comes from scripts/pg.sh
       - name: Start the TLS postgres
         run: echo "ROWX_TEST_DSN_SSL=$(scripts/pg.sh up --ssl)" >> "$GITHUB_ENV"
