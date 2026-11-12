@@ -378,6 +378,7 @@ class _Source:
     pydantic: _PydField | None = None
     attrs_alias: str | None = None
     converter: ast.expr | None = None
+    converter_module: _Module | None = None
     # the class that declares the field, whose type parameters its annotation names
     owner: _Class | None = None
 
@@ -1964,14 +1965,65 @@ class _Resolver:
             info.fields[key] = self._attrs_field(stmt, key, klass)
         self._attrs_default_hooks(info, node, klass)
 
+    def _attrs_field_call(self, expr: ast.expr, module: _Module) -> tuple[ast.Call, _Module] | None:
+        seen: set[tuple[Path, str]] = set()
+        value = expr
+        for _ in range(MAX_HOPS + 1):
+            if isinstance(value, ast.Call):
+                func, func_module = self._unalias(value.func, module)
+                if self._external_name(func, func_module) in {"attrs.field", "attr.field", "attr.ib", "attr.attrib"}:
+                    return value, module
+                break
+            next_value = self._attrs_field_binding(value, module, seen)
+            if next_value is None:
+                break
+            value, module = next_value
+        return None
+
+    def _attrs_field_binding(
+        self, value: ast.expr, module: _Module, seen: set[tuple[Path, str]]
+    ) -> tuple[ast.expr, _Module] | None:
+        if isinstance(value, ast.Attribute):
+            try:
+                target = self._ref(value.value, module)
+            except RejectError:
+                return None
+            if not isinstance(target, _ModuleRef):
+                return None
+            module, value = target.module, ast.Name(id=value.attr, ctx=ast.Load())
+        if not isinstance(value, ast.Name):
+            return None
+        key = (module.path, value.id)
+        bindings = module.bindings.get(value.id, [])
+        if key in seen or len(bindings) != 1 or bindings[0].tc:
+            return None
+        seen.add(key)
+        binding = bindings[0]
+        result: tuple[ast.expr, _Module] | None = None
+        if binding.kind == "from":
+            target = self._find(module, binding.level, binding.module)
+            if target is not None:
+                result = ast.Name(id=binding.name, ctx=ast.Load()), target
+        elif binding.kind == "call" and isinstance(binding.node, ast.Call):
+            result = binding.node, module
+        elif binding.kind == "alias" and binding.expr is not None and not binding.type_stmt:
+            result = binding.expr, module
+        return result
+
     def _attrs_unannotated_fields(self, node: ast.ClassDef, klass: _Class) -> None:
         for stmt in _plain_statements(node.body):
-            if not isinstance(stmt, ast.Assign) or not isinstance(stmt.value, ast.Call):
+            if not isinstance(stmt, ast.Assign):
                 continue
-            func, module = self._unalias(stmt.value.func, klass.module)
-            if self._external_name(func, module) not in {"attrs.field", "attr.field"}:
+            field = self._attrs_field_call(stmt.value, klass.module)
+            if field is None:
+                try:
+                    ast.literal_eval(stmt.value)
+                except ValueError, TypeError, SyntaxError:
+                    msg = f"`{klass.name}` has an untraceable attrs collection declaration"
+                    raise _invalid(msg) from None
                 continue
-            init = next((option for option in stmt.value.keywords if option.arg == "init"), None)
+            call, _ = field
+            init = next((option for option in call.keywords if option.arg == "init"), None)
             if init is not None and not self._attrs_bool(init, "unannotated field init"):
                 self._attrs_check_fallback(node, klass)
                 continue
@@ -1983,10 +2035,8 @@ class _Resolver:
         for stmt, _ in self._annotated(node):
             if self._special(stmt.annotation, klass.module) == "ClassVar":
                 continue
-            if isinstance(stmt.value, ast.Call):
-                func, module = self._unalias(stmt.value.func, klass.module)
-                if self._external_name(func, module) in {"attrs.field", "attr.field"}:
-                    continue
+            if stmt.value is not None and self._attrs_field_call(stmt.value, klass.module) is not None:
+                continue
             msg = f"`{klass.name}` has an attrs collection fallback with implicit fields"
             raise _invalid(msg)
 
@@ -2008,27 +2058,20 @@ class _Resolver:
         source = self._source(stmt, key, klass)
         source.attrs_alias = key.lstrip("_")
         value = stmt.value
-        func, module = self._unalias(value.func, klass.module) if isinstance(value, ast.Call) else (None, klass.module)
-        if (
-            isinstance(value, ast.Call)
-            and func is not None
-            and self._external_name(func, module)
-            in {
-                "attrs.field",
-                "attr.field",
-            }
-        ):
-            if value.args:
+        field = self._attrs_field_call(value, klass.module) if value is not None else None
+        if field is not None:
+            call, module = field
+            if call.args:
                 msg = f"field `{key}` has unsupported positional options"
                 raise _invalid(msg)
-            for option in value.keywords:
-                if not self._attrs_field_option(source, option, klass):
+            for option in call.keywords:
+                if not self._attrs_field_option(source, option, module):
                     return None
         elif value is not None:
             source.default = self._attrs_default(value, klass.module)
         return source
 
-    def _attrs_field_option(self, source: _Source, option: ast.keyword, klass: _Class) -> bool:
+    def _attrs_field_option(self, source: _Source, option: ast.keyword, module: _Module) -> bool:
         key = source.key
         if option.arg is None:
             msg = f"field `{key}` uses dynamic options"
@@ -2036,9 +2079,9 @@ class _Resolver:
         if option.arg == "init":
             return self._attrs_bool(option, f"field `{key}` init")
         if option.arg == "default":
-            source.default |= self._attrs_default(option.value, klass.module)
+            source.default |= self._attrs_default(option.value, module)
         elif option.arg == "factory":
-            source.default |= self._attrs_factory(option.value, klass.module)
+            source.default |= self._attrs_factory(option.value, module)
         elif option.arg == "alias":
             if isinstance(option.value, ast.Constant) and option.value.value is None:
                 return True
@@ -2049,6 +2092,7 @@ class _Resolver:
         elif option.arg == "converter":
             if not isinstance(option.value, ast.Constant) or option.value.value is not None:
                 source.converter = option.value
+                source.converter_module = module
         else:
             self._attrs_field_other_option(option, key)
         return True
@@ -2064,7 +2108,9 @@ class _Resolver:
             target = self._ref(expr, module)
         except RejectError:
             target = None
-        if isinstance(target, _Class) or (
+        if isinstance(target, _Class) and self._attrs_factory_class(target, set()):
+            return True
+        if (
             isinstance(target, _External)
             and target.qualname.startswith("builtins.")
             and callable(getattr(builtins, target.qualname.removeprefix("builtins."), None))
@@ -2072,6 +2118,27 @@ class _Resolver:
             return True
         msg = "an attrs field has an indeterminate factory"
         raise _invalid(msg)
+
+    def _attrs_factory_class(self, klass: _Class, seen: set[ClassKey]) -> bool:
+        key = _class_key(klass)
+        if key in seen or not isinstance(klass.node, ast.ClassDef):
+            return False
+        node = klass.node
+        if node.decorator_list or node.keywords:
+            return False
+        seen.add(key)
+        for base in node.bases:
+            try:
+                target = self._ref(base, klass.module)
+            except RejectError:
+                return False
+            if isinstance(target, _Class):
+                if not self._attrs_factory_class(target, seen):
+                    return False
+            elif not isinstance(target, _External) or target.qualname != "builtins.object":
+                return False
+        seen.remove(key)
+        return True
 
     @staticmethod
     def _attrs_field_other_option(option: ast.keyword, key: str) -> None:
@@ -2641,7 +2708,8 @@ class _Resolver:
 
     def _attrs_converter(self, source: _Source, output: _Node) -> Elem:
         expr = source.converter
-        if isinstance(expr, ast.Call) and self._external_name(expr.func, source.module) in {
+        module = source.converter_module or source.module
+        if isinstance(expr, ast.Call) and self._external_name(expr.func, module) in {
             "attrs.Converter",
             "attr.Converter",
         }:
@@ -2654,7 +2722,7 @@ class _Resolver:
                 msg = f"field `{source.key}` has an unsupported converter"
                 raise _invalid(msg)
             expr = expr.args[0]
-        found = self._attrs_converter_node(expr, source.module)
+        found = self._attrs_converter_node(expr, module)
         if found is not None:
             node, module = found
             args = node.args

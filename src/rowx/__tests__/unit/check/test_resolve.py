@@ -37,6 +37,14 @@ def test_glob_include_uses_literal_prefix_for_roots(tmp_path: Path) -> None:
         "@attrs.define\nclass Row:\n    value: int\n    hidden = attrs.field(init=False, default=1)",
         "@attrs.define\nclass Base:\n    hidden = attrs.field()\n@attrs.define\nclass Row(Base):\n    value: int",
         "def convert(value): return value\n@attrs.define\nclass Row:\n    value: int = attrs.field(converter=convert)",
+        "def erase(cls): return None\n@erase\nclass Factory: pass\n@attrs.define\nclass Row:\n    value: int = attrs.field(factory=Factory)",
+        "class Meta(type):\n    def __new__(meta, name, bases, namespace): return None\nclass Factory(metaclass=Meta): pass\n@attrs.define\nclass Row:\n    value: int = attrs.field(factory=Factory)",
+        "class Meta(type): pass\nclass Base(metaclass=Meta): pass\nclass Factory(Base): pass\n@attrs.define\nclass Row:\n    value: int = attrs.field(factory=Factory)",
+        "import attr\n@attrs.define\nclass Row:\n    value: int = attr.ib()\n    hidden = attr.attrib()",
+        "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    hidden = make_field()",
+        "spec = attrs.field()\n@attrs.define\nclass Row:\n    value: int = attrs.field()\n    hidden = spec",
+        "import attr\nfield_alias = attr.ib\n@attrs.define\nclass Base:\n    hidden = field_alias()\n@attrs.define\nclass Row(Base):\n    value: int",
+        "import attr\n@attrs.define\nclass Row:\n    value: int\n    hidden = attr.ib(init=False)",
         "@attrs.define\nclass Row:\n    value: int\n    def __init__(self, value): self.value = value",
     ],
 )
@@ -69,9 +77,11 @@ def test_attrs_resolves_imported_converter_without_executing_source(tmp_path: Pa
     assert result.row_type.fields[0].elem.leaf == "int"
 
 
-@pytest.mark.parametrize("reference", ["factories.make", "make", "alias", "frozenset"])
+@pytest.mark.parametrize("reference", ["factories.make", "make", "alias", "frozenset", "factories.Factory"])
 def test_attrs_resolves_factory_without_executing_source(tmp_path: Path, reference: str) -> None:
-    (tmp_path / "factories.py").write_text('raise RuntimeError("must not execute")\ndef make(): return 1\n')
+    (tmp_path / "factories.py").write_text(
+        'raise RuntimeError("must not execute")\ndef make(): return 1\nclass Factory: pass\n'
+    )
     path = tmp_path / "case.py"
     path.write_text(
         "import attrs\nimport factories\nfrom factories import make\nfrom rowx import query\n"
@@ -84,6 +94,22 @@ def test_attrs_resolves_factory_without_executing_source(tmp_path: Path, referen
     assert result.diagnostic is None
     assert result.row_type is not None
     assert not result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize("reference", ["factories.Factory", "Factory", "alias"])
+def test_attrs_rejects_imported_decorated_factory(tmp_path: Path, reference: str) -> None:
+    (tmp_path / "factories.py").write_text("def erase(cls): return None\n@erase\nclass Factory: pass\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nimport factories\nfrom factories import Factory\nfrom rowx import query\n"
+        "alias = Factory\n"
+        f"@attrs.define\nclass Row:\n    value: int = attrs.field(factory={reference})\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
 
 
 def test_attrs_rejects_ambiguous_inherited_fields(tmp_path: Path) -> None:

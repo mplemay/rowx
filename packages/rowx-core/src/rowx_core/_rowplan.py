@@ -651,11 +651,26 @@ def _attrs_metadata(t: type, infos: tuple[_AttrsInfo, ...], hints: dict[str, obj
             raise _reject(t, f"field {info.name!r} has conflicting attrs type metadata")
 
 
-def _concrete(t: object) -> bool:
-    t = _unwrap_field(t)
+def _concrete(t: object, depth: int = 0) -> bool:
+    if depth > MAX_ALIAS_DEPTH:
+        raise _reject(t, f"annotation deeper than {MAX_ALIAS_DEPTH}")
+    t = _unwrap(_unwrap_field(t))
     if t is Any or t is object:
         return False
-    return all(_concrete(arg) for arg in get_args(t))
+    return all(_concrete(arg, depth + 1) for arg in get_args(t))
+
+
+def _attrs_annotation_key(t: object, depth: int = 0) -> object:
+    if depth > MAX_ALIAS_DEPTH:
+        raise _reject(t, f"annotation deeper than {MAX_ALIAS_DEPTH}")
+    t = _unwrap(t)
+    origin = get_origin(t)
+    if origin is None:
+        return t
+    args = tuple(_attrs_annotation_key(arg, depth + 1) for arg in get_args(t))
+    if origin in {Union, types.UnionType}:
+        return (Union, frozenset(args))
+    return (origin, args)
 
 
 def _attrs_converter(t: type, info: _AttrsInfo, converter_type: type, hints: dict[str, object]) -> None:
@@ -687,7 +702,7 @@ def _attrs_converter(t: type, info: _AttrsInfo, converter_type: type, hints: dic
     output = annotations.get("return")
     if input_type is None or output is None or info.name not in hints:
         raise _reject(t, f"field {info.name!r} has an unsupported converter signature")
-    if _unwrap_field(output) != _unwrap_field(hints[info.name]) or not _concrete(input_type):
+    if _attrs_annotation_key(output) != _attrs_annotation_key(hints[info.name]) or not _concrete(input_type):
         raise _reject(t, f"field {info.name!r} has an unsupported converter signature")
     _elem(_unwrap_field(output))
     hints[info.name] = input_type

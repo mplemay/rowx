@@ -111,6 +111,42 @@ ATTRS_ROWS: Final[list[Row]] = [
         "ok",
     ),
     (
+        (
+            "type Inner = Annotated[int, 'inner']\ntype Items = list[Inner | None]\n"
+            "def convert(value: int) -> Items: return []\n"
+            "@attrs.define\nclass T:\n    value: list[int | None] = attrs.field(converter=convert)"
+        ),
+        ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+        "ok",
+    ),
+    *(
+        (
+            (
+                "type Alias[T] = list[T]\n"
+                f"def convert(value: int) -> {output}: return []\n"
+                f"@attrs.define\nclass T:\n    value: {field} = attrs.field(converter=convert)"
+            ),
+            ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+            "ok",
+        )
+        for output, field in [
+            ("Alias[int]", "list[int]"),
+            ("list[int]", "Alias[int]"),
+            ("list[Alias[Annotated[int, 'x']]]", "list[list[int]]"),
+            ("list[list[int]]", "list[Alias[Annotated[int, 'x']]]"),
+        ]
+    ),
+    (
+        "import attr\nfield_spec = attr.ib(default=1, alias='external')\n@attrs.define\nclass T:\n    value: int = field_spec",
+        ("named", "validator", "by_name", (("value", ("external",), False, False),)),
+        "ok",
+    ),
+    (
+        "spec = attrs.field(init=False, default=1)\n@attrs.define\nclass T:\n    visible: int = attrs.field()\n    hidden = spec",
+        ("named", "validator", "by_name", (("visible", ("visible",), False, True),)),
+        "ok",
+    ),
+    (
         "@attrs.define\nclass T:\n    value: Annotated[int, 'metadata']",
         ("named", "validator", "by_name", (("value", ("value",), False, True),)),
         "ok",
@@ -122,6 +158,14 @@ ATTRS_ROWS: Final[list[Row]] = [
         ),
         ("named", "validator", "by_name", (("value", ("value",), False, True),)),
         "ok",
+    ),
+    (
+        (
+            "type Recursive = list[Recursive]\ndef convert(value: Recursive) -> str: return ''\n"
+            "@attrs.define\nclass T:\n    value: str = attrs.field(converter=convert)"
+        ),
+        "deeper than",
+        "unresolved-row-type",
     ),
     (
         (
