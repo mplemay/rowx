@@ -284,7 +284,7 @@ def test_attrs_converter_compares_input_type_and_nullability(schema: str, tmp_pa
     assert result.diagnostic is None
     assert result.row_type is not None
     statements = ['SELECT NULL::int4 AS "value?"', 'SELECT 1::int4 AS "value!"', 'SELECT NULL::text AS "value?"']
-    outcomes = asyncio.run(describe_all(schema, statements, 1, TIMEOUT_MS))
+    outcomes = asyncio.run(describe_all([schema], statements, TIMEOUT_MS, backend=PG_RULES))
     findings = [
         {
             finding.rule
@@ -303,8 +303,8 @@ def test_attrs_mutated_shared_default_rejected_for_empty_result(schema: str, tmp
     path = tmp_path / "case.py"
     path.write_text(
         "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
-        "@spec.default\ndef make(self): return 42\n"
         "@attrs.define\nclass Row:\n    id: int\n    value: int = spec\n"
+        "    spec.default(lambda self: 42)\n"
         'query[Row](t"SELECT 7::int4 AS id WHERE false")\n'
     )
     [call] = discover_file(path).calls
@@ -313,7 +313,7 @@ def test_attrs_mutated_shared_default_rejected_for_empty_result(schema: str, tmp
     assert result.diagnostic is not None
     assert result.diagnostic.rule == "invalid-row-type"
     sql = "SELECT 7::int4 AS id WHERE false"
-    outcomes = asyncio.run(describe_all(schema, [sql], 1, TIMEOUT_MS))
+    outcomes = asyncio.run(describe_all([schema], [sql], TIMEOUT_MS, backend=PG_RULES))
     assert len(describe_columns(outcomes, sql)) == 1
 
 
@@ -329,7 +329,7 @@ def test_attrs_none_factory_missing_column_is_reported(schema: str, tmp_path: Fi
     assert result.diagnostic is None
     assert result.row_type is not None
     sql = "SELECT 1 AS other WHERE false"
-    outcomes = asyncio.run(describe_all(schema, [sql], 1, TIMEOUT_MS))
+    outcomes = asyncio.run(describe_all([schema], [sql], TIMEOUT_MS, backend=PG_RULES))
     findings = compare(DescribeDesc(columns=tuple(describe_columns(outcomes, sql))), result.row_type, backend=PG_RULES)
     assert "missing-column" in {finding.rule for finding in findings}
 

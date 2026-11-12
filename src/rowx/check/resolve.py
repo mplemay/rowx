@@ -1,5 +1,6 @@
 import ast
 import builtins
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from keyword import iskeyword
@@ -1997,19 +1998,227 @@ class _Resolver:
     def _attrs_mutated_field(self, field: tuple[ast.Call, _Module], module: _Module) -> bool:
         if module.tree is None:
             return False
-        # Class and function bodies have their own scope; decorators run at module scope.
-        pending: list[ast.AST] = list(module.tree.body)
-        while pending:
-            node = pending.pop()
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                pending.extend(node.decorator_list)
-                continue
-            if isinstance(node, ast.Attribute) and node.attr == "default":
-                target, _ = self._attrs_trace_field(node.value, module)
-                if target is not None and target[0] is field[0] and target[1].path == field[1].path:
-                    return True
-            pending.extend(ast.iter_child_nodes(node))
+        globals_: dict[str, bool | _Module] = {}
+        for node in module.tree.body:
+            if self._attrs_scan_eager(node, globals_, field, module, globals_):
+                return True
+            self._attrs_bind_class(node, globals_, field, module, globals_)
         return False
+
+    def _attrs_is_shared(
+        self,
+        expr: ast.expr,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if isinstance(expr, ast.Name):
+            if expr.id in scope:
+                return scope[expr.id] is True
+            if expr.id in globals_:
+                return globals_[expr.id] is True
+        if (
+            isinstance(expr, ast.Attribute)
+            and isinstance(expr.value, ast.Name)
+            and (expr.value.id in scope or expr.value.id in globals_)
+        ):
+            binding = scope.get(expr.value.id, globals_.get(expr.value.id, False))
+            if not isinstance(binding, _Module):
+                return binding
+            expr, module = ast.Name(id=expr.attr, ctx=ast.Load()), binding
+        target, _ = self._attrs_trace_field(expr, module)
+        return target is not None and target[0] is field[0] and target[1].path == field[1].path
+
+    def _attrs_scan_eager(
+        self,
+        node: ast.AST,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "default"
+            and self._attrs_is_shared(node.value, scope, field, module, globals_)
+        ):
+            return True
+        if isinstance(node, ast.NamedExpr):
+            if self._attrs_scan_eager(node.value, scope, field, module, globals_):
+                return True
+            scope[node.target.id] = self._attrs_class_value(node.value, scope, field, module, globals_)
+            return False
+        if isinstance(node, ast.ClassDef):
+            # Nested classes do not close over the enclosing class namespace.
+            header = [*node.decorator_list, *node.bases, *node.keywords]
+            return any(
+                self._attrs_scan_eager(item, scope, field, module, globals_) for item in header
+            ) or self._attrs_scan_body(node.body, {}, field, module, globals_)
+        if isinstance(node, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+            # Function decorators and defaults execute now; the body does not.
+            decorators = [] if isinstance(node, ast.Lambda) else node.decorator_list
+            header = [*decorators, *node.args.defaults, *node.args.kw_defaults]
+            return any(
+                self._attrs_scan_eager(item, scope, field, module, globals_) for item in header if item is not None
+            )
+        return any(self._attrs_scan_eager(item, scope, field, module, globals_) for item in ast.iter_child_nodes(node))
+
+    def _attrs_scan_body(
+        self,
+        body: list[ast.stmt],
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        for node in body:
+            if isinstance(node, ast.If):
+                if self._attrs_scan_if(node, scope, field, module, globals_):
+                    return True
+            elif isinstance(
+                node, ast.For | ast.AsyncFor | ast.While | ast.With | ast.AsyncWith | ast.Try | ast.TryStar | ast.Match
+            ):
+                if self._attrs_scan_compound(node, scope, field, module, globals_):
+                    return True
+            else:
+                if self._attrs_scan_eager(node, scope, field, module, globals_):
+                    return True
+                self._attrs_bind_class(node, scope, field, module, globals_)
+        return False
+
+    def _attrs_scan_if(
+        self,
+        node: ast.If,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if self._attrs_scan_eager(node.test, scope, field, module, globals_):
+            return True
+        left, right = scope.copy(), scope.copy()
+        if self._attrs_scan_body(node.body, left, field, module, globals_) or self._attrs_scan_body(
+            node.orelse, right, field, module, globals_
+        ):
+            return True
+        for name in left.keys() | right.keys():
+            fallback = self._attrs_is_shared(ast.Name(id=name, ctx=ast.Load()), scope, field, module, globals_)
+            left_value, right_value = left.get(name, fallback), right.get(name, fallback)
+            scope[name] = left_value if left_value == right_value else bool(left_value or right_value)
+        return False
+
+    def _attrs_scan_compound(
+        self,
+        node: ast.stmt,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        # Compound statements may execute zero or multiple times. Keep all possibly
+        # shared bindings when control flow makes a class-local name uncertain.
+        branches: list[list[ast.stmt]] = []
+        pending: list[ast.AST] = [node]
+        while pending:
+            item = pending.pop()
+            for child in ast.iter_child_nodes(item):
+                if isinstance(child, ast.stmt):
+                    branches.append([child])
+                elif isinstance(child, ast.ExceptHandler | ast.match_case):
+                    pending.append(child)
+                elif self._attrs_scan_eager(child, scope, field, module, globals_):
+                    return True
+        branch_scope = scope.copy()
+        if isinstance(node, ast.For | ast.AsyncFor) and isinstance(node.target, ast.Name):
+            values = node.iter.elts if isinstance(node.iter, ast.List | ast.Tuple | ast.Set) else [node.iter]
+            if any(self._attrs_is_shared(value, scope, field, module, globals_) for value in values):
+                branch_scope[node.target.id] = True
+        for body in branches:
+            if self._attrs_scan_body(body, branch_scope, field, module, globals_):
+                return True
+            scope.update({name: value for name, value in branch_scope.items() if value})
+        return False
+
+    def _attrs_class_value(
+        self,
+        expr: ast.expr,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool | _Module:
+        if isinstance(expr, ast.Name):
+            if expr.id in scope:
+                return scope[expr.id]
+            if expr.id in globals_:
+                return globals_[expr.id]
+        if self._attrs_is_shared(expr, scope, field, module, globals_):
+            return True
+        try:
+            ref = self._ref(expr, module)
+        except RejectError:
+            return False
+        return ref.module if isinstance(ref, _ModuleRef) else False
+
+    def _attrs_bind_import(
+        self,
+        node: ast.Import | ast.ImportFrom,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+    ) -> None:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                scope[alias.asname or alias.name.split(".")[0]] = self._find(module, 0, alias.name) or False
+        else:
+            origin = self._find(module, node.level, node.module)
+            for alias in node.names:
+                name = alias.asname or alias.name
+                scope[name] = origin is not None and self._attrs_is_shared(
+                    ast.Name(id=alias.name, ctx=ast.Load()), {}, field, origin, {}
+                )
+                if origin is not None and alias.name not in origin.bindings:
+                    with suppress(RejectError):
+                        scope[name] = self._submodule(origin, alias.name).module
+
+    def _attrs_bind_class(
+        self,
+        node: ast.stmt,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> None:
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            self._attrs_bind_import(node, scope, field, module)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    scope.pop(target.id, None)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                self._attrs_bind_target((target, node.value), scope, field, module, globals_=globals_)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            scope[node.target.id] = self._attrs_class_value(node.value, scope, field, module, globals_)
+        elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            scope[node.name] = False
+
+    def _attrs_bind_target(
+        self,
+        pair: tuple[ast.expr, ast.expr],
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        *,
+        globals_: dict[str, bool | _Module],
+    ) -> None:
+        target, value = pair
+        if isinstance(target, ast.Name):
+            scope[target.id] = self._attrs_class_value(value, scope, field, module, globals_)
+        elif isinstance(target, ast.Tuple | ast.List) and isinstance(value, ast.Tuple | ast.List):
+            for item, source in zip(target.elts, value.elts, strict=False):
+                self._attrs_bind_target((item, source), scope, field, module, globals_=globals_)
 
     def _attrs_field_binding(
         self, value: ast.expr, module: _Module, seen: set[tuple[Path, str]]

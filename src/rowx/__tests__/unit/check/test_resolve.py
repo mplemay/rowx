@@ -118,6 +118,146 @@ def test_attrs_rejects_mutation_in_field_defining_module(tmp_path: Path) -> None
     assert result.diagnostic.rule == "invalid-row-type"
 
 
+@pytest.mark.parametrize("reference", ["fields.spec", "spec", "alias"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "class Helper:\n    @spec.default\n    def make(self): raise RuntimeError('deferred')",
+        "class Outer:\n    class Helper:\n        @spec.default\n        def make(self): raise RuntimeError('deferred')",
+        "class Helper:\n    local = spec\n    local.default(lambda self: 1)",
+        "def helper(value=spec.default(lambda self: 1)): raise RuntimeError('deferred')",
+        "def helper(*, value=spec.default(lambda self: 1)): raise RuntimeError('deferred')",
+        "@attrs.define\nclass Other:\n    value: int = spec\n    spec.default(lambda self: 1)",
+    ],
+)
+def test_attrs_rejects_eager_shared_field_mutations(tmp_path: Path, reference: str, mutation: str) -> None:
+    (tmp_path / "fields.py").write_text("import attrs\nraise RuntimeError('not executed')\nspec = attrs.field()\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nimport fields\nfrom fields import spec\nfrom rowx import query\n"
+        "alias = fields.spec\nraise RuntimeError('not executed')\n"
+        f"{mutation}\n@attrs.define\nclass Row:\n    value: int = {reference}\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.row_type is None
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+@pytest.mark.parametrize(
+    "helper",
+    [
+        "class Helper:\n    spec = attrs.field()\n    @spec.default\n    def make(self): return 1",
+        "def helper():\n    spec.default(lambda self: 1)",
+        "helper = lambda: spec.default(lambda self: 1)",
+    ],
+)
+def test_attrs_shared_field_ignores_shadow_and_deferred_body(tmp_path: Path, helper: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        f"{helper}\n@attrs.define\nclass Row:\n    value: int = spec\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize(
+    ("body", "rejected"),
+    [
+        ("import fields as d\n    @d.spec.default\n    def make(self): return 1", True),
+        ("d = fields\n    @d.spec.default\n    def make(self): return 1", True),
+        ("local, = (spec,)\n    local.default(lambda self: 1)", True),
+        ("(local := spec)\n    local.default(lambda self: 1)", True),
+        ("if condition:\n        local = spec\n    local.default(lambda self: 1)", True),
+        ("for item in ():\n        local = spec\n    local.default(lambda self: 1)", True),
+        ("for local in (spec,):\n        local.default(lambda self: 1)", True),
+        ("from fields import spec as local\n    @local.default\n    def make(self): return 1", True),
+        ("spec = 0\n    del spec\n    @spec.default\n    def make(self): return 1", True),
+        ("spec = attrs.field()\n    @spec.default\n    def make(self): return 1", False),
+        ("spec, = (attrs.field(),)\n    @spec.default\n    def make(self): return 1", False),
+        ("fields = object()\n    fields.spec.default(lambda self: 1)", False),
+    ],
+)
+def test_attrs_shared_field_class_scope_bindings(tmp_path: Path, body: str, *, rejected: bool) -> None:
+    (tmp_path / "fields.py").write_text("import attrs\nspec = attrs.field()\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nimport fields\nfrom fields import spec\nfrom rowx import query\n"
+        f"class Helper:\n    {body}\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    if rejected:
+        assert result.diagnostic is not None
+        assert result.diagnostic.rule == "invalid-row-type"
+    else:
+        assert result.diagnostic is None
+        assert result.row_type is not None
+        assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize(
+    "binding", ["(alias := spec)", "def helper(value=(alias := spec)): raise RuntimeError('not executed')"]
+)
+@pytest.mark.parametrize(
+    "helper",
+    [
+        "class Defaults:\n    @alias.default\n    def make(self): return 1",
+        "class Outer:\n    alias = attrs.field()\n    class Defaults:\n        @alias.default\n        def make(self): return 1",
+    ],
+)
+def test_attrs_rejects_module_eager_namedexpr_alias(tmp_path: Path, binding: str, helper: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        f"{binding}\n{helper}\n@attrs.define\nclass Row:\n    value: int = spec\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+def test_attrs_module_namedexpr_alias_class_shadow(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n(alias := spec)\n"
+        "class Defaults:\n    alias = attrs.field()\n    @alias.default\n    def make(self): return 1\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+def test_attrs_shared_field_class_submodule_import(tmp_path: Path) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "fields.py").write_text("import attrs\nspec = attrs.field()\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom pkg.fields import spec\nfrom rowx import query\n"
+        "class Helper:\n    from pkg import fields as d\n    @d.spec.default\n    def make(self): return 1\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
 @pytest.mark.parametrize("reference", ["converters.convert", "convert", "alias"])
 def test_attrs_resolves_imported_converter_without_executing_source(tmp_path: Path, reference: str) -> None:
     (tmp_path / "converters.py").write_text(

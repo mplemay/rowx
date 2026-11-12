@@ -128,6 +128,20 @@ def test_attrs_mutated_shared_default_omission_and_empty_results(schema: str) ->
     assert rows == []
 
 
+def test_attrs_eager_shared_default_omission_and_empty_results(schema: str) -> None:
+    spec = attrs.field()
+
+    @attrs.define
+    class Row:
+        id: int
+        value: int = spec
+        spec.default(lambda _self: 42)
+
+    row = run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one)
+    assert row == Row(id=7, value=42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
 def test_attrs_none_factory_missing_column_on_empty_result(schema: str) -> None:
     with pytest.raises(RowShapeError):
         run_on(schema, "connection", query[AttrsNoneFactory](t"SELECT 1::int4 AS other WHERE false").all)
