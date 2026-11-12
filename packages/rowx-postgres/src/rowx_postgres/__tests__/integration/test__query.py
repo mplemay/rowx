@@ -105,6 +105,29 @@ class AttrsNoneFactory:
     value: int = attrs.field(factory=None)
 
 
+ATTRS_SHARED_SPEC = attrs.field()
+
+
+def attrs_shared_default(_self: object) -> int:
+    return 42
+
+
+ATTRS_SHARED_SPEC.default(attrs_shared_default)
+
+
+@attrs.define
+class AttrsMutatedShared:
+    id: int
+    value: int = ATTRS_SHARED_SPEC
+
+
+def test_attrs_mutated_shared_default_omission_and_empty_results(schema: str) -> None:
+    row = run_on(schema, "connection", query[AttrsMutatedShared](t"SELECT 7::int4 AS id").one)
+    assert row == AttrsMutatedShared(id=7, value=42)
+    rows = run_on(schema, "connection", query[AttrsMutatedShared](t"SELECT 7::int4 AS id WHERE false").all)
+    assert rows == []
+
+
 def test_attrs_none_factory_missing_column_on_empty_result(schema: str) -> None:
     with pytest.raises(RowShapeError):
         run_on(schema, "connection", query[AttrsNoneFactory](t"SELECT 1::int4 AS other WHERE false").all)

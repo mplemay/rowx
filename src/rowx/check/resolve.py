@@ -1966,19 +1966,50 @@ class _Resolver:
         self._attrs_default_hooks(info, node, klass)
 
     def _attrs_field_call(self, expr: ast.expr, module: _Module) -> tuple[ast.Call, _Module] | None:
+        field, modules = self._attrs_trace_field(expr, module)
+        if field is not None and not isinstance(expr, ast.Call):
+            for origin in modules:
+                if self._attrs_mutated_field(field, origin):
+                    msg = "an attrs shared field has unsupported post-construction default metadata"
+                    raise _invalid(msg)
+        return field
+
+    def _attrs_trace_field(
+        self, expr: ast.expr, module: _Module
+    ) -> tuple[tuple[ast.Call, _Module] | None, list[_Module]]:
         seen: set[tuple[Path, str]] = set()
+        modules = [module]
         value = expr
         for _ in range(MAX_HOPS + 1):
             if isinstance(value, ast.Call):
                 func, func_module = self._unalias(value.func, module)
                 if self._external_name(func, func_module) in {"attrs.field", "attr.field", "attr.ib", "attr.attrib"}:
-                    return value, module
+                    return (value, module), modules
                 break
             next_value = self._attrs_field_binding(value, module, seen)
             if next_value is None:
                 break
             value, module = next_value
-        return None
+            if all(item.path != module.path for item in modules):
+                modules.append(module)
+        return None, modules
+
+    def _attrs_mutated_field(self, field: tuple[ast.Call, _Module], module: _Module) -> bool:
+        if module.tree is None:
+            return False
+        # Class and function bodies have their own scope; decorators run at module scope.
+        pending: list[ast.AST] = list(module.tree.body)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                pending.extend(node.decorator_list)
+                continue
+            if isinstance(node, ast.Attribute) and node.attr == "default":
+                target, _ = self._attrs_trace_field(node.value, module)
+                if target is not None and target[0] is field[0] and target[1].path == field[1].path:
+                    return True
+            pending.extend(ast.iter_child_nodes(node))
+        return False
 
     def _attrs_field_binding(
         self, value: ast.expr, module: _Module, seen: set[tuple[Path, str]]

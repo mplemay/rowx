@@ -57,6 +57,67 @@ def test_attrs_rejects_dynamic_or_unsupported_declarations(tmp_path: Path, decla
     assert result.diagnostic.rule == "invalid-row-type"
 
 
+@pytest.mark.parametrize("reference", ["fields.spec", "spec", "alias"])
+@pytest.mark.parametrize(
+    "mutation", ["@mutated.default\ndef make(self): raise RuntimeError('must not execute')", "mutated.default(make)"]
+)
+def test_attrs_rejects_mutated_shared_field_without_executing_source(
+    tmp_path: Path, reference: str, mutation: str
+) -> None:
+    (tmp_path / "fields.py").write_text("import attrs\nraise RuntimeError('must not execute')\nspec = attrs.field()\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nimport fields\nfrom fields import spec\nfrom rowx import query\n"
+        "alias = spec\nmutated = fields.spec\ndef make(self): raise RuntimeError('must not execute')\n"
+        f"@attrs.define\nclass Before:\n    value: int = {reference}\n"
+        f"{mutation}\n"
+        f"@attrs.define\nclass After:\n    value: int = {reference}\n"
+        'query[Before](t"select 1")\nquery[After](t"select 1")\n'
+    )
+    calls = discover_file(path).calls
+    assert len(calls) == 2
+    for call in calls:
+        result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+        assert result.row_type is None
+        assert result.diagnostic is not None
+        assert result.diagnostic.rule == "invalid-row-type"
+        assert "post-construction default" in result.diagnostic.message
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_attrs_rejects_direct_mutated_shared_field(tmp_path: Path, *, excluded: bool) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nraise RuntimeError('must not execute')\n"
+        f"spec = attrs.field(init={not excluded})\nother = spec\n"
+        "@other.default\ndef make(self): raise RuntimeError('must not execute')\n"
+        "@attrs.define\nclass Row:\n    id: int = attrs.field()\n    value: int = spec\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.row_type is None
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+def test_attrs_rejects_mutation_in_field_defining_module(tmp_path: Path) -> None:
+    (tmp_path / "fields.py").write_text(
+        "import attrs\nraise RuntimeError('must not execute')\nspec = attrs.field()\nother = spec\n"
+        "@other.default\ndef make(self): raise RuntimeError('must not execute')\n"
+    )
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom fields import spec\nfrom rowx import query\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.row_type is None
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
 @pytest.mark.parametrize("reference", ["converters.convert", "convert", "alias"])
 def test_attrs_resolves_imported_converter_without_executing_source(tmp_path: Path, reference: str) -> None:
     (tmp_path / "converters.py").write_text(

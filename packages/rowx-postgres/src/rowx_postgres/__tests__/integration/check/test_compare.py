@@ -299,6 +299,24 @@ def test_attrs_converter_compares_input_type_and_nullability(schema: str, tmp_pa
     assert "type-mismatch" in findings[2]
 
 
+def test_attrs_mutated_shared_default_rejected_for_empty_result(schema: str, tmp_path: FilePath) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        "@spec.default\ndef make(self): return 42\n"
+        "@attrs.define\nclass Row:\n    id: int\n    value: int = spec\n"
+        'query[Row](t"SELECT 7::int4 AS id WHERE false")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,), backend=PG_RULES)
+    assert result.row_type is None
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+    sql = "SELECT 7::int4 AS id WHERE false"
+    outcomes = asyncio.run(describe_all(schema, [sql], 1, TIMEOUT_MS))
+    assert len(describe_columns(outcomes, sql)) == 1
+
+
 def test_attrs_none_factory_missing_column_is_reported(schema: str, tmp_path: FilePath) -> None:
     path = tmp_path / "case.py"
     path.write_text(
