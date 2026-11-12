@@ -1,8 +1,10 @@
+import gc
 import importlib
 import re
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 import types
+import warnings
 from typing import TYPE_CHECKING, ClassVar, Final, TypeVar, clear_overloads
 
 import pytest
@@ -71,6 +73,21 @@ def test_none_is_shared_no_rows_plan() -> None:
 def test_attrs_rejects_unsupported_constructors_and_converters(source: str, evaluate: Evaluate) -> None:
     with pytest.raises(InterfaceError):
         row_plan(evaluate(source))
+
+
+@pytest.mark.parametrize("converter", ["convert", "attrs.Converter(convert)"])
+def test_attrs_async_converter_rejected_without_calling(converter: str, evaluate: Evaluate) -> None:
+    row_type = evaluate(
+        "calls = []\nasync def convert(value: int) -> str:\n    calls.append(value)\n    return str(value)\n"
+        f"@attrs.define\nclass T:\n    value: str = attrs.field(converter={converter})"
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        with pytest.raises(InterfaceError, match="unsupported converter"):
+            row_plan(row_type)
+        gc.collect()
+    assert not [warning for warning in caught if issubclass(warning.category, RuntimeWarning)]
+    assert sys.modules["conformance_row"].calls == []
 
 
 def test_attrs_factory_is_not_called_during_planning(evaluate: Evaluate) -> None:

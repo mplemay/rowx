@@ -666,6 +666,8 @@ def _attrs_converter(t: type, info: _AttrsInfo, converter_type: type, hints: dic
         converter = getattr(converter, "converter", None)
     if not callable(converter):
         raise _reject(t, f"field {info.name!r} has an uninspectable converter")
+    if inspect.iscoroutinefunction(converter):
+        raise _reject(t, f"field {info.name!r} has an unsupported converter signature")
     if get_overloads(converter) or (
         getattr(converter, "__module__", None) == "attr._make"
         and getattr(converter, "__qualname__", None) == "pipe.<locals>.pipe_converter"

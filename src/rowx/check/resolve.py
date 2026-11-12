@@ -846,6 +846,7 @@ class _Resolver:
         # set while an alias body is evaluated: a string there stays unsupported, but a `TYPE_CHECKING` name is still
         # rejected, because a `TypeAliasType` evaluates its value when the field is read
         self._in_alias = False
+        self._attrs_annotation = False
         # the type parameters in scope while a generic's body is evaluated, each bound to its argument
         self._env: dict[str, _Arg] = {}
         self._infos: dict[ClassKey, _Info] = {}
@@ -1093,7 +1094,8 @@ class _Resolver:
                 if (leaf := LEAVES.get(normalized)) is not None:
                     return _Node((Elem(leaf, nullable=False),), none=False)
                 if normalized in NEUTRAL:
-                    return _Node((Elem("any", nullable=False),), none=False)
+                    leaf = normalized if self._attrs_annotation else "any"
+                    return _Node((Elem(leaf, nullable=False),), none=False)
                 if (selected := self._selected()) is not None and (
                     leaf := selected.value_leaves.get(normalized)
                 ) is not None:
@@ -1952,6 +1954,7 @@ class _Resolver:
                 info.fields = dict(first.fields)
                 info.init = first.init
             return
+        self._attrs_unannotated_fields(node, klass)
         for base in reversed(rest):
             for key, source in base.fields.items():
                 info.fields.pop(key, None)
@@ -1960,6 +1963,32 @@ class _Resolver:
             info.fields.pop(key, None)
             info.fields[key] = self._attrs_field(stmt, key, klass)
         self._attrs_default_hooks(info, node, klass)
+
+    def _attrs_unannotated_fields(self, node: ast.ClassDef, klass: _Class) -> None:
+        for stmt in _plain_statements(node.body):
+            if not isinstance(stmt, ast.Assign) or not isinstance(stmt.value, ast.Call):
+                continue
+            func, module = self._unalias(stmt.value.func, klass.module)
+            if self._external_name(func, module) not in {"attrs.field", "attr.field"}:
+                continue
+            init = next((option for option in stmt.value.keywords if option.arg == "init"), None)
+            if init is not None and not self._attrs_bool(init, "unannotated field init"):
+                self._attrs_check_fallback(node, klass)
+                continue
+            msg = f"`{klass.name}` has an unannotated attrs field"
+            raise _invalid(msg)
+
+    def _attrs_check_fallback(self, node: ast.ClassDef, klass: _Class) -> None:
+        # An unannotated field switches attrs to explicit-field collection, even when init=False.
+        for stmt, _ in self._annotated(node):
+            if self._special(stmt.annotation, klass.module) == "ClassVar":
+                continue
+            if isinstance(stmt.value, ast.Call):
+                func, module = self._unalias(stmt.value.func, klass.module)
+                if self._external_name(func, module) in {"attrs.field", "attr.field"}:
+                    continue
+            msg = f"`{klass.name}` has an attrs collection fallback with implicit fields"
+            raise _invalid(msg)
 
     @staticmethod
     def _attrs_check_bases(klass: _Class, bases: list[_Info]) -> None:
@@ -1979,10 +2008,16 @@ class _Resolver:
         source = self._source(stmt, key, klass)
         source.attrs_alias = key.lstrip("_")
         value = stmt.value
-        if isinstance(value, ast.Call) and self._external_name(value.func, klass.module) in {
-            "attrs.field",
-            "attr.field",
-        }:
+        func, module = self._unalias(value.func, klass.module) if isinstance(value, ast.Call) else (None, klass.module)
+        if (
+            isinstance(value, ast.Call)
+            and func is not None
+            and self._external_name(func, module)
+            in {
+                "attrs.field",
+                "attr.field",
+            }
+        ):
             if value.args:
                 msg = f"field `{key}` has unsupported positional options"
                 raise _invalid(msg)
@@ -2000,8 +2035,10 @@ class _Resolver:
             raise _invalid(msg)
         if option.arg == "init":
             return self._attrs_bool(option, f"field `{key}` init")
-        if option.arg in {"default", "factory"}:
-            source.default = option.arg == "factory" or self._attrs_default(option.value, klass.module)
+        if option.arg == "default":
+            source.default |= self._attrs_default(option.value, klass.module)
+        elif option.arg == "factory":
+            source.default |= self._attrs_factory(option.value, klass.module)
         elif option.arg == "alias":
             if isinstance(option.value, ast.Constant) and option.value.value is None:
                 return True
@@ -2015,6 +2052,26 @@ class _Resolver:
         else:
             self._attrs_field_other_option(option, key)
         return True
+
+    def _attrs_factory(self, expr: ast.expr, module: _Module) -> bool:
+        if isinstance(expr, ast.Constant) and expr.value is None:
+            return False
+        if isinstance(expr, ast.Lambda):
+            return True
+        if self._attrs_converter_node(expr, module) is not None:
+            return True
+        try:
+            target = self._ref(expr, module)
+        except RejectError:
+            target = None
+        if isinstance(target, _Class) or (
+            isinstance(target, _External)
+            and target.qualname.startswith("builtins.")
+            and callable(getattr(builtins, target.qualname.removeprefix("builtins."), None))
+        ):
+            return True
+        msg = "an attrs field has an indeterminate factory"
+        raise _invalid(msg)
 
     @staticmethod
     def _attrs_field_other_option(option: ast.keyword, key: str) -> None:
@@ -2582,7 +2639,7 @@ class _Resolver:
                 return None
         return None
 
-    def _attrs_converter(self, source: _Source, output: Elem) -> Elem:
+    def _attrs_converter(self, source: _Source, output: _Node) -> Elem:
         expr = source.converter
         if isinstance(expr, ast.Call) and self._external_name(expr.func, source.module) in {
             "attrs.Converter",
@@ -2605,12 +2662,31 @@ class _Resolver:
             if len(positional) == 1 and not (args.vararg or args.kwarg or args.kwonlyargs) and node.returns is not None:
                 annotation = positional[0].annotation
                 if annotation is not None:
-                    result = _to_elem(self._scoped(node.returns, module, (), {}), allow_none=True)
+                    result = self._attrs_annotation_node(node.returns, module, {})
                     input_ = _to_elem(self._scoped(annotation, module, (), {}), allow_none=True)
-                    if result == output and self._attrs_concrete(input_):
+                    if (
+                        result.none == output.none
+                        and frozenset(result.members) == frozenset(output.members)
+                        and self._attrs_concrete(input_)
+                    ):
                         return input_
         msg = f"field `{source.key}` has an unsupported converter signature"
         raise _invalid(msg)
+
+    def _attrs_annotation_node(self, expr: ast.expr, module: _Module, env: dict[str, _Arg]) -> _Node:
+        self._attrs_annotation = True
+        try:
+            return self._scoped(expr, module, (), env)
+        finally:
+            self._attrs_annotation = False
+
+    def _field_elem(self, expr: ast.expr, source: _Source, owner: _Owner) -> Elem:
+        env = self._field_env(owner, source)
+        elem = _to_elem(self._scoped(expr, source.module, (), env), allow_none=True)
+        if source.converter is not None:
+            output = self._attrs_annotation_node(expr, source.module, env)
+            elem = self._attrs_converter(source, output)
+        return elem
 
     def _field(
         self, source: _Source, owner: _Owner, *, names: tuple[str, ...] | None, reason: str | None
@@ -2619,9 +2695,7 @@ class _Resolver:
         self._in_field = True
         try:
             expr, override = self._strip_field(source.annotation, source.module)
-            elem = _to_elem(self._scoped(expr, source.module, (), self._field_env(owner, source)), allow_none=True)
-            if source.converter is not None:
-                elem = self._attrs_converter(source, elem)
+            elem = self._field_elem(expr, source, owner)
         except RejectError as reject:
             notes = [f"field defined at {source.module.path}:{span.line}:{span.col}"]
             if owner.generic is not None:

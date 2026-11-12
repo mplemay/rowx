@@ -100,6 +100,16 @@ class AttrsFactory:
     label: str = attrs.field(factory=attrs_factory)
 
 
+@attrs.define
+class AttrsNoneFactory:
+    value: int = attrs.field(factory=None)
+
+
+def test_attrs_none_factory_missing_column_on_empty_result(schema: str) -> None:
+    with pytest.raises(RowShapeError):
+        run_on(schema, "connection", query[AttrsNoneFactory](t"SELECT 1::int4 AS other WHERE false").all)
+
+
 def test_attrs_aliases_defaults_and_empty_results(schema: str) -> None:
     row = run_on(schema, "connection", query[AttrsRow](t"SELECT 7::int4 AS id").one)
     assert row == AttrsRow(7)

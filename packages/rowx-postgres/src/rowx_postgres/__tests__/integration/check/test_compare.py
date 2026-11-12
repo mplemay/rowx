@@ -299,6 +299,23 @@ def test_attrs_converter_compares_input_type_and_nullability(schema: str, tmp_pa
     assert "type-mismatch" in findings[2]
 
 
+def test_attrs_none_factory_missing_column_is_reported(schema: str, tmp_path: FilePath) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\n"
+        "@attrs.define\nclass Row:\n    value: int = attrs.field(factory=None)\n"
+        'query[Row](t"SELECT 1 AS other WHERE false")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,), backend=PG_RULES)
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    sql = "SELECT 1 AS other WHERE false"
+    outcomes = asyncio.run(describe_all(schema, [sql], 1, TIMEOUT_MS))
+    findings = compare(DescribeDesc(columns=tuple(describe_columns(outcomes, sql))), result.row_type, backend=PG_RULES)
+    assert "missing-column" in {finding.rule for finding in findings}
+
+
 # what the checker is documented to say regardless of the runtime value; `None` defers to the runtime oracle
 def documented(sql: SqlType, leaf: Leaf) -> bool | None:
     # a `void` column matches only the tuple element `None`, even against `Any`

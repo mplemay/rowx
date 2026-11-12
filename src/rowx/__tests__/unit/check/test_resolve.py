@@ -32,6 +32,10 @@ def test_glob_include_uses_literal_prefix_for_roots(tmp_path: Path) -> None:
         "@attrs.define\nclass Row:\n    value: int = attrs.field(alias=dynamic)",
         "@attrs.define\nclass Row:\n    a: int = attrs.field(alias='same')\n    b: int = attrs.field(alias='same')",
         "@attrs.define\nclass Row:\n    value: int = attrs.field(default=dynamic)",
+        "maybe_factory = int if dynamic else None\n@attrs.define\nclass Row:\n    value: int = attrs.field(factory=maybe_factory)",
+        "def erase(fn): return None\n@erase\ndef make(): return 1\n@attrs.define\nclass Row:\n    value: int = attrs.field(factory=make)",
+        "@attrs.define\nclass Row:\n    value: int\n    hidden = attrs.field(init=False, default=1)",
+        "@attrs.define\nclass Base:\n    hidden = attrs.field()\n@attrs.define\nclass Row(Base):\n    value: int",
         "def convert(value): return value\n@attrs.define\nclass Row:\n    value: int = attrs.field(converter=convert)",
         "@attrs.define\nclass Row:\n    value: int\n    def __init__(self, value): self.value = value",
     ],
@@ -63,6 +67,23 @@ def test_attrs_resolves_imported_converter_without_executing_source(tmp_path: Pa
     assert result.row_type is not None
     assert result.row_type.fields[0].elem.nullable
     assert result.row_type.fields[0].elem.leaf == "int"
+
+
+@pytest.mark.parametrize("reference", ["factories.make", "make", "alias", "frozenset"])
+def test_attrs_resolves_factory_without_executing_source(tmp_path: Path, reference: str) -> None:
+    (tmp_path / "factories.py").write_text('raise RuntimeError("must not execute")\ndef make(): return 1\n')
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nimport factories\nfrom factories import make\nfrom rowx import query\n"
+        "alias = factories.make\n"
+        f"@attrs.define\nclass Row:\n    value: int = attrs.field(factory={reference})\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert not result.row_type.fields[0].required
 
 
 def test_attrs_rejects_ambiguous_inherited_fields(tmp_path: Path) -> None:

@@ -49,7 +49,67 @@ from typing import Annotated, Any, ClassVar, Literal, NamedTuple, NotRequired, O
 NONE: Final[Plan] = ("none", 0, ())
 
 # (source_text, expected_plan_or_error, expected_checker_verdict); source text assigns `T`.
-ROWS: Final[list[Row]] = [
+ATTRS_ROWS: Final[list[Row]] = [
+    (
+        "@attrs.define\nclass T:\n    value: int = attrs.field(factory=lambda: 1)",
+        ("named", "validator", "by_name", (("value", ("value",), False, False),)),
+        "ok",
+    ),
+    (
+        "@attrs.define\nclass T:\n    visible: int = attrs.field()\n    hidden = attrs.field()",
+        "unresolved",
+        "invalid-row-type",
+    ),
+    (
+        "field_alias = attrs.field\n@attrs.define\nclass T:\n    hidden = field_alias()",
+        "unresolved",
+        "invalid-row-type",
+    ),
+    (
+        "@attrs.define\nclass T:\n    visible: int = attrs.field()\n    hidden = attrs.field(init=False, default=1)",
+        ("named", "validator", "by_name", (("visible", ("visible",), False, True),)),
+        "ok",
+    ),
+    *(
+        (
+            (
+                "async def convert(value: int) -> str: return str(value)\n@attrs.define\n"
+                f"class T:\n    value: str = attrs.field(converter={converter})"
+            ),
+            "unsupported converter",
+            "invalid-row-type",
+        )
+        for converter in ["convert", "attrs.Converter(convert)"]
+    ),
+    (
+        "@attrs.define\nclass T:\n    value: int = attrs.field(factory=None)",
+        ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+        "ok",
+    ),
+    (
+        "@attrs.define\nclass T:\n    a: int = attrs.field(default=1, factory=None)\n    b: int = attrs.field(factory=None, default=2)",
+        ("named", "validator", "by_name", (("a", ("a",), False, False), ("b", ("b",), False, False))),
+        "ok",
+    ),
+    *(
+        (
+            (
+                f"def convert(value: int) -> {output}: return value\n"
+                f"@attrs.define\nclass T:\n    value: {field} = attrs.field(converter=convert)"
+            ),
+            "unsupported converter",
+            "invalid-row-type",
+        )
+        for output, field in [("Any", "object"), ("object", "Any"), ("list[Any]", "list[object]")]
+    ),
+    (
+        (
+            "Alias = list[Any]\ndef convert(value: int) -> Annotated[Alias, 'out']: return []\n"
+            "@attrs.define\nclass T:\n    value: Annotated[list[Any], 'field'] = attrs.field(converter=convert)"
+        ),
+        ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+        "ok",
+    ),
     (
         "@attrs.define\nclass T:\n    value: Annotated[int, 'metadata']",
         ("named", "validator", "by_name", (("value", ("value",), False, True),)),
@@ -160,6 +220,10 @@ ROWS: Final[list[Row]] = [
         ("named", "validator", "by_name", (("x", ("x",), False, False), ("y", ("y",), False, False))),
         "ok",
     ),
+]
+
+ROWS: Final[list[Row]] = [
+    *ATTRS_ROWS,
     ("T = None", NONE, "ok"),
     ("T = int", ("scalar", 1, (False,)), "ok"),
     ("T = int | None", ("scalar", 1, (True,)), "ok"),
