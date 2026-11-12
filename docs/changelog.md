@@ -11,6 +11,9 @@
 - `rowx-embedded` now releases in lockstep with the other distributions (0.3.0, from the `v*` tag and `release.yml`)
   instead of as `18.4.0` on its own `embedded-v*` tag. It depends on the matching `rowx-postgres`, and `rowx[embedded]`
   pins `rowx-embedded==0.3.0`. The engine is still PostgreSQL 18.4.
+- A pool acquire that is retrying a connect now takes a connection that another caller returns meanwhile. Before, it
+  kept retrying until its timeout, so a pool whose server was at its connection limit could time out next to an idle
+  connection of its own.
 - A pool acquire that times out while connecting now raises `PoolTimeoutError` with the last connect error as its
   `__cause__`, and the message says so, instead of reporting the timeout alone.
 - `_fetch` / `_stream` take a core `ShapeSpec`, and the Postgres executor builds and caches the native shape.

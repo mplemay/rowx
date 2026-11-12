@@ -67,10 +67,6 @@ def _relative(path: Path) -> str:
 # the snippets that need what one embedded session cannot give, by file (relative to the repository root) and a line
 # that only that snippet holds (an index would shift the marks whenever a snippet is added before it)
 SERVER_SNIPPETS: Final[dict[tuple[str, str], pytest.MarkDecorator]] = {
-    # one connection is enough for it, but a pool that opens before its first query races the release of the connection
-    # it warmed: the acquire that finds nothing idle opens a second one and never looks at the idle list again, which one
-    # session refuses (a pool bug, not an engine limit); about a third of runs time out
-    ("README.md", "Pool(DSN, max_size=10)"): pytest.mark.server(needs="sessions"),
     ("docs/guide/executors.md", "min_size=1, max_size=4"): pytest.mark.server(needs="sessions"),
     ("docs/guide/executors.md", 'pool.transaction(isolation="serializable")'): pytest.mark.server(needs="sessions"),
     ("docs/guide/migrations.md", "0001_create_accounts.up.sql"): pytest.mark.server(needs="sessions"),

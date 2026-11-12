@@ -12,12 +12,16 @@ mod tests;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::{Future, poll_fn};
+use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::Poll;
 use std::time::Duration;
 
 use thiserror::Error;
 use tokio::runtime::Handle;
+use tokio::sync::futures::Notified;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -44,6 +48,31 @@ pub enum PoolError<E> {
 }
 
 type Terminate = Arc<dyn Fn() + Send + Sync>;
+
+// what an acquirer that found no idle connection ends up with: one it opened, or one that another
+// caller gave back meanwhile (which still has to be vetted like any idle connection)
+enum Opened<M: Manage> {
+    Connected(Parts<M>),
+    Returned(Parts<M>),
+}
+
+// `work`, unless `returned` (armed by the caller) fires first; once it has fired it stays ready
+async fn unless_returned<F: Future>(
+    work: F,
+    mut notified: Pin<&mut Notified<'_>>,
+) -> Option<F::Output> {
+    let mut work = pin!(work);
+    poll_fn(|cx| {
+        if let Poll::Ready(output) = work.as_mut().poll(cx) {
+            return Poll::Ready(Some(output));
+        }
+        if notified.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -85,6 +114,9 @@ struct Inner<M: Manage> {
     pid: u32,
     semaphore: Arc<Semaphore>,
     drained: Arc<Notify>,
+    // woken on every push to `idle`, so an acquirer that is retrying a connect takes a connection
+    // that came back instead (a server at its connection limit refuses the connect until it does)
+    returned: Notify,
     // oldest first, so `pop` reuses the most recently returned connection
     idle: Mutex<Vec<Parts<M>>>,
     // every connection, idle or not
@@ -185,6 +217,7 @@ impl<M: Manage> Inner<M> {
         }
         idle.push(parts);
         drop(idle);
+        self.returned.notify_waiters();
         Ok(())
     }
 
@@ -242,11 +275,18 @@ impl<M: Manage> Inner<M> {
     }
 
     // retried with backoff until `deadline`, and each attempt is bounded by `connect_timeout`
-    // and the last connect error is kept, so a timeout can say why nothing connected
-    async fn connect_until(&self, deadline: Instant) -> Result<Parts<M>, PoolError<M::Error>> {
+    // and the last connect error is kept, so a timeout can say why nothing connected. A connection
+    // returned to idle meanwhile ends the retries: it is taken instead of a new one
+    async fn connect_until(&self, deadline: Instant) -> Result<Opened<M>, PoolError<M::Error>> {
         let mut pause = FIRST_CONNECT_RETRY;
         let mut last: Option<M::Error> = None;
         loop {
+            // armed before the idle check, so a push between the two still wakes this attempt
+            let mut returned = pin!(self.returned.notified());
+            returned.as_mut().enable();
+            if let Some(parts) = self.pop_idle() {
+                return Ok(Opened::Returned(parts));
+            }
             let now = Instant::now();
             if now >= deadline {
                 return Err(
@@ -258,19 +298,22 @@ impl<M: Manage> Inner<M> {
                 .options
                 .connect_timeout
                 .map_or(remaining, |each| each.min(remaining));
-            match tokio::time::timeout(limit, self.manager.connect()).await {
-                Ok(Ok(conn)) => {
+            let attempt = tokio::time::timeout(limit, self.manager.connect());
+            match unless_returned(attempt, returned.as_mut()).await {
+                Some(Ok(Ok(conn))) => {
                     self.size.fetch_add(1, Ordering::AcqRel);
                     // no caller has initialised it yet either, so the `init` hook still has to run
-                    return Ok(Parts {
+                    return Ok(Opened::Connected(Parts {
                         conn,
                         meta: self.meta(true),
-                    });
+                    }));
                 }
-                Ok(Err(err)) => last = Some(err),
-                Err(_) => {}
+                Some(Ok(Err(err))) => last = Some(err),
+                // a timed-out attempt, or a returned connection that the next round takes
+                Some(Err(_)) | None => {}
             }
-            tokio::time::sleep_until((Instant::now() + pause).min(deadline)).await;
+            let pause_until = (Instant::now() + pause).min(deadline);
+            unless_returned(tokio::time::sleep_until(pause_until), returned.as_mut()).await;
             pause = (pause * 2).min(MAX_CONNECT_RETRY);
         }
     }
@@ -433,6 +476,7 @@ impl<M: Manage> Pool<M> {
                 pid: std::process::id(),
                 semaphore: Arc::new(Semaphore::new(max_size)),
                 drained: Arc::new(Notify::new()),
+                returned: Notify::new(),
                 idle: Mutex::new(Vec::new()),
                 size: AtomicUsize::new(0),
                 waiting: AtomicUsize::new(0),
@@ -485,9 +529,18 @@ impl<M: Manage> Pool<M> {
             return Err(CoreError::PoolClosed.into());
         }
         loop {
-            let Some(parts) = inner.pop_idle() else {
-                held.parts = Some(inner.connect_until(deadline).await?);
-                break;
+            let idle = inner.pop_idle();
+            let parts = if let Some(parts) = idle {
+                parts
+            } else {
+                let opened = inner.connect_until(deadline).await?;
+                match opened {
+                    Opened::Connected(parts) => {
+                        held.parts = Some(parts);
+                        break;
+                    }
+                    Opened::Returned(parts) => parts,
+                }
             };
             // owned by the guard from here on, so a cancelled acquire still closes it
             held.parts = Some(parts);
