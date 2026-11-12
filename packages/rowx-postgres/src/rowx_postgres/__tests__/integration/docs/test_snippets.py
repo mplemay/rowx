@@ -253,6 +253,30 @@ def test_skill_testing_reference_allows_asyncio_tests() -> None:
     assert "Trio" in text
 
 
+def test_skill_integrations_cover_sqlalchemy_and_fastapi() -> None:
+    skill = USE_ROWX_SKILL.read_text()
+    sqlalchemy = (USE_ROWX_SKILL.parent / "references" / "sqlalchemy.md").read_text()
+    fastapi = (USE_ROWX_SKILL.parent / "references" / "fastapi.md").read_text()
+    assert "references/sqlalchemy.md" in skill
+    assert "references/fastapi.md" in skill
+    assert "unit of work" in skill
+    assert "identity map" in skill
+    for text in (skill, sqlalchemy):
+        assert "tstring()" in text
+        assert "scalar_one" in text
+        assert "relationship()" in text
+        assert "rowx migrate" in text
+    assert "pydantic" in sqlalchemy
+    assert "Pool(DSN)" in sqlalchemy
+    assert "lifespan" in fastapi
+    assert "Depends" in fastapi
+    assert "await pool.close()" in fastapi
+    assert 'scope="function"' in fastapi
+    assert "RowNotFound" in fastapi
+    assert "pool.acquire()" in fastapi
+    assert "pool.transaction()" in fastapi
+
+
 def test_parametrization_runs_every_fence() -> None:
     # The decorator sets pytestmark at import. ty does not treat that attribute as declared.
     raw = vars(test_snippet_runs).get("pytestmark")
