@@ -227,6 +227,13 @@ def test_rowx_name_mismatch_fails(tmp_path: Path) -> None:
         VALIDATE_WHEEL(path)
 
 
+def test_packaged_skill_is_a_development_file(tmp_path: Path) -> None:
+    entry = f"{ROWX}/.agents/skills/use-rowx/SKILL.md"
+    path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, extras=((entry, b"# skill\n"),)))
+    with pytest.raises(SystemExit, match=r"contains a development file: rowx/\.agents/skills/use-rowx/SKILL\.md"):
+        VALIDATE_WHEEL(path)
+
+
 def test_rowx_version_mismatch_fails(tmp_path: Path) -> None:
     path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, metadata_version=WRONG_VERSION))
     with pytest.raises(SystemExit, match=r"Version is '9\.9\.9'"):

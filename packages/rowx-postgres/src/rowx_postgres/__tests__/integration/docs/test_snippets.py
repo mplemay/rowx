@@ -18,6 +18,13 @@ ROOT: Final[Path] = next(parent for parent in Path(__file__).resolve().parents i
 # `.agents/skills/` may be absent; the pattern stays so a later skill page is picked up.
 DOC_GLOBS: Final[tuple[str, ...]] = ("README.md", "docs/**/*.md", ".agents/skills/**/*.md")
 SNIPPET: Final[Pattern[str]] = re_compile(r"^```python test\n(?P<body>.*?)^```$", MULTILINE | DOTALL)
+USE_ROWX_SKILL: Final[Path] = ROOT / ".agents" / "skills" / "use-rowx" / "SKILL.md"
+USE_ROWX_SKILL_URL: Final[str] = "https://github.com/mplemay/rowx/blob/main/.agents/skills/use-rowx/SKILL.md"
+FENCED_BLOCK: Final[Pattern[str]] = re_compile(r"^```.*?^```$", MULTILINE | DOTALL)
+INLINE_CODE: Final[Pattern[str]] = re_compile(r"`[^`]*`")
+INLINE_LINK: Final[Pattern[str]] = re_compile(r"\[[^]]*\]\(([^)]*)\)")
+REFERENCE_DEFINITION: Final[Pattern[str]] = re_compile(r"^\[[^]]+\]:[ \t]+(\S+)", MULTILINE)
+EXTERNAL_LINK_PREFIXES: Final[tuple[str, ...]] = ("http://", "https://", "mailto:")
 
 
 # the testing guide snippet runs the plugin in a temporary project, whose template (cached for the next run of a real
@@ -118,6 +125,129 @@ def test_published_readmes_use_canonical_imports() -> None:
     assert "The checker never imports" in why_text
 
     assert "why.md" in zensical
+
+
+def _link_destinations(text: str) -> list[str]:
+    # Fenced blocks and inline code are not markdown links. `query[T](t"...")` is code, not a link.
+    prose = INLINE_CODE.sub("", FENCED_BLOCK.sub("", text))
+    inline = [match.group(1) for match in INLINE_LINK.finditer(prose)]
+    defined = [match.group(1) for match in REFERENCE_DEFINITION.finditer(prose)]
+    return [*inline, *defined]
+
+
+def _relative_target(destination: str) -> str | None:
+    target = destination.strip()
+    if len(target) >= 2 and target[0] == "<" and target[-1] == ">":
+        target = target[1:-1].strip()
+    target = target.split(maxsplit=1)[0]
+    if target.startswith(EXTERNAL_LINK_PREFIXES):
+        return None
+    path = target.split("#", 1)[0]
+    if not path:
+        return None
+    return path
+
+
+def test_use_rowx_skill_is_discovered() -> None:
+    assert USE_ROWX_SKILL in set(_doc_files())
+
+
+def test_use_rowx_skill_is_linked() -> None:
+    readme = (ROOT / "README.md").read_text()
+    index = (ROOT / "docs" / "index.md").read_text()
+    testing = (ROOT / "docs" / "contributing" / "testing.md").read_text()
+    assert ".agents/skills/use-rowx/SKILL.md" in readme
+    assert USE_ROWX_SKILL_URL in index
+    assert USE_ROWX_SKILL_URL in testing
+
+
+def test_use_rowx_skill_links_resolve() -> None:
+    sources = sorted(USE_ROWX_SKILL.parent.rglob("*.md"))
+    assert sources
+    for source in sources:
+        for destination in _link_destinations(source.read_text()):
+            if (relative := _relative_target(destination)) is None:
+                continue
+            resolved = (source.parent / relative).resolve()
+            assert resolved.is_relative_to(ROOT), f"{source.relative_to(ROOT)} -> {destination}"
+            assert resolved.is_file(), f"{source.relative_to(ROOT)} -> {destination}"
+
+
+def _python_fence_after(text: str, label: str) -> str:
+    start = text.index(f"{label}:")
+    fence = text.index("```python\n", start)
+    body_start = fence + len("```python\n")
+    return text[body_start : text.index("\n```", body_start)]
+
+
+def test_skill_import_rule_does_not_export_connect() -> None:
+    text = (USE_ROWX_SKILL.parent / "rules" / "imports.md").read_text()
+    assert "`connect` imported from `rowx` or `rowx_core`" not in text
+    assert "`connect` is not exported by `rowx` or `rowx_core`" in text
+
+
+def test_skill_reset_rule_names_the_role() -> None:
+    text = (USE_ROWX_SKILL.parent / "rules" / "reset.md").read_text()
+    assert "neither the role nor session authorization" in text
+
+
+def test_skill_migration_samples_match_the_commands() -> None:
+    rules = (USE_ROWX_SKILL.parent / "rules" / "migrations.md").read_text()
+    add, reset = rules.split("## Validate before reset drops", maxsplit=1)
+    assert "rowx migrate add" in add
+    assert "migrator.run" not in add
+    assert "rowx database reset" in reset
+    assert "rowx database drop" in reset
+    reference = (USE_ROWX_SKILL.parent / "references" / "migrations.md").read_text()
+    assert "rowx migrate add" in reference
+    assert "rowx database reset" in reference
+    assert "migrator.run" not in reference
+
+
+def test_skill_unchecked_section_calls_query_unchecked() -> None:
+    text = (USE_ROWX_SKILL.parent / "rules" / "diagnostics.md").read_text()
+    heading = "## `query_unchecked` SQL is not described"
+    start = text.index(heading)
+    next_heading = text.find("\n## ", start + 1)
+    section = text[start:] if next_heading < 0 else text[start:next_heading]
+    incorrect = _python_fence_after(section, "Incorrect")
+    correct = _python_fence_after(section, "Correct")
+    assert "query_unchecked[str]" in incorrect
+    assert "query[str]" in correct
+    assert "query_unchecked" not in correct
+    assert "SQL is not described" in section
+    assert "dict" not in section
+    assert "query[str](sql)" in text[:start]
+
+
+def test_skill_any_list_is_one_parameter() -> None:
+    text = (USE_ROWX_SKILL.parent / "rules" / "parameters.md").read_text()
+    start = text.index("## Lists use ANY")
+    section = text[start : text.index("\n## ", start + 1)]
+    assert "one parameter" in section
+    incorrect = _python_fence_after(section, "Incorrect")
+    assert any('f"' in line for line in incorrect.splitlines())
+    call = incorrect[incorrect.index("query[") :].split(")", 1)[0]
+    assert 't"' not in call
+    assert "ANY(" in _python_fence_after(section, "Correct")
+
+
+def test_skill_drift_gate_states_its_conditions() -> None:
+    text = (USE_ROWX_SKILL.parent / "references" / "migrations.md").read_text()
+    assert "--no-drift-check" in text
+    assert "--scratch" in text
+    assert "would be described" in text
+
+
+def test_skill_fetch_has_no_io_until_iteration() -> None:
+    text = (USE_ROWX_SKILL.parent / "references" / "queries.md").read_text()
+    assert "no IO until iteration" in text
+
+
+def test_skill_testing_reference_allows_asyncio_tests() -> None:
+    text = (USE_ROWX_SKILL.parent / "references" / "testing.md").read_text()
+    assert "asyncio.run" in text
+    assert "Trio" in text
 
 
 def test_parametrization_runs_every_fence() -> None:
