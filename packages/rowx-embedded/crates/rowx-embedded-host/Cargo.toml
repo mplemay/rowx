@@ -16,7 +16,7 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
 thiserror = "2"
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14", default-features = false }
 
 [lints]
 workspace = true
