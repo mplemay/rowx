@@ -407,3 +407,141 @@ def test_attrs_deferred_loop_and_local_generator(tmp_path: Path) -> None:
     assert result.diagnostic is None
     assert result.row_type is not None
     assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize(
+    "hook",
+    [
+        "@value.default\n    class Maker:\n        def __init__(self, row): pass",
+        "@value.default(lambda self: 1)\n    def hook(): pass",
+        "@identity(value.default(lambda self: 1))\n    def hook(self): pass",
+        "@identity(value.default(lambda self: 1))\n    async def hook(self): pass",
+        "def hook(self, arg=value.default(lambda self: 1)): pass",
+    ],
+)
+def test_attrs_rejects_eager_local_header_registration(tmp_path: Path, hook: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\ndef identity(x): return lambda f: f\n"
+        f"@attrs.define\nclass Row:\n    value: int = attrs.field()\n    {hook}\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[(alias := spec) for _ in (1,)]",
+        "[[(alias := spec) for _ in (1,)] for _ in (1,)]",
+        "[(alias := spec if flag else None) for _ in (1,)]",
+        "[0 for _ in (1,) if (alias := spec)]",
+    ],
+)
+def test_attrs_shared_field_comprehension_walrus(tmp_path: Path, expression: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        f"unused = {expression}\nalias.default(lambda self: 1)\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+def test_attrs_reexported_module_mutation_without_execution(tmp_path: Path) -> None:
+    (tmp_path / "fields.py").write_text("import attrs\nraise RuntimeError('must not execute')\nspec = attrs.field()\n")
+    (tmp_path / "exports.py").write_text("import fields\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nfrom exports import fields\n"
+        "fields.spec.default(lambda self: 1)\n@attrs.define\nclass Row:\n    value: int = fields.spec\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+@pytest.mark.parametrize(("target", "iterable"), [("spec", "(attrs.field(),)"), ("(spec,)", "((attrs.field(),),)")])
+def test_attrs_class_loop_fresh_field_shadows_shared(tmp_path: Path, target: str, iterable: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        f"class Helper:\n    for {target} in {iterable}:\n        spec.default(lambda self: 1)\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "for alias in (value,):\n        alias.default(lambda self: 1)",
+        "for (alias,) in ((value,),):\n        alias.default(lambda self: 1)",
+        "unused = [alias.default(lambda self: 1) for alias in (value,)]",
+        "for alias in (value,):\n        copy = alias\n        copy.default(lambda self: 1)\n    del alias, copy",
+    ],
+)
+@pytest.mark.parametrize("private", [False, True])
+def test_attrs_local_field_loop_alias_registration(tmp_path: Path, body: str, *, private: bool) -> None:
+    path = tmp_path / "case.py"
+    name = "__value" if private else "value"
+    alias = "__alias" if private else "alias"
+    body = body.replace("value", name).replace("alias", alias)
+    path.write_text(
+        "import attrs\nfrom rowx import query\n@attrs.define\nclass Row:\n"
+        f'    {name}: int = attrs.field()\n    {body}\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_attrs_local_loop_alias_shadow_is_unrelated(tmp_path: Path, *, private: bool) -> None:
+    path = tmp_path / "case.py"
+    source = (
+        "import attrs\nfrom rowx import query\n@attrs.define\nclass Row:\n"
+        "    value: int = attrs.field()\n"
+        "    for alias in (value,):\n        for alias in (attrs.field(),):\n            alias.default(lambda self: 1)\n"
+        '    del alias\nquery[Row](t"select 1")\n'
+    )
+    if private:
+        source = source.replace("value", "__value").replace("alias", "__alias")
+    path.write_text(source)
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_attrs_local_loop_copy_shadow_is_unrelated(tmp_path: Path, *, private: bool) -> None:
+    path = tmp_path / "case.py"
+    source = (
+        "import attrs\nfrom rowx import query\n@attrs.define\nclass Row:\n"
+        "    value: int = attrs.field()\n"
+        "    for alias in (value,):\n        copy = alias\n        copy = attrs.field()\n"
+        "        copy.default(lambda self: 1)\n    del alias, copy\nquery[Row](t'select 1')\n"
+    )
+    if private:
+        source = source.replace("value", "__value").replace("alias", "__alias").replace("copy", "__copy")
+    path.write_text(source)
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required

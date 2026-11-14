@@ -680,6 +680,22 @@ def test_parameter_comparison_coverage_for_array_leaves() -> None:
     "declaration",
     [
         (
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n"
+            "    for alias in (value,):\n        alias.default(lambda self: 42)\n"
+        ),
+        (
+            "spec = attrs.field()\nunused = [(alias := spec) for _ in (1,)]\nalias.default(lambda self: 42)\n"
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = spec\n"
+        ),
+        (
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n"
+            "    @value.default\n    class Maker:\n        def __init__(self, row): pass\n"
+        ),
+        (
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n"
+            "    @value.default(lambda self: 42)\n    def method(): pass\n"
+        ),
+        (
             "spec = attrs.field()\nfor alias, in ((spec,),):\n    alias.default(lambda self: 42)\n"
             "@attrs.define\nclass Row:\n    id: int\n    value: int = spec\n"
         ),

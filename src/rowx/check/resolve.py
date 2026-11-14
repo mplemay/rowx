@@ -2072,7 +2072,7 @@ class _Resolver:
         module: _Module,
         globals_: dict[str, bool | _Module],
     ) -> bool:
-        local: dict[str, bool | _Module] = {}
+        local = scope.copy()
         for index, generator in enumerate(node.generators):
             current = scope if index == 0 else local
             if self._attrs_scan_eager(generator.iter, current, field, module, globals_):
@@ -2100,7 +2100,26 @@ class _Resolver:
             if any(self._attrs_scan_eager(test, local, field, module, globals_) for test in generator.ifs):
                 return True
         values = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
-        return any(self._attrs_scan_eager(value, local, field, module, globals_) for value in values)
+        found = any(self._attrs_scan_eager(value, local, field, module, globals_) for value in values)
+        self._attrs_merge_walrus(node, scope, local)
+        return found
+
+    @staticmethod
+    def _attrs_merge_walrus(node: ast.AST, scope: dict[str, bool | _Module], local: dict[str, bool | _Module]) -> None:
+        # Assignment expressions in eager comprehensions bind outside their loop scope.
+        pending = [node]
+        while pending:
+            item = pending.pop()
+            if (
+                isinstance(item, ast.NamedExpr)
+                and (binding := local.get(item.target.id)) is not None
+                and binding is not False
+            ):
+                scope[item.target.id] = binding
+            if isinstance(item, ast.GeneratorExp):
+                pending.append(item.generators[0].iter)
+            elif not isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+                pending.extend(ast.iter_child_nodes(item))
 
     def _attrs_scan_body(
         self,
@@ -2202,6 +2221,7 @@ class _Resolver:
         ):
             msg = "an attrs default registration has an indeterminate loop binding"
             raise _invalid(msg)
+        branch_scope.update(dict.fromkeys(targets, False))
         for value in values:
             bindings = scope.copy()
             self._attrs_bind_target((node.target, value), bindings, field, module, globals_=globals_)
@@ -2244,6 +2264,10 @@ class _Resolver:
                 return scope[expr.id]
             if expr.id in globals_:
                 return globals_[expr.id]
+        if isinstance(expr, ast.IfExp):
+            return self._attrs_class_value(expr.body, scope, field, module, globals_) or self._attrs_class_value(
+                expr.orelse, scope, field, module, globals_
+            )
         if self._attrs_is_shared(expr, scope, field, module, globals_):
             return True
         try:
@@ -2269,9 +2293,14 @@ class _Resolver:
                 scope[name] = origin is not None and self._attrs_is_shared(
                     ast.Name(id=alias.name, ctx=ast.Load()), {}, field, origin, {}
                 )
-                if origin is not None and alias.name not in origin.bindings:
+                if origin is not None and not scope[name]:
                     with suppress(RejectError):
-                        scope[name] = self._submodule(origin, alias.name).module
+                        ref = self._ref(ast.Name(id=alias.name, ctx=ast.Load()), origin)
+                        if isinstance(ref, _ModuleRef):
+                            scope[name] = ref.module
+                    if alias.name not in origin.bindings:
+                        with suppress(RejectError):
+                            scope[name] = self._submodule(origin, alias.name).module
 
     def _attrs_bind_class(
         self,
@@ -2483,6 +2512,7 @@ class _Resolver:
     @staticmethod
     def _attrs_default_hooks(info: _Info, node: ast.ClassDef, klass: _Class) -> None:
         _Resolver._attrs_reject_nested_hooks(info, node, klass)
+        _Resolver._attrs_reject_local_loop_aliases(info, node, klass)
         for stmt in node.body:
             if not isinstance(stmt, ast.FunctionDef):
                 continue
@@ -2502,7 +2532,17 @@ class _Resolver:
     def _attrs_reject_nested_hooks(info: _Info, node: ast.ClassDef, klass: _Class) -> None:
         pending: list[ast.AST] = []
         for stmt in node.body:
-            if isinstance(stmt, ast.FunctionDef):
+            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                pending.extend(
+                    decorator
+                    for decorator in stmt.decorator_list
+                    if not (
+                        isinstance(stmt, ast.FunctionDef)
+                        and isinstance(decorator, ast.Attribute)
+                        and decorator.attr == "default"
+                        and isinstance(decorator.value, ast.Name)
+                    )
+                )
                 pending.extend(stmt.args.defaults)
                 pending.extend(item for item in stmt.args.kw_defaults if item is not None)
             else:
@@ -2524,8 +2564,95 @@ class _Resolver:
                 pending.extend(decorators)
                 pending.extend(item.args.defaults)
                 pending.extend(value for value in item.args.kw_defaults if value is not None)
-            elif not isinstance(item, ast.ClassDef):
+            elif isinstance(item, ast.ClassDef):
+                pending.extend([*item.decorator_list, *item.bases, *item.keywords])
+            else:
                 pending.extend(ast.iter_child_nodes(item))
+
+    @staticmethod
+    def _attrs_local_loop_bindings(
+        target: ast.expr, iterable: ast.expr, aliases: set[str], class_name: str
+    ) -> set[str]:
+        bound: set[str] = set()
+        values = iterable.elts if isinstance(iterable, ast.Tuple | ast.List | ast.Set) else []
+        pairs = [(target, value) for value in values]
+        while pairs:
+            dest, source = pairs.pop()
+            if (
+                isinstance(dest, ast.Name)
+                and isinstance(source, ast.Name)
+                and _mangle(class_name, source.id) in aliases
+            ):
+                bound.add(_mangle(class_name, dest.id))
+            elif isinstance(dest, ast.Tuple | ast.List) and isinstance(source, ast.Tuple | ast.List):
+                pairs.extend(zip(dest.elts, source.elts, strict=False))
+        return bound
+
+    @staticmethod
+    def _attrs_local_loop_body(
+        body: list[ast.stmt], aliases: set[str], class_name: str
+    ) -> list[tuple[ast.AST, set[str]]]:
+        pending: list[tuple[ast.AST, set[str]]] = []
+        current = aliases.copy()
+        for stmt in body:
+            pending.append((stmt, current.copy()))
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        name = _mangle(class_name, target.id)
+                        current.discard(name)
+                        if isinstance(stmt.value, ast.Name) and _mangle(class_name, stmt.value.id) in aliases:
+                            current.add(name)
+                aliases = current.copy()
+        return pending
+
+    @staticmethod
+    def _attrs_reject_local_loop_aliases(info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+        fields = set(info.fields)
+        pending: list[tuple[ast.AST, set[str]]] = [(stmt, fields) for stmt in node.body]
+        while pending:
+            item, aliases = pending.pop()
+            if isinstance(item, ast.GeneratorExp):
+                pending.append((item.generators[0].iter, aliases))
+                continue
+            if isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+                header = [*item.args.defaults, *(value for value in item.args.kw_defaults if value is not None)]
+                if not isinstance(item, ast.Lambda):
+                    header.extend(item.decorator_list)
+                pending.extend((child, aliases) for child in header)
+                continue
+            if isinstance(item, ast.ClassDef):
+                pending.extend((child, aliases) for child in [*item.decorator_list, *item.bases, *item.keywords])
+                continue
+            if isinstance(item, ast.ListComp | ast.SetComp | ast.DictComp):
+                aliases = aliases.copy()
+                for generator in item.generators:
+                    bound = _Resolver._attrs_local_loop_bindings(generator.target, generator.iter, aliases, node.name)
+                    aliases.difference_update(
+                        _mangle(node.name, target.id)
+                        for target in ast.walk(generator.target)
+                        if isinstance(target, ast.Name)
+                    )
+                    aliases |= bound
+            elif isinstance(item, ast.For | ast.AsyncFor):
+                bound = _Resolver._attrs_local_loop_bindings(item.target, item.iter, aliases, node.name)
+                aliases = aliases.copy()
+                aliases.difference_update(
+                    _mangle(node.name, target.id) for target in ast.walk(item.target) if isinstance(target, ast.Name)
+                )
+                aliases |= bound
+                pending.extend(_Resolver._attrs_local_loop_body(item.body, aliases, node.name))
+                pending.extend((child, aliases) for child in [item.iter, *item.orelse])
+                continue
+            if (
+                isinstance(item, ast.Attribute)
+                and item.attr == "default"
+                and isinstance(item.value, ast.Name)
+                and _mangle(node.name, item.value.id) in aliases - fields
+            ):
+                msg = f"`{klass.name}` has an unsupported attrs default registration"
+                raise _invalid(msg)
+            pending.extend((child, aliases) for child in ast.iter_child_nodes(item))
 
     def _attrs_default(self, expr: ast.expr, module: _Module) -> bool:
         if self._external_name(expr, module) in {"attrs.NOTHING", "attr.NOTHING"}:

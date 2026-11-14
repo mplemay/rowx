@@ -1404,3 +1404,96 @@ def test_attrs_comprehension_default_omission_and_empty_results(schema: str) -> 
 
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_nested_class_default_omission_and_empty_results(schema: str) -> None:
+    @attrs.define
+    class Row:
+        id: int
+        value: object = attrs.field()
+
+        @value.default  # ty: ignore[call-non-callable]
+        class Maker:
+            def __init__(self, row: object) -> None:
+                pass
+
+    assert isinstance(run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one).value, Row.Maker)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_decorator_expression_default_omission_and_empty_results(schema: str) -> None:
+    def identity[T](_value: object) -> Callable[[T], T]:
+        return lambda func: func
+
+    @attrs.define
+    class Row:
+        id: int
+        value: int = attrs.field()
+
+        @identity(value.default(lambda _self: 42))  # ty: ignore[call-non-callable]
+        def method(self) -> None:
+            pass
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_walrus_default_omission_and_empty_results(schema: str) -> None:
+    spec = attrs.field()
+    unused = [(alias := spec) for _ in (1,)]
+    assert unused
+    alias.default(lambda _self: 42)
+
+    @attrs.define
+    class Row:
+        id: int
+        value: int = spec
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_local_loop_alias_default_omission_and_empty_results(schema: str) -> None:
+    @attrs.define
+    class Row:
+        id: int
+        value: int = attrs.field()
+        for alias in (value,):
+            alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del alias
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_fresh_class_loop_field_keeps_shared_field_required(schema: str) -> None:
+    spec = attrs.field()
+
+    class Helper:
+        for spec in (attrs.field(),):
+            spec.default(lambda _self: 42)
+
+    assert Helper
+
+    @attrs.define
+    class Row:
+        id: int
+        value: int = spec
+
+    with pytest.raises(RowShapeError):
+        run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all)
+
+
+def test_attrs_private_loop_copy_default_omission_and_empty_results(schema: str) -> None:
+    @attrs.define
+    class Row:
+        id: int
+        __value: int = attrs.field()
+        for alias in (__value,):
+            copy = alias
+            copy.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del alias, copy
+
+    result = run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one)
+    assert attrs.astuple(result) == (7, 42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
