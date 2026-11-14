@@ -674,3 +674,34 @@ def test_parameter_comparison_coverage_for_array_leaves() -> None:
         None,
         False,
     )
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        (
+            "spec = attrs.field()\nfor alias, in ((spec,),):\n    alias.default(lambda self: 42)\n"
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = spec\n"
+        ),
+        (
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n"
+            "    if True:\n        @value.default\n        def make(self): return 42\n"
+        ),
+        "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n    value.default(lambda self: 42)\n",
+    ],
+)
+def test_attrs_flow_default_rejected_before_empty_result_comparison(
+    schema: str, tmp_path: FilePath, declaration: str
+) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\n" + declaration + 'query[Row](t"SELECT 7::int4 AS id WHERE false")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,), backend=PG_RULES)
+    assert result.row_type is None
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+    sql = "SELECT 7::int4 AS id WHERE false"
+    outcomes = asyncio.run(describe_all([schema], [sql], TIMEOUT_MS, backend=PG_RULES))
+    assert len(describe_columns(outcomes, sql)) == 1

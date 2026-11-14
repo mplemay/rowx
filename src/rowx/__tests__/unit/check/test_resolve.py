@@ -326,3 +326,84 @@ def test_attrs_rejects_ambiguous_inherited_fields(tmp_path: Path) -> None:
     result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
     assert result.diagnostic is not None
     assert result.diagnostic.rule == "invalid-row-type"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "for alias in (spec,):\n    alias.default(lambda self: 1)",
+        "if True:\n    alias, = (spec,)\nalias.default(lambda self: 1)",
+        "if True:\n    alias, = (spec,)\n    class Helper:\n        alias.default(lambda self: 1)",
+        "for alias in (spec,):\n    class Helper:\n        alias.default(lambda self: 1)",
+        "class Helper:\n    for alias, in ((spec,),):\n        alias.default(lambda self: 1)",
+        "class Helper:\n    for [alias] in ([spec],):\n        alias.default(lambda self: 1)",
+        "unused = (x for x in (spec.default(lambda self: 1),))",
+        "unused = [spec.default(lambda self: 1) for _ in ()]",
+        "unused = [alias.default(lambda self: 1) for alias in (spec,)]",
+        "unused = {alias.default(lambda self: 1) for alias, in ((spec,),)}",
+        "unused = {0: alias.default(lambda self: 1) for alias in (spec,)}",
+        "for alias in unknown():\n    alias.default(lambda self: 1)",
+        "unused = [alias.default(lambda self: 1) for alias in unknown()]",
+    ],
+)
+def test_attrs_shared_field_flow_mutation(tmp_path: Path, mutation: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        f"{mutation}\n@attrs.define\nclass Row:\n    value: int = spec\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+def test_attrs_shared_field_unconsumed_generator(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        "unused = (spec.default(lambda self: 1) for _ in ())\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize(
+    "hook",
+    [
+        "if True:\n        @value.default\n        def make(self): return 1",
+        "if True:\n        if True:\n            @value.default\n            def make(self): return 1",
+        "value.default(lambda self: 1)",
+    ],
+)
+def test_attrs_rejects_unsupported_local_default_registration(tmp_path: Path, hook: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\n@attrs.define\nclass Row:\n"
+        f'    value: int = attrs.field()\n    {hook}\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+def test_attrs_deferred_loop_and_local_generator(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        "for alias in unknown():\n    def later(): alias.default(lambda self: 1)\n"
+        "@attrs.define\nclass Row:\n    value: int = spec\n"
+        "    (value.default(lambda self: 1) for _ in ())\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required

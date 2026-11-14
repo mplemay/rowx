@@ -14,7 +14,7 @@ from rowx.check.model import Diagnostic, QueryCall, Rule, Span
 from rowx.check.walk import literal_prefix
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from rowx_core.backend import CheckerBackend
 
@@ -1999,11 +1999,7 @@ class _Resolver:
         if module.tree is None:
             return False
         globals_: dict[str, bool | _Module] = {}
-        for node in module.tree.body:
-            if self._attrs_scan_eager(node, globals_, field, module, globals_):
-                return True
-            self._attrs_bind_class(node, globals_, field, module, globals_)
-        return False
+        return self._attrs_scan_body(module.tree.body, globals_, field, module, globals_)
 
     def _attrs_is_shared(
         self,
@@ -2038,6 +2034,10 @@ class _Resolver:
         module: _Module,
         globals_: dict[str, bool | _Module],
     ) -> bool:
+        if isinstance(node, ast.GeneratorExp):
+            node = node.generators[0].iter
+        elif isinstance(node, ast.ListComp | ast.SetComp | ast.DictComp):
+            return self._attrs_scan_comprehension(node, scope, field, module, globals_)
         if (
             isinstance(node, ast.Attribute)
             and node.attr == "default"
@@ -2048,7 +2048,7 @@ class _Resolver:
             if self._attrs_scan_eager(node.value, scope, field, module, globals_):
                 return True
             scope[node.target.id] = self._attrs_class_value(node.value, scope, field, module, globals_)
-            return False
+            node = ast.Constant(value=None)
         if isinstance(node, ast.ClassDef):
             # Nested classes do not close over the enclosing class namespace.
             header = [*node.decorator_list, *node.bases, *node.keywords]
@@ -2063,6 +2063,44 @@ class _Resolver:
                 self._attrs_scan_eager(item, scope, field, module, globals_) for item in header if item is not None
             )
         return any(self._attrs_scan_eager(item, scope, field, module, globals_) for item in ast.iter_child_nodes(node))
+
+    def _attrs_scan_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        local: dict[str, bool | _Module] = {}
+        for index, generator in enumerate(node.generators):
+            current = scope if index == 0 else local
+            if self._attrs_scan_eager(generator.iter, current, field, module, globals_):
+                return True
+            targets = [target.id for target in ast.walk(generator.target) if isinstance(target, ast.Name)]
+            local.update(dict.fromkeys(targets, False))
+            literal = isinstance(generator.iter, ast.Tuple | ast.List | ast.Set)
+            values = generator.iter.elts if literal else []
+            expressions = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+            if (
+                not literal
+                or (
+                    isinstance(generator.target, ast.Tuple | ast.List)
+                    and any(not isinstance(value, ast.Tuple | ast.List) for value in values)
+                )
+            ) and self._attrs_loop_default([*expressions, *generator.ifs], set(targets)):
+                msg = "an attrs default registration has an indeterminate comprehension binding"
+                raise _invalid(msg)
+            for value in values:
+                bindings = current.copy()
+                self._attrs_bind_target((generator.target, value), bindings, field, module, globals_=globals_)
+                for target in ast.walk(generator.target):
+                    if isinstance(target, ast.Name) and bool(bindings.get(target.id)):
+                        local[target.id] = bindings[target.id]
+            if any(self._attrs_scan_eager(test, local, field, module, globals_) for test in generator.ifs):
+                return True
+        values = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+        return any(self._attrs_scan_eager(value, local, field, module, globals_) for value in values)
 
     def _attrs_scan_body(
         self,
@@ -2098,8 +2136,10 @@ class _Resolver:
         if self._attrs_scan_eager(node.test, scope, field, module, globals_):
             return True
         left, right = scope.copy(), scope.copy()
-        if self._attrs_scan_body(node.body, left, field, module, globals_) or self._attrs_scan_body(
-            node.orelse, right, field, module, globals_
+        left_globals = left if scope is globals_ else globals_
+        right_globals = right if scope is globals_ else globals_
+        if self._attrs_scan_body(node.body, left, field, module, left_globals) or self._attrs_scan_body(
+            node.orelse, right, field, module, right_globals
         ):
             return True
         for name in left.keys() | right.keys():
@@ -2130,14 +2170,65 @@ class _Resolver:
                 elif self._attrs_scan_eager(child, scope, field, module, globals_):
                     return True
         branch_scope = scope.copy()
-        if isinstance(node, ast.For | ast.AsyncFor) and isinstance(node.target, ast.Name):
-            values = node.iter.elts if isinstance(node.iter, ast.List | ast.Tuple | ast.Set) else [node.iter]
-            if any(self._attrs_is_shared(value, scope, field, module, globals_) for value in values):
-                branch_scope[node.target.id] = True
+        if isinstance(node, ast.For | ast.AsyncFor):
+            self._attrs_bind_loop(node, (scope, branch_scope), field, module, globals_=globals_)
+        branch_globals = branch_scope if scope is globals_ else globals_
         for body in branches:
-            if self._attrs_scan_body(body, branch_scope, field, module, globals_):
+            if self._attrs_scan_body(body, branch_scope, field, module, branch_globals):
                 return True
             scope.update({name: value for name, value in branch_scope.items() if value})
+        return False
+
+    def _attrs_bind_loop(
+        self,
+        node: ast.For | ast.AsyncFor,
+        scopes: tuple[dict[str, bool | _Module], dict[str, bool | _Module]],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        *,
+        globals_: dict[str, bool | _Module],
+    ) -> None:
+        scope, branch_scope = scopes
+        literal = isinstance(node.iter, ast.List | ast.Tuple | ast.Set)
+        values = node.iter.elts if literal else [node.iter]
+        targets = {item.id for item in ast.walk(node.target) if isinstance(item, ast.Name)}
+        uses_default = self._attrs_loop_default(node.body, targets)
+        if uses_default and (
+            not literal
+            or (
+                isinstance(node.target, ast.Tuple | ast.List)
+                and any(not isinstance(value, ast.Tuple | ast.List) for value in values)
+            )
+        ):
+            msg = "an attrs default registration has an indeterminate loop binding"
+            raise _invalid(msg)
+        for value in values:
+            bindings = scope.copy()
+            self._attrs_bind_target((node.target, value), bindings, field, module, globals_=globals_)
+            for target in ast.walk(node.target):
+                if isinstance(target, ast.Name) and bool(bindings.get(target.id)):
+                    branch_scope[target.id] = bindings[target.id]
+
+    @staticmethod
+    def _attrs_loop_default(body: Sequence[ast.AST], targets: set[str]) -> bool:
+        pending: list[ast.AST] = list(body)
+        while pending:
+            item = pending.pop()
+            if (
+                isinstance(item, ast.Attribute)
+                and item.attr == "default"
+                and isinstance(item.value, ast.Name)
+                and item.value.id in targets
+            ):
+                return True
+            if isinstance(item, ast.GeneratorExp):
+                pending.append(item.generators[0].iter)
+            elif isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+                pending.extend([] if isinstance(item, ast.Lambda) else item.decorator_list)
+                pending.extend(item.args.defaults)
+                pending.extend(value for value in item.args.kw_defaults if value is not None)
+            else:
+                pending.extend(ast.iter_child_nodes(item))
         return False
 
     def _attrs_class_value(
@@ -2391,6 +2482,7 @@ class _Resolver:
 
     @staticmethod
     def _attrs_default_hooks(info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+        _Resolver._attrs_reject_nested_hooks(info, node, klass)
         for stmt in node.body:
             if not isinstance(stmt, ast.FunctionDef):
                 continue
@@ -2405,6 +2497,35 @@ class _Resolver:
                         msg = f"`{klass.name}` has an untraceable attrs default"
                         raise _invalid(msg)
                     info.fields[source.key] = replace(source, default=True)
+
+    @staticmethod
+    def _attrs_reject_nested_hooks(info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+        pending: list[ast.AST] = []
+        for stmt in node.body:
+            if isinstance(stmt, ast.FunctionDef):
+                pending.extend(stmt.args.defaults)
+                pending.extend(item for item in stmt.args.kw_defaults if item is not None)
+            else:
+                pending.append(stmt)
+        while pending:
+            item = pending.pop()
+            if (
+                isinstance(item, ast.Attribute)
+                and item.attr == "default"
+                and isinstance(item.value, ast.Name)
+                and _mangle(node.name, item.value.id) in info.fields
+            ):
+                msg = f"`{klass.name}` has an unsupported attrs default registration"
+                raise _invalid(msg)
+            if isinstance(item, ast.GeneratorExp):
+                pending.append(item.generators[0].iter)
+            elif isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+                decorators = [] if isinstance(item, ast.Lambda) else item.decorator_list
+                pending.extend(decorators)
+                pending.extend(item.args.defaults)
+                pending.extend(value for value in item.args.kw_defaults if value is not None)
+            elif not isinstance(item, ast.ClassDef):
+                pending.extend(ast.iter_child_nodes(item))
 
     def _attrs_default(self, expr: ast.expr, module: _Module) -> bool:
         if self._external_name(expr, module) in {"attrs.NOTHING", "attr.NOTHING"}:

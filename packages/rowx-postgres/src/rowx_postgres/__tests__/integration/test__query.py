@@ -1350,3 +1350,57 @@ def test_query_unchecked_qualified_ident(schema: str) -> None:
             )
 
     assert asyncio.run(body()) > 0
+
+
+def test_attrs_local_conditional_default_omission_and_empty_results(schema: str) -> None:
+    @attrs.define
+    class Row:
+        id: int
+        value: int = attrs.field()
+        if True:
+
+            @value.default  # ty: ignore[call-non-callable]
+            def make(self) -> int:
+                return self.id + 35
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_local_called_default_omission_and_empty_results(schema: str) -> None:
+    @attrs.define
+    class Row:
+        id: int
+        value: int = attrs.field()
+        value.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_loop_default_omission_and_empty_results(schema: str) -> None:
+    spec = attrs.field()
+    for (alias,) in ((spec,),):
+        alias.default(lambda _self: 42)
+
+    @attrs.define
+    class Row:
+        id: int
+        value: int = spec
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_comprehension_default_omission_and_empty_results(schema: str) -> None:
+    spec = attrs.field()
+    defaults = [alias.default(lambda _self: 42) for alias in (spec,)]
+    assert len(defaults) == 1
+
+    @attrs.define
+    class Row:
+        id: int
+        value: int = spec
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
