@@ -545,3 +545,136 @@ def test_attrs_local_loop_copy_shadow_is_unrelated(tmp_path: Path, *, private: b
     assert result.diagnostic is None
     assert result.row_type is not None
     assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[spec.default(lambda self: 1) for _ in (1,)]",
+        "{spec.default(lambda self: 1) for _ in (1,)}",
+        "{0: spec.default(lambda self: 1) for _ in (1,)}",
+        "[[alias.default(lambda self: 1) for _ in (1,)] for alias in (global_spec,)]",
+    ],
+)
+def test_attrs_class_comprehension_uses_global_scope(tmp_path: Path, expression: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\nglobal_spec = spec\n"
+        f"class Helper:\n    spec = attrs.field()\n    unused = {expression}\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+def test_attrs_class_comprehension_fresh_global_and_eager_iterable(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\nfresh = attrs.field()\n"
+        "class Helper:\n    fresh = spec\n    unused = [fresh.default(lambda self: 1) for _ in (1,)]\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "for alias in (value,):\n        if True:\n            copy = alias\n            copy.default(lambda self: 1)\n    del alias, copy",
+        "(alias := value)\n    alias.default(lambda self: 1)\n    del alias",
+        "(alias := value)\n    alias, copy = attrs.field(), alias\n    copy.default(lambda self: 1)\n    del alias, copy",
+        "(alias := value)\n    while flag:\n        alias = attrs.field()\n    alias.default(lambda self: 1)\n    del alias",
+        "(alias := value if flag else attrs.field())\n    alias.default(lambda self: 1)\n    del alias",
+        "for alias in (value,):\n        if True:\n            copy = alias\n        copy.default(lambda self: 1)\n    del alias, copy",
+    ],
+)
+def test_attrs_local_conditional_and_walrus_alias_registration(tmp_path: Path, body: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\n@attrs.define\nclass Row:\n"
+        f'    value: int = attrs.field()\n    {body}\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+def test_attrs_local_walrus_fresh_shadow_and_deferred(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\n@attrs.define\nclass Row:\n"
+        "    value: int = attrs.field()\n    (alias := attrs.field())\n    alias.default(lambda self: 1)\n"
+        "    (lambda: (other := value))\n    (value.default(lambda self: 1) for _ in ())\n"
+        '    del alias\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+def test_attrs_class_comprehension_mangles_global_name(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\n_Helper__spec = attrs.field()\n"
+        "class Helper:\n    __spec = attrs.field()\n    unused = [__spec.default(lambda self: 1) for _ in (1,)]\n"
+        '@attrs.define\nclass Row:\n    value: int = _Helper__spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+def test_attrs_class_comprehension_first_iterable_uses_class_scope(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        "class Helper:\n    spec = attrs.field()\n    unused = [alias.default(lambda self: 1) for alias in (spec,)]\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+def test_attrs_local_conditional_fresh_rebinding(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\n@attrs.define\nclass Row:\n"
+        "    value: int = attrs.field()\n    (alias := value)\n"
+        "    if True:\n        alias = attrs.field()\n    else:\n        alias = attrs.field()\n"
+        "    alias.default(lambda self: 1)\n    del alias\nquery[Row](t'select 1')\n"
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_attrs_class_comprehension_qualified_private_attribute(tmp_path: Path, *, private: bool) -> None:
+    field = "_Helper__spec" if private else "spec"
+    use = "__spec" if private else "spec"
+    (tmp_path / "fields.py").write_text(f"import attrs\n{field} = attrs.field()\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nimport fields\nfrom rowx import query\n"
+        f"class Helper:\n    unused = [fields.{use}.default(lambda self: 1) for _ in (1,)]\n"
+        f'@attrs.define\nclass Row:\n    value: int = fields.{field}\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"

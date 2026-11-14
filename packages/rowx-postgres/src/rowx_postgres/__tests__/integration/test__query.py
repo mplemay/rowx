@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from string.templatelib import Interpolation, Template
-from typing import TYPE_CHECKING, Final, NamedTuple, NotRequired, TypedDict
+from typing import TYPE_CHECKING, ClassVar, Final, NamedTuple, NotRequired, TypedDict
 
 import attrs
 import pytest
@@ -1497,3 +1497,48 @@ def test_attrs_private_loop_copy_default_omission_and_empty_results(schema: str)
     result = run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one)
     assert attrs.astuple(result) == (7, 42)
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_conditional_copy_and_local_walrus_omission_and_empty_results(schema: str) -> None:
+    @attrs.define
+    class Conditional:
+        id: int
+        value: int = attrs.field()
+        for alias in (value,):
+            if True:
+                copy = alias
+                copy.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del alias, copy
+
+    @attrs.define
+    class Walrus:
+        id: int
+        value: int = attrs.field()
+        _ = (alias := value)
+        alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del _, alias
+
+    assert run_on(schema, "connection", query[Conditional](t"SELECT 7::int4 AS id").one) == Conditional(7, 42)
+    assert run_on(schema, "connection", query[Conditional](t"SELECT 7::int4 AS id WHERE false").all) == []
+    assert run_on(schema, "connection", query[Walrus](t"SELECT 7::int4 AS id").one) == Walrus(7, 42)
+    assert run_on(schema, "connection", query[Walrus](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+ATTRS_COMPREHENSION_SPEC: Final = attrs.field()
+
+
+class AttrsComprehensionHelper:
+    ATTRS_COMPREHENSION_SPEC = attrs.field()
+    unused: ClassVar[list[object]] = [ATTRS_COMPREHENSION_SPEC.default(lambda _self: 42) for _ in (1,)]
+
+
+@attrs.define
+class AttrsComprehensionRow:
+    id: int
+    value: int = ATTRS_COMPREHENSION_SPEC
+
+
+def test_attrs_class_comprehension_global_default_omission_and_empty_results(schema: str) -> None:
+    result = run_on(schema, "connection", query[AttrsComprehensionRow](t"SELECT 7::int4 AS id").one)
+    assert result == AttrsComprehensionRow(7, 42)
+    assert run_on(schema, "connection", query[AttrsComprehensionRow](t"SELECT 7::int4 AS id WHERE false").all) == []

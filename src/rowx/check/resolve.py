@@ -2009,6 +2009,10 @@ class _Resolver:
         module: _Module,
         globals_: dict[str, bool | _Module],
     ) -> bool:
+        if isinstance(expr, ast.Attribute):
+            class_name = next((key.removeprefix("\0private:") for key in globals_ if key.startswith("\0private:")), "")
+            if class_name:
+                expr = ast.Attribute(value=expr.value, attr=_mangle(class_name, expr.attr), ctx=expr.ctx)
         if isinstance(expr, ast.Name):
             if expr.id in scope:
                 return scope[expr.id] is True
@@ -2054,7 +2058,9 @@ class _Resolver:
             header = [*node.decorator_list, *node.bases, *node.keywords]
             return any(
                 self._attrs_scan_eager(item, scope, field, module, globals_) for item in header
-            ) or self._attrs_scan_body(node.body, {}, field, module, globals_)
+            ) or self._attrs_scan_body(
+                node.body, {"\0class": False}, field, module, self._attrs_class_globals(node, field, module, globals_)
+            )
         if isinstance(node, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
             # Function decorators and defaults execute now; the body does not.
             decorators = [] if isinstance(node, ast.Lambda) else node.decorator_list
@@ -2064,6 +2070,18 @@ class _Resolver:
             )
         return any(self._attrs_scan_eager(item, scope, field, module, globals_) for item in ast.iter_child_nodes(node))
 
+    def _attrs_class_globals(
+        self, node: ast.ClassDef, field: tuple[ast.Call, _Module], module: _Module, globals_: dict[str, bool | _Module]
+    ) -> dict[str, bool | _Module]:
+        result = {key: value for key, value in globals_.items() if not key.startswith("\0private:")}
+        result[f"\0private:{node.name}"] = False
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and (mangled := _mangle(node.name, child.id)) != child.id:
+                result[child.id] = self._attrs_class_value(
+                    ast.Name(id=mangled, ctx=ast.Load()), globals_, field, module, globals_
+                )
+        return result
+
     def _attrs_scan_comprehension(
         self,
         node: ast.ListComp | ast.SetComp | ast.DictComp,
@@ -2072,7 +2090,9 @@ class _Resolver:
         module: _Module,
         globals_: dict[str, bool | _Module],
     ) -> bool:
-        local = scope.copy()
+        # A comprehension closes over a surrounding comprehension, but not a
+        # class namespace. Its first iterable still executes in that namespace.
+        local = {} if "\0class" in scope else scope.copy()
         for index, generator in enumerate(node.generators):
             current = scope if index == 0 else local
             if self._attrs_scan_eager(generator.iter, current, field, module, globals_):
@@ -2588,71 +2608,134 @@ class _Resolver:
                 pairs.extend(zip(dest.elts, source.elts, strict=False))
         return bound
 
+    # These bounded cases share binding state and must be processed in evaluation order.
     @staticmethod
-    def _attrs_local_loop_body(
-        body: list[ast.stmt], aliases: set[str], class_name: str
-    ) -> list[tuple[ast.AST, set[str]]]:
-        pending: list[tuple[ast.AST, set[str]]] = []
-        current = aliases.copy()
-        for stmt in body:
-            pending.append((stmt, current.copy()))
-            if isinstance(stmt, ast.Assign):
-                for target in stmt.targets:
-                    if isinstance(target, ast.Name):
-                        name = _mangle(class_name, target.id)
-                        current.discard(name)
-                        if isinstance(stmt.value, ast.Name) and _mangle(class_name, stmt.value.id) in aliases:
-                            current.add(name)
-                aliases = current.copy()
-        return pending
-
-    @staticmethod
-    def _attrs_reject_local_loop_aliases(info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+    def _attrs_reject_local_loop_aliases(info: _Info, node: ast.ClassDef, klass: _Class) -> None:  # ruff: ignore[complex-structure, too-many-statements]
         fields = set(info.fields)
-        pending: list[tuple[ast.AST, set[str]]] = [(stmt, fields) for stmt in node.body]
-        while pending:
-            item, aliases = pending.pop()
+        class_name = node.name
+
+        def name(expr: ast.expr) -> str | None:
+            return _mangle(class_name, expr.id) if isinstance(expr, ast.Name) else None
+
+        def shared(expr: ast.expr, aliases: set[str]) -> bool:
+            if isinstance(expr, ast.IfExp):
+                return shared(expr.body, aliases) or shared(expr.orelse, aliases)
+            return name(expr) in aliases
+
+        def bind(target: ast.expr, value: ast.expr, aliases: set[str], sources: set[str]) -> None:
+            if isinstance(target, ast.Name):
+                dest = _mangle(class_name, target.id)
+                is_shared = shared(value, sources)
+                aliases.discard(dest)
+                if is_shared:
+                    aliases.add(dest)
+            elif isinstance(target, ast.Tuple | ast.List) and isinstance(value, ast.Tuple | ast.List):
+                for dest, source in zip(target.elts, value.elts, strict=False):
+                    bind(dest, source, aliases, sources)
+
+        def scan(item: ast.AST, aliases: set[str]) -> None:  # ruff: ignore[complex-structure, too-many-return-statements, too-many-branches, too-many-statements]
             if isinstance(item, ast.GeneratorExp):
-                pending.append((item.generators[0].iter, aliases))
-                continue
+                scan(item.generators[0].iter, aliases)
+                return
             if isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
                 header = [*item.args.defaults, *(value for value in item.args.kw_defaults if value is not None)]
                 if not isinstance(item, ast.Lambda):
                     header.extend(item.decorator_list)
-                pending.extend((child, aliases) for child in header)
-                continue
+                for child in header:
+                    scan(child, aliases)
+                return
             if isinstance(item, ast.ClassDef):
-                pending.extend((child, aliases) for child in [*item.decorator_list, *item.bases, *item.keywords])
-                continue
+                for child in [*item.decorator_list, *item.bases, *item.keywords]:
+                    scan(child, aliases)
+                return
+            if isinstance(item, ast.NamedExpr):
+                scan(item.value, aliases)
+                bind(item.target, item.value, aliases, aliases.copy())
+                return
+            if isinstance(item, ast.Attribute) and item.attr == "default" and name(item.value) in aliases - fields:
+                msg = f"`{klass.name}` has an unsupported attrs default registration"
+                raise _invalid(msg)
             if isinstance(item, ast.ListComp | ast.SetComp | ast.DictComp):
-                aliases = aliases.copy()
+                local = aliases.copy()
                 for generator in item.generators:
-                    bound = _Resolver._attrs_local_loop_bindings(generator.target, generator.iter, aliases, node.name)
-                    aliases.difference_update(
-                        _mangle(node.name, target.id)
+                    scan(generator.iter, local)
+                    bound = _Resolver._attrs_local_loop_bindings(generator.target, generator.iter, local, class_name)
+                    local.difference_update(
+                        _mangle(class_name, target.id)
                         for target in ast.walk(generator.target)
                         if isinstance(target, ast.Name)
                     )
-                    aliases |= bound
-            elif isinstance(item, ast.For | ast.AsyncFor):
-                bound = _Resolver._attrs_local_loop_bindings(item.target, item.iter, aliases, node.name)
-                aliases = aliases.copy()
-                aliases.difference_update(
-                    _mangle(node.name, target.id) for target in ast.walk(item.target) if isinstance(target, ast.Name)
+                    local.update(bound)
+                    for test in generator.ifs:
+                        scan(test, local)
+                for child in [item.key, item.value] if isinstance(item, ast.DictComp) else [item.elt]:
+                    scan(child, local)
+                return
+            if isinstance(item, ast.For | ast.AsyncFor):
+                scan(item.iter, aliases)
+                local = aliases.copy()
+                bound = _Resolver._attrs_local_loop_bindings(item.target, item.iter, aliases, class_name)
+                local.difference_update(
+                    _mangle(class_name, target.id) for target in ast.walk(item.target) if isinstance(target, ast.Name)
                 )
-                aliases |= bound
-                pending.extend(_Resolver._attrs_local_loop_body(item.body, aliases, node.name))
-                pending.extend((child, aliases) for child in [item.iter, *item.orelse])
-                continue
-            if (
-                isinstance(item, ast.Attribute)
-                and item.attr == "default"
-                and isinstance(item.value, ast.Name)
-                and _mangle(node.name, item.value.id) in aliases - fields
-            ):
-                msg = f"`{klass.name}` has an unsupported attrs default registration"
-                raise _invalid(msg)
-            pending.extend((child, aliases) for child in ast.iter_child_nodes(item))
+                local.update(bound)
+                body(item.body, local)
+                body(item.orelse, local)
+                aliases.update(local)
+                return
+            if isinstance(item, ast.If):
+                scan(item.test, aliases)
+                left, right = aliases.copy(), aliases.copy()
+                body(item.body, left)
+                body(item.orelse, right)
+                aliases.clear()
+                aliases.update(left | right)
+                return
+            if isinstance(item, ast.Try | ast.TryStar):
+                main, possible = aliases.copy(), aliases.copy()
+                for statement in item.body:
+                    scan(statement, main)
+                    possible.update(main)
+                body(item.orelse, main)
+                branches = [main, *(possible.copy() for _ in item.handlers)]
+                for handler, branch in zip(item.handlers, branches[1:], strict=True):
+                    if handler.type is not None:
+                        scan(handler.type, branch)
+                    body(handler.body, branch)
+                for branch in branches:
+                    body(item.finalbody, branch)
+                aliases.clear()
+                aliases.update(*branches)
+                return
+            if isinstance(item, ast.Assign):
+                scan(item.value, aliases)
+                sources = aliases.copy()
+                for target in item.targets:
+                    bind(target, item.value, aliases, sources)
+                return
+            if isinstance(item, ast.AnnAssign):
+                if item.value is not None:
+                    scan(item.value, aliases)
+                    if name(item.target) not in fields:
+                        bind(item.target, item.value, aliases, aliases.copy())
+                return
+            if isinstance(item, ast.Delete):
+                for target in item.targets:
+                    if (key := name(target)) is not None:
+                        aliases.discard(key)
+                return
+            conditional = isinstance(item, ast.While | ast.Match)
+            local = aliases.copy() if conditional else aliases
+            for child in ast.iter_child_nodes(item):
+                scan(child, local)
+            if conditional:
+                aliases.update(local)
+
+        def body(statements: list[ast.stmt], aliases: set[str]) -> None:
+            for stmt in statements:
+                scan(stmt, aliases)
+
+        body(node.body, fields.copy())
 
     def _attrs_default(self, expr: ast.expr, module: _Module) -> bool:
         if self._external_name(expr, module) in {"attrs.NOTHING", "attr.NOTHING"}:
