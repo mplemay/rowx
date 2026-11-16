@@ -5,6 +5,10 @@ default:
 check:
     uv run prek run --all-files
 
+# bump the lockstep version, write the changelog section from notes, and open the release pull request
+release version notes="":
+    uv run python scripts/release.py bump {{version}} "{{notes}}"
+
 # clippy for packages/rowx-embedded (it builds the Wasmer tree, so it is not a default workspace member and `check` leaves it out)
 check-embedded:
     uv run prek run cargo-clippy-embedded --hook-stage manual --all-files

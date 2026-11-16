@@ -438,3 +438,12 @@ jobs:
         working-directory: examples/migrations
         # fail instead of skipping if the plugin finds no database URL
         run: uv run --project ../.. pytest -p no:cacheprovider -o rowx_require_database=true
+
+  tag-release:
+    name: Tag release
+    needs: [linux, embedded-wheel, embedded-rust, embedded, macos, examples]
+    if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      actions: write # the called workflow dispatches release.yml
+      contents: write # the called workflow creates the v* tag
+    uses: $/.github/workflows/tag-release.yml

@@ -123,6 +123,7 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Command | What it does |
 |---|---|
 | `just check` | All gates through `uv run prek run --all-files` |
+| `just release X.Y.Z notes.md` | Bump the lockstep version, write the changelog section from `notes.md`, and open the release pull request |
 | `just fmt` | Format rust, python, and shell through the prek hooks |
 | `just test-rust` | `cargo test` over the default members, which leave out `rowx-embedded` (DB tests run if `ROWX_TEST_DSN` is set) |
 | `just test-rust-embedded` | `cargo test -p rowx-embedded-host` (builds the Wasmer tree) |
