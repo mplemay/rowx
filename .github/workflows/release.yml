@@ -28,6 +28,9 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
       - name: Validate version and tag
         id: version
         env:
@@ -219,9 +222,116 @@ jobs:
       - name: Smoke test the wheel
         run: scripts/smoke-wheel.sh dist
 
+  # rowx-embedded (the in-process PostgreSQL engine) releases with the rest, from the same tag. It is built with no cache
+  # on purpose: a release must not restore build output that a pull request could have written. Only wheels are
+  # published (no sdist; CI checks the source archive). The artifacts are named `embedded-wheel-*` so the `wheel-*`
+  # pattern of the rowx-postgres wheels never picks them up.
+  build-embedded-wheels:
+    name: Embedded wheel (${{ matrix.name }})
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+            platform: macosx_
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64
+            manylinux: "2014"
+            platform: _x86_64
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: "2014"
+            platform: _aarch64
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # the extension is abi3-py314, so one build per platform serves every Python >= 3.14
+      - name: Build the wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: -m packages/rowx-embedded/Cargo.toml --release --locked --out dist-embedded --interpreter python3.14
+
+      - name: Check the wheel (tag, size budget, contents, licenses)
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: python scripts/validate-embedded-wheels.py dist-embedded --platform "$PLATFORM"
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: embedded-wheel-${{ matrix.name }}
+          path: dist-embedded/*.whl
+          if-no-files-found: error
+
+  # a clean venv per platform: the built wheel plus rowx-core and rowx-postgres, with no rowx CLI package
+  smoke-embedded:
+    name: Embedded smoke test (${{ matrix.name }})
+    needs: build-embedded-wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-arm64, os: macos-15 }
+          - { name: linux-x86_64, os: ubuntu-latest }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm }
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: embedded-wheel-${{ matrix.name }}
+          path: smoke-wheels/
+
+      # the wheel pins rowx-postgres to this release, which is not on PyPI yet
+      - name: Build rowx-core and rowx-postgres
+        run: |
+          uv build --package rowx-core --wheel --out-dir smoke-wheels
+          uvx --from "maturin>=1.0,<2.0" maturin build --locked --manifest-path packages/rowx-postgres/Cargo.toml --interpreter "$(uv python find 3.14)" --out smoke-wheels
+
+      - name: Smoke test the wheel
+        run: scripts/smoke-embedded-wheel.sh smoke-wheels
+
   check-distributions:
     name: Check distributions
-    needs: [validate, build-wheels, build-pure, build-sdist]
+    needs:
+      [
+        validate,
+        build-wheels,
+        build-pure,
+        build-sdist,
+        build-embedded-wheels,
+        smoke-embedded,
+      ]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -252,6 +362,22 @@ jobs:
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: python scripts/validate-distributions.py
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: embedded-wheel-*
+          path: dist-embedded/
+          merge-multiple: true
+
+      - name: Validate the embedded wheels
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          python scripts/validate-embedded-wheels.py dist-embedded --platform macosx_ --platform _x86_64 --platform _aarch64
+          test "$(find dist-embedded -name '*.whl' | wc -l)" -eq 3
+          for wheel in dist-embedded/*.whl; do
+            case "$(basename "$wheel")" in rowx_embedded-"$VERSION"-*) ;; *) echo "::error::$wheel is not version $VERSION"; exit 1 ;; esac
+          done
 
   rebuild-sdists:
     name: Rebuild sdists offline
@@ -437,12 +563,39 @@ jobs:
           packages-dir: dist/rowx-postgres
           skip-existing: true
 
+  # the embedded wheels block the release: publish-rowx needs this job, and it needs rowx-postgres on PyPI first
+  publish-embedded:
+    name: Publish rowx-embedded
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      needs.publish-postgres.result == 'success'
+    needs: [validate, check-distributions, publish-postgres]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rowx-embedded
+    permissions:
+      id-token: write # PyPI trusted publishing (OIDC)
+
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: embedded-wheel-*
+          path: dist/rowx-embedded
+          merge-multiple: true
+
+      - name: Publish rowx-embedded
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/rowx-embedded
+          skip-existing: true
+
   publish-rowx:
     name: Publish rowx
     if: >-
       github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
-      needs.publish-postgres.result == 'success'
-    needs: publish-postgres
+      needs.publish-postgres.result == 'success' && needs.publish-embedded.result == 'success'
+    needs: [publish-postgres, publish-embedded]
     runs-on: ubuntu-latest
     environment:
       name: pypi

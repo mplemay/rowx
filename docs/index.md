@@ -56,6 +56,10 @@ rowx check src --database-url postgresql://app@localhost/app
 `rowx check` exits 0 when it reports no diagnostics, 1 when it reports one or more, and 2 when the check could not run.
 The [checker reference](reference/checker.md) is the contract for the exit codes.
 
+No server? `uv add "rowx[embedded]"` adds an in-process Postgres 18: use `rowx.embedded.Database()` in code, or an
+`embedded://` database URL for `rowx check`, `rowx migrate` and the pytest plugin, with no Docker. It is for
+development, checking and tests, and it is not for production. See [Embedded Postgres](guide/embedded.md).
+
 A type mismatch is reported like this:
 
 ```text

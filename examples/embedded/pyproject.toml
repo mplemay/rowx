@@ -1,0 +1,20 @@
+[project]
+name = "rowx-example-embedded"
+version = "0.0.0"
+description = "A small app that is checked and tested against an in-process Postgres, with no Docker and no server"
+requires-python = ">=3.14"
+dependencies = ["rowx[embedded]"]
+
+[tool.rowx]
+include = ["."]
+database_url_env = "DATABASE_URL"
+
+# its presence is what lets `embedded://` build the database `rowx check` describes, and what the test plugin clones
+[tool.rowx.migrate]
+dir = "migrations"
+
+# pytest's rootdir decides where the plugin looks for [tool.rowx], so this table keeps it here
+[tool.pytest.ini_options]
+pythonpath = ["."]
+# pytest-asyncio, when it is installed, warns if this is left unset; the tests here are synchronous
+asyncio_default_fixture_loop_scope = "function"

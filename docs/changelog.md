@@ -1,12 +1,32 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.4.1
+
+- `rowx[embedded]` adds an in-process Postgres 18 for development, checking and tests. In code,
+  `rowx.embedded.Database` is a pool-shaped executor that owns one instance (`Database()` in memory,
+  `Database("/abs/dir")` persistent). An `embedded://` URL selects it for `rowx check`, `rowx check-compat`,
+  `rowx migrate` and the pytest plugin; generic `connect`, `Pool` and `ConnectOptions.from_dsn` do not accept one. All
+  of it lives in `rowx-embedded`, and `rowx-postgres` does not know about it. See
+  [Embedded Postgres](guide/embedded.md).
+- `rowx-embedded` releases in lockstep with the other distributions (0.4.1, from the `v*` tag and `release.yml`)
+  instead of as `18.4.0` on its own `embedded-v*` tag. It depends on the matching `rowx-postgres`, and `rowx[embedded]`
+  pins `rowx-embedded==0.4.1`. The engine is still PostgreSQL 18.4. This tree is version 0.4.1. 0.4.1 is not on PyPI
+  until the `v0.4.1` tag is published.
+- A pool acquire that is retrying a connect now takes a connection that another caller returns meanwhile. Before, it
+  kept retrying until its timeout, so a pool whose server was at its connection limit could time out next to an idle
+  connection of its own.
+- A pool acquire that times out while connecting now raises `PoolTimeoutError` with the last connect error as its
+  `__cause__`, and the message says so, instead of reporting the timeout alone.
+- `rowx`, `rowx-core`, and `rowx-postgres` drop the deprecated `License :: OSI Approved :: MIT License` classifier.
+  The license stays `MIT` in the `license` field.
+
+## 0.3.0
 
 - `_fetch` / `_stream` take a core `ShapeSpec`, and the Postgres executor builds and caches the native shape.
 - Three lockstep distributions replace the published 0.2.0 wheel. `rowx-core` (import `rowx_core`) has no runtime
   dependencies. `rowx-postgres` (import `rowx_postgres`, native module `rowx_postgres._core`) depends only on matching
   `rowx-core`. `rowx` (import `rowx`) depends on matching `rowx-core`, and `rowx[postgres]` installs matching
-  `rowx-postgres`. This tree is version 0.3.0. 0.3.0 is not on PyPI until the `v0.3.0` tag is published.
+  `rowx-postgres`. Published as `v0.3.0`.
 - `query(...)` captures a neutral template and selects no compiler. Each call uses that executor's `compiler`. A
   later call on another executor compiles again.
 - The `query` constructor rejects a non-template, a NUL in static text, a conversion, an unsupported format spec,

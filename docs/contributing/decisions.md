@@ -32,7 +32,7 @@ The native module is `rowx_postgres._core`. Value types live in `rowx_postgres`.
 | 21 | sqlparser-rs | Not in v1 |
 | 22 | Concurrency | One operation per connection; raise `ConnectionBusyError` |
 | 23 | TLS | rustls |
-| 24 | Packaging | Historical layout: one wheel and one CLI. Current packaging is three distributions ([Architecture](architecture.md)) |
+| 24 | Packaging | Historical layout: one wheel and one CLI. Current packaging is four distributions ([Architecture](architecture.md)) |
 | 25 | Doc shape | Spec plus milestones and tasks |
 
 ## Review-driven decisions (revision 2)
@@ -318,3 +318,27 @@ Records the decisions of #214 (design #215). The threat model and invariant are 
 | S21 | Reset idle guard | The first-keyword scan skips leading `;`, empty statements, `--` comments ended at `\n` or `\r`, and nested block comments. Because the scan is a heuristic, when the flag is clear the guard is `SELECT 1 OPERATOR(pg_catalog./) (pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp())::pg_catalog.int4`, which fails inside an open transaction and closes the connection. The default query is one batch with the guard or `ROLLBACK` prefixed. A custom query is a second round trip, so `DISCARD ALL` and `VACUUM` can run. `reset_query=None` sends no guard unless the transaction flag is set, in which case it sends `ROLLBACK`. With a `reset=` hook, any `ROLLBACK` runs before the hook. `RESET_QUERY` text is unchanged | The flag is conservative but not exact; the guard makes the reset verify the state it assumes |
 | S22 | Redaction | Redaction covers the decoded secret and every raw spelling of it in the DSN text, and masks URL userinfo and `password=` tokens syntactically; empty secrets are skipped | A DSN that fails to parse, or spells the secret escaped, must still not be echoed |
 | S24 | Numeric digits | *Amended after #218.* Digits are read through the unbound `Decimal.__str__`, not `as_tuple`, and parsed with every digit validated. An int outside `i64` goes through `Decimal(int)` and that string, not `str(int)`, so an int past the int-to-str digit limit still encodes as `numeric`. A conversion that fails is an `EncodeError` | `as_tuple` doubled the cost of a large numeric array, and `str(int)` is capped |
+
+## Embedded Postgres (#194)
+
+Records the decisions of the embedded database. The contract is [Embedded Postgres](../reference/embedded.md).
+
+| # | Decision | Why |
+|---|---|---|
+| E1 | The engine is PostgreSQL 18 in single-backend mode, compiled to WASIX and run by Wasmer in process. | No child process, and each instance has its own memory. |
+| E2 | A rowx-owned front proxy, not a patch to the engine's endpoint. | The engine's endpoint serves clients serially, so cancels and a second client wait in the backlog, and that breaks the cancel guard. A patch stack would be ours to maintain. |
+| E3 | One session per instance; a second client gets `53300` with a hint. | Multiplexing would collide session state and statement names. |
+| E4 | A cancel is dropped, and `statement_timeout` does not fire. | The engine has no way to interrupt. Documented, and server-only tests cover it. |
+| E5 | Isolation uses snapshots, not `CREATE DATABASE`. | One database per instance. |
+| E6 | The extension set is every contrib extension the engine ships (32), and is part of the snapshot identity. | The names are mirrored in `runtime.rs` and the build features, and a unit test checks that each one resolves in the engine. |
+| E7 | A snapshot boots into memory through a derived seed, with a directory restore as the fallback. | A raw backup needs crash recovery on every boot (about 1 s by the host's own comment); the seed brings a boot to about 0.2 s as measured. |
+| E8 | The companion is a Cargo workspace member outside `default-members`, and a uv workspace member in the `dev` group. | Wasmer must not reach plain `cargo test` or clippy, but every development environment and CI job installs the engine, so no test or check depends on whether it is there. |
+| E9 | The database is lazy: no IO in the constructor, one instance started on first use, and the pool is fixed at one session (`Database` takes no size, lifetime or ping arguments). | A module-level `Database` stays safe to create (the first use opens it), and it cannot exceed what the engine serves. |
+| E10 | `abandon` stops an instance without waiting. | An interrupted run, and a test's instance, must not wait for a statement the engine cannot cancel. A directory needs `force`. |
+| E11 | *Amended for 0.4.1.* `rowx-embedded` releases in lockstep with the rowx version, from the same `v*` tag, and `rowx[embedded]` pins that version. 0.3.0 published before embedded merged. The `v0.4.0` tag was locked to that commit, so the first embedded release is 0.4.1 (`rowx-embedded==0.4.1`). The engine is PostgreSQL 18.4, an engine fact rather than the package version. | One version across the distributions, and the embedded wheels block the release. |
+| E12 | The plugin builds its snapshot in the backend, behind the provisioner, and `rowx.testing` stays engine-neutral. | A new backend or engine does not change the plugin. |
+| E13 | The public runtime API is `rowx.embedded.Database`, a `Pool` subclass built like a pool, and runtime `embedded://` URLs are not accepted by `connect`, `Pool` or `ConnectOptions.from_dsn`. All embedded code is in `rowx-embedded`, which depends on `rowx-postgres` and registers the `embedded` scheme as its own backend; `rowx-postgres` has no embedded code. | One object that is queried directly, as PGlite does, with no ownership rules hidden in generic `connect` and `Pool`. Choosing between a server and an embedded database at run time is user code. The URL grammar stays for the CLI, migrations and the pytest plugin, which have no code to construct a `Database`. |
+
+The resolved placeholders: the boot target is p50 of at most 250 ms (measured about 0.2 s after the first boot of a
+process), `statement_timeout` does not fire, the extension set is the 32 listed in the guide, and a snapshot boots into
+memory (through the seed) with a directory restore as the fallback.

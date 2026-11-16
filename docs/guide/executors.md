@@ -7,7 +7,7 @@
 ## Pools
 
 A `Pool` is an `Executor`, so every query method takes it in place of a connection. Import it from `rowx.postgres`.
-`Pool` imported from `rowx` is the executor protocol, not a connection pool. The three distributions are
+`Pool` imported from `rowx` is the executor protocol, not a connection pool. The four distributions are
 [Packages](../packages.md). Coming from a `Session` is [From SQLAlchemy](../from-sqlalchemy.md).
 
 A query captures its template without selecting a database. The connection, pool or transaction passed to a query

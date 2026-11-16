@@ -1,9 +1,11 @@
 import asyncio
 import os
 import secrets
+import shutil
 import signal
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -12,9 +14,12 @@ import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
 from rowx_core.lifecycle import ORPHAN_AGE_SECONDS, make_tag
+from rowx_embedded._scratch import EmbeddedScratch
+from rowx_postgres import connect
 from rowx_postgres._core import create_database, drop_database, list_databases
 from rowx_postgres._services import PostgresAdmin, PostgresMigrations
 
+from rowx import query_unchecked
 from rowx.check.scratch import PREFIX, Scratch
 
 if TYPE_CHECKING:
@@ -71,6 +76,7 @@ def test_the_scratch_tag_names_the_process_and_the_time() -> None:
     assert abs(int(tag.rpartition(":")[2]) - time.time()) < 60
 
 
+@pytest.mark.server(needs="create-database")
 def test_an_old_orphan_is_swept_and_a_fresh_one_is_kept(server_dsn: str, planted: list[str]) -> None:
     now = int(time.time())
     old, fresh, busy, untagged = (planted_name() for _ in range(4))
@@ -95,6 +101,7 @@ def test_an_old_orphan_is_swept_and_a_fresh_one_is_kept(server_dsn: str, planted
     assert {fresh, busy, untagged} <= left
 
 
+@pytest.mark.server(needs="create-database")
 def test_a_scratch_database_is_tagged_while_it_exists(server_dsn: str, tmp_path: Path) -> None:
     migrations = tmp_path / "migrations"
     migrations.mkdir()
@@ -118,6 +125,9 @@ def new_scratch(dsn: str, before: set[str]) -> str | None:
     return next(iter(found), None)
 
 
+# the test polls the server while the child it started holds a session, so the two compete for the one an instance has
+@pytest.mark.server(needs="sessions")
+@pytest.mark.server(needs="create-database")
 def test_sigint_drops_the_scratch_database_and_exits_two(server_dsn: str, tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[tool.rowx.migrate]\n", encoding="utf-8")
     migrations = tmp_path / "migrations"
@@ -155,3 +165,85 @@ def test_sigint_drops_the_scratch_database_and_exits_two(server_dsn: str, tmp_pa
     assert not out
     assert "interrupted" in err
     assert name not in left
+
+
+SLOW_EMBEDDED_MIGRATION: Final[str] = "CREATE TABLE t (id int4); SELECT pg_sleep(30);"
+BOOT_SECONDS: Final[float] = 3.0
+
+
+# a short path of its own (a socket path is limited to about 100 bytes), so a leftover can be counted exactly
+@pytest.fixture
+def private_tmp(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    root = Path(tempfile.mkdtemp(prefix="rxs-"))
+    monkeypatch.setenv("TMPDIR", str(root))
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def socket_directories(root: Path) -> int:
+    return len(list(root.glob("rxe-*")))
+
+
+def migrations_in(tmp_path: Path, migration: str) -> Path:
+    directory = tmp_path / "migrations"
+    directory.mkdir()
+    (directory / "1_t.sql").write_text(migration, encoding="utf-8")
+    return directory
+
+
+@pytest.mark.embedded
+@pytest.mark.parametrize("workers", [1, 3])
+def test_an_embedded_scratch_builds_one_independent_migrated_instance_per_worker_and_removes_them(
+    workers: int, tmp_path: Path, private_tmp: Path
+) -> None:
+    migrations = migrations_in(tmp_path, "CREATE TABLE t (id int4);")
+
+    scratch = EmbeddedScratch()
+    during: list[int] = []
+
+    async def run() -> list[int]:
+        counts: list[int] = []
+        async with scratch.session(PostgresMigrations("embedded://", migrations), workers) as built:
+            # exactly one instance, and so one socket directory, per worker
+            assert len(built.urls) == workers
+            during.append(socket_directories(private_tmp))
+            for position, url in enumerate(built.urls):
+                async with await connect(url) as conn:
+                    await query_unchecked[None](t"INSERT INTO t VALUES ({position})").execute(conn)
+            for url in built.urls:
+                async with await connect(url) as conn:
+                    counts.append(await query_unchecked[int](t"SELECT count(*)::int4 FROM t").one(conn))
+        return counts
+
+    # each instance holds only its own row
+    assert asyncio.run(run()) == [1] * workers
+    assert during == [workers]
+    assert not scratch.leaked
+    assert list(private_tmp.iterdir()) == []
+
+
+@pytest.mark.embedded
+def test_cancelling_a_scratch_mid_migration_returns_at_once_and_removes_the_instance(
+    tmp_path: Path, private_tmp: Path
+) -> None:
+    migrations = migrations_in(tmp_path, SLOW_EMBEDDED_MIGRATION)
+
+    scratch = EmbeddedScratch()
+
+    async def run() -> float:
+        async def build() -> None:
+            async with scratch.session(PostgresMigrations("embedded://", migrations), 2):
+                pass
+
+        task = asyncio.ensure_future(build())
+        # boot, connect and start the migration, which is then 30 seconds long
+        await asyncio.sleep(BOOT_SECONDS)
+        cancelled = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return time.monotonic() - cancelled
+
+    assert asyncio.run(run()) < 2.0
+    assert not scratch.leaked
+    assert list(private_tmp.iterdir()) == []

@@ -363,6 +363,7 @@ def advisory_locks_held(dsn: str) -> int:
         (LOCKED_JOIN, [(True, "OuterJoin"), (False, "NotNullColumn")]),
     ],
 )
+@pytest.mark.server(needs="sessions")
 def test_a_domain_check_never_runs_during_describe(schema: str, sql: str, expected: list[tuple[bool, str]]) -> None:
     execute(schema, f"CREATE DOMAIN lock_dom AS int CHECK (pg_try_advisory_lock({LOCK_KEY}))")
 

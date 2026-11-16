@@ -1,3 +1,5 @@
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
+import sys
 from typing import TYPE_CHECKING, get_args
 
 import pytest
@@ -45,3 +47,17 @@ def test_value_class_leaves_cover_the_vocabulary() -> None:
         | {HSTORE_LEAF, "list", "any", "none"}
     )
     assert found == set(get_args(LeafName.__value__))
+
+
+@pytest.mark.parametrize(
+    "statement", ["import rowx", "import rowx_postgres", "import rowx.postgres", "import rowx.check.cli"]
+)
+def test_importing_never_imports_the_embedded_companion(statement: str) -> None:
+    code = f"import sys\n{statement}\nassert 'rowx_embedded' not in sys.modules\n"
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [sys.executable, "-I", "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

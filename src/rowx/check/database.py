@@ -7,6 +7,7 @@ from rowx_core import InterfaceError
 
 from rowx._backend import backend_for
 from rowx.check.config import load_config
+from rowx.check.embedded import embedded_for
 from rowx.check.migrate import add_connect_timeout, load_migrator, require_url, resolve_target, run_guarded, run_pending
 from rowx.check.runner import CheckError
 
@@ -80,6 +81,9 @@ async def _ready(admin: AdminService, args: Namespace, work: Callable[[], Awaita
 def handle(args: Namespace) -> None:
     config = load_config(Path.cwd(), args.config)
     dsn = require_url(config, args.database_url)
+    if embedded_for(dsn) is not None:
+        msg = "`rowx database` is not supported for embedded URLs"
+        raise CheckError(msg)
     backend = backend_for(dsn)
     try:
         admin = backend.admin(dsn)

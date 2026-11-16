@@ -12,6 +12,9 @@ CLI tests use fake executors or services and need no database. Database tests be
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/integration/` | Queries, describe, migrations, the checker against Postgres. |
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/conformance/` | The row-type grammar against the runtime and the checker, and the pyright/mypy reveal test. |
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/support/schema.sql` | The per-test schema. |
+| `packages/rowx-postgres/src/rowx_postgres/__tests__/support/engine.py` | The embedded engine's recorded divergences ([Embedded lane](#embedded-lane)). |
+| `packages/rowx-embedded/src/rowx_embedded/__tests__/unit/` | The embedded glue (`Database`, URL grammar, scratch, snapshot cache) against a fake engine. |
+| `packages/rowx-embedded/src/rowx_embedded/__tests__/integration/` | The glue and the engine binding (`test__engine.py`, slow) against the real engine. They run with the rest of `just test-py`; the glue tests are also marked `embedded`, so the embedded lane runs them. The host's Rust tests run with `just test-rust-embedded` (`cargo test -p rowx-embedded-host`). |
 
 A test file is `test_<module>.py` for the module it covers.
 
@@ -30,8 +33,8 @@ execute fences tagged `python test` in `integration/docs/test_snippets.py`. The 
 [use-rowx skill](https://github.com/mplemay/rowx/blob/main/.agents/skills/use-rowx/SKILL.md). Ordinary `python`
 fences are not executed.
 
-Rust tests are `cargo test --workspace` (`just test-rust`). Database tests in `crates/rowx-postgres/tests/` use the
-same DSN. `crates/rowx-core` has no database.
+Rust tests are `cargo test` over the default workspace members (`just test-rust`). Database tests in
+`crates/rowx-postgres/tests/` use the same DSN. `crates/rowx-core` has no database.
 
 ## Commands
 
@@ -39,8 +42,11 @@ same DSN. `crates/rowx-core` has no database.
 |---|---|
 | `just check` | `uv run prek run --all-files`: rumdl, ruff, `ty check` on `src`, `packages/rowx-core/src` and `packages/rowx-postgres/src`, `cargo fmt`, `cargo clippy`. |
 | `just test-py` | `uv run pytest`. |
-| `just test-rust` | `cargo test --workspace`. |
+| `just test-rust` | `cargo test` over the default members (no Wasmer). |
+| `just test-rust-embedded` | `cargo test -p rowx-embedded-host`. |
 | `just docs-build` | `zensical build --clean --strict`. |
+| `just check-embedded` | Clippy for the embedded companion, a non-default workspace member: `uv run prek run cargo-clippy-embedded --hook-stage manual`. |
+| `just test-embedded` | The embedded lane: `ROWX_TEST_DSN=embedded:// uv run pytest -m "(db and not server) or embedded"`. |
 
 `ty` is the type-check gate. pyright and mypy stay in the dev group because
 `conformance/test_typecheckers.py` runs both against the public query annotations. They are not part of `just check`.
@@ -62,9 +68,11 @@ not start a database.
   that SQL is not described and that a bad `T` is still reported.
 - **Migrations.** Filename grammar and the plan are tested without a database. Apply, revert, the advisory lock and
   the history table are `rowx_postgres` integration tests. `migrate add` is tested with no backend installed.
-- **Distributions.** `src/rowx/__tests__/unit/test_validate_distributions.py` checks the three packages: `rowx-core`
-  has no runtime dependencies, `rowx-postgres` depends only on `rowx-core`, and `rowx` does not depend on
-  `rowx-postgres` unless the extra is selected.
+- **Distributions.** `src/rowx/__tests__/unit/test_validate_distributions.py` checks the three lockstep packages:
+  `rowx-core` has no runtime dependencies, `rowx-postgres` depends only on `rowx-core`, and `rowx` does not depend on
+  `rowx-postgres` unless the extra is selected. Its `embedded` extra must add exactly `rowx-postgres` and the platform
+  gated `rowx-embedded==<version>`. The embedded wheels have their own check, `scripts/validate-embedded-wheels.py`,
+  and the version agreement is in `scripts/validate-release-versions.py`.
 
 ## Test plugin
 
@@ -73,3 +81,34 @@ sets `pytest_plugins = ["rowx.testing"]` and depends on `rowx[pytest]`, which ad
 database backend. The plugin reads `[tool.rowx.migrate]` and the database URL. It builds a template database and
 gives each test a clone. Without a URL the tests skip, or fail when the project requires a database. The plugin
 tests under `src/rowx/__tests__/unit/test_testing.py` use fakes and do not connect.
+
+## Embedded lane
+
+| Marker | Meaning |
+|---|---|
+| `db` | Needs a live Postgres (`ROWX_TEST_DSN`). |
+| `server(needs=...)` | Needs a real server: `sessions`, `cancel`, `tls`, `create-database`, `pg-stat-activity`, `timing`, `auth` or `tcp`. `timing` implies `server`. |
+| `server(divergence=...)` | Hits an engine divergence: `inet-cidr`, `xml`, `encoding`, `locale` or `backend-pid`. |
+| `embedded` | Runs the embedded engine and needs no server; the embedded lane selects it. |
+
+With `ROWX_TEST_DSN=embedded://` the suite starts one instance per process (per xdist worker) and points the tests at
+it; `server` tests skip, a test that skips for any other reason fails (so a lost precondition cannot shrink the lane),
+and a test that leaves a session open fails the next tests with one line naming it. The lane is
+`pytest -m "(db and not server) or embedded"`. Docker stays the full-capability lane, so `ROWX_REQUIRE_DB=1` runs with a
+server run everything.
+
+The divergences are recorded in `packages/rowx-postgres/src/rowx_postgres/__tests__/support/engine.py`. Removing a mark
+is the fix for its cause:
+
+| Divergence | What differs |
+|---|---|
+| `inet-cidr` | Binary `inet` and `cidr` values carry WASI address-family bytes. |
+| `xml` | The engine has no XML support (`0A000`). |
+| `encoding` | No conversion libraries: `SET client_encoding = 'SJIS'` fails. |
+| `locale` | No locale data: `lc_monetary` stays `C`. |
+| `backend-pid` | Every session reports the same `pg_backend_pid()`. |
+
+Not recorded as a mark, because the tests that touch it are engine tests: closing a directory instance stops the
+backend as a process exit does, with no shutdown checkpoint, so the next open runs crash recovery. The host runs a
+`CHECKPOINT` just before a normal close (never on an abandon), so a sequence does not skip the 32 values it pre-logs.
+`UNLOGGED` relations are still reset by every reopen, which a server does only after a crash.

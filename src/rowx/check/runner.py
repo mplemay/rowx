@@ -35,9 +35,11 @@ from rowx.check.resolve import ModuleGraph, RowType, resolve_row_type, roots_for
 from rowx.check.sourcemap import SourceMap, SourceMapper
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
+
+    from rowx_core.backend import ScratchBuild
 
     from rowx.check.config import Config
     from rowx.check.model import FileResult, QueryCall, QueryKind
@@ -87,18 +89,15 @@ class Statistics:
     by_rule: Counter[Rule] = field(default_factory=Counter)
 
 
-@dataclass(slots=True, kw_only=True, frozen=True)
-class ScratchBuild:
-    url: str
-    seconds: float
-
-
-# `gate` runs once, before anything is described, and only when there is something to describe
-# `scratch` builds the database to describe against from the server URL, and drops it when the run ends
+# `gate` runs once, before anything is described, and only when there is something to describe; it gets the first URL
+# `scratch` builds the database to describe against from the target URL, for that many workers, and tears it down when
+# the run ends
+# `own` starts a database that the run owns and yields its URL; the run then describes with exactly one worker
 @dataclass(slots=True, kw_only=True, frozen=True)
 class Hooks:
     gate: Callable[[str], Awaitable[int | None]] | None = None
-    scratch: Callable[[str], AbstractAsyncContextManager[ScratchBuild]] | None = None
+    scratch: Callable[[str, int], AbstractAsyncContextManager[ScratchBuild]] | None = None
+    own: Callable[[str], AbstractAsyncContextManager[str]] | None = None
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -316,19 +315,19 @@ class _Worker:
         return outcome
 
 
+# one worker per URL (at most one per statement), so a URL that appears twice is shared by two workers
 async def describe_all(
-    dsn: str,
+    urls: Sequence[str],
     statements: list[str],
-    jobs: int,
     timeout_ms: int,
     backend: CheckerBackend | None = None,
 ) -> dict[str, Outcome]:
-    selected = backend if backend is not None else backend_for(dsn).checker()
+    selected = backend if backend is not None else backend_for(urls[0]).checker()
     pending = deque(statements)
     results: dict[str, Outcome] = {}
 
-    async def run() -> None:
-        worker = _Worker(dsn, timeout_ms, selected)
+    async def run(url: str) -> None:
+        worker = _Worker(url, timeout_ms, selected)
         try:
             await worker._open()  # ruff: ignore[private-member-access]
             while pending:
@@ -339,8 +338,8 @@ async def describe_all(
 
     try:
         async with asyncio.TaskGroup() as group:
-            for _ in range(min(jobs, len(statements))):
-                group.create_task(run())
+            for url in urls[: len(statements)]:
+                group.create_task(run(url))
     except* CheckError as errors:
         raise min(errors.exceptions, key=str) from None
     return results
@@ -736,6 +735,12 @@ def _collect(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     return sites, reports, sources, backend
 
 
+# how many distinct statements a run over `files` describes, for sizing a scratch before that run starts
+def count_statements(config: Config, files: Iterable[Path], dsn: str, boundary: Path | None = None) -> int:
+    sites, _, _, _ = _collect(config, files, Statistics(), None, dsn, None, boundary)
+    return len({site.sourcemap.sql for site in sites})
+
+
 async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     config: Config,
     files: Iterable[Path],
@@ -755,22 +760,26 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
     sites, reports, sources, selected = _collect(config, files, stats, selected, dsn, coverage, boundary)
     statements = sorted({site.sourcemap.sql for site in sites})
     stats.distinct_sql = len(statements)
-    target = dsn
     if statements:
         if dsn is None or not dsn.strip():
             msg = f"no database URL; pass --database-url or set ${config.database_url_env}"
             raise CheckError(msg)
         if selected is None:
             selected = backend_for(dsn).checker()
-        target = dsn
+        urls = (dsn,) * jobs
         async with AsyncExitStack() as stack:
-            if hooks.scratch is not None:
-                built = await stack.enter_async_context(hooks.scratch(dsn))
-                target = built.url
+            if hooks.own is not None:
+                urls = (await stack.enter_async_context(hooks.own(dsn)),)
+            elif hooks.scratch is not None:
+                # never more workers than statements, so a scratch that builds a database per worker builds no spare
+                workers = min(jobs, len(statements))
+                built = await stack.enter_async_context(hooks.scratch(dsn, workers))
+                # one URL is shared by every worker, several are one per worker
+                urls = built.urls * workers if len(built.urls) == 1 else built.urls[:workers]
                 stats.scratch_seconds = built.seconds
             if hooks.gate is not None:
-                stats.migrations = await hooks.gate(target)
-            outcomes = await describe_all(target, statements, jobs, config.statement_timeout_ms, selected)
+                stats.migrations = await hooks.gate(urls[0])
+            outcomes = await describe_all(urls, statements, config.statement_timeout_ms, selected)
         for site in sites:
             # collection inferred parameters before a backend existed; bind before they are compared
             if site.inference is not None:
@@ -779,7 +788,13 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
             reports.extend(_evaluate(site, outcome, selected))
             if inspect and not isinstance(outcome, (DatabaseError, _Operational)):
                 inspection.append(
-                    _inspection(site, outcome, selected, tuple(value for value in (dsn, target) if value), config.root)
+                    _inspection(
+                        site,
+                        outcome,
+                        selected,
+                        tuple(dict.fromkeys(value for value in (dsn, *urls) if value)),
+                        config.root,
+                    )
                 )
     stats.by_rule.update(report.diagnostic.rule for report in reports)
     return RunResult(reports=reports, sources=sources, statistics=stats, coverage=coverage, inspection=inspection)

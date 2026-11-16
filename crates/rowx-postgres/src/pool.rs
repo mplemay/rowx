@@ -101,6 +101,7 @@ impl From<PoolError<Self>> for Error {
         match err {
             PoolError::Core(core) => Self::Core(core),
             PoolError::Manage(err) => err,
+            PoolError::ConnectTimeout(err) => Self::ConnectTimeout(Box::new(err)),
         }
     }
 }

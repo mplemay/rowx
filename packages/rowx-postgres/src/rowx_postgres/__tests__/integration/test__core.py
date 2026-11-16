@@ -44,6 +44,7 @@ from rowx_postgres import (
     Range,
     connect,
 )
+from rowx_postgres.__tests__.support.engine import divergent
 from rowx_postgres.__tests__.support.type_goldens import DECODE_GOLDENS
 from rowx_postgres._core import Connection as ConnectionImpl, RowShape, TypeInfo, _decode, type_table
 
@@ -851,7 +852,7 @@ ARRAY_FAMILIES: Final[dict[str, object]] = {
 }
 
 
-@pytest.mark.parametrize("sql_type", sorted(ARRAY_FAMILIES))
+@pytest.mark.parametrize("sql_type", divergent(sorted(ARRAY_FAMILIES), str))
 @pytest.mark.db
 def test_every_element_family_round_trips_as_an_array_parameter(schema: str, sql_type: str) -> None:
     value = ARRAY_FAMILIES[sql_type]
@@ -1174,6 +1175,7 @@ def test_a_uuid_subclass_cannot_choose_the_bytes_that_are_sent(schema: str) -> N
 
 
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_an_ip_address_subclass_cannot_choose_the_bytes_that_are_sent(schema: str) -> None:
     class LyingAddress(ipaddress.IPv4Address): ...
 
@@ -1184,6 +1186,7 @@ def test_an_ip_address_subclass_cannot_choose_the_bytes_that_are_sent(schema: st
 
 
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_an_ip_interface_subclass_cannot_choose_the_prefix_that_is_sent(schema: str) -> None:
     class LyingInterface(ipaddress.IPv4Interface): ...
 
@@ -1195,6 +1198,7 @@ def test_an_ip_interface_subclass_cannot_choose_the_prefix_that_is_sent(schema: 
 
 
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_an_ip_network_subclass_cannot_choose_the_address_or_prefix_that_is_sent(schema: str) -> None:
     class LyingNetwork(ipaddress.IPv4Network): ...
 
@@ -1799,7 +1803,7 @@ def test_corpus_covers_the_type_table() -> None:
     assert {case.key for case in CORPUS} == supported
 
 
-@pytest.mark.parametrize("case", CORPUS, ids=_case_id)
+@pytest.mark.parametrize("case", divergent(CORPUS, lambda case: case.sql_type), ids=_case_id)
 @pytest.mark.db
 def test_decode_matches_psycopg(schema: str, case: Case) -> None:
     sql = _literal_sql(case)
@@ -3069,6 +3073,7 @@ def test_bit_takes_only_str(schema: str) -> None:
     ],
 )
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_inet_decodes_to_an_interface(schema: str, literal: str, expected: object) -> None:
     got = read(schema, f"SELECT '{literal}'::inet")
     assert type(got) is type(expected)
@@ -3078,6 +3083,7 @@ def test_inet_decodes_to_an_interface(schema: str, literal: str, expected: objec
 
 @pytest.mark.parametrize("literal", ["10.0.0.0/8", "0.0.0.0/0", "2001:db8::/32", "::/0", "1.2.3.4/32"])
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_cidr_decodes_to_a_network(schema: str, literal: str) -> None:
     got = read(schema, f"SELECT '{literal}'::cidr")
     assert got == ipaddress.ip_network(literal)
@@ -3094,6 +3100,7 @@ def test_cidr_decodes_to_a_network(schema: str, literal: str) -> None:
     ],
 )
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_inet_interface_round_trips(schema: str, value: object) -> None:
     assert read(schema, "SELECT $1::inet", [value]) == value
 
@@ -3108,6 +3115,7 @@ def test_inet_interface_round_trips(schema: str, value: object) -> None:
     ],
 )
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_inet_accepts_addresses_and_strings(schema: str, value: object, expected: object) -> None:
     assert read(schema, "SELECT $1::inet", [value]) == expected
 
@@ -3117,11 +3125,13 @@ def test_inet_accepts_addresses_and_strings(schema: str, value: object, expected
     [ipaddress.IPv4Network("10.0.0.0/8"), ipaddress.IPv6Network("2001:db8::/32"), ipaddress.IPv4Network("0.0.0.0/0")],
 )
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_cidr_round_trips(schema: str, value: object) -> None:
     assert read(schema, "SELECT $1::cidr", [value]) == value
 
 
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_cidr_accepts_a_string(schema: str) -> None:
     assert read(schema, "SELECT $1::cidr", ["10.0.0.0/8"]) == ipaddress.IPv4Network("10.0.0.0/8")
 
@@ -3208,6 +3218,7 @@ def test_bad_mac_is_an_encode_error(schema: str, sql_type: str, value: str) -> N
 
 
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_network_arrays_round_trip_with_nulls_and_two_dimensions(schema: str) -> None:
     inets = [[ipaddress.IPv4Interface("10.0.0.1/24"), None], [ipaddress.IPv6Interface("::1/128"), None]]
     assert read(schema, "SELECT $1::inet[]", [inets]) == inets
@@ -3236,6 +3247,7 @@ def test_array_element_error_names_the_element(schema: str) -> None:
 
 
 @pytest.mark.db
+@pytest.mark.server(divergence="inet-cidr")
 def test_query_annotated_with_the_pair_decodes(schema: str) -> None:
     pair = ipaddress.IPv4Interface | ipaddress.IPv6Interface
     q = query[tuple[pair, pair | None, str]](t"SELECT '10.0.0.1/24'::inet, NULL::inet, '08:00:2b:01:02:03'::macaddr")
@@ -3953,7 +3965,7 @@ def test_table_coverage() -> None:
     assert {row.key for row in table} >= ENCODE_EXEMPT
 
 
-@pytest.mark.parametrize("key", sorted(DECODE_GOLDENS))
+@pytest.mark.parametrize("key", divergent(sorted(DECODE_GOLDENS), str))
 @pytest.mark.db
 def test_decode_golden(schema: str, key: str) -> None:
     sql_type, literal, expected = DECODE_GOLDENS[key]
@@ -3961,14 +3973,14 @@ def test_decode_golden(schema: str, key: str) -> None:
     assert fetch_scalar_rows(schema, sql) == [expected]
 
 
-@pytest.mark.parametrize("key", sorted(ENCODE_GOLDENS))
+@pytest.mark.parametrize("key", divergent(sorted(ENCODE_GOLDENS), str))
 @pytest.mark.db
 def test_encode_golden(schema: str, key: str) -> None:
     sql_type, value = ENCODE_GOLDENS[key]
     assert fetch_scalar_rows(schema, f"SELECT $1::{sql_type}", [value]) == [value]
 
 
-@pytest.mark.parametrize("sql_type", sorted(UNSUPPORTED_DECODE))
+@pytest.mark.parametrize("sql_type", divergent(sorted(UNSUPPORTED_DECODE), str))
 @pytest.mark.db
 def test_unsupported_type_is_decode_error(schema: str, sql_type: str) -> None:
     with pytest.raises(DecodeError, match=sql_type):

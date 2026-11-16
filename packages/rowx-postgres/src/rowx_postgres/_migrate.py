@@ -66,7 +66,7 @@ async def call[T](executor: Connection | Pool, start: Callable[[ConnectionImpl |
                 raise
             await executor._finish(conn)  # ruff: ignore[private-member-access]
         else:
-            rows = await start(executor._impl)  # ruff: ignore[private-member-access]
+            rows = await start(await executor._started())  # ruff: ignore[private-member-access]
     elif isinstance(executor, Connection):
         if executor._tx is not None:  # ruff: ignore[private-member-access]
             msg = "a migrator can't run on a connection that is inside a transaction"

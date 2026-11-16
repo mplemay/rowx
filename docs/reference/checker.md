@@ -50,6 +50,9 @@ evidence: rule levels and inline suppressions cannot turn an incompatible or inc
 Snapshot configuration still validates rule settings and applies its versioned path exclusions; snapshot discovery
 does not apply `.gitignore` or `.ignore`. The loading-revision and building-schema failures are `CheckError`s raised
 before the 0/1/2 return. The URL is `--database-url` or `ROWX_DATABASE_URL`. It does not read `database_url_env`.
+An `embedded://` URL builds each revision's schema in memory, with one instance per describe worker, instead of a
+scratch database on a server, and prints no disposable-server warning; an embedded directory URL is a `CheckError`
+(exit 2). See [Embedded Postgres](embedded.md#checker).
 
 ## Config
 

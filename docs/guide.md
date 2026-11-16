@@ -23,6 +23,7 @@ The `python test` blocks in this guide run against a seeded database (users `ali
 - [CI](guide/ci.md): run the checker on a throwaway Postgres.
 - [Migrations](guide/migrations.md): SQL files, applied in order.
 - [Testing](guide/testing.md): a migrated database per test.
+- [Embedded Postgres](guide/embedded.md): an in-process Postgres 18 for development, checking, and tests.
 - [Security](guide/security.md): what is trusted, and what stays a bound value.
 
 ## Known limits

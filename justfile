@@ -5,13 +5,25 @@ default:
 check:
     uv run prek run --all-files
 
-# cargo test over the workspace; DB tests run when ROWX_TEST_DSN is set
+# clippy for packages/rowx-embedded (it builds the Wasmer tree, so it is not a default workspace member and `check` leaves it out)
+check-embedded:
+    uv run prek run cargo-clippy-embedded --hook-stage manual --all-files
+
+# cargo test over the default workspace members; DB tests run when ROWX_TEST_DSN is set
 test-rust:
-    cargo test --workspace
+    cargo test
+
+# cargo test for the embedded engine host (builds the Wasmer tree)
+test-rust-embedded:
+    cargo test -p rowx-embedded-host
 
 # python tests
 test-py:
     uv run pytest
+
+# the embedded lane: the database tests that one embedded session can serve, plus the tests marked `embedded`
+test-embedded:
+    ROWX_TEST_DSN=embedded:// uv run pytest -m "(db and not server) or embedded"
 
 # long nullability fuzz with a random seed, printing the precision report; needs ROWX_TEST_DSN
 fuzz-nullability count="5000":

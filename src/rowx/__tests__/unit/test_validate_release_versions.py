@@ -19,6 +19,9 @@ VERSION_FILES: Final[tuple[str, ...]] = (
     "uv.lock",
     "packages/rowx-core/pyproject.toml",
     "packages/rowx-postgres/pyproject.toml",
+    "packages/rowx-embedded/pyproject.toml",
+    "packages/rowx-embedded/Cargo.toml",
+    "packages/rowx-embedded/crates/rowx-embedded-host/Cargo.toml",
 )
 
 type Main = Callable[[], int]
@@ -82,15 +85,18 @@ def test_push_without_tag_fails(monkeypatch: pytest.MonkeyPatch) -> None:
         _run(monkeypatch, "push")
 
 
-def test_mismatched_dev_pin_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["rowx-postgres", "rowx-embedded"])
+def test_mismatched_dev_pin_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str) -> None:
     _copy_version_files(tmp_path)
     project = tmp_path / "pyproject.toml"
     version = _release_version(tmp_path)
     text = project.read_text(encoding="utf-8")
-    needle = f'    "rowx-postgres=={version}",\n'
+    # the embedded extra repeats the rowx-postgres pin, so the dev group's line is found by its position after it
+    needle = f'dev = [\n    "rowx-postgres=={version}",\n    "rowx-embedded=={version}",\n'
     assert text.count(needle) == 1
-    project.write_text(text.replace(needle, f'    "rowx-postgres=={MISMATCH_VERSION}",\n', 1), encoding="utf-8")
-    with pytest.raises(SystemExit, match="dev dependency group"):
+    mismatched = needle.replace(f'"{name}=={version}"', f'"{name}=={MISMATCH_VERSION}"')
+    project.write_text(text.replace(needle, mismatched, 1), encoding="utf-8")
+    with pytest.raises(SystemExit, match=f"dev dependency group must pin {name}"):
         _run(monkeypatch, "pull_request", root=tmp_path)
 
 
@@ -104,6 +110,44 @@ def test_mismatched_lock_version_fails(monkeypatch: pytest.MonkeyPatch, tmp_path
     lock.write_text(
         text.replace(needle, f'name = "rowx-core"\nversion = "{MISMATCH_VERSION}"', 1),
         encoding="utf-8",
+    )
+    with pytest.raises(SystemExit, match="Release version mismatch"):
+        _run(monkeypatch, "pull_request", root=tmp_path)
+
+
+def _replace_once(path: Path, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def test_mismatched_embedded_extra_pin_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _copy_version_files(tmp_path)
+    version = _release_version(tmp_path)
+    _replace_once(tmp_path / "pyproject.toml", f'"rowx-embedded=={version};', f'"rowx-embedded=={MISMATCH_VERSION};')
+    with pytest.raises(SystemExit, match=r"rowx\[embedded\] must be exactly"):
+        _run(monkeypatch, "pull_request", root=tmp_path)
+
+
+def test_embedded_must_depend_on_matching_postgres(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _copy_version_files(tmp_path)
+    version = _release_version(tmp_path)
+    _replace_once(
+        tmp_path / "packages/rowx-embedded/pyproject.toml",
+        f'dependencies = ["rowx-core=={version}", "rowx-postgres=={version}"]',
+        f'dependencies = ["rowx-core=={version}", "rowx-postgres=={MISMATCH_VERSION}"]',
+    )
+    with pytest.raises(SystemExit, match="rowx-embedded must depend exactly"):
+        _run(monkeypatch, "pull_request", root=tmp_path)
+
+
+def test_mismatched_embedded_cargo_version_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _copy_version_files(tmp_path)
+    version = _release_version(tmp_path)
+    _replace_once(
+        tmp_path / "packages/rowx-embedded/crates/rowx-embedded-host/Cargo.toml",
+        f'version = "{version}"',
+        f'version = "{MISMATCH_VERSION}"',
     )
     with pytest.raises(SystemExit, match="Release version mismatch"):
         _run(monkeypatch, "pull_request", root=tmp_path)

@@ -8,12 +8,19 @@ from typing import Final
 ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 PUSH_EVENT: Final[str] = "push"
 PACKAGE_NAME: Final[str] = "rowx"
-PYTHON_PACKAGES: Final[tuple[str, ...]] = ("rowx", "rowx-core", "rowx-postgres")
+PYTHON_PACKAGES: Final[tuple[str, ...]] = ("rowx", "rowx-core", "rowx-postgres", "rowx-embedded")
+EMBEDDED_DIR: Final[str] = "packages/rowx-embedded"
+EMBEDDED_MARKER: Final[str] = (
+    "(sys_platform == 'darwin' and platform_machine == 'arm64') or "
+    "(sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))"
+)
 WORKSPACE_PACKAGES: Final[frozenset[str]] = frozenset({
     "rowx-core",
     "rowx-postgres",
     "rowx-postgres-py",
     "rowx-py-core",
+    "rowx-embedded",
+    "rowx-embedded-host",
 })
 
 
@@ -48,7 +55,12 @@ def main() -> int:
     if not isinstance(extras, dict) or extras.get("postgres") != [f"rowx-postgres=={version}"]:
         message = "rowx[postgres] must pin the matching rowx-postgres"
         raise SystemExit(message)
-    _require_dev_postgres_pin(project, version)
+    expected_embedded = [f"rowx-postgres=={version}", f"rowx-embedded=={version}; {EMBEDDED_MARKER}"]
+    if extras.get("embedded") != expected_embedded:
+        message = f"rowx[embedded] must be exactly {expected_embedded}"
+        raise SystemExit(message)
+    _check_embedded(root, version, versions)
+    _require_dev_pins(project, version)
     if _required("EVENT_NAME") == PUSH_EVENT:
         versions["tag"] = _required("TAG_NAME")[1:]
     if any(value != version for value in versions.values()):
@@ -60,13 +72,26 @@ def main() -> int:
     return 0
 
 
-def _require_dev_postgres_pin(project: dict[str, object], version: str) -> None:
-    required = f"rowx-postgres=={version}"
+def _check_embedded(root: Path, version: str, versions: dict[str, str]) -> None:
+    package = root / EMBEDDED_DIR
+    embedded_project = _read(package / "pyproject.toml")["project"]
+    required = [f"rowx-core=={version}", f"rowx-postgres=={version}"]
+    if not isinstance(embedded_project, dict) or embedded_project.get("dependencies") != required:
+        message = f"rowx-embedded must depend exactly on {required}"
+        raise SystemExit(message)
+    versions["rowx-embedded/Cargo.toml"] = _version(package / "Cargo.toml", ("package", "version"))
+    versions["rowx-embedded-host/Cargo.toml"] = _version(
+        package / "crates/rowx-embedded-host/Cargo.toml", ("package", "version")
+    )
+
+
+def _require_dev_pins(project: dict[str, object], version: str) -> None:
     groups = project.get("dependency-groups")
     dev = groups.get("dev") if isinstance(groups, dict) else None
-    if not isinstance(dev, list) or required not in dev:
-        message = "dev dependency group must pin rowx-postgres to the release version"
-        raise SystemExit(message)
+    for name in ("rowx-postgres", "rowx-embedded"):
+        if not isinstance(dev, list) or f"{name}=={version}" not in dev:
+            message = f"dev dependency group must pin {name} to the release version"
+            raise SystemExit(message)
 
 
 def _required(name: str) -> str:
@@ -99,7 +124,7 @@ def _version(path: Path, keys: tuple[str, ...]) -> str:
     return current
 
 
-def _package_versions(path: Path) -> dict[str, str]:
+def _package_versions(path: Path, names: frozenset[str] = WORKSPACE_PACKAGES) -> dict[str, str]:
     packages = _read(path).get("package")
     if not isinstance(packages, list):
         message = f"{path.name} is missing package"
@@ -110,7 +135,7 @@ def _package_versions(path: Path) -> dict[str, str]:
             continue
         name = package.get("name")
         version = package.get("version")
-        if isinstance(name, str) and name in WORKSPACE_PACKAGES and isinstance(version, str):
+        if isinstance(name, str) and name in names and isinstance(version, str):
             versions[name] = version
     return versions
 

@@ -511,17 +511,22 @@ def test_a_connection_inside_a_transaction_is_an_interface_error(schema: str, tm
     asyncio.run(run())
 
 
+@pytest.mark.timing
 def test_a_second_operation_on_a_busy_connection_is_a_busy_error(schema: str, tmp_path: Path) -> None:
+    write(tmp_path, "1_slow.sql", "SELECT pg_sleep(30);")
     migrator = Migrator(tmp_path)
 
     async def run() -> None:
-        async with await connect(schema) as conn:
-            first = asyncio.ensure_future(migrator.info(conn))
-            # lets the first call claim the connection
-            await asyncio.sleep(0)
+        async with await connect(schema) as conn, await connect(schema) as observer:
+            pid = await backend_pid(conn)
+            first = asyncio.ensure_future(migrator.run(conn))
+            # the first operation holds the connection for as long as its statement runs
+            await wait_for_statement(observer, [pid], "%pg_sleep(30)%")
             with pytest.raises(ConnectionBusyError):
                 await migrator.info(conn)
-            await first
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
 
     asyncio.run(run())
 
@@ -539,6 +544,7 @@ def test_a_closed_pool_is_an_interface_error(schema: str, tmp_path: Path) -> Non
     asyncio.run(run())
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_run_on_a_pool_makes_other_connections_reprepare_stale_plans(schema: str, tmp_path: Path) -> None:
     write(tmp_path, "1_create.sql", "CREATE TABLE epoch_t (a int4); INSERT INTO epoch_t VALUES (1);")
     migrator = Migrator(tmp_path)
@@ -668,6 +674,7 @@ def test_a_cancelled_run_on_a_pool_still_drops_stale_plans(schema: str, tmp_path
     assert asyncio.run(run()) == [1, 1]
 
 
+@pytest.mark.server(needs="sessions")
 def test_two_migrators_on_one_database_both_finish(schema: str, tmp_path: Path) -> None:
     write(tmp_path, "1_t.sql", "CREATE TABLE t (id int4);")
     migrator = Migrator(tmp_path)
@@ -776,6 +783,7 @@ def test_a_cancelled_run_on_a_pool_without_a_reset_query_leaves_no_lock(schema: 
     asyncio.run(run())
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_failed_unlock_discards_the_pooled_connection(schema: str, tmp_path: Path) -> None:
     # the file terminates its own backend, so neither the rollback nor the unlock can run
     write(tmp_path, "1_kill.sql", "SELECT pg_terminate_backend(pg_backend_pid()); SELECT pg_sleep(34);")
@@ -819,6 +827,7 @@ async def ping(conn: Connection) -> None:
 
 
 @pytest.mark.parametrize("setup", [None, ping], ids=["in_rust", "with_hooks"])
+@pytest.mark.server(needs="create-database")
 def test_a_failed_unlock_on_a_live_connection_discards_the_pooled_connection(
     database: str,
     tmp_path: Path,

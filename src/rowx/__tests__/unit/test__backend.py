@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
 import pytest
 
-from rowx._backend import UnsupportedSchemeError, module_for
+from rowx._backend import LOADED, BackendMissing, UnsupportedSchemeError, backend_for, module_for
 
 QUERY: Final[str] = 'from rowx import query\n\nquery[int](t"SELECT 1")\n'
 MONEY_QUERY: Final[str] = """\
@@ -213,6 +213,21 @@ def test_postgres_dsns_select_the_postgres_backend(dsn: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "dsn", ["embedded://", "embedded:", "embedded:rel", "embedded:///var/lib/db", "EMBEDDED://?options=-c%20x%3D1"]
+)
+def test_embedded_dsns_select_the_embedded_backend(dsn: str) -> None:
+    assert module_for(dsn) == "rowx_embedded._backend"
+
+
+def test_an_embedded_dsn_without_the_companion_asks_for_the_embedded_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "rowx_embedded", None)
+    monkeypatch.delitem(LOADED, "rowx_embedded._backend", raising=False)
+    monkeypatch.delitem(sys.modules, "rowx_embedded._backend", raising=False)
+    with pytest.raises(BackendMissing, match=r"rowx\[embedded\]"):
+        backend_for("embedded://")
+
+
+@pytest.mark.parametrize(
     "argv",
     [
         ["migrate", "info", "--database-url", "sqlite://x"],
@@ -228,7 +243,7 @@ def test_unknown_scheme_on_migrate_and_database_exits_two(tmp_path: Path, argv: 
     assert "rowx[postgres]" not in result.stderr
 
 
-@pytest.mark.parametrize("dsn", ["sqlite://x", "embedded://x"])
+@pytest.mark.parametrize("dsn", ["sqlite://x", "mysql://x"])
 def test_unknown_scheme_does_not_ask_for_the_postgres_extra(dsn: str) -> None:
     with pytest.raises(UnsupportedSchemeError, match="unknown database scheme") as raised:
         module_for(dsn)

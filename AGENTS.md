@@ -124,7 +124,8 @@ validates every query against a live Postgres 18 database by preparing and descr
 |---|---|
 | `just check` | All gates through `uv run prek run --all-files` |
 | `just fmt` | Format rust, python, and shell through the prek hooks |
-| `just test-rust` | `cargo test --workspace` (DB tests run if `ROWX_TEST_DSN` is set) |
+| `just test-rust` | `cargo test` over the default members, which leave out `rowx-embedded` (DB tests run if `ROWX_TEST_DSN` is set) |
+| `just test-rust-embedded` | `cargo test -p rowx-embedded-host` (builds the Wasmer tree) |
 | `just test-py` | `uv run pytest` |
 | `just db-up` / `just db-down` | Start or stop `postgres:18` |
 | `just bench` | Release build plus `bench/fetch_100k.py` |

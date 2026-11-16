@@ -49,3 +49,9 @@ def test_collision_does_not_drop_an_existing_database() -> None:
     asyncio.run(run())
     admin.drop.assert_not_awaited()
     assert not scratch.leaked
+
+
+def test_scratch_session_rejects_fewer_than_one_worker() -> None:
+    scratch = Scratch("postgresql://u@h/app", Mock(spec=AdminService))
+    with pytest.raises(ValueError, match="at least one worker"):
+        scratch.session(Mock(), 0)

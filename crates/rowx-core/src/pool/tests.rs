@@ -26,9 +26,13 @@ struct Shared {
     fail_reset: AtomicBool,
     pings: AtomicUsize,
     cancels: AtomicUsize,
-    // how long connects and pings take, in milliseconds
+    // how long connects, pings and resets take, in milliseconds
     connect_ms: AtomicU64,
     ping_ms: AtomicU64,
+    reset_ms: AtomicU64,
+    // a server's connection limit (0 for none): a connect fails while this many are open
+    limit: AtomicUsize,
+    open: AtomicUsize,
     forgets: AtomicUsize,
     resets: Mutex<Vec<(u64, bool)>>,
     closed: Mutex<Vec<u64>>,
@@ -71,6 +75,10 @@ impl Manage for Fake {
         if delay > 0 {
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
+        let limit = self.0.limit.load(Ordering::Acquire);
+        if limit > 0 && self.0.open.load(Ordering::Acquire) >= limit {
+            return Err(FakeError);
+        }
         let failing = self.0.failing_connects.load(Ordering::Acquire);
         if failing > 0 {
             if failing != usize::MAX {
@@ -80,6 +88,7 @@ impl Manage for Fake {
             }
             return Err(FakeError);
         }
+        self.0.open.fetch_add(1, Ordering::AcqRel);
         Ok(FakeConn {
             id: self.0.next_id.fetch_add(1, Ordering::AcqRel) + 1,
             state: Arc::new(State::default()),
@@ -104,16 +113,16 @@ impl Manage for Fake {
         Ok(())
     }
 
-    fn reset(
-        &self,
-        conn: &FakeConn,
-        rollback: bool,
-    ) -> impl Future<Output = Result<(), FakeError>> + Send {
+    async fn reset(&self, conn: &FakeConn, rollback: bool) -> Result<(), FakeError> {
+        let delay = self.0.reset_ms.load(Ordering::Acquire);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         if self.0.fail_reset.load(Ordering::Acquire) {
-            return ready(Err(FakeError));
+            return Err(FakeError);
         }
         lock(&self.0.resets).push((conn.id, rollback));
-        ready(Ok(()))
+        Ok(())
     }
 
     fn is_broken(&self, conn: &FakeConn) -> bool {
@@ -131,6 +140,7 @@ impl Manage for Fake {
     }
 
     fn close(&self, conn: FakeConn) -> impl Future<Output = ()> + Send {
+        self.0.open.fetch_sub(1, Ordering::AcqRel);
         conn.state.close();
         lock(&self.0.closed).push(conn.id);
         ready(())
@@ -467,11 +477,51 @@ async fn acquire_timeout_covers_retries() -> TestResult {
     shared.failing_connects.store(usize::MAX, Ordering::Release);
     let start = Instant::now();
     let err = pool.acquire().await.err();
-    assert!(matches!(err, Some(PoolError::Core(CoreError::PoolTimeout))));
+    // the last connect error comes back with the timeout
+    assert!(matches!(err, Some(PoolError::ConnectTimeout(FakeError))));
     assert!(start.elapsed() >= Duration::from_secs(2));
     assert!(start.elapsed() < Duration::from_secs(3));
     assert!(shared.attempts.load(Ordering::Acquire) > 2);
     assert_eq!(pool.size(), 0);
+    Ok(())
+}
+
+// a server at its connection limit refuses a new connect until the pool's own connection, which is
+// still being reset after a release, comes back; the waiter that is retrying the connect takes it
+#[tokio::test(start_paused = true)]
+async fn a_connect_retry_takes_a_connection_returned_meanwhile() -> TestResult {
+    let (pool, shared) = pool(PoolOptions {
+        max_size: 2,
+        acquire_timeout: Duration::from_secs(5),
+        ..options()
+    })?;
+    shared.limit.store(1, Ordering::Release);
+    shared.reset_ms.store(200, Ordering::Release);
+    let first = pool.acquire().await?;
+    let first_id = id(&first)?;
+    // released in the background: the reset holds the connection (and its permit) for 200ms
+    drop(first);
+    let start = Instant::now();
+    let second = pool.acquire().await?;
+    assert_eq!(id(&second)?, first_id);
+    assert!(start.elapsed() < Duration::from_secs(1));
+    // the refused connects never opened anything, and the pool still has its one connection
+    assert!(shared.attempts.load(Ordering::Acquire) >= 2);
+    assert_eq!(pool.size(), 1);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn acquire_timeout_without_a_connect_error_is_a_plain_timeout() -> TestResult {
+    let (pool, shared) = pool(PoolOptions {
+        acquire_timeout: Duration::from_secs(2),
+        connect_timeout: Some(Duration::from_millis(100)),
+        ..options()
+    })?;
+    // every attempt outlasts connect_timeout, so none of them fails with an error
+    shared.connect_ms.store(10_000, Ordering::Release);
+    let err = pool.acquire().await.err();
+    assert!(matches!(err, Some(PoolError::Core(CoreError::PoolTimeout))));
     Ok(())
 }
 
