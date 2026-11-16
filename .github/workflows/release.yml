@@ -445,7 +445,8 @@ jobs:
           fi
           # rustup reads rust-toolchain.toml from the build directory; the sdist is outside the checkout
           cp "$GITHUB_WORKSPACE/rust-toolchain.toml" "${projects[0]}/rust-toolchain.toml"
-          cargo fetch --locked --manifest-path "${projects[0]}/Cargo.toml"
+          # no --locked: the sdist lock omits the unused wasmer-compiler patch, which cargo would otherwise record as a lock change
+          cargo fetch --manifest-path "${projects[0]}/Cargo.toml"
 
       - name: Rebuild rowx-postgres offline
         env:
@@ -457,7 +458,7 @@ jobs:
           cd "${projects[0]}"
           PYO3_PYTHON="$(uv python find 3.14)"
           export PYO3_PYTHON
-          maturin build --offline --locked --out "$RUNNER_TEMP/rebuilt-postgres"
+          maturin build --offline --out "$RUNNER_TEMP/rebuilt-postgres"
 
   publish-core:
     name: Publish rowx-core

@@ -37,6 +37,8 @@ features = ["pyo3/extension-module"]
 module-name = "rowx_postgres._core"
 python-packages = ["rowx_postgres"]
 python-source = "src"
+# source archives need the root `[patch.crates-io]` path; `vendor` here is a symlink to the repository's root `vendor/`
+include = [{ path = "vendor/wasmer-compiler/**/*", format = "sdist" }]
 exclude = [
     { path = "**/__tests__/**", format = "wheel" },
     { path = "**/__pycache__/**", format = "wheel" },
