@@ -10,6 +10,8 @@
 - a class: a dataclass, `NamedTuple`, `TypedDict`, or a pydantic model or dataclass, one field per column. See
   [Named row types](#named-row-types).
 
+Coming from a mapped class, see [From SQLAlchemy](../from-sqlalchemy.md).
+
 Elements are `int`, `float`, `str`, `bool`, `bytes`, `Decimal`, `date`, `time`, `datetime`, `timedelta`, `UUID`, or
 `list[...]` of those for arrays. Add `| None` for nullable columns. `Any` and `object` match any type and either
 nullability. `type` aliases and `Annotated[...]` are followed.

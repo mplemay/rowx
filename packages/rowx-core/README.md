@@ -1,5 +1,7 @@
 # rowx-core
 
+Typesafe raw SQL for Python 3.14+, with no ORM.
+
 Shared typed query, executor, row-shape and error primitives for rowx database implementations.
 
 `rowx-core` is pure Python and has no runtime dependencies. `from rowx import query` and

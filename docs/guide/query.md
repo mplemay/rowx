@@ -1,8 +1,6 @@
 # Writing queries
 
-A `query[T]` takes one inline t-string. Conversions (`{x!r}`, `{x=}`), format specs and nested templates are rejected,
-so every interpolation is a bound parameter. Use `query_unchecked` for dynamic SQL; the checker does not describe
-its SQL, but it still resolves `T`.
+Write one statement. Bind every value.
 
 ```python test
 import asyncio
@@ -42,5 +40,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+`query[T]` takes one inline t-string. Conversions (`{x!r}`, `{x=}`), format specs, and nested templates are rejected,
+so every interpolation is a bound parameter. `query_unchecked` is the path for dynamic SQL. The checker does not
+describe its SQL, and it still resolves `T`.
+
 In `query_unchecked`, a nested `Template` is flattened and its values stay bound, and `{name:ident}` emits a quoted
-identifier (a `str`, or a `tuple[str, ...]` joined with dots). There is no raw-SQL escape.
+identifier (a `str`, or a `tuple[str, ...]` joined with dots). There is no raw-SQL escape. Allowlist the name first
+([Identifiers](security.md#identifiers)).
