@@ -4,8 +4,9 @@
 `release.yml` and one GitHub environment, `pypi`.
 
 Each package is its own job. Publish order is `rowx-core`, then `rowx-postgres`, then `rowx-embedded`, then `rowx`. Each
-job uses `skip-existing: true`. Re-running a failed publish job skips files already on PyPI and uploads the rest. If a
-later publish job was skipped because an earlier one failed, re-run that skipped job after the failed one succeeds.
+job runs `uv publish`. PyPI accepts a second upload of a byte-identical file and rejects a same-name file with
+different bytes, so re-running a failed publish job uploads only what is missing. If a later publish job was skipped
+because an earlier one failed, re-run that skipped job after the failed one succeeds.
 
 `rowx` already uses the `pypi` environment. The owner registers pending trusted publishers for
 `rowx-core` and `rowx-postgres`.

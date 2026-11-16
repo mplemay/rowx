@@ -500,11 +500,17 @@ jobs:
           fi
           cp "${files[@]}" dist/rowx-core/
 
-      - name: Publish rowx-core
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          packages-dir: dist/rowx-core
-          skip-existing: true
+          enable-cache: false
+
+      - name: Attest rowx-core distributions
+        uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
+        with:
+          paths: dist/rowx-core
+
+      - name: Publish rowx-core
+        run: uv publish --trusted-publishing always "dist/rowx-core/*"
 
   publish-postgres:
     name: Publish rowx-postgres
@@ -558,11 +564,17 @@ jobs:
             esac
           done
 
-      - name: Publish rowx-postgres
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          packages-dir: dist/rowx-postgres
-          skip-existing: true
+          enable-cache: false
+
+      - name: Attest rowx-postgres distributions
+        uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
+        with:
+          paths: dist/rowx-postgres
+
+      - name: Publish rowx-postgres
+        run: uv publish --trusted-publishing always "dist/rowx-postgres/*"
 
   # the embedded wheels block the release: publish-rowx needs this job, and it needs rowx-postgres on PyPI first
   publish-embedded:
@@ -585,11 +597,17 @@ jobs:
           path: dist/rowx-embedded
           merge-multiple: true
 
-      - name: Publish rowx-embedded
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          packages-dir: dist/rowx-embedded
-          skip-existing: true
+          enable-cache: false
+
+      - name: Attest rowx-embedded distributions
+        uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
+        with:
+          paths: dist/rowx-embedded
+
+      - name: Publish rowx-embedded
+        run: uv publish --trusted-publishing always "dist/rowx-embedded/*"
 
   publish-rowx:
     name: Publish rowx
@@ -639,8 +657,14 @@ jobs:
             exit 1
           fi
 
-      - name: Publish rowx
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          packages-dir: dist/rowx
-          skip-existing: true
+          enable-cache: false
+
+      - name: Attest rowx distributions
+        uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
+        with:
+          paths: dist/rowx
+
+      - name: Publish rowx
+        run: uv publish --trusted-publishing always "dist/rowx/*"
