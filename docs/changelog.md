@@ -1,17 +1,20 @@
 # Changelog
 
-## 0.4.1
+## 0.4.2
 
+- The 0.4.0 and 0.4.1 tags never published: `v0.4.0` was tagged before its version bump, and `v0.4.1` failed the offline
+  sdist rebuild because the `rowx-postgres` sdist lacked the vendored `wasmer-compiler` patch. 0.4.2 is the first 0.4
+  release on PyPI.
 - `rowx[embedded]` adds an in-process Postgres 18 for development, checking and tests. In code,
   `rowx.embedded.Database` is a pool-shaped executor that owns one instance (`Database()` in memory,
   `Database("/abs/dir")` persistent). An `embedded://` URL selects it for `rowx check`, `rowx check-compat`,
   `rowx migrate` and the pytest plugin; generic `connect`, `Pool` and `ConnectOptions.from_dsn` do not accept one. All
   of it lives in `rowx-embedded`, and `rowx-postgres` does not know about it. See
   [Embedded Postgres](guide/embedded.md).
-- `rowx-embedded` releases in lockstep with the other distributions (0.4.1, from the `v*` tag and `release.yml`)
+- `rowx-embedded` releases in lockstep with the other distributions (0.4.2, from the `v*` tag and `release.yml`)
   instead of as `18.4.0` on its own `embedded-v*` tag. It depends on the matching `rowx-postgres`, and `rowx[embedded]`
-  pins `rowx-embedded==0.4.1`. The engine is still PostgreSQL 18.4. This tree is version 0.4.1. 0.4.1 is not on PyPI
-  until the `v0.4.1` tag is published.
+  pins `rowx-embedded==0.4.2`. The engine is still PostgreSQL 18.4. This tree is version 0.4.2. 0.4.2 is not on PyPI
+  until the `v0.4.2` tag is published.
 - A pool acquire that is retrying a connect now takes a connection that another caller returns meanwhile. Before, it
   kept retrying until its timeout, so a pool whose server was at its connection limit could time out next to an idle
   connection of its own.
