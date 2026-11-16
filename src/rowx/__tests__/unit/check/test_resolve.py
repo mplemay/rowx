@@ -21,6 +21,86 @@ def test_glob_include_uses_literal_prefix_for_roots(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "body",
+    [
+        "for alias in iter((value,)):\n        alias.default(lambda self: 1)",
+        "for alias in tuple([value]):\n        if True:\n            copy = alias\n            copy.default(lambda self: 1)",
+        "for alias in (value if True else attrs.field(),):\n        alias.default(lambda self: 1)",
+        "with nullcontext(value) as alias:\n        copy = alias\n        copy.default(lambda self: 1)",
+        "match value:\n        case alias:\n            alias.default(lambda self: 1)",
+        "(alias := value)\n    match 1:\n        case 0: alias = attrs.field()\n        case 1: alias.default(lambda self: 1)",
+        "(alias := value)\n    for _ in ():\n        alias = attrs.field()\n    else:\n        alias.default(lambda self: 1)",
+        "(alias := value)\n    while False:\n        alias = attrs.field()\n    else:\n        alias.default(lambda self: 1)",
+        "(alias := (other := value))\n    alias.default(lambda self: 1)",
+    ],
+)
+def test_attrs_local_binding_paths_reject_registration(tmp_path: Path, body: str) -> None:
+    path = tmp_path / "case.py"
+    cleanup = "alias"
+    if "copy = alias" in body:
+        cleanup += ", copy"
+    if "other := value" in body:
+        cleanup += ", other"
+    path.write_text(
+        "import attrs\nfrom contextlib import nullcontext\nfrom rowx import query\n"
+        f"@attrs.define\nclass Row:\n    value: int = attrs.field()\n    {body}\n    del {cleanup}\n"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "(alias := spec)\nalias, copy = attrs.field(), alias\ncopy.default(lambda self: 1)",
+        "(alias := (other := spec))\nalias.default(lambda self: 1)",
+        "(alias := spec)\nfor _ in ():\n    alias = attrs.field()\nelse:\n    alias.default(lambda self: 1)",
+        "(alias := spec)\nwhile False:\n    alias = attrs.field()\nelse:\n    alias.default(lambda self: 1)",
+        "(alias := spec)\nmatch 1:\n    case 0: alias = attrs.field()\n    case 1: alias.default(lambda self: 1)",
+    ],
+)
+def test_attrs_shared_binding_paths_reject_registration(tmp_path: Path, body: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        f'{body}\n@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "with nullcontext(value) as alias:\n        alias = attrs.field()\n        alias.default(lambda self: 1)",
+        "match value:\n        case alias:\n            alias = attrs.field()\n            alias.default(lambda self: 1)",
+        "for alias in tuple([value]):\n        alias = attrs.field()\n        alias.default(lambda self: 1)",
+        "for alias in (attrs.field(validator=lambda s, a, v: value),):\n        alias.default(lambda self: 1)",
+        "match attrs.field():\n        case alias:\n            alias.default(lambda self: 1)",
+        "match attr.field():\n        case alias:\n            alias.default(lambda self: 1)",
+        "def later():\n        (alias := (other := value))\n        alias.default(lambda self: 1)",
+    ],
+)
+def test_attrs_binding_paths_allow_fresh_and_deferred(tmp_path: Path, body: str) -> None:
+    path = tmp_path / "case.py"
+    cleanup = "" if body.startswith("def later") else "    del alias\n"
+    path.write_text(
+        "import attr\nimport attrs\nfrom contextlib import nullcontext\nfrom rowx import query\n"
+        f"@attrs.define\nclass Row:\n    value: int = attrs.field()\n    {body}\n{cleanup}"
+        'query[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+
+
+@pytest.mark.parametrize(
     "declaration",
     [
         "@attrs.define(field_transformer=transform)\nclass Row:\n    value: int",

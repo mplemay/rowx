@@ -680,6 +680,33 @@ def test_parameter_comparison_coverage_for_array_leaves() -> None:
     "declaration",
     [
         (
+            "spec = attrs.field()\n(alias := spec)\nalias, copy = attrs.field(), alias\n"
+            "copy.default(lambda self: 42)\n@attrs.define\nclass Row:\n    id: int\n    value: int = spec\n"
+        ),
+        (
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n"
+            "    (alias := (other := value))\n    alias.default(lambda self: 42)\n    del alias, other\n"
+        ),
+        (
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n"
+            "    for alias in tuple([value]):\n        copy = alias\n        copy.default(lambda self: 42)\n"
+            "    del alias, copy\n"
+        ),
+        (
+            "from contextlib import nullcontext\n@attrs.define\nclass Row:\n    id: int\n"
+            "    value: int = attrs.field()\n    with nullcontext(value) as alias:\n"
+            "        alias.default(lambda self: 42)\n    del alias\n"
+        ),
+        (
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n"
+            "    match value:\n        case alias:\n            alias.default(lambda self: 42)\n    del alias\n"
+        ),
+        (
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n"
+            "    (alias := value)\n    for unused in ():\n        alias = attrs.field()\n"
+            "    else:\n        alias.default(lambda self: 42)\n    del alias\n"
+        ),
+        (
             "spec = attrs.field()\nclass Helper:\n    spec = attrs.field()\n"
             "    unused = [spec.default(lambda self: 42) for _ in (1,)]\n"
             "@attrs.define\nclass Row:\n    id: int\n    value: int = spec\n"

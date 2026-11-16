@@ -2197,6 +2197,22 @@ class _Resolver:
     ) -> bool:
         # Compound statements may execute zero or multiple times. Keep all possibly
         # shared bindings when control flow makes a class-local name uncertain.
+        if isinstance(node, ast.For | ast.AsyncFor | ast.While):
+            return self._attrs_scan_loop(node, scope, field, module, globals_)
+        if isinstance(node, ast.Match):
+            return self._attrs_scan_match(node, scope, field, module, globals_)
+        if isinstance(node, ast.With | ast.AsyncWith):
+            return self._attrs_scan_with(node, scope, field, module, globals_)
+        return self._attrs_scan_other_compound(node, scope, field, module, globals_)
+
+    def _attrs_scan_other_compound(
+        self,
+        node: ast.stmt,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
         branches: list[list[ast.stmt]] = []
         pending: list[ast.AST] = [node]
         while pending:
@@ -2218,6 +2234,77 @@ class _Resolver:
             scope.update({name: value for name, value in branch_scope.items() if value})
         return False
 
+    def _attrs_scan_loop(
+        self,
+        node: ast.For | ast.AsyncFor | ast.While,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        header = node.iter if isinstance(node, ast.For | ast.AsyncFor) else node.test
+        if self._attrs_scan_eager(header, scope, field, module, globals_):
+            return True
+        branch = scope.copy()
+        if isinstance(node, ast.For | ast.AsyncFor):
+            self._attrs_bind_loop(node, (scope, branch), field, module, globals_=globals_)
+        branch_globals = branch if scope is globals_ else globals_
+        if self._attrs_scan_body(node.body, branch, field, module, branch_globals):
+            return True
+        for name, value in scope.items():
+            if value:
+                branch[name] = branch.get(name) or value
+        if self._attrs_scan_body(node.orelse, branch, field, module, branch_globals):
+            return True
+        scope.update({name: value for name, value in branch.items() if value})
+        return False
+
+    def _attrs_scan_match(
+        self,
+        node: ast.Match,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if self._attrs_scan_eager(node.subject, scope, field, module, globals_):
+            return True
+        branches = []
+        for case in node.cases:
+            branch = scope.copy()
+            capture = not self._attrs_known_fresh(node.subject, module)
+            for pattern in ast.walk(case.pattern):
+                if isinstance(pattern, ast.MatchAs | ast.MatchStar) and pattern.name is not None:
+                    branch[pattern.name] = capture
+                elif isinstance(pattern, ast.MatchMapping) and pattern.rest is not None:
+                    branch[pattern.rest] = capture
+            branch_globals = branch if scope is globals_ else globals_
+            if case.guard is not None and self._attrs_scan_eager(case.guard, branch, field, module, branch_globals):
+                return True
+            if self._attrs_scan_body(case.body, branch, field, module, branch_globals):
+                return True
+            branches.append(branch)
+        for branch in branches:
+            scope.update({name: value for name, value in branch.items() if value})
+        return False
+
+    def _attrs_scan_with(
+        self,
+        node: ast.With | ast.AsyncWith,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        for context in node.items:
+            if self._attrs_scan_eager(context.context_expr, scope, field, module, globals_):
+                return True
+            if context.optional_vars is not None:
+                for target in ast.walk(context.optional_vars):
+                    if isinstance(target, ast.Name):
+                        scope[target.id] = True
+        return self._attrs_scan_body(node.body, scope, field, module, globals_)
+
     def _attrs_bind_loop(
         self,
         node: ast.For | ast.AsyncFor,
@@ -2231,17 +2318,13 @@ class _Resolver:
         literal = isinstance(node.iter, ast.List | ast.Tuple | ast.Set)
         values = node.iter.elts if literal else [node.iter]
         targets = {item.id for item in ast.walk(node.target) if isinstance(item, ast.Name)}
-        uses_default = self._attrs_loop_default(node.body, targets)
-        if uses_default and (
-            not literal
-            or (
-                isinstance(node.target, ast.Tuple | ast.List)
-                and any(not isinstance(value, ast.Tuple | ast.List) for value in values)
-            )
-        ):
-            msg = "an attrs default registration has an indeterminate loop binding"
-            raise _invalid(msg)
         branch_scope.update(dict.fromkeys(targets, False))
+        if not literal or (
+            isinstance(node.target, ast.Tuple | ast.List)
+            and any(not isinstance(value, ast.Tuple | ast.List) for value in values)
+        ):
+            branch_scope.update(dict.fromkeys(targets, True))
+            return
         for value in values:
             bindings = scope.copy()
             self._attrs_bind_target((node.target, value), bindings, field, module, globals_=globals_)
@@ -2279,6 +2362,8 @@ class _Resolver:
         module: _Module,
         globals_: dict[str, bool | _Module],
     ) -> bool | _Module:
+        while isinstance(expr, ast.NamedExpr):
+            expr = expr.value
         if isinstance(expr, ast.Name):
             if expr.id in scope:
                 return scope[expr.id]
@@ -2337,12 +2422,27 @@ class _Resolver:
                 if isinstance(target, ast.Name):
                     scope.pop(target.id, None)
         elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                self._attrs_bind_target((target, node.value), scope, field, module, globals_=globals_)
+            self._attrs_bind_assignment(node, scope, field, module, globals_)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
             scope[node.target.id] = self._attrs_class_value(node.value, scope, field, module, globals_)
         elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             scope[node.name] = False
+
+    def _attrs_bind_assignment(
+        self,
+        node: ast.Assign,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> None:
+        sources = scope.copy()
+        for target in node.targets:
+            bindings = sources.copy()
+            self._attrs_bind_target((target, node.value), bindings, field, module, globals_=globals_)
+            for item in ast.walk(target):
+                if isinstance(item, ast.Name) and item.id in bindings:
+                    scope[item.id] = bindings[item.id]
 
     def _attrs_bind_target(
         self,
@@ -2354,11 +2454,16 @@ class _Resolver:
         globals_: dict[str, bool | _Module],
     ) -> None:
         target, value = pair
+        sources = scope.copy()
         if isinstance(target, ast.Name):
-            scope[target.id] = self._attrs_class_value(value, scope, field, module, globals_)
+            scope[target.id] = self._attrs_class_value(value, sources, field, module, globals_)
         elif isinstance(target, ast.Tuple | ast.List) and isinstance(value, ast.Tuple | ast.List):
             for item, source in zip(target.elts, value.elts, strict=False):
-                self._attrs_bind_target((item, source), scope, field, module, globals_=globals_)
+                bindings = sources.copy()
+                self._attrs_bind_target((item, source), bindings, field, module, globals_=globals_)
+                for name in ast.walk(item):
+                    if isinstance(name, ast.Name) and name.id in bindings:
+                        scope[name.id] = bindings[name.id]
 
     def _attrs_field_binding(
         self, value: ast.expr, module: _Module, seen: set[tuple[Path, str]]
@@ -2529,10 +2634,9 @@ class _Resolver:
             msg = f"field `{key}` has a dynamic `{option.arg}` option"
             raise _invalid(msg)
 
-    @staticmethod
-    def _attrs_default_hooks(info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+    def _attrs_default_hooks(self, info: _Info, node: ast.ClassDef, klass: _Class) -> None:
         _Resolver._attrs_reject_nested_hooks(info, node, klass)
-        _Resolver._attrs_reject_local_loop_aliases(info, node, klass)
+        self._attrs_reject_local_loop_aliases(info, node, klass)
         for stmt in node.body:
             if not isinstance(stmt, ast.FunctionDef):
                 continue
@@ -2589,28 +2693,41 @@ class _Resolver:
             else:
                 pending.extend(ast.iter_child_nodes(item))
 
+    def _attrs_known_fresh(self, expr: ast.expr, module: _Module) -> bool:
+        return isinstance(expr, ast.Call) and self._external_name(expr.func, module) in {
+            "attrs.field",
+            "attr.field",
+            "attr.ib",
+            "attr.attrib",
+        }
+
     @staticmethod
     def _attrs_local_loop_bindings(
         target: ast.expr, iterable: ast.expr, aliases: set[str], class_name: str
     ) -> set[str]:
         bound: set[str] = set()
-        values = iterable.elts if isinstance(iterable, ast.Tuple | ast.List | ast.Set) else []
+        if not isinstance(iterable, ast.Tuple | ast.List | ast.Set):
+            return {_mangle(class_name, item.id) for item in ast.walk(target) if isinstance(item, ast.Name)}
+        values = iterable.elts
         pairs = [(target, value) for value in values]
+
+        def shared(source: ast.expr) -> bool:
+            if isinstance(source, ast.NamedExpr):
+                return shared(source.value)
+            if isinstance(source, ast.IfExp):
+                return shared(source.body) or shared(source.orelse)
+            return isinstance(source, ast.Name) and _mangle(class_name, source.id) in aliases
+
         while pairs:
             dest, source = pairs.pop()
-            if (
-                isinstance(dest, ast.Name)
-                and isinstance(source, ast.Name)
-                and _mangle(class_name, source.id) in aliases
-            ):
+            if isinstance(dest, ast.Name) and shared(source):
                 bound.add(_mangle(class_name, dest.id))
             elif isinstance(dest, ast.Tuple | ast.List) and isinstance(source, ast.Tuple | ast.List):
                 pairs.extend(zip(dest.elts, source.elts, strict=False))
         return bound
 
     # These bounded cases share binding state and must be processed in evaluation order.
-    @staticmethod
-    def _attrs_reject_local_loop_aliases(info: _Info, node: ast.ClassDef, klass: _Class) -> None:  # ruff: ignore[complex-structure, too-many-statements]
+    def _attrs_reject_local_loop_aliases(self, info: _Info, node: ast.ClassDef, klass: _Class) -> None:  # ruff: ignore[complex-structure, too-many-statements]
         fields = set(info.fields)
         class_name = node.name
 
@@ -2618,6 +2735,8 @@ class _Resolver:
             return _mangle(class_name, expr.id) if isinstance(expr, ast.Name) else None
 
         def shared(expr: ast.expr, aliases: set[str]) -> bool:
+            if isinstance(expr, ast.NamedExpr):
+                return shared(expr.value, aliases)
             if isinstance(expr, ast.IfExp):
                 return shared(expr.body, aliases) or shared(expr.orelse, aliases)
             return name(expr) in aliases
@@ -2680,8 +2799,52 @@ class _Resolver:
                 )
                 local.update(bound)
                 body(item.body, local)
+                local.update(aliases)
                 body(item.orelse, local)
                 aliases.update(local)
+                return
+            if isinstance(item, ast.While):
+                scan(item.test, aliases)
+                local = aliases.copy()
+                body(item.body, local)
+                local.update(aliases)
+                body(item.orelse, local)
+                aliases.update(local)
+                return
+            if isinstance(item, ast.With | ast.AsyncWith):
+                for context in item.items:
+                    scan(context.context_expr, aliases)
+                    if context.optional_vars is not None:
+                        aliases.update(
+                            _mangle(class_name, target.id)
+                            for target in ast.walk(context.optional_vars)
+                            if isinstance(target, ast.Name)
+                        )
+                body(item.body, aliases)
+                return
+            if isinstance(item, ast.Match):
+                scan(item.subject, aliases)
+                branches = [aliases.copy()]
+                for case in item.cases:
+                    branch = aliases.copy()
+                    capture = not self._attrs_known_fresh(item.subject, klass.module)
+                    for pattern in ast.walk(case.pattern):
+                        if isinstance(pattern, ast.MatchAs | ast.MatchStar) and pattern.name is not None:
+                            key = _mangle(class_name, pattern.name)
+                            branch.discard(key)
+                            if capture:
+                                branch.add(key)
+                        elif isinstance(pattern, ast.MatchMapping) and pattern.rest is not None:
+                            key = _mangle(class_name, pattern.rest)
+                            branch.discard(key)
+                            if capture:
+                                branch.add(key)
+                    if case.guard is not None:
+                        scan(case.guard, branch)
+                    body(case.body, branch)
+                    branches.append(branch)
+                aliases.clear()
+                aliases.update(*branches)
                 return
             if isinstance(item, ast.If):
                 scan(item.test, aliases)
@@ -2724,12 +2887,8 @@ class _Resolver:
                     if (key := name(target)) is not None:
                         aliases.discard(key)
                 return
-            conditional = isinstance(item, ast.While | ast.Match)
-            local = aliases.copy() if conditional else aliases
             for child in ast.iter_child_nodes(item):
-                scan(child, local)
-            if conditional:
-                aliases.update(local)
+                scan(child, aliases)
 
         def body(statements: list[ast.stmt], aliases: set[str]) -> None:
             for stmt in statements:

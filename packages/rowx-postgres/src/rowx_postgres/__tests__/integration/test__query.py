@@ -2,6 +2,7 @@ import asyncio
 import datetime as dt
 import gc
 import inspect
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -1522,6 +1523,81 @@ def test_attrs_conditional_copy_and_local_walrus_omission_and_empty_results(sche
     assert run_on(schema, "connection", query[Conditional](t"SELECT 7::int4 AS id WHERE false").all) == []
     assert run_on(schema, "connection", query[Walrus](t"SELECT 7::int4 AS id").one) == Walrus(7, 42)
     assert run_on(schema, "connection", query[Walrus](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_nested_walrus_and_simultaneous_assignment_omission(schema: str) -> None:
+    spec = attrs.field()
+    alias = spec
+    alias, copy = attrs.field(), alias
+    copy.default(lambda _self: 42)
+
+    @attrs.define
+    class Shared:
+        id: int
+        value: int = spec
+
+    @attrs.define
+    class Local:
+        id: int
+        value: int = attrs.field()
+        _ = (alias := (other := value))
+        alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del _, alias, other
+
+    assert run_on(schema, "connection", query[Shared](t"SELECT 7::int4 AS id").one) == Shared(7, 42)
+    assert run_on(schema, "connection", query[Shared](t"SELECT 7::int4 AS id WHERE false").all) == []
+    assert run_on(schema, "connection", query[Local](t"SELECT 7::int4 AS id").one) == Local(7, 42)
+    assert run_on(schema, "connection", query[Local](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_binding_path_defaults_omission_and_empty_results(schema: str) -> None:
+    @attrs.define
+    class Loop:
+        id: int
+        value: int = attrs.field()
+        for alias in iter((value,)):
+            copy = alias
+            copy.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del alias, copy  # ty: ignore[possibly-unresolved-reference]
+
+    @attrs.define
+    class Context:
+        id: int
+        value: int = attrs.field()
+        with nullcontext(value) as alias:
+            alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del alias
+
+    @attrs.define
+    class Match:
+        id: int
+        value: int = attrs.field()
+        match value:
+            case alias:
+                alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del alias
+
+    @attrs.define
+    class LoopElse:
+        id: int
+        value: int = attrs.field()
+        _ = (alias := value)
+        for _unused in ():
+            alias = attrs.field()
+            if alias is None:
+                break
+        else:
+            alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del _, alias
+
+    assert run_on(schema, "connection", query[Loop](t"SELECT 7::int4 AS id").one) == Loop(7, 42)
+    assert run_on(schema, "connection", query[Loop](t"SELECT 7::int4 AS id WHERE false").all) == []
+    assert run_on(schema, "connection", query[Context](t"SELECT 7::int4 AS id").one) == Context(7, 42)
+    assert run_on(schema, "connection", query[Context](t"SELECT 7::int4 AS id WHERE false").all) == []
+    assert run_on(schema, "connection", query[Match](t"SELECT 7::int4 AS id").one) == Match(7, 42)
+    assert run_on(schema, "connection", query[Match](t"SELECT 7::int4 AS id WHERE false").all) == []
+    assert run_on(schema, "connection", query[LoopElse](t"SELECT 7::int4 AS id").one) == LoopElse(7, 42)
+    assert run_on(schema, "connection", query[LoopElse](t"SELECT 7::int4 AS id WHERE false").all) == []
 
 
 ATTRS_COMPREHENSION_SPEC: Final = attrs.field()
