@@ -73,5 +73,9 @@ changelog tag="":
     if [[ -n "{{ tag }}" ]]; then
       args+=(--tag "{{ tag }}")
     fi
-    uvx --from git-cliff==2.14.2 git-cliff "${args[@]}"
-    uv run rumdl fmt docs/changelog.md
+    # Locked changelog tools only. --inexact keeps a developer environment, and
+    # --no-install-workspace skips the native packages. --no-sync keeps uv run
+    # from installing the default groups afterwards.
+    uv sync --frozen --inexact --only-group changelog --no-install-workspace
+    uv run --frozen --no-sync git-cliff "${args[@]}"
+    uv run --frozen --no-sync rumdl fmt docs/changelog.md
