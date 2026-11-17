@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail when docs/changelog.md differs from an offline git-cliff render.
+# Fail when docs/changelog.md differs from the tagged git-cliff render.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
