@@ -440,3 +440,30 @@ Construction-time misuse of a template is `TypeError`. A bad row type at the cal
 `DatabaseError` unwrapped. An invalid `table`, schema name or revert target is `ValueError`. A `Transaction`
 argument to `Migrator` is `InterfaceError`. No error message or `repr` may include the DSN password. Sqlstate
 subclasses are not provided.
+
+Planned ([#356](https://github.com/mplemay/rowx/issues/356)): `DatabaseError.sqlstate` keeps its 5-character contract
+for every backend. `DatabaseError` gains an optional `code: str | None` attribute carrying the backend's native error
+name. For SQLite it is the extended result code name, such as `SQLITE_CONSTRAINT_UNIQUE`. For PostgreSQL it is `None`.
+For SQLite, `.position` comes from `sqlite3_error_offset`. SQLite codes map to a SQLSTATE as follows, with the
+`SQLITE_` prefix omitted:
+
+| SQLite code | `sqlstate` |
+|---|---|
+| `CONSTRAINT_PRIMARYKEY`, `CONSTRAINT_UNIQUE`, `CONSTRAINT_ROWID` | `23505` |
+| `CONSTRAINT_NOTNULL` | `23502` |
+| `CONSTRAINT_FOREIGNKEY` | `23503` |
+| `CONSTRAINT_CHECK` | `23514` |
+| `CONSTRAINT_DATATYPE`, `MISMATCH` | `22000` |
+| Any other `CONSTRAINT_*` | `23000` |
+| `TOOBIG` | `54000` |
+| `BUSY`, `LOCKED` | `55P03` (told apart by `code`) |
+| `BUSY_SNAPSHOT` | `40001` |
+| `INTERRUPT` | `57014` |
+| `READONLY` | `25006` |
+| `FULL` | `53100` |
+| `CANTOPEN` | `58030` |
+| `CORRUPT` | `XX001` |
+| `NOTADB` | `XX002` |
+| Every other code, including plain `SQLITE_ERROR` (syntax error, missing table, missing column) | `HY000` |
+
+`code` always carries the extended name.

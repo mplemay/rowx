@@ -98,6 +98,19 @@ the database URL already sets. Unknown keys are a config error (exit 2), with a 
 URL precedence is `--database-url`, then the configured environment variable. The implementation is
 `src/rowx/check/config.py`.
 
+### SQLite URLs (planned)
+
+Planned ([#334](https://github.com/mplemay/rowx/issues/334)): `--database-url` accepts a SQLite target. SQLite needs
+the `rowx[sqlite]` extra.
+
+- Accepted forms are `sqlite:///relative.db`, `sqlite:////abs/path.db` and `sqlite::memory:`. The path is
+  percent-decoded. A Windows drive letter is written `sqlite:///C:/x.db`. An empty path is rejected.
+- Rejected, with a hint showing the `sqlite:///` form: `sqlite:path`, a bare path, `sqlite://host/...`, `file:` URIs,
+  and the query options `mode=memory`, `immutable`, `vfs` and `cache=shared`.
+- A bare string without a scheme stays a PostgreSQL keyword DSN.
+- The checker opens a file read-only (`mode=ro`).
+- `sqlite::memory:` implies `--scratch` and skips the drift gate. `rowx database` and `rowx migrate` reject it.
+
 The config file is the nearest `pyproject.toml` walking up from the working directory, or `--config`. Patterns are
 relative to its directory (the project root); without a config file the working directory is the root. `src` matches
 only root `src`, while `**/src` matches that name at any depth. A matching directory includes its descendants. `*`
@@ -374,6 +387,10 @@ caret. Server-supplied text is sanitised before it reaches a terminal ([Checker]
 `file`, `line`, `col`, `end_line`, `end_col`, `notes`, `help`, `sqlstate`, `sql`, `column_index` and `field`. There is
 no separate footer. Pass `--statistics` for the counts; diagnostic counts reflect visible reports, while coverage
 evidence is unaffected by reporting filters.
+
+Planned ([#356](https://github.com/mplemay/rowx/issues/356)): the JSON object gains a `code` field carrying the
+native error code. It is omitted when the code is `None`, so PostgreSQL output is unchanged. The help for a SQL error
+is looked up by `code` when present, then by `sqlstate`.
 
 Described column metadata is not written to a disk cache. Every check prepares the statements it describes.
 
