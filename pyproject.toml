@@ -92,6 +92,10 @@ bench-drivers = [
 docs = [
     "zensical==0.1.1",
 ]
+changelog = [
+    "git-cliff==2.14.2",
+    "rumdl>=0.3.2",
+]
 
 [tool.ruff]
 target-version = "py314"

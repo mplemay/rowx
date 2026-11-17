@@ -11,14 +11,20 @@ because an earlier one failed, re-run that skipped job after the failed one succ
 `rowx` already uses the `pypi` environment. The owner registers pending trusted publishers for
 `rowx-core` and `rowx-postgres`.
 
-`just release X.Y.Z notes.md` bumps the lockstep version, writes the changelog section from `notes.md`, and opens the
-release pull request. After that pull request merges, a green CI push to main runs the tag release job. That job
-creates `vX.Y.Z` on the merge commit and dispatches `release.yml` on the tag. A tag push from `GITHUB_TOKEN` does not
-start `release.yml`.
+`just release X.Y.Z` bumps the lockstep version, regenerates `docs/changelog.md` with git-cliff, and opens the release
+pull request. After that pull request merges, a green CI push to main runs the tag release job. That job creates
+`vX.Y.Z` on the merge commit and dispatches `release.yml` on the tag. A tag push from `GITHUB_TOKEN` does not start
+`release.yml`.
 
 A `workflow_dispatch` whose ref is a branch builds, checks, and rebuilds the artifacts. It does not publish.
 Publishing runs when the ref is a `v*` tag, including a dispatch of that tag. If the tag exists and the dispatch
 failed, run Release from the Actions tab with the ref set to that tag.
+
+git-cliff builds `docs/changelog.md` from `feat`, `fix`, `perf`, and breaking commits. `v0.4.0` and `v0.4.1` are
+ignored, so those commits stay in 0.4.2. `just changelog` regenerates the file. The release commit's committer date is
+12:00 UTC on the day of the cut, and that UTC day is the new section's heading date. CI and the tag workflow
+regenerate the file and fail when it differs. After the packages publish, the workflow opens or updates the GitHub
+Release from the latest section. A re-dispatch of the `v*` tag updates that release too.
 
 The abi3 wheels do not include a free-threaded cp314t build. Free-threaded CPython 3.14t cannot install
 them, so pip builds `rowx-postgres` from the source distribution.

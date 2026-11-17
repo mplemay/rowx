@@ -439,9 +439,26 @@ jobs:
         # fail instead of skipping if the plugin finds no database URL
         run: uv run --project ../.. pytest -p no:cacheprovider -o rowx_require_database=true
 
+  changelog:
+    name: Changelog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Check the changelog
+        run: scripts/check-changelog.sh
+
   tag-release:
     name: Tag release
-    needs: [linux, embedded-wheel, embedded-rust, embedded, macos, examples]
+    needs: [linux, embedded-wheel, embedded-rust, embedded, macos, examples, changelog]
     if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

@@ -5,9 +5,9 @@ default:
 check:
     uv run prek run --all-files
 
-# bump the lockstep version, write the changelog section from notes, and open the release pull request
-release version notes="":
-    uv run python scripts/release.py bump {{version}} "{{notes}}"
+# bump the lockstep version, regenerate the changelog, and open the release pull request
+release version:
+    uv run python scripts/release.py bump {{version}}
 
 # clippy for packages/rowx-embedded (it builds the Wasmer tree, so it is not a default workspace member and `check` leaves it out)
 check-embedded:
@@ -68,3 +68,13 @@ docs:
 # build the documentation site in strict mode
 docs-build:
     uv run --group docs zensical build --clean --strict
+
+# regenerate docs/changelog.md from feat, fix, perf, and breaking commits
+changelog:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Locked changelog tools only. --inexact keeps a developer environment, and
+    # --no-install-workspace skips the native packages. --no-sync keeps uv run
+    # from installing the default groups afterwards.
+    uv sync --frozen --inexact --only-group changelog --no-install-workspace
+    uv run --frozen --no-sync python scripts/release.py render-changelog -o docs/changelog.md

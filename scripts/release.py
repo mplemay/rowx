@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 from argparse import ArgumentParser
 from dataclasses import dataclass
-from json import JSONDecodeError, loads
+from datetime import UTC, datetime
 from os import environ
 from pathlib import Path
 from re import MULTILINE, compile as compile_regex, escape
 from shutil import which
 from subprocess import run  # ruff: ignore[suspicious-subprocess-import]
+from tempfile import TemporaryDirectory
 from tomllib import TOMLDecodeError, loads as load_toml
 from typing import Final, Literal
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 ROOT: Final[Path] = Path(__file__).resolve().parent.parent
-PYPI_RELEASES: Final[str] = "https://pypi.org/pypi/rowx/json"
-PYPI_TIMEOUT: Final[float] = 30
 MAIN_BRANCH: Final[str] = "main"
 SKIP_ACTION: Final = "skip"
 TAG_ACTION: Final = "tag"
 VERSION_PATTERN: Final = compile_regex(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
-HEADING: Final = compile_regex(r"^## (.+)$", flags=MULTILINE)
+DAY: Final = compile_regex(r"^\d{4}-\d{2}-\d{2}$")
+# the first dated release heading; later headings keep the dates git-cliff gave their tags
+HEADING_DATE: Final = compile_regex(r"^(## \[[^\]]+\].*) - \d{4}-\d{2}-\d{2}$", flags=MULTILINE)
+# noon UTC stays on the same calendar day in the timezones git-cliff and GitHub Actions use
+RELEASE_COMMIT_TIME: Final[str] = "T12:00:00Z"
 VERSION_LINE_FILES: Final[tuple[str, ...]] = (
     "pyproject.toml",
     "packages/rowx-core/pyproject.toml",
@@ -70,36 +71,54 @@ class TagPlan:
     version: str = ""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChangelogPlan:
+    tag: str | None
+    rewrite_top_date: bool
+
+
 def main() -> int:
     parser = ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     bump_command = commands.add_parser("bump")
     bump_command.add_argument("version")
-    bump_command.add_argument("notes", nargs="?")
     commands.add_parser("tag-plan")
+    render_command = commands.add_parser("render-changelog")
+    render_command.add_argument("--top-date")
+    render_command.add_argument("-o", "--output", required=True)
     args = parser.parse_args()
     if args.command == "bump":
-        notes = args.notes if isinstance(args.notes, str) else None
-        return command_bump(args.version, notes)
+        return command_bump(args.version)
+    if args.command == "render-changelog":
+        top_date = args.top_date if isinstance(args.top_date, str) else None
+        output = args.output if isinstance(args.output, str) else ""
+        return command_render_changelog(output, top_date)
     return command_tag_plan()
 
 
-def command_bump(version: str, notes_path: str | None) -> int:
+def command_bump(version: str) -> int:
     _require_stable(version)
     current = _project_version(ROOT / "pyproject.toml")
     _require_greater(current, version)
-    notes = _read_notes(notes_path)
     _require_clean_main(ROOT)
     _require_new_branch(ROOT, version)
-    published = _published(current)
+    day = datetime.now(UTC).date().isoformat()
     try:
-        bump(ROOT, version, notes, published=published)
+        bump(ROOT, version)
         refresh_locks(ROOT)
         _validate_versions(ROOT)
+        changelog = render_changelog(ROOT, top_date=day)
+        (ROOT / "docs" / "changelog.md").write_text(changelog, encoding="utf-8")
     except SystemExit:
         _restore_release_files(ROOT)
         raise
-    _commit_and_open_pr(ROOT, current, version)
+    _commit_and_open_pr(ROOT, current, version, committer_date=release_committer_date(day))
+    return 0
+
+
+def command_render_changelog(output: str, top_date: str | None) -> int:
+    text = render_changelog(ROOT, top_date=top_date)
+    Path(output).write_text(text, encoding="utf-8")
     return 0
 
 
@@ -118,11 +137,11 @@ def command_tag_plan() -> int:
     return 0
 
 
-def bump(root: Path, new_version: str, notes: str, *, published: bool) -> None:
+def bump(root: Path, new_version: str) -> None:
     _require_stable(new_version)
     current = _project_version(root / "pyproject.toml")
     _require_greater(current, new_version)
-    updates = _collect(root, current, new_version, notes, published=published)
+    updates = _collect(root, current, new_version)
     for path, text in updates.items():
         path.write_text(text, encoding="utf-8")
 
@@ -156,11 +175,44 @@ def refresh_locks(root: Path) -> None:
         raise SystemExit(message)
 
 
-def _collect(root: Path, current: str, new: str, notes: str, *, published: bool) -> dict[Path, str]:
+def changelog_plan(*, version: str, head: str, tag_commit: str | None) -> ChangelogPlan:
+    if tag_commit == head:
+        return ChangelogPlan(tag=None, rewrite_top_date=False)
+    if tag_commit is None:
+        return ChangelogPlan(tag=f"v{version}", rewrite_top_date=True)
+    return ChangelogPlan(tag=None, rewrite_top_date=False)
+
+
+def replace_top_heading_date(text: str, day: str) -> str:
+    dated = _require_day(day)
+    match = HEADING_DATE.search(text)
+    if match is None:
+        message = "changelog is missing a dated heading"
+        raise SystemExit(message)
+    return f"{text[: match.start()]}{match.group(1)} - {dated}{text[match.end() :]}"
+
+
+def release_committer_date(day: str) -> str:
+    return f"{_require_day(day)}{RELEASE_COMMIT_TIME}"
+
+
+def render_changelog(root: Path, *, top_date: str | None = None) -> str:
+    if top_date is not None:
+        _require_day(top_date)
+    _sync_changelog_tools()
+    version = _project_version(root / "pyproject.toml")
+    head = _git(root, "rev-parse", "HEAD").strip()
+    plan = changelog_plan(version=version, head=head, tag_commit=_local_tag_commit(root, version))
+    text = _git_cliff(root, plan.tag)
+    if plan.rewrite_top_date:
+        # a virtual --tag is dated with the clock; the tagged commit's noon UTC time is stable
+        day = top_date if top_date is not None else _committer_utc_day(root)
+        text = replace_top_heading_date(text, day)
+    return _format_changelog(text)
+
+
+def _collect(root: Path, current: str, new: str) -> dict[Path, str]:
     updates: dict[Path, str] = {
-        root / "docs/changelog.md": _update_changelog(
-            _read(root / "docs/changelog.md"), current, new, notes, published=published
-        ),
         root / "docs/packages.md": _update_packages(_read(root / "docs/packages.md"), current, new),
     }
     for relative in VERSION_LINE_FILES:
@@ -175,29 +227,6 @@ def _collect(root: Path, current: str, new: str, notes: str, *, published: bool)
     for relative, packages in LOCK_FILES:
         updates[root / relative] = _bump_lock(_read(root / relative), packages, current, new)
     return updates
-
-
-def _update_changelog(text: str, current: str, new: str, notes: str, *, published: bool) -> str:
-    match = HEADING.search(text)
-    found = match.group(1) if match is not None else "none"
-    if match is None or found != current:
-        message = f"changelog must open on {current}, found {found}"
-        raise SystemExit(message)
-    body = notes.strip()
-    if published and not body:
-        message = "a published release needs changelog notes"
-        raise SystemExit(message)
-    if body and not any(line.startswith("- ") for line in body.splitlines()):
-        message = "changelog notes need a bullet"
-        raise SystemExit(message)
-    if published:
-        return text[: match.start()] + f"## {new}\n\n{body}\n\n" + text[match.start() :]
-    heading = f"## {new}"
-    renamed = text[: match.start()] + heading + text[match.end() :]
-    if not body:
-        return renamed
-    insert_at = match.start() + len(heading)
-    return renamed[:insert_at] + f"\n\n{body}\n" + renamed[insert_at:]
 
 
 def _update_packages(text: str, current: str, new: str) -> str:
@@ -299,32 +328,99 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _read_notes(path: str | None) -> str:
-    if not path:
-        return ""
-    note_path = Path(path)
-    if not note_path.is_file():
-        message = f"notes file {note_path} does not exist"
+def _require_day(day: str) -> str:
+    if DAY.fullmatch(day) is None:
+        message = f"{day} is not YYYY-MM-DD"
         raise SystemExit(message)
-    return note_path.read_text(encoding="utf-8")
+    return day
 
 
-def _published(version: str) -> bool:
-    request = Request(PYPI_RELEASES, headers={"User-Agent": "rowx-release"})
+def _committer_utc_day(root: Path) -> str:
+    seconds = _git(root, "log", "-1", "--format=%ct").strip()
     try:
-        with urlopen(request, timeout=PYPI_TIMEOUT) as response:  # ruff: ignore[suspicious-url-open-usage]
-            payload = loads(response.read().decode())
-    except (HTTPError, URLError, TimeoutError, JSONDecodeError) as error:
-        message = f"could not read PyPI releases: {error}"
+        instant = int(seconds)
+    except ValueError:
+        message = f"unexpected committer time {seconds}"
         raise SystemExit(message) from None
-    if not isinstance(payload, dict):
-        message = "PyPI response is not an object"
+    return datetime.fromtimestamp(instant, UTC).date().isoformat()
+
+
+def _local_tag_commit(root: Path, version: str) -> str | None:
+    completed = run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [_executable("git"), "rev-parse", "-q", "--verify", f"refs/tags/v{version}^{{commit}}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    sha = completed.stdout.strip()
+    if not sha:
+        message = f"v{version} did not resolve"
         raise SystemExit(message)
-    releases = payload.get("releases")
-    if not isinstance(releases, dict):
-        message = "PyPI response has no releases"
-        raise SystemExit(message)
-    return version in releases
+    return sha
+
+
+def _sync_changelog_tools() -> None:
+    _run(
+        [
+            _executable("uv"),
+            "sync",
+            "--project",
+            str(ROOT),
+            "--frozen",
+            "--inexact",
+            "--only-group",
+            "changelog",
+            "--no-install-workspace",
+        ],
+        ROOT,
+    )
+
+
+def _git_cliff(root: Path, tag: str | None) -> str:
+    with TemporaryDirectory() as directory:
+        output = Path(directory) / "changelog.md"
+        argv = [
+            _executable("uv"),
+            "run",
+            "--project",
+            str(ROOT),
+            "--frozen",
+            "--no-sync",
+            "git-cliff",
+            "--offline",
+            "--config",
+            str(root / "cliff.toml"),
+            "-o",
+            str(output),
+        ]
+        if tag is not None:
+            argv.extend(("--tag", tag))
+        _run(argv, root)
+        return output.read_text(encoding="utf-8")
+
+
+def _format_changelog(text: str) -> str:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "changelog.md"
+        path.write_text(text, encoding="utf-8")
+        _run(
+            [
+                _executable("uv"),
+                "run",
+                "--project",
+                str(ROOT),
+                "--frozen",
+                "--no-sync",
+                "rumdl",
+                "fmt",
+                str(path),
+            ],
+            ROOT,
+        )
+        return path.read_text(encoding="utf-8")
 
 
 def _validate_versions(root: Path) -> None:
@@ -369,12 +465,15 @@ def _restore_release_files(root: Path) -> None:
     _git(root, "restore", "--source=HEAD", "--worktree", "--staged", "--", *RELEASE_PATHS)
 
 
-def _commit_and_open_pr(root: Path, old: str, new: str) -> None:
+def _commit_and_open_pr(root: Path, old: str, new: str, *, committer_date: str) -> None:
     branch = f"release/{new}"
     message = COMMIT_MESSAGE.format(version=new)
     _git(root, "checkout", "-b", branch)
     _git(root, "add", "--", *RELEASE_PATHS)
-    _git(root, "commit", "-m", message)
+    env = environ.copy()
+    env["GIT_AUTHOR_DATE"] = committer_date
+    env["GIT_COMMITTER_DATE"] = committer_date
+    _run([_executable("git"), "commit", "-m", message], root, env=env)
     _git(root, "push", "-u", "origin", branch)
     _run(
         [_executable("gh"), "pr", "create", "--title", message, "--body", _pull_request_body(old, new)],
@@ -386,12 +485,12 @@ def _pull_request_body(old: str, new: str) -> str:
     return (
         "## Summary\n"
         f"- Bumps every lockstep distribution from {old} to {new}.\n"
-        "- The changelog notes are in `docs/changelog.md`.\n"
+        "- `docs/changelog.md` is generated from commits.\n"
         "\n"
         f"Merging to main tags `v{new}` after CI is green. That tag runs Release, which publishes.\n"
         "\n"
         "## Test plan\n"
-        "- [ ] Review the changelog notes\n"
+        "- [ ] Review the generated changelog\n"
         "- [ ] CI passes the lockstep version check\n"
     )
 
