@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import unicodedata
+from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
 from typing import TYPE_CHECKING, Final, get_args
@@ -215,6 +216,28 @@ def test_crlf_and_tabs() -> None:
 )
 def test_null_reason_note(reason: NullReasonName, detail: str | None, expected: str) -> None:
     assert null_reason_note(reason, detail) == expected
+
+
+def test_unproven_nullability_has_a_note() -> None:
+    assert null_reason_note("Unproven") == "nullability not proven, assumed nullable"
+
+
+def test_json_sql_error_omits_the_code_for_postgresql() -> None:
+    source = 'from rowx import query\nrows = query[tuple[int]](t"select frm users")\n'
+    report = sql_error(source, position=12, message='syntax error at or near "users"')
+    assert report.code is None
+    actual = render_json([report])
+    golden("sql_error.json.txt", actual)
+    [item] = json.loads(actual)
+    assert item["sqlstate"] == "42601"
+    assert "code" not in item
+
+
+def test_json_sql_error_carries_a_native_code_when_there_is_one() -> None:
+    source = 'from rowx import query\nrows = query[tuple[int]](t"select frm users")\n'
+    report = replace(sql_error(source, position=12), code="SQLITE_ERROR")
+    [item] = json.loads(render_json([report]))
+    assert (item["sqlstate"], item["code"]) == ("42601", "SQLITE_ERROR")
 
 
 def test_null_reasons_match_the_note_table() -> None:

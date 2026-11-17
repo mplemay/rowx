@@ -12,7 +12,7 @@ from rowx_core.migrations import Migration, discover_migrations
 
 from rowx._backend import backend_for
 from rowx.check.config import Config, MigrateConfig, database_url, load_config
-from rowx.check.embedded import embedded_for, open_instance
+from rowx.check.embedded import embedded_for, in_memory_for, open_instance
 from rowx.check.render import strip_controls
 from rowx.check.runner import CheckError, redact
 
@@ -162,6 +162,9 @@ def handle(args: Namespace) -> None:
         return
     dsn = require_url(config, args.database_url)
     if (embedded := embedded_for(dsn)) is None:
+        if in_memory_for(dsn):
+            msg = "an in-memory database is gone when the command exits; use a file database URL"
+            raise CheckError(msg)
         run_guarded(dsn, _database_command(target, args, dsn, backend_for(dsn)))
         return
     if not embedded.persistent:

@@ -10,7 +10,10 @@ from rowx.check import compat
 from rowx.check.cli import main
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
     from pathlib import Path
+
+    from rowx_core.backend import Backend
 
 
 def git(root: Path, *args: str) -> str:
@@ -191,8 +194,12 @@ def test_snapshot_keeps_tracked_ignored_query_in_compatibility_verdict(
         def sweep(self) -> None:
             pass
 
-    monkeypatch.setattr(compat, "Scratch", FakeScratch)
-    monkeypatch.setattr(compat, "backend_for", lambda _dsn: SimpleNamespace(admin=lambda _dsn: None))
+    monkeypatch.setattr("rowx.check.scratch.Scratch", FakeScratch)
+    monkeypatch.setattr(
+        compat,
+        "backend_for",
+        lambda _dsn: SimpleNamespace(admin=lambda _dsn: None, scratch_factory=None, compat_warning=None),
+    )
     monkeypatch.setattr(compat, "load_migrator", lambda *_args: None)
     monkeypatch.setattr(compat, "run_check", check)
     status = main(["check-compat", "--against", "HEAD", "--head", "HEAD", "--database-url", "postgresql://host/db"])
@@ -295,3 +302,107 @@ def test_embedded_url_builds_each_schema_with_one_instance_per_worker(
     assert len({urls for _, urls in seen}) == 2
     assert "compatible checked subset" in captured.out
     assert "disposable PostgreSQL server" not in captured.err
+
+
+class LeakyScratch:
+    def __init__(self, *, leaked: bool) -> None:
+        self.leaked = leaked
+        self.swept = False
+
+    @staticmethod
+    @asynccontextmanager
+    async def session(_migrator: object, _workers: int) -> AsyncGenerator[SimpleNamespace]:
+        yield SimpleNamespace(urls=("fake:///scratch",), seconds=0.0)
+
+    def sweep(self) -> None:
+        self.swept = True
+
+
+def compat_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: Backend, url: str, scratch: LeakyScratch
+) -> int:
+    from dataclasses import replace  # ruff: ignore[import-outside-top-level]
+
+    from rowx.check.discover import discover_file  # ruff: ignore[import-outside-top-level]
+    from rowx.check.runner import RunResult, SiteCoverage, Statistics  # ruff: ignore[import-outside-top-level]
+
+    revision(tmp_path, "[tool.rowx.migrate]\n")
+    (tmp_path / "good.py").write_text('from rowx import query\nquery[tuple[int]](t"select 1")\n', encoding="utf-8")
+    git(tmp_path, "add", "good.py")
+    git(tmp_path, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "query")
+    monkeypatch.chdir(tmp_path)
+    asked: list[tuple[str, bool]] = []
+
+    def factory(dsn: str, /, *, sweep_previous: bool = True) -> LeakyScratch:
+        asked.append((dsn, sweep_previous))
+        return scratch
+
+    backend = replace(backend, scratch_factory=factory)
+
+    async def check(_config: object, files: list[Path], *_args: object, **_kwargs: object) -> RunResult:  # ruff: ignore[unused-async]
+        coverage = [
+            SiteCoverage(
+                path=call.path,
+                span=call.span,
+                kind=call.kind,
+                described=True,
+                row_comparison="compared",
+                parameters_aligned=True,
+            )
+            for file in files
+            for call in discover_file(file).calls
+        ]
+        return RunResult(reports=[], sources={}, statistics=Statistics(), coverage=coverage)
+
+    monkeypatch.setattr(compat, "backend_for", lambda _dsn: backend)
+    monkeypatch.setattr("rowx.check.embedded.backend_for", lambda _dsn: backend)
+    monkeypatch.setattr(compat, "load_migrator", lambda *_args: None)
+    monkeypatch.setattr(compat, "run_check", check)
+    status = main(["check-compat", "--against", "HEAD", "--head", "HEAD", "--database-url", url])
+    assert asked == [(url, False), (url, False)]
+    return status
+
+
+def test_an_in_memory_url_builds_each_schema_through_the_backend_scratch_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rowx_core.backend import Backend  # ruff: ignore[import-outside-top-level]
+
+    scratch = LeakyScratch(leaked=False)
+    backend = Backend(memory_factory=lambda _url: True)
+    assert compat_run(tmp_path, monkeypatch, backend, "fake://:memory:", scratch) == 0
+    captured = capsys.readouterr()
+    assert scratch.swept
+    assert "compatible checked subset" in captured.out
+    assert "warning" not in captured.err
+
+
+def test_any_scratch_that_reports_a_leak_makes_the_run_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rowx_core.backend import Backend  # ruff: ignore[import-outside-top-level]
+
+    scratch = LeakyScratch(leaked=True)
+    assert compat_run(tmp_path, monkeypatch, Backend(memory_factory=lambda _url: True), "fake://:memory:", scratch) == 2
+    assert "incomplete: scratch cleanup failed" in capsys.readouterr().out
+
+
+def test_the_warning_comes_from_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rowx_core.backend import Backend  # ruff: ignore[import-outside-top-level]
+
+    backend = Backend(memory_factory=lambda _url: False, compat_warning="use a throwaway file")
+    compat_run(tmp_path, monkeypatch, backend, "fake:///var/db", LeakyScratch(leaked=False))
+    assert capsys.readouterr().err == "warning: use a throwaway file\n"
+
+
+def test_the_postgresql_backend_warns_and_the_embedded_one_does_not() -> None:
+    assert compat._compat_warning("postgresql://h/db") == (
+        "use a disposable PostgreSQL server; trusted migrations can affect shared cluster resources"
+    )
+    assert compat._compat_warning("embedded://") is None
+
+
+def test_an_unknown_scheme_prints_no_warning() -> None:
+    assert compat._compat_warning("no-such-scheme://x") is None

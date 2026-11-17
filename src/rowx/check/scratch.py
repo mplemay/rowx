@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from contextlib import AbstractAsyncContextManager
 
-    from rowx_core.backend import AdminService, MigrationService
+    from rowx_core.backend import AdminService, Backend, MigrationService, ScratchService
 
 PREFIX: Final[str] = "rowx_check_"
 
@@ -84,7 +84,7 @@ class Scratch:
         try:
             await self.admin.create_scratch(self.name, comment=make_tag())
         except (DatabaseError, InterfaceError, OSError) as error:
-            if isinstance(error, DatabaseError) and error.sqlstate == "42P04":
+            if isinstance(error, DatabaseError) and self.admin.duplicate(error):
                 self.pending_drop = False
             msg = f"could not create the scratch database: {error}"
             raise CheckError(redact(msg, self.server_dsn)) from None
@@ -124,3 +124,10 @@ class Scratch:
         if self.leaked:
             reason = f": {self.drop_error}" if self.drop_error is not None else ""
             sys.stderr.write(f"warning: could not drop the scratch database {self.name!r}{reason}\n")
+
+
+# a backend that makes its own scratch (a file database) is not given the server's admin service
+def scratch_for(dsn: str, backend: Backend, *, sweep_previous: bool = True) -> ScratchService:
+    if backend.scratch_factory is not None:
+        return backend.scratch(dsn, sweep_previous=sweep_previous)
+    return Scratch(dsn, backend.admin(dsn), sweep_previous=sweep_previous)

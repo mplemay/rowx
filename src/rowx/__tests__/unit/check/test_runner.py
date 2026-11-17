@@ -9,10 +9,10 @@ from rowx_core import Compiler
 from rowx_core.backend import CheckerBackend, CheckerSession
 from rowx_core.errors import DatabaseError, InterfaceError
 
-from rowx._backend import backend_for
+from rowx._backend import SCHEMES, backend_for
 from rowx.check.cli import main
 from rowx.check.config import load_config
-from rowx.check.runner import CheckError, RunResult, describe_all, redact, run_check
+from rowx.check.runner import CheckError, RunResult, _vocabulary_backend, describe_all, redact, run_check
 from rowx.check.walk import discover_files
 
 if TYPE_CHECKING:
@@ -438,3 +438,124 @@ def test_glob_include_resolves_imported_row_type(tmp_path: Path) -> None:
     result = asyncio.run(run_check(config, discover_files(config, tmp_path), None, 1, boundary=tmp_path))
     assert not result.reports
     assert result.statistics.unchecked == 1
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class FakeParam:
+    type_name: str
+    type_key: str | None = None
+    element_key: str | None = None
+
+
+PARAM_SOURCE = 'from rowx import query\nx = 1\nquery[int](t"SELECT {x}")\n'
+
+
+def _param_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: CheckerBackend,
+    params: tuple[FakeParam, ...],
+    *,
+    inspect: bool = False,
+) -> RunResult:
+    path = tmp_path / "site.py"
+    path.write_text(PARAM_SOURCE, encoding="utf-8")
+
+    async def outcomes(*_args: object, **_kwargs: object) -> dict[str, FakeDescribe]:  # ruff: ignore[unused-async]
+        return {"SELECT $1": FakeDescribe(owner="x", params=params)}
+
+    backend = replace(backend, compiler=backend_for("postgres://").checker().compiler)
+    monkeypatch.setattr("rowx.check.runner.describe_all", outcomes)
+    config = load_config(tmp_path)
+    return asyncio.run(
+        run_check(config, discover_files(config, tmp_path, [path]), "fake://db", 1, backend=backend, inspect=inspect)
+    )
+
+
+def _lite(backend: CheckerBackend) -> CheckerBackend:
+    return replace(
+        backend,
+        untyped_params=True,
+        untyped_columns=True,
+        placeholder=lambda number: f"?{number}",
+        describer="SQLite",
+        cast=lambda expression: f"CAST({expression} AS TEXT)",
+    )
+
+
+def _rules(result: RunResult) -> list[str]:
+    return [report.diagnostic.rule for report in result.reports]
+
+
+def test_an_untyped_parameter_is_no_error_and_no_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend
+) -> None:
+    result = _param_run(tmp_path, monkeypatch, _lite(fake_backend), (FakeParam(type_name=""),), inspect=True)
+    assert "unsupported-type" not in _rules(result)
+    assert "param-type-mismatch" not in _rules(result)
+    [site] = result.coverage
+    [parameter] = site.parameters
+    assert (parameter.untyped, parameter.mismatch, parameter.label) == (True, None, "?1")
+    [inspected] = result.inspection[0].parameters
+    assert (inspected.untyped, inspected.mismatch, inspected.label) == (True, None, "?1")
+
+
+def test_a_parameter_without_a_type_is_unsupported_for_a_typed_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend
+) -> None:
+    result = _param_run(tmp_path, monkeypatch, fake_backend, (FakeParam(type_name="unknown"),), inspect=True)
+    [report] = [report for report in result.reports if report.diagnostic.rule == "unsupported-type"]
+    assert report.diagnostic.message == 'parameter $1 has unsupported type "unknown"'
+    assert report.help == "cast the parameter to a supported type, such as `{x}::text`"
+    assert result.coverage[0].parameters[0].untyped is False
+    assert result.inspection[0].parameters[0].label == "$1"
+
+
+def test_the_parameter_count_message_names_who_counts_the_parameters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend
+) -> None:
+    [report] = [
+        report
+        for report in _param_run(tmp_path, monkeypatch, fake_backend, ()).reports
+        if report.diagnostic.rule == "param-count-mismatch"
+    ]
+    assert report.diagnostic.message == "the query has 1 interpolation but the server expects 0 parameters"
+    [report] = [
+        report
+        for report in _param_run(tmp_path, monkeypatch, _lite(fake_backend), ()).reports
+        if report.diagnostic.rule == "param-count-mismatch"
+    ]
+    assert report.diagnostic.message == "the query has 1 interpolation but SQLite expects 0 parameters"
+
+
+def test_the_unsupported_parameter_message_and_hint_come_from_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend
+) -> None:
+    backend = replace(_lite(fake_backend), untyped_params=False)
+    result = _param_run(tmp_path, monkeypatch, backend, (FakeParam(type_name="blob"),))
+    [report] = [report for report in result.reports if report.diagnostic.rule == "unsupported-type"]
+    assert report.diagnostic.message == 'parameter ?1 has unsupported type "blob"'
+    assert report.help == "cast the parameter to a supported type, such as `CAST({x} AS TEXT)`"
+
+
+def test_the_sql_error_label_is_the_native_code_when_there_is_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend
+) -> None:
+    report = _sql_error_report(
+        tmp_path, monkeypatch, fake_backend, DatabaseError("23505", "dup", code="SQLITE_CONSTRAINT_UNIQUE")
+    )
+    assert report.diagnostic.message == "dup (SQLITE_CONSTRAINT_UNIQUE)"
+    report = _sql_error_report(tmp_path, monkeypatch, fake_backend, DatabaseError("42P01", "gone"))
+    assert report.diagnostic.message == "gone (SQLSTATE 42P01)"
+
+
+def test_the_vocabulary_is_postgresql_only_when_no_url_is_supplied() -> None:
+    assert _vocabulary_backend(None) is not None
+    assert _vocabulary_backend("  ") is not None
+    assert _vocabulary_backend("postgresql://h/db") is not None
+
+
+def test_a_url_that_cannot_load_never_takes_the_postgresql_vocabulary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(SCHEMES, "fakedb-missing", ("no_such_backend_module", "fake"))
+    assert _vocabulary_backend("fakedb-missing://x") is None
+    assert _vocabulary_backend("sqlite-unknown-scheme://x") is None

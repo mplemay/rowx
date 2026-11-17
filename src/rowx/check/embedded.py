@@ -63,6 +63,25 @@ def embedded_for(dsn: str | None) -> EmbeddedService | None:
         raise CheckError(msg) from None
 
 
+# whether the URL names a database that is gone when the process exits, for any backend; an unknown scheme or a missing
+# backend is reported later, by the code that needs the backend
+def in_memory_for(dsn: str | None) -> bool:
+    if dsn is None or not dsn.strip():
+        return False
+    try:
+        backend = backend_for(dsn)
+    except UnsupportedSchemeError, BackendMissing:
+        return False
+    try:
+        return backend.in_memory(dsn)
+    except EmbeddedTargetError as error:
+        msg = f"the embedded database URL is not valid: {error}"
+        raise CheckError(msg) from None
+    except InterfaceError, ValueError:
+        msg = "the database URL could not be parsed"
+        raise CheckError(msg) from None
+
+
 # the loop's own handler cancels the main task, which then waits behind the engine until its statement ends, and says
 # nothing meanwhile. Once an instance is up, the first Ctrl-C says so at once and cancels the task as before; the
 # second stops the instance without waiting (a crash-safe directory is left as a crash leaves it) and leaves the loop

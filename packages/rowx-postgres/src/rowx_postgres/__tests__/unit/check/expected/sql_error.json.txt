@@ -1,0 +1,18 @@
+[
+  {
+    "rule": "sql-error",
+    "severity": "error",
+    "message": "syntax error at or near \"users\"",
+    "file": "app/users.py",
+    "line": 2,
+    "col": 39,
+    "end_line": 2,
+    "end_col": 40,
+    "notes": [],
+    "help": null,
+    "sqlstate": "42601",
+    "sql": "select",
+    "column_index": null,
+    "field": null
+  }
+]

@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from rowx.check.params import ParamType
     from rowx.check.resolve import Elem, NamedField, RowType
 
-JSON_KEYS: Final[frozenset[str]] = frozenset({"json", "jsonb"})
 USE_EXECUTE: Final[str] = "use .execute()"
 UNNAMED: Final[str] = "?column?"
 LOWERCASE_IDENTIFIER: Final[Pattern[str]] = re_compile(r"[a-z_][a-z0-9_]*")
@@ -76,12 +75,20 @@ def _accepts(rules: CheckerBackend, py_type_name: str, key: str) -> bool:
     return "object" in accepted or py_type_name in accepted
 
 
+def _is_array(key: str | None, rules: CheckerBackend) -> bool:
+    return rules.array_key is not None and key == rules.array_key
+
+
+def _untyped(column: ColumnDesc, rules: CheckerBackend) -> bool:
+    return rules.untyped_columns and column.type_key is None
+
+
 def _label(column: ColumnDesc, index: int) -> str:
     return f'column {index + 1} "{column.name}"'
 
 
 def expected_type(column: ColumnDesc, rules: CheckerBackend) -> str:
-    if column.type_key == "array":
+    if _is_array(column.type_key, rules):
         leaf = _py_result(rules, column.element_key) if column.element_key is not None else "?"
         return f"list[{leaf}]"
     return "None" if column.type_key == "void" else _py_result(rules, column.type_key or "")
@@ -110,16 +117,20 @@ def _array_matches(column: ColumnDesc, elem: Elem, rules: CheckerBackend) -> boo
         item = item.item
     if item is None:
         return False
-    return item.leaf == "any" or column.element_key in JSON_KEYS or item.leaf in _py_results(rules, column.element_key)
+    return (
+        item.leaf == "any"
+        or column.element_key in rules.json_keys
+        or item.leaf in _py_results(rules, column.element_key)
+    )
 
 
 # a range column's help names its subtype, since `Range[T]` is checked against it
 def _range_help(column: ColumnDesc, rules: CheckerBackend) -> str | None:
-    key = column.element_key if column.type_key == "array" else column.type_key
+    key = column.element_key if _is_array(column.type_key, rules) else column.type_key
     if key is None or rules.types[key].matcher != "range":
         return None
     leaf = _py_result(rules, key)
-    name = column.type_name.removeprefix("_") if column.type_key == "array" else column.type_name
+    name = column.type_name.removeprefix("_") if _is_array(column.type_key, rules) else column.type_name
     return f"`{name}` is a range of `{leaf[leaf.index('[') + 1 : -1]}`, so annotate it `{leaf}`"
 
 
@@ -129,31 +140,30 @@ def _leaf_matches(column: ColumnDesc, elem: Elem, rules: CheckerBackend) -> bool
     # a bare `None` only ever matches `void`, so no wider rule below may accept it
     if elem.leaf == "none" or column.type_key == "void":
         return elem.leaf == "none" and column.type_key == "void"
-    match column.type_key:
-        case None:
-            return False
-        case "array":
-            return _array_matches(column, elem, rules)
-        case key if key in JSON_KEYS:
-            return True
-        case key:
-            return elem.leaf in _py_results(rules, key)
+    key = column.type_key
+    if key is None:
+        return False
+    if _is_array(key, rules):
+        return _array_matches(column, elem, rules)
+    if key in rules.json_keys:
+        return True
+    return elem.leaf in _py_results(rules, key)
 
 
-def _unsupported(column: ColumnDesc, index: int, element: int | None) -> Finding:
+def _unsupported(column: ColumnDesc, index: int, element: int | None, rules: CheckerBackend) -> Finding:
     return Finding(
         rule="unsupported-type",
         message=f'{_label(column, index)} has unsupported type "{column.type_name}"',
         column=index,
         element=element,
-        help="cast the column to a supported type, such as `::text`",
+        help=f"cast the column to a supported type, such as `{rules.cast('')}`",
     )
 
 
-def _supported(column: ColumnDesc) -> bool:
+def _supported(column: ColumnDesc, rules: CheckerBackend) -> bool:
     if column.type_key is None:
         return False
-    if column.type_key == "array":
+    if _is_array(column.type_key, rules):
         return column.element_key is not None
     return True
 
@@ -190,6 +200,19 @@ def _nullability_finding(
     ]
 
 
+# an untyped column accepts any annotation, so only its nullability is compared
+def _compare_untyped(
+    column: ColumnDesc, index: int, elem: Elem, element: int | None, subject: str | None
+) -> list[Finding]:
+    if elem.leaf == "any":
+        return []
+    note = f"{_label(column, index)} is untyped, so its type is not checked"
+    return [
+        replace(finding, notes=(*finding.notes, note))
+        for finding in _nullability_finding(column, index, elem, element, subject)
+    ]
+
+
 # `subject` is the field of a named row, such as `field "age" of `User``; a tuple element has none
 def _compare_element(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     column: ColumnDesc,
@@ -199,8 +222,10 @@ def _compare_element(  # ruff: ignore[too-many-arguments, too-many-positional-ar
     rules: CheckerBackend,
     subject: str | None = None,
 ) -> list[Finding]:
-    if not _supported(column):
-        return [_unsupported(column, index, element)]
+    if _untyped(column, rules):
+        return _compare_untyped(column, index, elem, element, subject)
+    if not _supported(column, rules):
+        return [_unsupported(column, index, element, rules)]
     if column.type_key == "void":
         return _void_finding(column, index, elem, element)
     # `Any` and `object` are the only annotations neutral to both type and nullability
@@ -407,7 +432,7 @@ def _param_finding(  # ruff: ignore[too-many-arguments, too-many-positional-argu
 ) -> Finding:
     accepted = ", ".join(f"`{name}`" for name in rules.types[key].accepted_params)
     message = (
-        f'parameter ${index + 1} has type "{type_name}", {noun} accepts {accepted}, '
+        f'parameter {rules.placeholder(index + 1)} has type "{type_name}", {noun} accepts {accepted}, '
         f"but the interpolation is `{shown_param(evident)}`"
     )
     return Finding(rule="param-type-mismatch", message=message)
@@ -441,7 +466,7 @@ def compare_param_result(  # ruff: ignore[too-many-arguments, too-many-positiona
     rules = _rules(backend)
     if not _accepts(rules, evident.name, type_key):
         return _param_finding(index, type_name, type_key, evident, "which", rules), True
-    if type_key == "array":
+    if _is_array(type_key, rules):
         leaf = _array_leaf(evident)
         if element_key is None or leaf is None:
             return None, False

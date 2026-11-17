@@ -721,3 +721,87 @@ def test_both_names_of_one_pydantic_field_are_a_duplicate() -> None:
     assert findings[0].help == 'select only one of "id" and "user_id"'
     assert rules(run(row, column("user_id"))) == []
     assert rules(run(row, column("id"))) == []
+
+
+def lite_rules(**extra: object) -> CheckerBackend:
+    return replace(
+        PG_RULES,
+        untyped_params=True,
+        untyped_columns=True,
+        placeholder=lambda number: f"?{number}",
+        cast=lambda expression: f"CAST({expression} AS TEXT)",
+        **extra,
+    )
+
+
+def run_with(backend: CheckerBackend, row_type: RowType, *columns: ColumnDesc) -> list[Finding]:
+    return compare(DescribeDesc(columns=columns), row_type, backend=backend)
+
+
+def test_an_untyped_column_accepts_any_annotation_with_a_note() -> None:
+    backend = lite_rules()
+    for leaf in ("int", "str", "any", "none", "bytes"):
+        assert run_with(backend, scalar(Elem(leaf, nullable=True)), col(None, nullable=True)) == []
+    assert (
+        run_with(
+            backend, scalar(Elem("list", nullable=True, item=Elem("int", nullable=False))), col(None, nullable=True)
+        )
+        == []
+    )
+
+
+def test_an_untyped_column_still_compares_nullability_and_says_it_is_untyped() -> None:
+    backend = lite_rules()
+    [finding] = run_with(backend, tup(Elem("int", nullable=False)), col(None, nullable=True, name="v"))
+    assert finding.rule == "nullability-mismatch"
+    assert finding.notes == ('column 1 "v" is untyped, so its type is not checked',)
+    [finding] = run_with(backend, scalar(Elem("str", nullable=True)), col(None, nullable=False, name="v"))
+    assert finding.rule == "nullability-mismatch"
+    assert finding.notes == ('column 1 "v" is untyped, so its type is not checked',)
+
+
+def test_an_untyped_named_field_keeps_the_note_after_the_field_is_attached() -> None:
+    row = named(field("v"))
+    [finding] = run_with(lite_rules(), row, col(None, nullable=True, name="v"))
+    assert (finding.rule, finding.fields) == ("nullability-mismatch", (0,))
+    assert finding.notes == ('column 1 "v" is untyped, so its type is not checked',)
+
+
+def test_an_untyped_column_is_unsupported_when_the_backend_does_not_say_so() -> None:
+    assert rules(run_with(PG_RULES, scalar(Elem("str", nullable=False)), col(None))) == ["unsupported-type"]
+
+
+def test_the_unsupported_column_help_comes_from_the_backend_cast() -> None:
+    [finding] = run_with(PG_RULES, scalar(Elem("str", nullable=False)), col(None))
+    assert finding.help == "cast the column to a supported type, such as `::text`"
+    backend = replace(PG_RULES, cast=lambda expression: f"CAST({expression} AS TEXT)")
+    [finding] = run_with(backend, scalar(Elem("str", nullable=False)), col(None))
+    assert finding.help == "cast the column to a supported type, such as `CAST( AS TEXT)`"
+
+
+def test_the_parameter_mismatch_names_the_parameter_as_the_backend_does() -> None:
+    evident = ParamType("str")
+    finding = compare_param(0, "integer", "int4", evident, None, PG_RULES)
+    assert finding is not None
+    assert finding.message.startswith('parameter $1 has type "integer"')
+    finding = compare_param(1, "integer", "int4", evident, None, lite_rules())
+    assert finding is not None
+    assert finding.message.startswith('parameter ?2 has type "integer"')
+
+
+def test_an_untyped_parameter_is_never_a_mismatch() -> None:
+    assert compare_param_result(0, "", None, ParamType("str"), None, lite_rules()) == (None, False)
+
+
+def test_a_backend_without_arrays_never_reads_a_none_key_as_one() -> None:
+    backend = replace(PG_RULES, array_key=None)
+    assert rules(run_with(backend, scalar(Elem("str", nullable=False)), col(None))) == ["unsupported-type"]
+    # the key "array" is an ordinary key here, which the table does not know as an array
+    assert compare_param_result(0, "x", None, ParamType("list", ParamType("int")), "int4", backend) == (None, False)
+
+
+def test_the_json_keys_come_from_the_backend() -> None:
+    row = scalar(Elem("str", nullable=False))
+    assert run_with(PG_RULES, row, col("jsonb")) == []
+    backend = replace(PG_RULES, json_keys=frozenset())
+    assert rules(run_with(backend, row, col("jsonb"))) == ["type-mismatch"]

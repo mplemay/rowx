@@ -48,6 +48,7 @@ type _TemplateReason = Literal[
     "NotValidatedConstraint",
     "ForeignOrView",
     "ViewColumn",
+    "Unproven",
     "OuterJoin",
     "GroupingSets",
     "ScanBoundary",
@@ -82,6 +83,8 @@ def null_reason_note(reason: _TemplateReason, detail: str | None = None, *, colu
     match reason:
         case "Computed":
             return f'computed expression; add AS "{column or "col"}!"'
+        case "Unproven":
+            return "nullability not proven, assumed nullable"
         case "OuterJoin":
             return "nullable side of an outer join" + ("" if detail is None else f" ({detail})")
         case "ScanBoundary":

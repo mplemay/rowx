@@ -88,3 +88,12 @@ def test_unavailable_admin_capability_exits_two(
     assert not captured.out
     assert "does not support database administration" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_an_in_memory_url_is_refused_before_any_backend_service_is_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("rowx.check.embedded.backend_for", lambda _dsn: Backend(memory_factory=lambda _url: True))
+    assert main(["database", "create", "--database-url", "fake://:memory:"]) == 2
+    assert capsys.readouterr().err == "error: `rowx database` is not supported for in-memory URLs\n"

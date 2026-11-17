@@ -13,7 +13,7 @@ from rowx_core.backend import UnsupportedCapabilityError
 
 from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
 from rowx.check.config import Config, ConfigError, database_url, load_config
-from rowx.check.embedded import embedded_for, redact_owned
+from rowx.check.embedded import embedded_for, in_memory_for, redact_owned
 from rowx.check.model import Diagnostic, Span
 from rowx.check.render import Report, render_json, render_text, strip_controls
 from rowx.check.rules import apply_levels, resolve_levels
@@ -144,13 +144,16 @@ def _coverage(result: RunResult, root: Path) -> str:
             for index, param in enumerate(site.parameters, 1):
                 py = param.python_type.name if param.python_type is not None else "unknown"
                 status = (
-                    "not compared"
+                    "untyped, not compared"
+                    if param.untyped
+                    else "not compared"
                     if param.mismatch is None
                     else "mismatch"
                     if param.mismatch
                     else "no mismatch reported"
                 )
-                lines.append(f"    parameter ${index}: SQL {strip_controls(param.sql_type)}, Python {py}; {status}")
+                label = param.label if param.label is not None else f"${index}"
+                lines.append(f"    parameter {label}: SQL {strip_controls(param.sql_type)}, Python {py}; {status}")
     return "\n".join(lines) + "\n"
 
 
@@ -165,7 +168,13 @@ def _inspect(result: RunResult) -> str:
         lines.append(f"query {quoted(str(path))}:{span.line}:{span.col}-{span.end_line}:{span.end_col}")
         for index, column in enumerate(site.columns, 1):
             nullable = "nullable" if column.nullable else "not nullable"
-            mapping = quoted(column.python_type) if column.python_type is not None else "unknown"
+            mapping = (
+                quoted(column.python_type)
+                if column.python_type is not None
+                else "untyped"
+                if column.untyped
+                else "unknown"
+            )
             lines.append(
                 f"  column {index}: {quoted(column.name)}, SQL {quoted(column.sql_type)}, Python {mapping}, "
                 f"{nullable}, {quoted(column.reason)}"
@@ -173,9 +182,16 @@ def _inspect(result: RunResult) -> str:
         for index, param in enumerate(site.parameters, 1):
             py = quoted(param.python_type) if param.python_type is not None else "unknown"
             status = (
-                "not compared" if param.mismatch is None else "mismatch" if param.mismatch else "no mismatch reported"
+                "untyped, not compared"
+                if param.untyped
+                else "not compared"
+                if param.mismatch is None
+                else "mismatch"
+                if param.mismatch
+                else "no mismatch reported"
             )
-            lines.append(f"  parameter ${index}: SQL {quoted(param.sql_type)}, Python {py}, {status}")
+            label = param.label if param.label is not None else f"${index}"
+            lines.append(f"  parameter {label}: SQL {quoted(param.sql_type)}, Python {py}, {status}")
     return "\n".join(lines) + ("\n" if lines else "")
 
 
@@ -221,10 +237,10 @@ class _HookState:
 def _scratch_hook(config: Config, state: _HookState) -> Callable[[str, int], AbstractAsyncContextManager[ScratchBuild]]:
     def _open(url: str, workers: int) -> AbstractAsyncContextManager[ScratchBuild]:
         from rowx.check.migrate import load_migrator, resolve_target  # ruff: ignore[import-outside-top-level]
-        from rowx.check.scratch import Scratch  # ruff: ignore[import-outside-top-level]
+        from rowx.check.scratch import scratch_for  # ruff: ignore[import-outside-top-level]
 
         backend = backend_for(url)
-        scratch = Scratch(url, backend.admin(url))
+        scratch = scratch_for(url, backend)
         # recorded before the session so an interrupted drop is still swept
         state.built = scratch
         return scratch.session(load_migrator(resolve_target(config, None), url, backend), workers)
@@ -289,6 +305,7 @@ def _check_hooks(
     if embedded is not None and not embedded.persistent:
         # an in-memory database is built from the migrations, so there is nothing to drift from
         return Hooks(scratch=_embedded_scratch_hook(config, state, embedded))
+    # `scratch` is already set for a non-embedded in-memory URL, so it has no gate either
     if scratch:
         return Hooks(scratch=_scratch_hook(config, state))
     gate = _drift_hook(config, state) if drift and config.migrate is not None else None
@@ -303,14 +320,21 @@ def _redacted(text: str, dsn: str, state: _HookState) -> str:
 
 
 # whether the run builds a scratch database, or a usage error
-def _scratch_wanted(config: Config, embedded: EmbeddedService | None, *, requested: bool) -> bool:
+def _scratch_wanted(
+    config: Config, embedded: EmbeddedService | None, *, requested: bool, in_memory: bool = False
+) -> bool:
     if embedded is not None and embedded.persistent and requested:
         msg = "`--scratch` builds a database from the migrations; an embedded directory URL is checked as it is"
         raise CheckError(msg)
     # an in-memory database only exists to be built from the migrations
-    implied = embedded is not None and not embedded.persistent
+    implied = (embedded is not None and not embedded.persistent) or in_memory
     if (requested or implied) and config.migrate is None:
-        reason = "an in-memory embedded URL implies `--scratch`, which" if implied else "`--scratch`"
+        if not implied:
+            reason = "`--scratch`"
+        elif embedded is not None:
+            reason = "an in-memory embedded URL implies `--scratch`, which"
+        else:
+            reason = "an in-memory database URL implies `--scratch`, which"
         msg = f"{reason} needs a `[tool.rowx.migrate]` table in pyproject.toml"
         raise CheckError(msg)
     return requested or implied
@@ -330,7 +354,8 @@ def _check(args: Namespace) -> tuple[RunResult, Path]:
     )
     dsn = database_url(config, args.database_url)
     embedded = embedded_for(dsn)
-    scratch = _scratch_wanted(config, embedded, requested=bool(args.scratch))
+    memory = embedded is None and in_memory_for(dsn)
+    scratch = _scratch_wanted(config, embedded, requested=bool(args.scratch), in_memory=memory)
     files = discover_files(config, cwd, args.paths)
     state = _HookState()
     try:
