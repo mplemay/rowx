@@ -17,22 +17,25 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyString, PyTuple};
 use pyo3::wrap_pyfunction;
 use rowx_postgres::{Kind, Type};
-use rowx_py_core::row::{Layout, RowForm, construct};
+use rowx_py_core::row::{Layout, RowForm};
 
 #[pyfunction]
-fn _cancel_requests_sent() -> u64 {
+#[pyo3(name = "_cancel_requests_sent")]
+fn cancel_requests_sent() -> u64 {
     rowx_postgres::cancel::requests_sent()
 }
 
 #[pyfunction]
-fn _catalog_queries() -> u64 {
+#[pyo3(name = "_catalog_queries")]
+fn catalog_queries() -> u64 {
     rowx_postgres::describe::catalog_queries()
 }
 
 // test hook: the wire format ("binary" or "text") each parameter is sent in once encoded against the
 // built-in types with these OIDs
 #[pyfunction]
-fn _param_formats(
+#[pyo3(name = "_param_formats")]
+fn param_formats(
     py: Python<'_>,
     oids: &Bound<'_, PyList>,
     params: &Bound<'_, PyList>,
@@ -91,7 +94,8 @@ fn hook_type(spec: &Bound<'_, PyAny>, depth: usize) -> PyResult<Type> {
 
 // test hook: decodes a binary value of the described type through the real codec, as a row would be
 #[pyfunction]
-fn _decode<'py>(
+#[pyo3(name = "_decode")]
+fn decode<'py>(
     py: Python<'py>,
     spec: &Bound<'py, PyAny>,
     raw: &Bound<'py, PyBytes>,
@@ -103,8 +107,9 @@ fn _decode<'py>(
 // `cells` are the already decoded values, `targets` the field each fills (`None` passes through) and
 // `keys` the column keys a validator row is built from
 #[pyfunction]
+#[pyo3(name = "_construct")]
 #[pyo3(signature = (shape, cells, targets, keys, row_index = 0))]
-fn _construct<'py>(
+fn construct<'py>(
     py: Python<'py>,
     shape: &named::RowShape,
     cells: &Bound<'py, PyList>,
@@ -126,7 +131,7 @@ fn _construct<'py>(
             .get_item(index)
             .map_err(|_| errors::interface_error(py, "a column has no cell in the test row"))
     };
-    construct(py, cell, &layout, shape.data(), row_index)
+    rowx_py_core::row::construct(py, cell, &layout, shape.data(), row_index)
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -151,11 +156,11 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<types::TypeInfo>()?;
     module.add_function(wrap_pyfunction!(named::map_columns_py, module)?)?;
     module.add_function(wrap_pyfunction!(types::type_table, module)?)?;
-    module.add_function(wrap_pyfunction!(_cancel_requests_sent, module)?)?;
-    module.add_function(wrap_pyfunction!(_catalog_queries, module)?)?;
-    module.add_function(wrap_pyfunction!(_construct, module)?)?;
-    module.add_function(wrap_pyfunction!(_param_formats, module)?)?;
-    module.add_function(wrap_pyfunction!(_decode, module)?)?;
+    module.add_function(wrap_pyfunction!(cancel_requests_sent, module)?)?;
+    module.add_function(wrap_pyfunction!(catalog_queries, module)?)?;
+    module.add_function(wrap_pyfunction!(construct, module)?)?;
+    module.add_function(wrap_pyfunction!(param_formats, module)?)?;
+    module.add_function(wrap_pyfunction!(decode, module)?)?;
     Ok(())
 }
 
