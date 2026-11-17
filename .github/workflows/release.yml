@@ -34,9 +34,18 @@ jobs:
       - name: Validate version and tag
         id: version
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          # a v* ref publishes, including a workflow_dispatch of that tag; a branch dispatch stays a dry run
+          EVENT_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && 'push' || github.event_name }}
           TAG_NAME: ${{ github.ref_name }}
         run: scripts/validate-release.sh
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Check the changelog
+        run: scripts/check-changelog.sh
 
   build-wheels:
     name: Wheel (${{ matrix.name }})
@@ -445,7 +454,8 @@ jobs:
           fi
           # rustup reads rust-toolchain.toml from the build directory; the sdist is outside the checkout
           cp "$GITHUB_WORKSPACE/rust-toolchain.toml" "${projects[0]}/rust-toolchain.toml"
-          cargo fetch --locked --manifest-path "${projects[0]}/Cargo.toml"
+          # no --locked: the sdist lock omits the unused wasmer-compiler patch, which cargo would otherwise record as a lock change
+          cargo fetch --manifest-path "${projects[0]}/Cargo.toml"
 
       - name: Rebuild rowx-postgres offline
         env:
@@ -457,11 +467,11 @@ jobs:
           cd "${projects[0]}"
           PYO3_PYTHON="$(uv python find 3.14)"
           export PYO3_PYTHON
-          maturin build --offline --locked --out "$RUNNER_TEMP/rebuilt-postgres"
+          maturin build --offline --out "$RUNNER_TEMP/rebuilt-postgres"
 
   publish-core:
     name: Publish rowx-core
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v')
     needs:
       [
         validate,
@@ -499,16 +509,22 @@ jobs:
           fi
           cp "${files[@]}" dist/rowx-core/
 
-      - name: Publish rowx-core
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          packages-dir: dist/rowx-core
-          skip-existing: true
+          enable-cache: false
+
+      - name: Attest rowx-core distributions
+        uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
+        with:
+          paths: dist/rowx-core
+
+      - name: Publish rowx-core
+        run: uv publish --trusted-publishing always "dist/rowx-core/*"
 
   publish-postgres:
     name: Publish rowx-postgres
     if: >-
-      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(github.ref, 'refs/tags/v') &&
       needs.publish-core.result == 'success'
     needs: publish-core
     runs-on: ubuntu-latest
@@ -557,17 +573,23 @@ jobs:
             esac
           done
 
-      - name: Publish rowx-postgres
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          packages-dir: dist/rowx-postgres
-          skip-existing: true
+          enable-cache: false
+
+      - name: Attest rowx-postgres distributions
+        uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
+        with:
+          paths: dist/rowx-postgres
+
+      - name: Publish rowx-postgres
+        run: uv publish --trusted-publishing always "dist/rowx-postgres/*"
 
   # the embedded wheels block the release: publish-rowx needs this job, and it needs rowx-postgres on PyPI first
   publish-embedded:
     name: Publish rowx-embedded
     if: >-
-      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(github.ref, 'refs/tags/v') &&
       needs.publish-postgres.result == 'success'
     needs: [validate, check-distributions, publish-postgres]
     runs-on: ubuntu-latest
@@ -584,16 +606,22 @@ jobs:
           path: dist/rowx-embedded
           merge-multiple: true
 
-      - name: Publish rowx-embedded
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          packages-dir: dist/rowx-embedded
-          skip-existing: true
+          enable-cache: false
+
+      - name: Attest rowx-embedded distributions
+        uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
+        with:
+          paths: dist/rowx-embedded
+
+      - name: Publish rowx-embedded
+        run: uv publish --trusted-publishing always "dist/rowx-embedded/*"
 
   publish-rowx:
     name: Publish rowx
     if: >-
-      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(github.ref, 'refs/tags/v') &&
       needs.publish-postgres.result == 'success' && needs.publish-embedded.result == 'success'
     needs: [publish-postgres, publish-embedded]
     runs-on: ubuntu-latest
@@ -638,8 +666,41 @@ jobs:
             exit 1
           fi
 
-      - name: Publish rowx
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          packages-dir: dist/rowx
-          skip-existing: true
+          enable-cache: false
+
+      - name: Attest rowx distributions
+        uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
+        with:
+          paths: dist/rowx
+
+      - name: Publish rowx
+        run: uv publish --trusted-publishing always "dist/rowx/*"
+
+  github-release:
+    name: GitHub release
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.publish-rowx.result == 'success'
+    needs: publish-rowx
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create or update the GitHub release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: scripts/publish-github-release.sh

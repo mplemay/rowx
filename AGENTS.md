@@ -25,6 +25,10 @@
   - *Files:* [ignores (project)](.gitignore)
   - *Rules:*
     - **Always use all lowercase single-line conventional commit messages (ex: `feat: add query builder`).**
+- **GitHub Actions:** Workflow steps
+  - *Rules:*
+    - A step that is a script lives in `scripts/` and the workflow calls it. A step that runs one command can stay
+      inline.
 
 ## Conventions
 
@@ -106,7 +110,8 @@
 - Do not name test files by functionality
 - Each Python package owns `<import_root>/__tests__/` with `unit/` and `integration/` subdirectories, mirroring its
   modules. Core and CLI tests use fake executors or services and need no database.
-- Database tests belong to `rowx_postgres`; markers are `db` and `timing`.
+- PostgreSQL database tests belong to `rowx_postgres`; markers are `db` and `timing`. SQLite database tests belong to
+  `rowx_sqlite`, carry no `db` marker and always run.
 
 ## Project
 
@@ -123,6 +128,7 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Command | What it does |
 |---|---|
 | `just check` | All gates through `uv run prek run --all-files` |
+| `just release X.Y.Z` | Bump the lockstep version, regenerate the changelog with git-cliff, and open the release pull request |
 | `just fmt` | Format rust, python, and shell through the prek hooks |
 | `just test-rust` | `cargo test` over the default members, which leave out `rowx-embedded` (DB tests run if `ROWX_TEST_DSN` is set) |
 | `just test-rust-embedded` | `cargo test -p rowx-embedded-host` (builds the Wasmer tree) |
@@ -155,7 +161,7 @@ validates every query against a live Postgres 18 database by preparing and descr
   and installs `rowx-postgres` through its `postgres` extra. The checker never imports or executes user code.
 - Runtime queries use the supplied executor's compiler. Checking selects its backend from an explicit database
   target; backend resources and services are passed explicitly, never through ambient context variables.
-- DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked
+- PostgreSQL DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked
   `@pytest.mark.timing` and synchronise by polling `pg_stat_activity`, never with `sleep`.
 
 ## Cursor Cloud specific instructions

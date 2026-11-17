@@ -72,7 +72,7 @@ not start a database.
   `rowx-core` has no runtime dependencies, `rowx-postgres` depends only on `rowx-core`, and `rowx` does not depend on
   `rowx-postgres` unless the extra is selected. Its `embedded` extra must add exactly `rowx-postgres` and the platform
   gated `rowx-embedded==<version>`. The embedded wheels have their own check, `scripts/validate-embedded-wheels.py`,
-  and the version agreement is in `scripts/validate-release-versions.py`.
+  and the version agreement is in `scripts/validate-release-versions.py`, which `scripts/release.py` bumps.
 
 ## Test plugin
 

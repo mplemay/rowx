@@ -9,7 +9,9 @@ use rowx_postgres::describe::{self as pg, TypeKey};
 
 use crate::conn::Connection;
 use crate::errors::{PgError, interface_error};
-use crate::exec::{Access, fail, watch};
+use rowx_py_core::exec::watch;
+
+use crate::exec::{Access, fail};
 use rowx_py_core::runtime;
 
 #[pyclass(
@@ -121,7 +123,10 @@ pub fn describe<'py>(
     let hook = Hook::new(claim);
     let watched = hook.clone();
     let future = future_into_py(py, async move {
-        Access::default().reserve(&cancel.state, &hook).await?;
+        Access::default()
+            .reserve(&cancel.state, &hook)
+            .await
+            .map_err(PgError::from)?;
         let inner = Arc::clone(&cancel.backend.conn);
         let pending = cancel::spawn(&cancel, &hook, async move {
             let guard = inner.lock().await;

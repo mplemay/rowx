@@ -1,13 +1,20 @@
 # Packages
 
-rowx publishes four distributions, all released together under one version (0.4.1). Install matching versions of the
-ones you use. Each distribution has its own import root.
+rowx publishes four distributions, all released together under one version (0.4.2). Install matching versions of the
+ones you use. Each distribution has its own import root. An application that runs queries and checks them installs
+one extra, `rowx[postgres]`.
 
 An application that installs `rowx[postgres]` imports `from rowx import ...` and `from rowx.postgres import ...`.
 `from rowx import query` is the same object as `from rowx_core import query`, and `from rowx.postgres import connect`
-is the same object as `from rowx_postgres import connect`. A runtime-only install imports `rowx_core` and
-`rowx_postgres`. `Pool` imported from `rowx` is the executor protocol, not a connection pool. `import rowx` loads no
-backend.
+is the same object as `from rowx_postgres import connect`. `Pool` imported from `rowx` is the executor protocol, not a
+connection pool. `import rowx` loads no backend.
+
+Install the two packages separately when the application should not include the `rowx` command. That install imports
+`rowx_core` and `rowx_postgres`.
+
+```sh
+uv add rowx-core rowx-postgres
+```
 
 ## rowx-core
 
@@ -37,6 +44,8 @@ The `postgres` extra adds the matching `rowx-postgres`:
 ```sh
 uv add "rowx[postgres]"
 ```
+
+Free-threaded CPython 3.14t cannot install the abi3 wheels, so pip builds rowx-postgres from the source distribution.
 
 The `embedded` extra adds `rowx-postgres` and the matching `rowx-embedded` as well (see
 [rowx-embedded](#rowx-embedded)).
@@ -68,3 +77,25 @@ uv add "rowx[embedded]"
 ```
 
 See [Embedded Postgres](guide/embedded.md).
+
+## Upgrading from 0.2
+
+0.2.0 published one `rowx` wheel. Its native module was `rowx._core`. Application imports were
+`from rowx import query` and `from rowx.postgres import connect, Pool`. There was no separate `rowx-core` or
+`rowx-postgres` distribution.
+
+0.3.0 published the split as three lockstep wheels. `rowx-core` is pure Python, imports as `rowx_core`, and has
+no runtime dependencies. `rowx-postgres` imports as `rowx_postgres`, its native module is `rowx_postgres._core`, and
+it depends only on matching `rowx-core`. `rowx` is pure Python, imports as `rowx`, and depends on matching
+`rowx-core`. The `postgres` extra installs matching `rowx-postgres`. 0.4.2 added `rowx-embedded` in lockstep
+with the others.
+
+This tree is version 0.4.2.
+
+`rowx` re-exports the query API of `rowx_core`. `rowx.core` re-exports the `rowx_core` names that `rowx` and
+`rowx.errors` do not already export. `rowx.postgres` re-exports `rowx_postgres` and still needs the `postgres` extra.
+The import the guide uses is `from rowx import query` and `from rowx.postgres import connect, Pool`.
+
+What the compiler accepts, including the adjacency space and the 65535-parameter cap, is
+[t-string compilation](reference/api.md#t-string-compilation). Each exception class is the same object in `rowx` and
+`rowx_core` ([Errors](guide/errors.md)). The release notes are the [changelog](changelog.md).

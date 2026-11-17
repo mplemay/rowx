@@ -134,6 +134,27 @@ pub fn row_construct_error(
     err
 }
 
+/// A named row whose constructor or validator raised `cause`, an `Exception`.
+#[must_use]
+pub fn row_construct_failed(
+    py: Python<'_>,
+    cause: PyErr,
+    type_name: &str,
+    row_index: usize,
+) -> PyErr {
+    let detail = cause.value(py).repr().map_or_else(
+        |_| "<unrepresentable>".to_owned(),
+        |r| r.to_string_lossy().into_owned(),
+    );
+    row_construct_error(
+        py,
+        &format!("{type_name} row {row_index}: {detail}"),
+        type_name,
+        row_index,
+        cause,
+    )
+}
+
 #[must_use]
 pub fn encode_error(py: Python<'_>, message: &str) -> PyErr {
     build(py, &ENCODE_ERROR, "EncodeError", (message,))

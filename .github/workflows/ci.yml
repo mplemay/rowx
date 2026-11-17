@@ -438,3 +438,75 @@ jobs:
         working-directory: examples/migrations
         # fail instead of skipping if the plugin finds no database URL
         run: uv run --project ../.. pytest -p no:cacheprovider -o rowx_require_database=true
+
+  changelog:
+    name: Changelog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Check the changelog
+        run: scripts/check-changelog.sh
+
+  tag-release:
+    name: Tag release
+    needs: [linux, embedded-wheel, embedded-rust, embedded, macos, examples, changelog]
+    if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write # dispatch release.yml; a GITHUB_TOKEN tag push does not start it
+      contents: write # create the v* tag
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Decide whether this commit is a release
+        id: plan
+        run: uv run python scripts/release.py tag-plan
+
+      - name: Fetch main
+        if: success() && steps.plan.outputs.action == 'tag'
+        run: scripts/tag-release.sh fetch-main
+
+      - name: Install the pinned Rust toolchain
+        if: success() && steps.plan.outputs.action == 'tag'
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Validate the tag
+        if: success() && steps.plan.outputs.action == 'tag'
+        env:
+          EVENT_NAME: push
+          TAG_NAME: ${{ steps.plan.outputs.tag }}
+        run: scripts/validate-release.sh
+
+      - name: Create the tag
+        if: success() && steps.plan.outputs.action == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ steps.plan.outputs.tag }}
+          HEAD_SHA: ${{ github.sha }}
+        run: scripts/tag-release.sh create-tag
+
+      - name: Dispatch Release
+        if: success() && steps.plan.outputs.action == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.plan.outputs.tag }}
+        run: scripts/tag-release.sh dispatch

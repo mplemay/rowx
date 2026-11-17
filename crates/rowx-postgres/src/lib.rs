@@ -14,5 +14,5 @@ pub mod tls;
 pub mod types;
 pub mod wire;
 
-pub use tokio_postgres::Row;
 pub use tokio_postgres::types::{Kind, Type};
+pub use tokio_postgres::{Column, Row};

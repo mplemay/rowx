@@ -4,14 +4,28 @@
 `release.yml` and one GitHub environment, `pypi`.
 
 Each package is its own job. Publish order is `rowx-core`, then `rowx-postgres`, then `rowx-embedded`, then `rowx`. Each
-job uses `skip-existing: true`. Re-running a failed publish job skips files already on PyPI and uploads the rest. If a
-later publish job was skipped because an earlier one failed, re-run that skipped job after the failed one succeeds.
+job runs `uv publish`. PyPI accepts a second upload of a byte-identical file and rejects a same-name file with
+different bytes, so re-running a failed publish job uploads only what is missing. If a later publish job was skipped
+because an earlier one failed, re-run that skipped job after the failed one succeeds.
 
 `rowx` already uses the `pypi` environment. The owner registers pending trusted publishers for
 `rowx-core` and `rowx-postgres`.
 
-`workflow_dispatch` builds, checks, and rebuilds the artifacts. It does not publish. Publishing runs
-only on a `v*` tag push.
+`just release X.Y.Z` bumps the lockstep version, regenerates `docs/changelog.md` with git-cliff, and opens the release
+pull request. After that pull request merges, a green CI push to main runs the tag release job. That job creates
+`vX.Y.Z` on the merge commit and dispatches `release.yml` on the tag. A tag push from `GITHUB_TOKEN` does not start
+`release.yml`.
+
+A `workflow_dispatch` whose ref is a branch builds, checks, and rebuilds the artifacts. It does not publish.
+Publishing runs when the ref is a `v*` tag, including a dispatch of that tag. If the tag exists and the dispatch
+failed, run Release from the Actions tab with the ref set to that tag.
+
+git-cliff builds `docs/changelog.md` from `feat`, `fix`, `perf`, and breaking commits that belong to a tag.
+`v0.4.0` and `v0.4.1` are ignored, so those commits stay in 0.4.2. `just changelog` regenerates that released file.
+`just release` gives the commits since the current tag the new version. The release commit's committer date is
+12:00 UTC on the day of the cut, and that UTC day is the new section's heading date. CI and the tag workflow
+regenerate the file and fail when it differs. After the packages publish, the workflow opens or updates the GitHub
+Release from the latest section. A re-dispatch of the `v*` tag updates that release too.
 
 The abi3 wheels do not include a free-threaded cp314t build. Free-threaded CPython 3.14t cannot install
 them, so pip builds `rowx-postgres` from the source distribution.
@@ -25,5 +39,6 @@ owner registers a pending trusted publisher for `rowx-embedded` with workflow `r
 first.
 
 The embedded wheels block the release: `rowx` publishes only after `rowx-embedded` does, and `rowx-embedded` publishes
-after `rowx-postgres` because it pins it. A manual run of the workflow builds, checks (40 MB budget per wheel) and
-smoke tests every wheel and never publishes. The old `embedded-v*` tags and `release-embedded.yml` are gone.
+after `rowx-postgres` because it pins it. A manual run on a branch builds, checks (40 MB budget per wheel) and smoke
+tests every wheel and does not publish. A run whose ref is a `v*` tag publishes. The old `embedded-v*` tags and
+`release-embedded.yml` are gone.

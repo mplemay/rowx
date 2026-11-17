@@ -1,5 +1,7 @@
 # rowx-postgres
 
+Typesafe raw SQL for Python 3.14+, with no ORM.
+
 PostgreSQL execution, migrations and database services for rowx.
 
 `rowx-postgres` depends only on matching `rowx-core`.
