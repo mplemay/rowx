@@ -391,8 +391,10 @@ def _sql_error(site: _Site, error: DatabaseError, backend: CheckerBackend) -> Re
             span=span,
             notes=notes,
         ),
-        help=backend.sql_error_help.get(error.sqlstate),
+        help=(backend.sql_error_help.get(error.code) if error.code is not None else None)
+        or backend.sql_error_help.get(error.sqlstate),
         sqlstate=error.sqlstate,
+        code=error.code,
         sql=site.sourcemap.sql,
     )
 

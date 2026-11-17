@@ -48,14 +48,17 @@ class DatabaseError(Error):
     detail: str | None
     hint: str | None
     position: int | None
+    code: str | None
 
-    def __init__(
+    # the Rust side builds it with a positional tuple, so `code` cannot be keyword-only
+    def __init__(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         self,
         sqlstate: str,
         message: str,
         detail: str | None = None,
         hint: str | None = None,
         position: int | None = None,
+        code: str | None = None,
     ) -> None:
         super().__init__(sqlstate, message)
         self.sqlstate = sqlstate
@@ -63,14 +66,15 @@ class DatabaseError(Error):
         self.detail = detail
         self.hint = hint
         self.position = position
+        self.code = code
 
     @override
     def __str__(self) -> str:
         return f"{self.sqlstate}: {self.message}"
 
     @override
-    def __reduce__(self) -> tuple[type[Self], tuple[str, str, str | None, str | None, int | None]]:
-        return type(self), (self.sqlstate, self.message, self.detail, self.hint, self.position)
+    def __reduce__(self) -> tuple[type[Self], tuple[str, str, str | None, str | None, int | None, str | None]]:
+        return type(self), (self.sqlstate, self.message, self.detail, self.hint, self.position, self.code)
 
 
 class RowNotFound(Error):  # ruff: ignore[error-suffix-on-exception-name]

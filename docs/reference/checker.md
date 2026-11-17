@@ -389,9 +389,8 @@ caret. Server-supplied text is sanitised before it reaches a terminal ([Checker]
 no separate footer. Pass `--statistics` for the counts; diagnostic counts reflect visible reports, while coverage
 evidence is unaffected by reporting filters.
 
-Planned ([#356](https://github.com/mplemay/rowx/issues/356)): the JSON object gains a `code` field carrying the
-native error code. It is omitted when the code is `None`, so PostgreSQL output is unchanged. The help for a SQL error
-is looked up by `code` when present, then by `sqlstate`.
+The object also has a `code` field carrying the native error code when it is not `None`; it is omitted otherwise,
+so PostgreSQL output has no `code`. The help for a SQL error is looked up by `code` when present, then by `sqlstate`.
 
 Described column metadata is not written to a disk cache. Every check prepares the statements it describes.
 

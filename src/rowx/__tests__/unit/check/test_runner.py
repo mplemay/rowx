@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from rowx_core import Compiled, TemplatePlan
     from rowx_core.backend import ColumnInfo, Describe, Failure, ParamInfo, ShapeIssue
 
+    from rowx.check.render import Report
+
 
 class UnusedCompiler(Compiler):
     @override
@@ -132,6 +134,43 @@ def test_sql_errors_are_outcomes_not_failures(monkeypatch: pytest.MonkeyPatch, f
     assert asyncio.run(describe_all(["postgresql://x"], ["SELECT 1"], 1000, backend=fake_backend)) == {
         "SELECT 1": error
     }
+
+
+def _sql_error_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: CheckerBackend, error: DatabaseError
+) -> Report:
+    from rowx._backend import backend_for  # ruff: ignore[import-outside-top-level]
+
+    path = tmp_path / "site.py"
+    path.write_text('from rowx import query\nquery[int](t"SELECT 1")\n', encoding="utf-8")
+
+    async def outcomes(*_args: object, **_kwargs: object) -> dict[str, DatabaseError]:  # ruff: ignore[unused-async]
+        return {"SELECT 1": error}
+
+    backend = replace(backend, compiler=backend_for("postgres://").checker().compiler)
+    monkeypatch.setattr("rowx.check.runner.describe_all", outcomes)
+    config = load_config(tmp_path)
+    result = asyncio.run(run_check(config, discover_files(config, tmp_path, [path]), "fake://db", 1, backend=backend))
+    [report] = [report for report in result.reports if report.diagnostic.rule == "sql-error"]
+    return report
+
+
+def test_sql_error_help_prefers_the_code_over_the_sqlstate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend
+) -> None:
+    backend = replace(fake_backend, sql_error_help={"NATIVE": "by code", "42P01": "by sqlstate"})
+    report = _sql_error_report(tmp_path, monkeypatch, backend, DatabaseError("42P01", "m", code="NATIVE"))
+    assert (report.help, report.code, report.sqlstate) == ("by code", "NATIVE", "42P01")
+
+
+def test_sql_error_help_falls_back_to_the_sqlstate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_backend: CheckerBackend
+) -> None:
+    backend = replace(fake_backend, sql_error_help={"42P01": "by sqlstate"})
+    report = _sql_error_report(tmp_path, monkeypatch, backend, DatabaseError("42P01", "m", code="UNMAPPED"))
+    assert (report.help, report.code) == ("by sqlstate", "UNMAPPED")
+    report = _sql_error_report(tmp_path, monkeypatch, backend, DatabaseError("42P01", "m"))
+    assert (report.help, report.code) == ("by sqlstate", None)
 
 
 def test_each_sql_is_described_once_across_workers(

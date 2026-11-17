@@ -168,12 +168,13 @@ pub fn database_error(
     detail: Option<&str>,
     hint: Option<&str>,
     position: Option<u32>,
+    code: Option<&str>,
 ) -> PyErr {
     build(
         py,
         &DATABASE_ERROR,
         "DatabaseError",
-        (sqlstate, message, detail, hint, position),
+        (sqlstate, message, detail, hint, position, code),
     )
 }
 
