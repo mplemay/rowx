@@ -363,13 +363,13 @@ def compat_run(
     return status
 
 
-def test_an_in_memory_url_builds_each_schema_through_the_backend_scratch_factory(
+def test_each_schema_is_built_through_the_backend_scratch_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from rowx_core.backend import Backend  # ruff: ignore[import-outside-top-level]
 
     scratch = LeakyScratch(leaked=False)
-    backend = Backend(memory_factory=lambda _url: True)
+    backend = Backend()
     assert compat_run(tmp_path, monkeypatch, backend, "fake://:memory:", scratch) == 0
     captured = capsys.readouterr()
     assert scratch.swept

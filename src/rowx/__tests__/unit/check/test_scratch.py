@@ -51,6 +51,31 @@ def test_collision_does_not_drop_an_existing_database() -> None:
     assert not scratch.leaked
 
 
+def test_a_duplicate_answered_by_the_admin_keeps_the_existing_database() -> None:
+    import asyncio  # ruff: ignore[import-outside-top-level]
+    from unittest.mock import AsyncMock  # ruff: ignore[import-outside-top-level]
+
+    from rowx_core.errors import DatabaseError  # ruff: ignore[import-outside-top-level]
+
+    error = DatabaseError("HY000", "exists", code="SQLITE_EXAMPLE")
+    admin = Mock(spec=AdminService)
+    admin.with_database.return_value = "postgresql://host/scratch"
+    admin.duplicate.return_value = True
+    admin.create_scratch = AsyncMock(side_effect=error)
+    admin.drop = AsyncMock()
+    scratch = Scratch("postgresql://host/postgres", admin, sweep_previous=False)
+
+    async def run() -> None:
+        with pytest.raises(CheckError):
+            async with scratch.session(Mock()):
+                pass
+
+    asyncio.run(run())
+    admin.drop.assert_not_awaited()
+    assert not scratch.leaked
+    admin.duplicate.assert_called_once_with(error)
+
+
 def test_scratch_session_rejects_fewer_than_one_worker() -> None:
     scratch = Scratch("postgresql://u@h/app", Mock(spec=AdminService))
     with pytest.raises(ValueError, match="at least one worker"):

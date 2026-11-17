@@ -24,6 +24,7 @@ from rowx.check.compare import (
     compare,
     compare_param_result,
     expected_type,
+    is_array_key,
     shown_param,
 )
 from rowx.check.construction import template_reports
@@ -444,7 +445,7 @@ def _param_reports(site: _Site, described: Describe, backend: CheckerBackend) ->
     holes = site.sourcemap.holes
     reports: list[Report] = []
     if (count := len(described.params)) != len(holes):
-        # the backend references its first parameter through its last, so the first interpolation past that is the stray one
+        # the described parameters are the first `count` placeholders, so the first interpolation past that is the stray one
         span = holes[count] if count < len(holes) else site.mapper.span(_template(site))
         message = (
             f"the query has {_plural(len(holes), 'interpolation')} but {backend.describer} expects "
@@ -627,7 +628,7 @@ def _inspection(
     columns: list[InspectedColumn] = []
     for column in outcome.columns:
         key = column.type_key
-        is_array = backend.array_key is not None and key == backend.array_key
+        is_array = is_array_key(key, backend)
         supported = key in backend.types and (not is_array or column.element_key in backend.types)
         mapping = expected_type(_column_desc(column), backend) if supported else None
         reason = (

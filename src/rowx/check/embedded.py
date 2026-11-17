@@ -14,7 +14,7 @@ from rowx.check.runner import CheckError, redact
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Sequence
 
-    from rowx_core.backend import EmbeddedService, MigrationService, ScratchBuild, ScratchService
+    from rowx_core.backend import Backend, EmbeddedService, MigrationService, ScratchBuild, ScratchService
 
 
 WAITING: Final[str] = (
@@ -42,17 +42,17 @@ def redact_owned(text: str, dsn: str, owned: Sequence[str]) -> str:
     return text
 
 
-# the service for an embedded URL, or None for any other URL (an unknown scheme or a missing backend is reported
-# later, by the code that needs the backend)
-def embedded_for(dsn: str | None) -> EmbeddedService | None:
+# asks the backend that owns the URL; an unknown scheme or a missing backend gives the default, which is reported later,
+# by the code that needs the backend
+def _ask[T](dsn: str | None, ask: Callable[[Backend, str], T], *, default: T) -> T:
     if dsn is None or not dsn.strip():
-        return None
+        return default
     try:
         backend = backend_for(dsn)
     except UnsupportedSchemeError, BackendMissing:
-        return None
+        return default
     try:
-        return backend.embedded(dsn)
+        return ask(backend, dsn)
     except EmbeddedTargetError as error:
         # the factory's own refusals never quote the URL
         msg = f"the embedded database URL is not valid: {error}"
@@ -63,23 +63,14 @@ def embedded_for(dsn: str | None) -> EmbeddedService | None:
         raise CheckError(msg) from None
 
 
-# whether the URL names a database that is gone when the process exits, for any backend; an unknown scheme or a missing
-# backend is reported later, by the code that needs the backend
+# the service for an embedded URL, or None for any other URL
+def embedded_for(dsn: str | None) -> EmbeddedService | None:
+    return _ask(dsn, lambda backend, url: backend.embedded(url), default=None)
+
+
+# whether the URL names a database that is gone when the process exits, for any backend
 def in_memory_for(dsn: str | None) -> bool:
-    if dsn is None or not dsn.strip():
-        return False
-    try:
-        backend = backend_for(dsn)
-    except UnsupportedSchemeError, BackendMissing:
-        return False
-    try:
-        return backend.in_memory(dsn)
-    except EmbeddedTargetError as error:
-        msg = f"the embedded database URL is not valid: {error}"
-        raise CheckError(msg) from None
-    except InterfaceError, ValueError:
-        msg = "the database URL could not be parsed"
-        raise CheckError(msg) from None
+    return _ask(dsn, lambda backend, url: backend.in_memory(url), default=False)
 
 
 # the loop's own handler cancels the main task, which then waits behind the engine until its statement ends, and says

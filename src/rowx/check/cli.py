@@ -143,18 +143,18 @@ def _coverage(result: RunResult, root: Path) -> str:
                 lines.append("    parameters: not aligned or inference unavailable")
             for index, param in enumerate(site.parameters, 1):
                 py = param.python_type.name if param.python_type is not None else "unknown"
-                status = (
-                    "untyped, not compared"
-                    if param.untyped
-                    else "not compared"
-                    if param.mismatch is None
-                    else "mismatch"
-                    if param.mismatch
-                    else "no mismatch reported"
-                )
+                status = _param_status(untyped=param.untyped, mismatch=param.mismatch)
                 label = param.label if param.label is not None else f"${index}"
                 lines.append(f"    parameter {label}: SQL {strip_controls(param.sql_type)}, Python {py}; {status}")
     return "\n".join(lines) + "\n"
+
+
+def _param_status(*, untyped: bool, mismatch: bool | None) -> str:
+    if untyped:
+        return "untyped, not compared"
+    if mismatch is None:
+        return "not compared"
+    return "mismatch" if mismatch else "no mismatch reported"
 
 
 def _inspect(result: RunResult) -> str:
@@ -181,15 +181,7 @@ def _inspect(result: RunResult) -> str:
             )
         for index, param in enumerate(site.parameters, 1):
             py = quoted(param.python_type) if param.python_type is not None else "unknown"
-            status = (
-                "untyped, not compared"
-                if param.untyped
-                else "not compared"
-                if param.mismatch is None
-                else "mismatch"
-                if param.mismatch
-                else "no mismatch reported"
-            )
+            status = _param_status(untyped=param.untyped, mismatch=param.mismatch)
             label = param.label if param.label is not None else f"${index}"
             lines.append(f"  parameter {label}: SQL {quoted(param.sql_type)}, Python {py}, {status}")
     return "\n".join(lines) + ("\n" if lines else "")
@@ -305,7 +297,6 @@ def _check_hooks(
     if embedded is not None and not embedded.persistent:
         # an in-memory database is built from the migrations, so there is nothing to drift from
         return Hooks(scratch=_embedded_scratch_hook(config, state, embedded))
-    # `scratch` is already set for a non-embedded in-memory URL, so it has no gate either
     if scratch:
         return Hooks(scratch=_scratch_hook(config, state))
     gate = _drift_hook(config, state) if drift and config.migrate is not None else None
@@ -326,7 +317,7 @@ def _scratch_wanted(
     if embedded is not None and embedded.persistent and requested:
         msg = "`--scratch` builds a database from the migrations; an embedded directory URL is checked as it is"
         raise CheckError(msg)
-    # an in-memory database only exists to be built from the migrations
+    # an in-memory database only exists to be built from the migrations, so it implies scratch and has no drift gate
     implied = (embedded is not None and not embedded.persistent) or in_memory
     if (requested or implied) and config.migrate is None:
         if not implied:

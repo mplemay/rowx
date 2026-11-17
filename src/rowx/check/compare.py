@@ -75,7 +75,7 @@ def _accepts(rules: CheckerBackend, py_type_name: str, key: str) -> bool:
     return "object" in accepted or py_type_name in accepted
 
 
-def _is_array(key: str | None, rules: CheckerBackend) -> bool:
+def is_array_key(key: str | None, rules: CheckerBackend) -> bool:
     return rules.array_key is not None and key == rules.array_key
 
 
@@ -88,7 +88,7 @@ def _label(column: ColumnDesc, index: int) -> str:
 
 
 def expected_type(column: ColumnDesc, rules: CheckerBackend) -> str:
-    if _is_array(column.type_key, rules):
+    if is_array_key(column.type_key, rules):
         leaf = _py_result(rules, column.element_key) if column.element_key is not None else "?"
         return f"list[{leaf}]"
     return "None" if column.type_key == "void" else _py_result(rules, column.type_key or "")
@@ -126,11 +126,11 @@ def _array_matches(column: ColumnDesc, elem: Elem, rules: CheckerBackend) -> boo
 
 # a range column's help names its subtype, since `Range[T]` is checked against it
 def _range_help(column: ColumnDesc, rules: CheckerBackend) -> str | None:
-    key = column.element_key if _is_array(column.type_key, rules) else column.type_key
+    key = column.element_key if is_array_key(column.type_key, rules) else column.type_key
     if key is None or rules.types[key].matcher != "range":
         return None
     leaf = _py_result(rules, key)
-    name = column.type_name.removeprefix("_") if _is_array(column.type_key, rules) else column.type_name
+    name = column.type_name.removeprefix("_") if is_array_key(column.type_key, rules) else column.type_name
     return f"`{name}` is a range of `{leaf[leaf.index('[') + 1 : -1]}`, so annotate it `{leaf}`"
 
 
@@ -143,7 +143,7 @@ def _leaf_matches(column: ColumnDesc, elem: Elem, rules: CheckerBackend) -> bool
     key = column.type_key
     if key is None:
         return False
-    if _is_array(key, rules):
+    if is_array_key(key, rules):
         return _array_matches(column, elem, rules)
     if key in rules.json_keys:
         return True
@@ -163,7 +163,7 @@ def _unsupported(column: ColumnDesc, index: int, element: int | None, rules: Che
 def _supported(column: ColumnDesc, rules: CheckerBackend) -> bool:
     if column.type_key is None:
         return False
-    if _is_array(column.type_key, rules):
+    if is_array_key(column.type_key, rules):
         return column.element_key is not None
     return True
 
@@ -466,7 +466,7 @@ def compare_param_result(  # ruff: ignore[too-many-arguments, too-many-positiona
     rules = _rules(backend)
     if not _accepts(rules, evident.name, type_key):
         return _param_finding(index, type_name, type_key, evident, "which", rules), True
-    if _is_array(type_key, rules):
+    if is_array_key(type_key, rules):
         leaf = _array_leaf(evident)
         if element_key is None or leaf is None:
             return None, False
