@@ -10,6 +10,17 @@ if TYPE_CHECKING:
     from rowx_core.backend import Backend
 
 
+def in_memory(url: str) -> bool:
+    service = embedded_service(url)
+    return service is not None and not service.persistent
+
+
 # the PostgreSQL backend with the embedded engine's testing provisioner and embedded service in place of its server ones
 def load() -> Backend:
-    return replace(load_postgres(), testing_factory=provisioner, embedded_factory=embedded_service)
+    return replace(
+        load_postgres(),
+        testing_factory=provisioner,
+        embedded_factory=embedded_service,
+        memory_factory=in_memory,
+        compat_warning=None,
+    )

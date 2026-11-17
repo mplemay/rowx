@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from rowx_core._template import Compiler
+    from rowx_core.errors import DatabaseError
 
 
 type NullReason = Literal[
@@ -21,6 +22,7 @@ type NullReason = Literal[
     "NotValidatedConstraint",
     "ForeignOrView",
     "ViewColumn",
+    "Unproven",
     "OuterJoin",
     "GroupingSets",
     "ScanBoundary",
@@ -228,6 +230,14 @@ class OverrideIssue:
     help: str | None = None
 
 
+def dollar_placeholder(number: int) -> str:
+    return f"${number}"
+
+
+def text_cast(expression: str) -> str:
+    return f"{expression}::text"
+
+
 @dataclass(slots=True, kw_only=True, frozen=True)
 class CheckerBackend:
     connect_checker: Callable[[str, float], Awaitable[CheckerSession]]
@@ -241,6 +251,16 @@ class CheckerBackend:
     value_classes: Mapping[str, str]
     sql_error_help: Mapping[str, str] = field(default_factory=dict)
     override_issues: Callable[[str, Sequence[ColumnInfo]], Sequence[OverrideIssue]] | None = None
+    # the type keys that take any Python value, and the key of the array type (None when there are no arrays)
+    json_keys: frozenset[str] = frozenset({"json", "jsonb"})
+    array_key: str | None = "array"
+    # how a message names the 1-based parameter, who counts the parameters, and how a cast to a supported type reads
+    placeholder: Callable[[int], str] = dollar_placeholder
+    describer: str = "the server"
+    cast: Callable[[str], str] = text_cast
+    # parameters carry no type (a `type_key` of None is then not an error), and so may a column
+    untyped_params: bool = False
+    untyped_columns: bool = False
 
 
 class AdminService(Protocol):
@@ -255,6 +275,8 @@ class AdminService(Protocol):
     async def drop(self, name: str | None = None, *, force: bool = False) -> None: ...
     async def list(self, prefix: str) -> Sequence[DatabaseInfo]: ...
     def with_database(self, name: str) -> str: ...
+    # True when the error says that the database to create already exists
+    def duplicate(self, error: DatabaseError) -> bool: ...
 
 
 # what a session holds on its migrated template until it closes it
@@ -313,6 +335,10 @@ class ScratchService(Protocol):
     def sweep(self) -> None: ...
 
 
+class ScratchFactory(Protocol):
+    def __call__(self, dsn: str, /, *, sweep_previous: bool = True) -> ScratchService: ...
+
+
 # raised by an embedded factory for a URL it refuses; the message never quotes a value from the URL, so it can be shown
 class EmbeddedTargetError(ValueError):
     pass
@@ -345,6 +371,11 @@ class Backend:
     testing_factory: ProvisionerFactory | None = None
     # `None` from the factory means the URL is not an embedded one
     embedded_factory: Callable[[str], EmbeddedService | None] | None = None
+    scratch_factory: ScratchFactory | None = None
+    # True when the URL names a database that is gone when the process exits
+    memory_factory: Callable[[str], bool] | None = None
+    # shown before a compatibility run, for a backend whose migrations can reach beyond their own database
+    compat_warning: str | None = None
 
     def checker(self) -> CheckerBackend:
         if self.checker_factory is None:
@@ -391,3 +422,14 @@ class Backend:
         if self.embedded_factory is None:
             return None
         return self.embedded_factory(dsn)
+
+    def scratch(self, dsn: str, *, sweep_previous: bool = True) -> ScratchService:
+        if self.scratch_factory is None:
+            capability = "scratch databases"
+            raise UnsupportedCapabilityError(capability)
+        return self.scratch_factory(dsn, sweep_previous=sweep_previous)
+
+    def in_memory(self, dsn: str) -> bool:
+        if self.memory_factory is None:
+            return False
+        return self.memory_factory(dsn)

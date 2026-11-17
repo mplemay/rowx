@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 from rowx_core.backend import Backend
 
-from rowx.check.cli import _parser
+from rowx.check.cli import _parser, main
 from rowx.check.config import MigrateConfig
 from rowx.check.migrate import (
     DEFAULT_CONNECT_TIMEOUT,
@@ -88,3 +88,15 @@ def test_a_flag_beats_the_config_policy(
     seen.clear()
     load_migrator(target, "fake://app", backend)
     assert [(call["ignore_missing"], call["allow_out_of_order"]) for call in seen] == [(config, config)]
+
+
+def test_an_in_memory_url_is_refused_by_migrate_before_any_backend_service_is_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "migrations").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("rowx.check.embedded.backend_for", lambda _dsn: Backend(memory_factory=lambda _url: True))
+    assert main(["migrate", "run", "--database-url", "fake://:memory:"]) == 2
+    assert capsys.readouterr().err == (
+        "error: an in-memory database is gone when the command exits; use a file database URL\n"
+    )

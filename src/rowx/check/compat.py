@@ -6,17 +6,17 @@ from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory, TemporaryFile
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 from rowx_core.errors import DatabaseError, InterfaceError
 
-from rowx._backend import backend_for
+from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
 from rowx.check.config import Config, ConfigError, load_config
 from rowx.check.embedded import embedded_for, redact_owned, scratch_session
 from rowx.check.migrate import load_migrator, resolve_target
 from rowx.check.render import render_text, strip_controls
 from rowx.check.runner import CheckError, Hooks, RunResult, SiteCoverage, count_statements, run_check
-from rowx.check.scratch import Scratch
+from rowx.check.scratch import scratch_for
 from rowx.check.walk import discover_files
 
 EXIT_INCOMPLETE: Final[int] = 2
@@ -194,12 +194,19 @@ def _prebuilt(built: ScratchBuild) -> Callable[[str, int], AbstractAsyncContextM
     return _open
 
 
+# a scratch that reports whether its cleanup failed
+@runtime_checkable
+class Leaky(Protocol):
+    @property
+    def leaked(self) -> bool: ...
+
+
 @dataclass(slots=True, kw_only=True)
 class Target:
     dsn: str
     jobs: int
     embedded: EmbeddedService | None
-    scratches: list[Scratch | ScratchService] = field(default_factory=list)
+    scratches: list[ScratchService] = field(default_factory=list)
     # the socket URLs of the in-memory instances, which a message must not quote
     owned: list[str] = field(default_factory=list)
 
@@ -214,7 +221,7 @@ def _open_scratch(
         # never more instances than statements, as in a plain check; at least one, so that the migrations still run
         statements = count_statements(snapshot.config, snapshot.files, target.dsn, snapshot.root)
         return scratch_session(service, migrator, max(1, min(target.jobs, statements)))
-    scratch = Scratch(target.dsn, backend.admin(target.dsn), sweep_previous=False)
+    scratch = scratch_for(target.dsn, backend, sweep_previous=False)
     target.scratches.append(scratch)
     return scratch.session(migrator, target.jobs)
 
@@ -282,12 +289,19 @@ def _handle_snapshots(args: Namespace, target: Target) -> int:
         status = asyncio.run(_run(base, head, target))
         for scratch in target.scratches:
             scratch.sweep()
-        if any(isinstance(scratch, Scratch) and scratch.leaked for scratch in target.scratches):
+        if any(isinstance(scratch, Leaky) and scratch.leaked for scratch in target.scratches):
             sys.stdout.write("incomplete: scratch cleanup failed\n")
             return 2
     if status != EXIT_INCOMPLETE:
         sys.stdout.write("incompatible\n" if status == 1 else "compatible checked subset\n")
     return status
+
+
+def _compat_warning(dsn: str) -> str | None:
+    try:
+        return backend_for(dsn).compat_warning
+    except UnsupportedSchemeError, BackendMissing:
+        return None
 
 
 def handle(args: Namespace) -> int:
@@ -301,10 +315,8 @@ def handle(args: Namespace) -> int:
         msg = "check-compat builds each schema from the migrations; use `embedded://` and not an embedded directory URL"
         raise CheckError(msg)
     target = Target(dsn=dsn, jobs=args.jobs, embedded=embedded)
-    if embedded is None:
-        sys.stderr.write(
-            "warning: use a disposable PostgreSQL server; trusted migrations can affect shared cluster resources\n"
-        )
+    if (warning := _compat_warning(dsn)) is not None:
+        sys.stderr.write(f"warning: {warning}\n")
     try:
         return _handle_snapshots(args, target)
     except (CheckError, OSError, ValueError, subprocess.CalledProcessError) as error:
