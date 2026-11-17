@@ -110,7 +110,8 @@
 - Do not name test files by functionality
 - Each Python package owns `<import_root>/__tests__/` with `unit/` and `integration/` subdirectories, mirroring its
   modules. Core and CLI tests use fake executors or services and need no database.
-- Database tests belong to `rowx_postgres`; markers are `db` and `timing`.
+- PostgreSQL database tests belong to `rowx_postgres`; markers are `db` and `timing`. SQLite database tests belong to
+  `rowx_sqlite`, carry no `db` marker and always run.
 
 ## Project
 
@@ -160,7 +161,7 @@ validates every query against a live Postgres 18 database by preparing and descr
   and installs `rowx-postgres` through its `postgres` extra. The checker never imports or executes user code.
 - Runtime queries use the supplied executor's compiler. Checking selects its backend from an explicit database
   target; backend resources and services are passed explicitly, never through ambient context variables.
-- DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked
+- PostgreSQL DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked
   `@pytest.mark.timing` and synchronise by polling `pg_stat_activity`, never with `sleep`.
 
 ## Cursor Cloud specific instructions

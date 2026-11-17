@@ -1,13 +1,16 @@
 import datetime as dt
 import importlib
 import sys
+from dataclasses import dataclass
 from decimal import Decimal
 from ipaddress import ip_address, ip_network
-from typing import Final
+from types import SimpleNamespace
+from typing import Final, Literal, NoReturn
 
 import pytest
+from rowx_core.errors import InterfaceError, RowConstructError
 from rowx_postgres import Box, Circle, Line, LineSegment, Money, Path, Point, Polygon, Range
-from rowx_postgres._core import Connection, _param_formats, map_columns
+from rowx_postgres._core import Connection, RowShape, ShapeIssue, _construct, _param_formats, map_columns
 
 
 def test_postgres_submodule_imports_with_from_import() -> None:
@@ -290,3 +293,151 @@ def test_only_scalar_numeric_timetz_and_json_stay_text() -> None:
     # numeric and timetz carry text-format scalars; json and jsonb too
     assert _param_formats([1700, 1266, 114, 3802], [Decimal("1.5"), zoned, {"a": 1}, {"a": 1}]) == ["text"] * 4
     assert _param_formats([1700, 1266, 114, 3802], [None] * 4) == ["binary"] * 4
+
+
+def test_row_classes_keep_their_module() -> None:
+    assert RowShape.__module__ == "rowx_postgres._core"
+    assert ShapeIssue.__module__ == "rowx_postgres._core"
+    assert RowShape.__name__ == "RowShape"
+    assert ShapeIssue.__name__ == "ShapeIssue"
+
+
+type Field = tuple[str, tuple[str, ...] | None, bool, int]
+
+ID_NAME: Final[list[Field]] = [("ident", ("ident",), True, 0), ("name", ("name",), True, 0)]
+
+
+@dataclass(frozen=True)
+class Pair:
+    ident: int
+    name: str
+
+
+class Validator:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    def validate_python(self, value: dict[str, object]) -> tuple[str, dict[str, object]]:
+        self.calls.append("validate_python")
+        return ("validated", value)
+
+    def __call__(self, **kwargs: object) -> tuple[str, dict[str, object]]:
+        self.calls.append("call")
+        return ("called", kwargs)
+
+
+def shape_of(
+    ctor: object,
+    form: Literal["positional", "keyword", "dict", "validator"],
+    *,
+    validate: bool = True,
+    fields: list[Field] | None = None,
+) -> RowShape:
+    return RowShape(ctor, form, "by_name", "Pair", fields or ID_NAME, validate=validate)
+
+
+def test_construct_positional_calls_the_class_with_the_cells() -> None:
+    row = _construct(shape_of(Pair, "positional"), [7, "ann"], [0, 1], [])
+    assert isinstance(row, Pair)
+    assert (row.ident, row.name) == (7, "ann")
+
+
+def test_construct_positional_places_cells_by_their_target_field() -> None:
+    row = _construct(shape_of(Pair, "positional"), ["ann", 7], [1, 0], [])
+    assert isinstance(row, Pair)
+    assert (row.ident, row.name) == (7, "ann")
+
+
+def test_construct_positional_leaves_trailing_fields_to_the_constructor() -> None:
+    def ctor(ident: int, name: str = "anon") -> tuple[int, str]:
+        return (ident, name)
+
+    assert _construct(shape_of(ctor, "positional"), [7], [0], []) == (7, "anon")
+
+
+def test_construct_positional_rejects_a_skipped_field() -> None:
+    with pytest.raises(InterfaceError, match="cannot skip a field"):
+        _construct(shape_of(Pair, "positional"), ["ann"], [1], [])
+
+
+def test_construct_keyword_passes_fields_by_name() -> None:
+    row = _construct(shape_of(Pair, "keyword"), ["ann", 7], [1, 0], [])
+    assert isinstance(row, Pair)
+    assert (row.ident, row.name) == (7, "ann")
+
+
+def test_construct_keyword_leaves_a_pass_through_column_out() -> None:
+    row = _construct(shape_of(Pair, "keyword"), [7, "extra", "ann"], [0, None, 1], [])
+    assert isinstance(row, Pair)
+    assert (row.ident, row.name) == (7, "ann")
+
+
+def test_construct_dict_returns_the_dict_itself() -> None:
+    row = _construct(shape_of(dict, "dict"), ["ann", 7], [1, 0], [])
+    assert row == {"ident": 7, "name": "ann"}
+    assert type(row) is dict
+
+
+def test_construct_validator_validates_the_dict_of_column_keys() -> None:
+    calls: list[str] = []
+    row = _construct(shape_of(Validator(calls), "validator"), [7, "ann"], [0, 1], ["ident", "name"])
+    assert row == ("validated", {"ident": 7, "name": "ann"})
+    assert calls == ["validate_python"]
+
+
+def test_construct_validator_without_validate_calls_the_class() -> None:
+    calls: list[str] = []
+    row = _construct(shape_of(Validator(calls), "validator", validate=False), [7, "ann"], [0, 1], ["ident", "name"])
+    assert row == ("called", {"ident": 7, "name": "ann"})
+    assert calls == ["call"]
+
+
+def test_construct_validator_needs_a_key_for_every_column() -> None:
+    with pytest.raises(InterfaceError, match="has no key"):
+        _construct(shape_of(Validator([]), "validator"), [7, "ann"], [0, 1], ["ident"])
+
+
+def test_construct_rejects_a_column_mapped_past_the_fields() -> None:
+    with pytest.raises(InterfaceError, match="maps to a field its row type does not have"):
+        _construct(shape_of(dict, "dict"), [7], [5], [])
+
+
+@pytest.mark.parametrize("form", ["positional", "keyword", "validator"])
+def test_construct_wraps_a_raising_constructor_in_row_construct_error(
+    form: Literal["positional", "keyword", "validator"],
+) -> None:
+    cause = ValueError("bad row")
+
+    def raising(*_args: object, **_kwargs: object) -> NoReturn:
+        raise cause
+
+    ctor = SimpleNamespace(validate_python=raising) if form == "validator" else raising
+    with pytest.raises(RowConstructError) as caught:
+        _construct(shape_of(ctor, form), [7, "ann"], [0, 1], ["ident", "name"], 4)
+    assert caught.value.type_name == "Pair"
+    assert caught.value.row_index == 4
+    assert caught.value.__cause__ is cause
+    assert str(caught.value) == f"Pair row 4: {cause!r}"
+
+
+def test_construct_lets_a_base_exception_through() -> None:
+    def ctor(*_args: object) -> NoReturn:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _construct(shape_of(ctor, "positional"), [7, "ann"], [0, 1], [])
+
+
+def test_row_shape_getters_return_what_it_was_built_with() -> None:
+    shape = shape_of(Pair, "keyword")
+    assert shape.ctor is Pair
+    assert shape.form == "keyword"
+    assert shape.matching == "by_name"
+    assert shape.type_name == "Pair"
+
+
+def test_row_shape_rejects_an_unknown_form_or_matching() -> None:
+    with pytest.raises(ValueError, match="unknown row form"):
+        RowShape(Pair, "nope", "by_name", "Pair", ID_NAME)  # ty: ignore[invalid-argument-type]
+    with pytest.raises(ValueError, match="unknown matching"):
+        RowShape(Pair, "keyword", "nope", "Pair", ID_NAME)  # ty: ignore[invalid-argument-type]

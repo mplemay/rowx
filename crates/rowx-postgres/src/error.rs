@@ -1,5 +1,5 @@
 use rowx_core::error::{CoreError, TaskStopped};
-use rowx_core::row_shape::ShapeErrors;
+use rowx_core::row_shape::{NullCheckError, NullError, ShapeCheckError, ShapeErrors};
 use thiserror::Error;
 use tokio_postgres::error::ErrorPosition;
 
@@ -84,6 +84,44 @@ impl From<tokio_postgres::Error> for Error {
             return Self::Interface(format!("{text}: {cause}"));
         }
         Self::Interface(text)
+    }
+}
+
+impl From<ShapeCheckError> for Error {
+    fn from(err: ShapeCheckError) -> Self {
+        match err {
+            ShapeCheckError::RowShape(text) => Self::RowShape(text),
+            ShapeCheckError::Mapping { errors, columns } => Self::Shape { errors, columns },
+            ShapeCheckError::Interface(text) => Self::Interface(text),
+        }
+    }
+}
+
+impl From<NullError> for Error {
+    fn from(err: NullError) -> Self {
+        match err {
+            NullError::Column { .. } => Self::RowShape(err.to_string()),
+            NullError::Field {
+                column,
+                field,
+                row,
+                name,
+            } => Self::NullField {
+                column,
+                field,
+                row,
+                name,
+            },
+        }
+    }
+}
+
+impl From<NullCheckError<Self>> for Error {
+    fn from(err: NullCheckError<Self>) -> Self {
+        match err {
+            NullCheckError::Null(null) => null.into(),
+            NullCheckError::Read(read) => read,
+        }
     }
 }
 

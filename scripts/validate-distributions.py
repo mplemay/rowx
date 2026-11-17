@@ -42,6 +42,12 @@ POSTGRES_EXTRA: Final[str] = "postgres"
 PYTEST_EXTRA: Final[str] = "pytest"
 EMBEDDED_DISTRIBUTION: Final[str] = "rowx-embedded"
 EMBEDDED_EXTRA: Final[str] = "embedded"
+MARKER_AND: Final[str] = "and"
+MARKER_OR: Final[str] = "or"
+MARKER_EQUALS: Final[str] = "=="
+MARKER_OPEN: Final[str] = "("
+MARKER_CLOSE: Final[str] = ")"
+MARKER_QUOTES: Final[frozenset[str]] = frozenset({"'", '"'})
 # the platforms the companion ships wheels for; every disjunct of its marker is one of these plus the extra
 EMBEDDED_PLATFORMS: Final[frozenset[frozenset[tuple[str, str]]]] = frozenset({
     frozenset({("sys_platform", "darwin"), ("platform_machine", "arm64")}),
@@ -79,6 +85,9 @@ NATIVE_SUFFIXES: Final[tuple[str, ...]] = (".so", ".pyd", ".dll", ".dylib")
 PURE_SDIST_PREFIXES: Final[tuple[str, ...]] = ("rowx-", "rowx_core-")
 
 type Requirement = tuple[str, str | None]
+type MarkerAtom = tuple[str, str]
+type MarkerToken = str | MarkerAtom
+type MarkerForm = set[frozenset[MarkerAtom]]
 
 
 def main() -> int:
@@ -339,30 +348,147 @@ def _split_extras(path: Path, requirements: list[Requirement]) -> tuple[list[tup
     return extras, embedded
 
 
-# the companion's marker is a disjunction of (platform clauses and extra == 'embedded'); uv may reorder the clauses
+# uv reorders clauses and factors repeated conditions, so compare the marker's normal form to the platforms
 def _is_embedded_marker(marker: str) -> bool:
-    disjuncts: set[frozenset[tuple[str, str]]] = set()
-    for part in marker.split(" or "):
-        text = part.strip()
-        if text.startswith("(") and text.endswith(")"):
-            text = text[1:-1]
-        atoms = [_comparison(atom) for atom in text.split(" and ")]
-        if None in atoms:
+    if (form := _marker_form(marker)) is None:
+        return False
+    platforms: set[frozenset[MarkerAtom]] = set()
+    for conjunction in form:
+        if (platform := _embedded_platform(conjunction)) is None:
             return False
-        clauses = frozenset(atom for atom in atoms if atom is not None)
-        if ("extra", EMBEDDED_EXTRA) not in clauses:
-            return False
-        disjuncts.add(clauses - {("extra", EMBEDDED_EXTRA)})
-    return disjuncts == EMBEDDED_PLATFORMS
+        platforms.add(platform)
+    return frozenset(platforms) == EMBEDDED_PLATFORMS
 
 
-def _comparison(atom: str) -> tuple[str, str] | None:
-    left, separator, right = atom.strip().partition("==")
-    value = right.strip()
-    quoted = len(value) >= PAIR_LENGTH and value[0] in {"'", '"'} and value.endswith(value[0])
-    if not separator or not quoted or value.count(value[0]) != PAIR_LENGTH:
+def _embedded_platform(conjunction: frozenset[MarkerAtom]) -> frozenset[MarkerAtom] | None:
+    extra: MarkerAtom = ("extra", EMBEDDED_EXTRA)
+    if extra not in conjunction:
         return None
-    return left.strip(), value[1:-1]
+    return conjunction - {extra}
+
+
+def _marker_form(marker: str) -> MarkerForm | None:
+    if (tokens := _marker_tokens(marker)) is None:
+        return None
+    parsed = _parse_or(tokens, 0)
+    if parsed is None:
+        return None
+    form, index = parsed
+    if index != len(tokens):
+        return None
+    return form
+
+
+def _marker_tokens(marker: str) -> list[MarkerToken] | None:
+    tokens: list[MarkerToken] = []
+    index = 0
+    while index < len(marker):
+        if marker[index].isspace():
+            index += 1
+            continue
+        if marker[index] in {MARKER_OPEN, MARKER_CLOSE}:
+            tokens.append(marker[index])
+            index += 1
+            continue
+        if (scanned := _scan_word(marker, index)) is None:
+            return None
+        word, index = scanned
+        if word in {MARKER_AND, MARKER_OR}:
+            tokens.append(word)
+            continue
+        if (comparison := _scan_comparison(marker, index, word)) is None:
+            return None
+        atom, index = comparison
+        tokens.append(atom)
+    return tokens
+
+
+def _scan_word(marker: str, index: int) -> tuple[str, int] | None:
+    if not _identifier_char(marker[index], start=True):
+        return None
+    start = index
+    index += 1
+    while index < len(marker) and _identifier_char(marker[index], start=False):
+        index += 1
+    return marker[start:index], index
+
+
+def _identifier_char(char: str, *, start: bool) -> bool:
+    if not char.isascii():
+        return False
+    if start:
+        return char.isalpha() or char == "_"
+    return char.isalnum() or char == "_"
+
+
+def _scan_comparison(marker: str, index: int, name: str) -> tuple[MarkerAtom, int] | None:
+    index = _skip_space(marker, index)
+    if not marker.startswith(MARKER_EQUALS, index):
+        return None
+    index = _skip_space(marker, index + len(MARKER_EQUALS))
+    if index >= len(marker) or marker[index] not in MARKER_QUOTES:
+        return None
+    quote = marker[index]
+    end = marker.find(quote, index + 1)
+    if end < 0:
+        return None
+    return (name, marker[index + 1 : end]), end + 1
+
+
+def _skip_space(marker: str, index: int) -> int:
+    while index < len(marker) and marker[index].isspace():
+        index += 1
+    return index
+
+
+def _parse_or(tokens: list[MarkerToken], index: int) -> tuple[MarkerForm, int] | None:
+    parsed = _parse_and(tokens, index)
+    if parsed is None:
+        return None
+    form, index = parsed
+    while index < len(tokens) and tokens[index] == MARKER_OR:
+        parsed = _parse_and(tokens, index + 1)
+        if parsed is None:
+            return None
+        right, index = parsed
+        form |= right
+    return form, index
+
+
+# `and` binds tighter than `or`; distribute so each conjunction is a flat set of comparisons
+def _parse_and(tokens: list[MarkerToken], index: int) -> tuple[MarkerForm, int] | None:
+    parsed = _parse_primary(tokens, index)
+    if parsed is None:
+        return None
+    form, index = parsed
+    while index < len(tokens) and tokens[index] == MARKER_AND:
+        parsed = _parse_primary(tokens, index + 1)
+        if parsed is None:
+            return None
+        right, index = parsed
+        form = {left | clause for left in form for clause in right}
+    return form, index
+
+
+def _parse_primary(tokens: list[MarkerToken], index: int) -> tuple[MarkerForm, int] | None:
+    if index >= len(tokens):
+        return None
+    token = tokens[index]
+    if token == MARKER_OPEN:
+        return _parse_group(tokens, index + 1)
+    if isinstance(token, str):
+        return None
+    return {frozenset({token})}, index + 1
+
+
+def _parse_group(tokens: list[MarkerToken], index: int) -> tuple[MarkerForm, int] | None:
+    parsed = _parse_or(tokens, index)
+    if parsed is None:
+        return None
+    form, index = parsed
+    if index >= len(tokens) or tokens[index] != MARKER_CLOSE:
+        return None
+    return form, index + 1
 
 
 def _validate_core_requires(path: Path, requirements: list[Requirement]) -> None:

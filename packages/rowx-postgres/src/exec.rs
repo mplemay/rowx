@@ -1,21 +1,25 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyCFunction, PyList, PyTuple};
+use pyo3::types::{PyCFunction, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
-use rowx_core::state::{Claim, State};
+use rowx_core::state::State;
 use rowx_postgres::cancel::{self, Cancel, Hook};
 use rowx_postgres::conn::opens_transaction;
 use rowx_postgres::error::Error;
 use rowx_postgres::exec::{self, Raw, Shape};
-use rowx_postgres::pool::{Pool as PgPool, is_stale_plan, reset_batches};
+use rowx_postgres::pool::{PgManager, is_stale_plan, reset_batches};
 use rowx_postgres::{Row, Type};
+use rowx_py_core::exec::watch;
+use rowx_py_core::row::{self, BACKEND, Layout, nullable_mask};
 
 use crate::codec::{self, PyParam};
 use crate::errors::{PgError, interface_error, named_to_py_err, to_py_err};
-use crate::named::{RowShape, construct};
+use crate::named::{RowShape, layout_named};
+
+/// How a call reaches its connection; a stale-plan error bumps the pool's schema epoch.
+pub type Access = rowx_py_core::exec::Access<PgManager>;
 
 #[derive(Debug)]
 pub struct FetchArgs {
@@ -29,101 +33,17 @@ pub struct FetchArgs {
     pub shape: Option<Py<RowShape>>,
 }
 
-const NULLABLE: u8 = 1;
-const SPAN: u8 = 2;
+// bit 1 of the per-column flags: an `interval` is read as `rowx_postgres.Interval`
+const SPAN: u8 = BACKEND;
 
-/// How a row becomes Python.
-#[derive(Debug, Default)]
-pub enum RowForm {
-    Scalar,
-    #[default]
-    Tuple,
-    Named(Py<RowShape>),
-}
-
-/// How a row becomes Python: a bare value, a tuple or a named row, and which columns read an
-/// `interval` losslessly.
-#[derive(Debug, Default)]
-pub struct Layout {
-    pub form: RowForm,
-    pub spans: Vec<bool>,
-    // a named row: the field each column fills (`None` passes through)
-    pub targets: Vec<Option<usize>>,
-    // a named row built by a validator: the key of each column
-    pub keys: Vec<Py<pyo3::types::PyString>>,
-}
-
-impl Layout {
-    #[must_use]
-    pub fn new(scalar: bool, flags: Option<&[u8]>) -> Self {
-        Self {
-            form: if scalar {
-                RowForm::Scalar
-            } else {
-                RowForm::Tuple
-            },
-            spans: flags
-                .unwrap_or_default()
-                .iter()
-                .map(|flag| flag & SPAN != 0)
-                .collect(),
-            targets: Vec::new(),
-            keys: Vec::new(),
-        }
-    }
-}
-
-/// The nullability half of the per-column flags.
-#[must_use]
-pub fn nullable_mask(flags: &[u8]) -> Vec<bool> {
-    flags.iter().map(|flag| flag & NULLABLE != 0).collect()
-}
-
-/// How a call reaches its connection: the lease of a pooled connection (a released one can no longer
-/// claim it) and the pool whose schema epoch a stale-plan error bumps.
-#[derive(Debug, Clone, Default)]
-pub struct Access {
-    pub lease: Option<u64>,
-    pub pool: Option<PgPool>,
-}
-
-impl Access {
-    /// # Errors
-    /// `Busy`, `Closed`, `Broken`, or `StaleLease` for a revoked lease.
-    pub fn claim(&self, state: &Arc<State>) -> Result<Option<Claim>, CoreError> {
-        self.lease
-            .map_or_else(|| state.claim(), |lease| state.claim_leased(lease))
-    }
-
-    /// A call that arrived while a cancelled operation was settling waits here, outside the GIL.
-    ///
-    /// # Errors
-    /// `InterfaceError` when the connection closed or broke while waiting, or the lease was revoked.
-    pub async fn settle_claim(
-        &self,
-        state: &Arc<State>,
-        claim: Option<Claim>,
-    ) -> Result<Claim, PgError> {
-        match (claim, self.lease) {
-            (Some(claim), _) => Ok(claim),
-            (None, Some(lease)) => Ok(state.claim_settled_leased(lease).await?),
-            (None, None) => Ok(state.claim_settled().await?),
-        }
-    }
-
-    /// Registers a deferred claim without leaving a window for cancellation to miss it.
-    ///
-    /// # Errors
-    /// The connection could not be claimed, or this operation was cancelled.
-    pub async fn reserve(&self, state: &Arc<State>, hook: &Hook) -> Result<(), PgError> {
-        while !hook.reserve(|| self.claim(state))? {
-            state.wait_settled().await?;
-        }
-        Ok(())
-    }
-
+/// What only the PostgreSQL binding does with an [`Access`].
+pub trait AccessExt {
     /// `fail`, and a stale cached plan also bumps the pool's schema epoch.
-    pub fn fail(&self, state: &State, err: Error) -> PgError {
+    fn fail(&self, state: &State, err: Error) -> PgError;
+}
+
+impl AccessExt for Access {
+    fn fail(&self, state: &State, err: Error) -> PgError {
         if is_stale_plan(&err)
             && let Some(pool) = &self.pool
         {
@@ -169,7 +89,10 @@ pub async fn run_fetch(
     params: Vec<PyParam>,
     args: FetchArgs,
 ) -> PyResult<Py<PyAny>> {
-    access.reserve(&cancel.state, &hook).await?;
+    access
+        .reserve(&cancel.state, &hook)
+        .await
+        .map_err(PgError::from)?;
     let inner = Arc::clone(&cancel.backend.conn);
     let layout = Layout::new(args.scalar, args.mask.as_deref());
     let nullable = args.mask.as_deref().map(nullable_mask);
@@ -221,7 +144,7 @@ pub async fn run_fetch(
                         "a named row type was given no column mapping",
                     ));
                 };
-                Layout::named(py, shape, mapping, first)?
+                layout_named(py, shape.get(), mapping, first)?
             }
             _ => layout,
         };
@@ -247,13 +170,7 @@ pub fn driver_shape<'a>(
             arity,
             ..Shape::default()
         },
-        |named| Shape {
-            mask: Some(named.nullable()),
-            limit_one,
-            fields: Some(named.specs()),
-            matching: named.matching(),
-            ..Shape::default()
-        },
+        |named| named.data().shape(limit_one),
     )
 }
 
@@ -306,7 +223,10 @@ pub async fn run_execute(
     params: Vec<PyParam>,
     sql: String,
 ) -> PyResult<u64> {
-    access.reserve(&cancel.state, &hook).await?;
+    access
+        .reserve(&cancel.state, &hook)
+        .await
+        .map_err(PgError::from)?;
     let inner = Arc::clone(&cancel.backend.conn);
     let state = Arc::clone(&cancel.state);
     let pending = cancel::spawn(&cancel, &hook, async move {
@@ -352,7 +272,10 @@ pub fn simple<'py>(
     let hook = Hook::new(claim);
     let watched = hook.clone();
     let future = future_into_py(py, async move {
-        access.reserve(&cancel.state, &hook).await?;
+        access
+            .reserve(&cancel.state, &hook)
+            .await
+            .map_err(PgError::from)?;
         let inner = Arc::clone(&cancel.backend.conn);
         let state = Arc::clone(&cancel.state);
         let pending = cancel::spawn(&cancel, &hook, async move {
@@ -417,7 +340,10 @@ pub fn txn_step<'py>(
     let hook = Hook::new(claim);
     let watched = hook.clone();
     let future = future_into_py(py, async move {
-        access.reserve(&cancel.state, &hook).await?;
+        access
+            .reserve(&cancel.state, &hook)
+            .await
+            .map_err(PgError::from)?;
         let inner = Arc::clone(&cancel.backend.conn);
         let pending = cancel::spawn(&cancel, &hook, async move {
             inner.lock().await.simple(&sql).await
@@ -463,7 +389,7 @@ pub fn end_transaction<'py>(
             let claim = access
                 .settle_claim(&cancel.state, claim)
                 .await
-                .map_err(|e| e.0)?;
+                .map_err(Error::from)?;
             let conn = cancel.backend.conn.lock().await;
             let result = conn
                 .simple(if commit { "COMMIT" } else { "ROLLBACK" })
@@ -507,42 +433,6 @@ pub fn note_sql(state: &State, sql: &str) {
     }
 }
 
-/// asyncio runs done callbacks before the awaiting task resumes, while the Rust future is only dropped
-/// later on another thread; settling here keeps `cancel(); await next()` from seeing Busy
-///
-/// # Errors
-/// Any Python error from registering the callback.
-pub fn watch(future: &Bound<'_, PyAny>, hook: Hook) -> PyResult<()> {
-    let callback = PyCFunction::new_closure(future.py(), None, None, move |args, _kwargs| {
-        if let Ok(done) = args.get_item(0)
-            && done.call_method0("cancelled")?.is_truthy()?
-        {
-            hook.fire();
-        }
-        PyResult::Ok(())
-    })?;
-    future.call_method1("add_done_callback", (callback,))?;
-    Ok(())
-}
-
-/// Sets `flag` when the Python future is cancelled. A pool checks it right after acquiring, because
-/// the Rust future is dropped late: a cancelled waiter must never run its query.
-///
-/// # Errors
-/// Any Python error from registering the callback.
-pub fn watch_flag(future: &Bound<'_, PyAny>, flag: Arc<AtomicBool>) -> PyResult<()> {
-    let callback = PyCFunction::new_closure(future.py(), None, None, move |args, _kwargs| {
-        if let Ok(done) = args.get_item(0)
-            && done.call_method0("cancelled")?.is_truthy()?
-        {
-            flag.store(true, Ordering::Release);
-        }
-        PyResult::Ok(())
-    })?;
-    future.call_method1("add_done_callback", (callback,))?;
-    Ok(())
-}
-
 // a dead connection stays dead; every other error leaves the state to the claim's drop (Idle)
 pub fn fail(state: &State, err: Error) -> PgError {
     if err == Error::Core(CoreError::Broken) {
@@ -574,16 +464,13 @@ pub fn decode_row<'py>(
     layout: &Layout,
     row_index: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
-    match &layout.form {
-        RowForm::Scalar => cell(py, row, 0, layout),
-        RowForm::Tuple => {
-            let cells = (0..row.len())
-                .map(|index| cell(py, row, index, layout))
-                .collect::<PyResult<Vec<_>>>()?;
-            Ok(PyTuple::new(py, cells)?.into_any())
-        }
-        RowForm::Named(shape) => construct(py, row, layout, shape.get(), row_index),
-    }
+    row::decode_row(
+        py,
+        row.len(),
+        |index| cell(py, row, index, layout),
+        layout,
+        row_index,
+    )
 }
 
 /// # Errors
@@ -604,6 +491,6 @@ pub fn cell<'py>(
         ));
     };
     let ty = column.type_();
-    let as_span = layout.spans.get(index).copied().unwrap_or(false);
+    let as_span = layout.flags.get(index).is_some_and(|flag| flag & SPAN != 0);
     codec::decode_with(py, ty, raw.0, as_span)
 }

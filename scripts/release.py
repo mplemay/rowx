@@ -75,6 +75,8 @@ class TagPlan:
 class ChangelogPlan:
     tag: str | None
     rewrite_top_date: bool
+    # the current release tag's commit; git-cliff stops there, so later commits stay out of the file
+    through: str | None
 
 
 def main() -> int:
@@ -175,12 +177,10 @@ def refresh_locks(root: Path) -> None:
         raise SystemExit(message)
 
 
-def changelog_plan(*, version: str, head: str, tag_commit: str | None) -> ChangelogPlan:
-    if tag_commit == head:
-        return ChangelogPlan(tag=None, rewrite_top_date=False)
+def changelog_plan(*, version: str, tag_commit: str | None) -> ChangelogPlan:
     if tag_commit is None:
-        return ChangelogPlan(tag=f"v{version}", rewrite_top_date=True)
-    return ChangelogPlan(tag=None, rewrite_top_date=False)
+        return ChangelogPlan(tag=f"v{version}", rewrite_top_date=True, through=None)
+    return ChangelogPlan(tag=None, rewrite_top_date=False, through=tag_commit)
 
 
 def replace_top_heading_date(text: str, day: str) -> str:
@@ -201,9 +201,8 @@ def render_changelog(root: Path, *, top_date: str | None = None) -> str:
         _require_day(top_date)
     _sync_changelog_tools()
     version = _project_version(root / "pyproject.toml")
-    head = _git(root, "rev-parse", "HEAD").strip()
-    plan = changelog_plan(version=version, head=head, tag_commit=_local_tag_commit(root, version))
-    text = _git_cliff(root, plan.tag)
+    plan = changelog_plan(version=version, tag_commit=_local_tag_commit(root, version))
+    text = _git_cliff(root, plan.tag, through=plan.through)
     if plan.rewrite_top_date:
         # a virtual --tag is dated with the clock; the tagged commit's noon UTC time is stable
         day = top_date if top_date is not None else _committer_utc_day(root)
@@ -379,7 +378,7 @@ def _sync_changelog_tools() -> None:
     )
 
 
-def _git_cliff(root: Path, tag: str | None) -> str:
+def _git_cliff(root: Path, tag: str | None, *, through: str | None) -> str:
     with TemporaryDirectory() as directory:
         output = Path(directory) / "changelog.md"
         argv = [
@@ -398,6 +397,8 @@ def _git_cliff(root: Path, tag: str | None) -> str:
         ]
         if tag is not None:
             argv.extend(("--tag", tag))
+        elif through is not None:
+            argv.append(through)
         _run(argv, root)
         return output.read_text(encoding="utf-8")
 

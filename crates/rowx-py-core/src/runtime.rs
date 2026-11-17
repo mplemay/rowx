@@ -6,15 +6,20 @@ use tokio::runtime::{Builder, Handle, Runtime};
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-/// Builds the shared runtime once and registers it with pyo3-async-runtimes.
+/// Builds the shared runtime once and registers it with pyo3-async-runtimes. `worker_threads` of
+/// `None` keeps tokio's default (one per core).
 ///
 /// # Errors
 /// `RuntimeError` when the worker threads cannot be started.
-pub fn init() -> PyResult<()> {
+pub fn init(worker_threads: Option<usize>) -> PyResult<()> {
     if RUNTIME.get().is_some() {
         return Ok(());
     }
-    let runtime = Builder::new_multi_thread()
+    let mut builder = Builder::new_multi_thread();
+    if let Some(threads) = worker_threads {
+        builder.worker_threads(threads);
+    }
+    let runtime = builder
         .enable_all()
         .thread_name("rowx-io")
         .build()
