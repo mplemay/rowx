@@ -10,6 +10,10 @@ if TYPE_CHECKING:
     from rowx_postgres._core import RowShape
 
 
+def row_shape_class() -> type[RowShape]:
+    return postgres_core.RowShape
+
+
 def native_shape(spec: ShapeSpec | RowShape | None) -> RowShape | None:
     # the getter reads the attribute at call time, so a test can replace the constructor on the module
-    return native_shape_impl(spec, lambda: postgres_core.RowShape)
+    return native_shape_impl(spec, row_shape_class)

@@ -1,13 +1,10 @@
-import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
-from rowx_core._template import Compiled, Identifier, TemplatePlan, iter_parts
+from rowx_core._template import CONTROL_CHARACTER, Compiled, Identifier, TemplatePlan, iter_parts
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-
-CONTROL_CHARACTER: Final[re.Pattern[str]] = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 # The parts of compilation that differ between backends.

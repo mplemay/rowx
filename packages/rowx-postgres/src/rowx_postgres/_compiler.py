@@ -7,7 +7,6 @@ from rowx_core._compiler import (  # ruff: ignore[import-private-name]
     compile_parts as compile_parts_impl,
     compile_plan as compile_plan_impl,
     quote_ident as quote_ident_impl,
-    quote_part as quote_part_impl,
 )
 
 if TYPE_CHECKING:
@@ -102,10 +101,6 @@ def _ends_in_code(text: str) -> bool:
         if i < 0:
             return False
     return True
-
-
-def _quote_part(name: object) -> str:
-    return quote_part_impl(name, IDENT_MAX_BYTES)
 
 
 def _quote_ident(value: object) -> str:

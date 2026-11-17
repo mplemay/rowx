@@ -15,6 +15,9 @@ if TYPE_CHECKING:
 
 
 # What the shared glue calls on a backend's native connection; `S` is the native row shape
+# `_end_transaction(commit)`, `_release_savepoint(n)` and `_rollback_to_savepoint(n)` claim the connection when called,
+# raising `ConnectionBusyError` synchronously if it is busy, and return an awaitable that settles once the statement ran
+# `_savepoint()` returns the savepoint number
 class NativeConnection[S](Protocol):
     async def _fetch(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         self,

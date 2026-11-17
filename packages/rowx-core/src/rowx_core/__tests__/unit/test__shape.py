@@ -4,7 +4,14 @@ from rowx_core._shape import native_shape
 
 class FakeShape:
     def __init__(  # ruff: ignore[too-many-arguments]
-        self, ctor, form, matching, type_name, fields, *, validate
+        self,
+        ctor: type,
+        form: str,
+        matching: str,
+        type_name: str,
+        fields: list[tuple[str, tuple[str, ...], bool, int]],
+        *,
+        validate: bool,
     ) -> None:
         self.args = (ctor, form, matching, type_name, fields, validate)
 
