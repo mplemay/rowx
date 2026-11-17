@@ -9,7 +9,9 @@ use rowx_postgres::error::Error;
 use rowx_postgres::migrate::MigrateError;
 use rowx_py_core::errors as shared;
 
-use crate::named::{RowShape, render_null, render_shape};
+use rowx_py_core::shape::{render_null, render_shape};
+
+use crate::named::RowShape;
 
 // the only place a Postgres driver error becomes a Python exception
 #[must_use]
@@ -50,7 +52,12 @@ pub fn named_to_py_err(py: Python<'_>, err: &Error, shape: &RowShape) -> PyErr {
     match err {
         Error::Shape { errors, columns } => shared::row_shape_error(
             py,
-            &render_shape(shape.type_name(), shape.key_names(), errors, columns),
+            &render_shape(
+                shape.data().type_name(),
+                shape.data().key_names(),
+                errors,
+                columns,
+            ),
         ),
         Error::NullField {
             column,
@@ -58,35 +65,18 @@ pub fn named_to_py_err(py: Python<'_>, err: &Error, shape: &RowShape) -> PyErr {
             row,
             name,
         } => {
-            let key = shape.key_names().get(*field).map_or("", String::as_str);
+            let key = shape
+                .data()
+                .key_names()
+                .get(*field)
+                .map_or("", String::as_str);
             shared::row_shape_error(
                 py,
-                &render_null(shape.type_name(), key, *column, name, *row),
+                &render_null(shape.data().type_name(), key, *column, name, *row),
             )
         }
         other => to_py_err(py, other),
     }
-}
-
-/// A named row whose constructor or validator raised `cause`, an `Exception`.
-#[must_use]
-pub fn construct_to_py_err(
-    py: Python<'_>,
-    cause: PyErr,
-    type_name: &str,
-    row_index: usize,
-) -> PyErr {
-    let detail = cause.value(py).repr().map_or_else(
-        |_| "<unrepresentable>".to_owned(),
-        |r| r.to_string_lossy().into_owned(),
-    );
-    shared::row_construct_error(
-        py,
-        &format!("{type_name} row {row_index}: {detail}"),
-        type_name,
-        row_index,
-        cause,
-    )
 }
 
 /// Carries a driver error across an `async` block, where the GIL is not held.

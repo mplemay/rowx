@@ -18,10 +18,11 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::codec::{self, PyParam};
 use crate::errors::{PgError, interface_error, to_py_err};
-use crate::exec::{
-    Access, Layout, decode_row, driver_shape, fail_named, note_sql, nullable_mask, watch,
-};
-use crate::named::RowShape;
+use rowx_py_core::exec::watch;
+use rowx_py_core::row::{Layout, nullable_mask};
+
+use crate::exec::{Access, decode_row, driver_shape, fail_named, note_sql};
+use crate::named::{RowShape, layout_named};
 
 type Msg = Result<Batch, Error>;
 
@@ -90,7 +91,7 @@ impl Shared {
                 "a named row type was given no column mapping",
             ));
         };
-        let built = Layout::named(py, shape, mapping, first)?;
+        let built = layout_named(py, shape.get(), mapping, first)?;
         // only the task awaiting `_next` builds it, so the first `set` wins
         let _ = self.named.set(built);
         self.named
@@ -261,7 +262,7 @@ impl RowStream {
                         return Ok(empty());
                     }
                     shared.finish();
-                    return Err(e.into());
+                    return Err(PgError::from(e).into());
                 }
                 let inner = Arc::clone(&cancel.backend.conn);
                 let state = Arc::clone(&cancel.state);

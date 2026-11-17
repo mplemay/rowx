@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
@@ -14,15 +13,12 @@ use rowx_py_core::{errors as shared, runtime};
 
 use crate::conn::{Connection, options_from_py};
 use crate::errors::{PgError, options_error, to_py_err};
-use crate::exec::{self, Access, FetchArgs, watch, watch_flag};
+use rowx_py_core::exec::{watch, watch_flag};
+use rowx_py_core::time::seconds;
+
+use crate::exec::{self, Access, FetchArgs};
 use crate::named::RowShape;
 use crate::stream::{RowStream, StreamArgs};
-
-fn seconds(name: &str, secs: f64) -> PyResult<Duration> {
-    Duration::try_from_secs_f64(secs).map_err(|_| {
-        PyValueError::new_err(format!("{name} must be a non-negative number of seconds"))
-    })
-}
 
 fn optional_seconds(name: &str, secs: Option<f64>) -> PyResult<Option<Duration>> {
     secs.map(|secs| seconds(name, secs)).transpose()
