@@ -19,10 +19,6 @@ VERSION_PATTERN: Final = compile_regex(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[
 DAY: Final = compile_regex(r"^\d{4}-\d{2}-\d{2}$")
 # the first dated release heading; later headings keep the dates git-cliff gave their tags
 HEADING_DATE: Final = compile_regex(r"^(## \[[^\]]+\].*) - \d{4}-\d{2}-\d{2}$", flags=MULTILINE)
-UNRELEASED_HEADING: Final[str] = "## [unreleased]\n"
-NEXT_RELEASE_HEADING: Final[str] = "\n## ["
-PULL_REQUEST_URL: Final[str] = "https://github.com/mplemay/rowx/pull/"
-PULL_REF_PARTS: Final[int] = 4
 # noon UTC stays on the same calendar day in the timezones git-cliff and GitHub Actions use
 RELEASE_COMMIT_TIME: Final[str] = "T12:00:00Z"
 VERSION_LINE_FILES: Final[tuple[str, ...]] = (
@@ -79,6 +75,8 @@ class TagPlan:
 class ChangelogPlan:
     tag: str | None
     rewrite_top_date: bool
+    # the current release tag's commit; git-cliff stops there, so later commits stay out of the file
+    through: str | None
 
 
 def main() -> int:
@@ -179,12 +177,10 @@ def refresh_locks(root: Path) -> None:
         raise SystemExit(message)
 
 
-def changelog_plan(*, version: str, head: str, tag_commit: str | None) -> ChangelogPlan:
-    if tag_commit == head:
-        return ChangelogPlan(tag=None, rewrite_top_date=False)
+def changelog_plan(*, version: str, tag_commit: str | None) -> ChangelogPlan:
     if tag_commit is None:
-        return ChangelogPlan(tag=f"v{version}", rewrite_top_date=True)
-    return ChangelogPlan(tag=None, rewrite_top_date=False)
+        return ChangelogPlan(tag=f"v{version}", rewrite_top_date=True, through=None)
+    return ChangelogPlan(tag=None, rewrite_top_date=False, through=tag_commit)
 
 
 def replace_top_heading_date(text: str, day: str) -> str:
@@ -205,16 +201,12 @@ def render_changelog(root: Path, *, top_date: str | None = None) -> str:
         _require_day(top_date)
     _sync_changelog_tools()
     version = _project_version(root / "pyproject.toml")
-    head = _git(root, "rev-parse", "HEAD").strip()
-    plan = changelog_plan(version=version, head=head, tag_commit=_local_tag_commit(root, version))
-    text = _git_cliff(root, plan.tag)
+    plan = changelog_plan(version=version, tag_commit=_local_tag_commit(root, version))
+    text = _git_cliff(root, plan.tag, through=plan.through)
     if plan.rewrite_top_date:
         # a virtual --tag is dated with the clock; the tagged commit's noon UTC time is stable
         day = top_date if top_date is not None else _committer_utc_day(root)
         text = replace_top_heading_date(text, day)
-    # squash merge appends " (#n)" to the pull request title; branch commits do not have it yet
-    if (number := _pull_request_number(root)) is not None:
-        text = _link_open_pull_request(text, number)
     return _format_changelog(text)
 
 
@@ -352,67 +344,6 @@ def _committer_utc_day(root: Path) -> str:
     return datetime.fromtimestamp(instant, UTC).date().isoformat()
 
 
-def _pull_request_number(root: Path) -> int | None:
-    if root.resolve() != ROOT.resolve():
-        return None
-    event = environ.get("GITHUB_EVENT_NAME")
-    if event == "pull_request":
-        return _actions_pull_request()
-    if event == "push":
-        return None
-    return _branch_pull_request(root)
-
-
-def _actions_pull_request() -> int | None:
-    parts = environ.get("GITHUB_REF", "").split("/")
-    # refs/pull/<number>/merge
-    if len(parts) != PULL_REF_PARTS or parts[0] != "refs" or parts[1] != "pull" or not parts[2].isdigit():
-        return None
-    return int(parts[2])
-
-
-def _branch_pull_request(root: Path) -> int | None:
-    if (executable := which("gh")) is None:
-        return None
-    completed = run(  # ruff: ignore[subprocess-without-shell-equals-true]
-        [executable, "pr", "view", "--json", "number", "--jq", ".number"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        return None
-    number = completed.stdout.strip()
-    if not number.isdigit():
-        return None
-    return int(number)
-
-
-def _link_open_pull_request(text: str, number: int) -> str:
-    start = text.find(UNRELEASED_HEADING)
-    if start < 0:
-        return text
-    body = start + len(UNRELEASED_HEADING)
-    end = text.find(NEXT_RELEASE_HEADING, body)
-    if end < 0:
-        end = len(text)
-    return text[:body] + _link_bullets(text[body:end], number) + text[end:]
-
-
-def _link_bullets(section: str, number: int) -> str:
-    link = f"([#{number}]({PULL_REQUEST_URL}{number}))"
-    lines: list[str] = []
-    for line in section.splitlines(keepends=True):
-        content = line.rstrip("\n")
-        if content.startswith("- ") and PULL_REQUEST_URL not in content:
-            newline = "\n" if line.endswith("\n") else ""
-            lines.append(f"{content} {link}{newline}")
-            continue
-        lines.append(line)
-    return "".join(lines)
-
-
 def _local_tag_commit(root: Path, version: str) -> str | None:
     completed = run(  # ruff: ignore[subprocess-without-shell-equals-true]
         [_executable("git"), "rev-parse", "-q", "--verify", f"refs/tags/v{version}^{{commit}}"],
@@ -447,7 +378,7 @@ def _sync_changelog_tools() -> None:
     )
 
 
-def _git_cliff(root: Path, tag: str | None) -> str:
+def _git_cliff(root: Path, tag: str | None, *, through: str | None) -> str:
     with TemporaryDirectory() as directory:
         output = Path(directory) / "changelog.md"
         argv = [
@@ -466,6 +397,8 @@ def _git_cliff(root: Path, tag: str | None) -> str:
         ]
         if tag is not None:
             argv.extend(("--tag", tag))
+        elif through is not None:
+            argv.append(through)
         _run(argv, root)
         return output.read_text(encoding="utf-8")
 

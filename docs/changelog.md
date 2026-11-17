@@ -2,12 +2,6 @@
 
 Each release lists features, fixes, performance work, and breaking changes.
 
-## [unreleased]
-
-### Bug fixes
-
-- Accept the factored embedded extra marker ([#359](https://github.com/mplemay/rowx/pull/359))
-
 ## [0.4.2](https://github.com/mplemay/rowx/compare/v0.3.0...v0.4.2) - 2026-11-16
 
 ### Features

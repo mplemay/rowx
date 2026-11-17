@@ -20,8 +20,9 @@ A `workflow_dispatch` whose ref is a branch builds, checks, and rebuilds the art
 Publishing runs when the ref is a `v*` tag, including a dispatch of that tag. If the tag exists and the dispatch
 failed, run Release from the Actions tab with the ref set to that tag.
 
-git-cliff builds `docs/changelog.md` from `feat`, `fix`, `perf`, and breaking commits. `v0.4.0` and `v0.4.1` are
-ignored, so those commits stay in 0.4.2. `just changelog` regenerates the file. The release commit's committer date is
+git-cliff builds `docs/changelog.md` from `feat`, `fix`, `perf`, and breaking commits that belong to a tag.
+`v0.4.0` and `v0.4.1` are ignored, so those commits stay in 0.4.2. `just changelog` regenerates that released file.
+`just release` gives the commits since the current tag the new version. The release commit's committer date is
 12:00 UTC on the day of the cut, and that UTC day is the new section's heading date. CI and the tag workflow
 regenerate the file and fail when it differs. After the packages publish, the workflow opens or updates the GitHub
 Release from the latest section. A re-dispatch of the `v*` tag updates that release too.

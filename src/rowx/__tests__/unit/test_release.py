@@ -52,23 +52,22 @@ class _ChangelogPlan(Protocol):
     @property
     def rewrite_top_date(self) -> bool: ...
 
+    @property
+    def through(self) -> str | None: ...
+
 
 class _Release(Protocol):
     def bump(self, root: Path, new_version: str) -> None: ...
 
     def tag_plan(self, *, head_version: str, parent_version: str, head_sha: str, tag_sha: str | None) -> _Plan: ...
 
-    def changelog_plan(self, *, version: str, head: str, tag_commit: str | None) -> _ChangelogPlan: ...
+    def changelog_plan(self, *, version: str, tag_commit: str | None) -> _ChangelogPlan: ...
 
     def replace_top_heading_date(self, text: str, day: str) -> str: ...
 
     def release_committer_date(self, day: str) -> str: ...
 
     def render_changelog(self, root: Path, *, top_date: str | None = None) -> str: ...
-
-    def _link_open_pull_request(self, text: str, number: int) -> str: ...
-
-    def _pull_request_number(self, root: Path) -> int | None: ...
 
 
 def _load_release() -> _Release:
@@ -169,22 +168,25 @@ def test_tag_plan_refuses_when_tag_points_elsewhere() -> None:
         RELEASE.tag_plan(head_version=NEW_VERSION, parent_version="0.4.2", head_sha=HEAD_SHA, tag_sha=OTHER_SHA)
 
 
-def test_changelog_plan_skips_the_tag_when_it_points_at_head() -> None:
-    plan = RELEASE.changelog_plan(version=NEW_VERSION, head=HEAD_SHA, tag_commit=HEAD_SHA)
+def test_changelog_plan_stops_at_the_tag_when_it_points_at_head() -> None:
+    plan = RELEASE.changelog_plan(version=NEW_VERSION, tag_commit=HEAD_SHA)
     assert plan.tag is None
     assert plan.rewrite_top_date is False
+    assert plan.through == HEAD_SHA
 
 
 def test_changelog_plan_uses_a_virtual_tag_when_the_tag_is_missing() -> None:
-    plan = RELEASE.changelog_plan(version=NEW_VERSION, head=HEAD_SHA, tag_commit=None)
+    plan = RELEASE.changelog_plan(version=NEW_VERSION, tag_commit=None)
     assert plan.tag == f"v{NEW_VERSION}"
     assert plan.rewrite_top_date is True
+    assert plan.through is None
 
 
-def test_changelog_plan_leaves_released_history_when_the_tag_is_older() -> None:
-    plan = RELEASE.changelog_plan(version="0.4.2", head=HEAD_SHA, tag_commit=OTHER_SHA)
+def test_changelog_plan_stops_at_an_older_tag() -> None:
+    plan = RELEASE.changelog_plan(version="0.4.2", tag_commit=OTHER_SHA)
     assert plan.tag is None
     assert plan.rewrite_top_date is False
+    assert plan.through == OTHER_SHA
 
 
 def test_replace_top_heading_date_changes_only_the_first_date() -> None:
@@ -202,56 +204,31 @@ def test_release_committer_date_is_noon_utc() -> None:
     assert RELEASE.release_committer_date(RELEASE_DAY) == RELEASE_INSTANT
 
 
-UNRELEASED_CHANGELOG: Final[str] = (
-    "# Changelog\n\n"
-    "## [unreleased]\n\n"
-    "### Bug fixes\n\n"
-    "- Accept the factored embedded extra marker\n\n"
-    "## [0.4.2](https://example.com) - 2026-11-16\n\n"
-    "- Drop the deprecated pep 639 license classifier"
-    " ([#329](https://github.com/mplemay/rowx/pull/329))\n"
-)
-LINKED_BULLET: Final[str] = (
-    "- Accept the factored embedded extra marker ([#359](https://github.com/mplemay/rowx/pull/359))\n"
-)
+def test_render_omits_commits_after_the_current_tag(tmp_path: Path) -> None:
+    root = _changelog_repo(tmp_path)
+    (root / "feature.txt").write_text("one\n", encoding="utf-8")
+    _commit(root, "feat: add the first feature", "2026-01-01T12:00:00Z")
+    _git(root, "tag", "v0.1.0")
+    released = RELEASE.render_changelog(root)
+    (root / "feature.txt").write_text("two\n", encoding="utf-8")
+    _commit(root, "feat: add the next feature", "2026-01-02T12:00:00Z")
+    assert RELEASE.render_changelog(root) == released
+    assert "next feature" not in released
 
 
-def test_open_pull_request_links_only_unreleased_bullets() -> None:
-    linked = RELEASE._link_open_pull_request(UNRELEASED_CHANGELOG, 359)
-    assert LINKED_BULLET in linked
-    assert "([#329](https://github.com/mplemay/rowx/pull/329))" in linked
-    assert RELEASE._link_open_pull_request(linked, 359) == linked
-
-
-def test_actions_pull_request_number(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
-    monkeypatch.setenv("GITHUB_REF", "refs/pull/359/merge")
-    assert RELEASE._pull_request_number(REPO) == 359
-
-
-def test_push_event_keeps_commit_message_links(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
-    monkeypatch.delenv("GITHUB_REF", raising=False)
-    assert RELEASE._pull_request_number(REPO) is None
-
-
-def test_pull_request_number_ignores_other_repositories(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
-    monkeypatch.setenv("GITHUB_REF", "refs/pull/359/merge")
-    assert RELEASE._pull_request_number(tmp_path) is None
-
-
-def test_virtual_tag_render_matches_the_tagged_commit(tmp_path: Path) -> None:
+def _changelog_repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     (root / "docs").mkdir()
     copy2(REPO / "cliff.toml", root / "cliff.toml")
     (root / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "0.1.0"\n', encoding="utf-8")
-    (root / "feature.txt").write_text("one\n", encoding="utf-8")
     _git(root, "init", "-b", "main")
+    return root
+
+
+def test_virtual_tag_render_matches_the_tagged_commit(tmp_path: Path) -> None:
+    root = _changelog_repo(tmp_path)
+    (root / "feature.txt").write_text("one\n", encoding="utf-8")
     _commit(root, "feat: add the first feature", "2026-01-01T12:00:00Z")
     _git(root, "tag", "v0.1.0")
     (root / "feature.txt").write_text("two\n", encoding="utf-8")
