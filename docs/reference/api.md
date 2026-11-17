@@ -418,7 +418,7 @@ Error
 ├── InterfaceError
 │   ├── ConnectionBusyError
 │   └── PoolTimeoutError
-├── DatabaseError           # .sqlstate .message .detail .hint .position .code (planned)
+├── DatabaseError           # .sqlstate .message .detail .hint .position .code
 ├── RowNotFound
 ├── RowShapeError
 ├── DecodeError
@@ -441,12 +441,13 @@ Construction-time misuse of a template is `TypeError`. A bad row type at the cal
 argument to `Migrator` is `InterfaceError`. No error message or `repr` may include the DSN password. Sqlstate
 subclasses are not provided.
 
-Planned ([#356](https://github.com/mplemay/rowx/issues/356)): `DatabaseError.sqlstate` keeps its 5-character contract
-for every backend. `DatabaseError` gains an optional `code: str | None` attribute carrying the backend's native error
-name. For SQLite it is always the extended result code name, such as `SQLITE_CONSTRAINT_UNIQUE`. For PostgreSQL it is
-`None`. For SQLite, `.position` is derived from `sqlite3_error_offset` (a 0-based UTF-8 byte offset) and converted to
-the same 1-based character index; it is `None` when SQLite reports no offset. SQLite codes map to a SQLSTATE as follows,
-with the `SQLITE_` prefix omitted:
+`DatabaseError.sqlstate` keeps its 5-character contract for every backend. `DatabaseError.code` is an optional
+`str | None` carrying the backend's native error name; for PostgreSQL it is `None`.
+
+Planned ([#334](https://github.com/mplemay/rowx/issues/334)): for SQLite, `code` is always the extended result code
+name, such as `SQLITE_CONSTRAINT_UNIQUE`. For SQLite, `.position` is derived from `sqlite3_error_offset` (a 0-based
+UTF-8 byte offset) and converted to the same 1-based character index; it is `None` when SQLite reports no offset.
+SQLite codes map to a SQLSTATE as follows, with the `SQLITE_` prefix omitted:
 
 | SQLite code | `sqlstate` |
 |---|---|

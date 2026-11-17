@@ -31,6 +31,7 @@ pub fn to_py_err(py: Python<'_>, err: &Error) -> PyErr {
             detail.as_deref(),
             hint.as_deref(),
             *position,
+            None,
         ),
         Error::Interface(_) | Error::Drift(_) => shared::interface_error(py, &err.to_string()),
         Error::Core(core) => shared::core_to_py_err(py, *core),

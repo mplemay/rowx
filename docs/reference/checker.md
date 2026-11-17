@@ -385,13 +385,12 @@ follow the snippet. The sample above stops after the caret. Tabs expand to four 
 caret. Server-supplied text is sanitised before it reaches a terminal ([Checker](security.md#checker)).
 
 `--output-format json` prints one JSON array. Each object has `rule`, `severity` (`error` or `warning`), `message`,
-`file`, `line`, `col`, `end_line`, `end_col`, `notes`, `help`, `sqlstate`, `sql`, `column_index` and `field`. There is
-no separate footer. Pass `--statistics` for the counts; diagnostic counts reflect visible reports, while coverage
-evidence is unaffected by reporting filters.
+`file`, `line`, `col`, `end_line`, `end_col`, `notes`, `help`, `sqlstate`, `code` (only when it is not `None`), `sql`,
+`column_index` and `field`. There is no separate footer. Pass `--statistics` for the counts; diagnostic counts reflect
+visible reports, while coverage evidence is unaffected by reporting filters.
 
-Planned ([#356](https://github.com/mplemay/rowx/issues/356)): the JSON object gains a `code` field carrying the
-native error code. It is omitted when the code is `None`, so PostgreSQL output is unchanged. The help for a SQL error
-is looked up by `code` when present, then by `sqlstate`.
+PostgreSQL errors carry no `code`, so PostgreSQL output has no `code` field. The help for a SQL error is looked up by
+`code` when present, then by `sqlstate`.
 
 Described column metadata is not written to a disk cache. Every check prepares the statements it describes.
 

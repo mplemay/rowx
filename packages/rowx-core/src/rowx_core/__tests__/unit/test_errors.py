@@ -75,12 +75,24 @@ def test_database_error_defaults() -> None:
     assert err.detail is None
     assert err.hint is None
     assert err.position is None
+    assert err.code is None
+
+
+def test_database_error_code_is_the_sixth_positional_argument() -> None:
+    err = DatabaseError("23505", "duplicate key", "d", "h", 7, "SQLITE_CONSTRAINT_UNIQUE")
+    assert err.code == "SQLITE_CONSTRAINT_UNIQUE"
+    assert str(err) == "23505: duplicate key"
+
+
+def test_database_error_code_survives_pickling() -> None:
+    err = pickle.loads(pickle.dumps(DatabaseError("23505", "m", code="X")))  # ruff: ignore[suspicious-pickle-usage]
+    assert (err.code, str(err)) == ("X", "23505: m")
 
 
 def test_database_error_pickles() -> None:
     err = pickle.loads(pickle.dumps(DatabaseError("42P01", "missing", position=3)))  # ruff: ignore[suspicious-pickle-usage]
     assert isinstance(err, DatabaseError)
-    assert (err.sqlstate, err.message, err.position) == ("42P01", "missing", 3)
+    assert (err.sqlstate, err.message, err.position, err.code) == ("42P01", "missing", 3, None)
 
 
 def test_row_construct_error_is_a_decode_error_with_attributes() -> None:

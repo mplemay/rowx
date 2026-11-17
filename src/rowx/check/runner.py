@@ -383,6 +383,8 @@ def _sql_error(site: _Site, error: DatabaseError, backend: CheckerBackend) -> Re
         )
         if note is not None
     )
+    help_table = backend.sql_error_help
+    help_text = help_table.get(error.code) if error.code is not None else None
     return Report(
         diagnostic=Diagnostic(
             rule="sql-error",
@@ -391,8 +393,9 @@ def _sql_error(site: _Site, error: DatabaseError, backend: CheckerBackend) -> Re
             span=span,
             notes=notes,
         ),
-        help=backend.sql_error_help.get(error.sqlstate),
+        help=help_text or help_table.get(error.sqlstate),
         sqlstate=error.sqlstate,
+        code=error.code,
         sql=site.sourcemap.sql,
     )
 
