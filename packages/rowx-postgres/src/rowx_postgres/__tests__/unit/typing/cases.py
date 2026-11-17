@@ -205,6 +205,6 @@ async def negative_migrator(migrator: Migrator, tx: Transaction) -> None:
 
 
 async def negative_migrator_arguments(migrator: Migrator, conn: Connection) -> None:
-    await migrator.undo(conn)  # error  # ty: ignore[unresolved-attribute]
+    await migrator.undo(conn)  # error  # ty: ignore[missing-attribute]
     await migrator.revert(conn, 1)  # error  # ty: ignore[too-many-positional-arguments]
     await migrator.info(conn, dry_run=True)  # error  # ty: ignore[unknown-argument]

@@ -569,7 +569,7 @@ def test_param_matrix(schema: str) -> None:
     evidence: dict[str, Any] = {}
     for source in PARAM_VALUES:
         tree = ast.parse(PRELUDE + source)
-        evidence[source] = ParamInference(tree, backend=PG_RULES).infer(tree.body[-1].value)  # ty: ignore[unresolved-attribute]
+        evidence[source] = ParamInference(tree, backend=PG_RULES).infer(tree.body[-1].value)  # ty: ignore[missing-attribute]
 
     cells = [(sql, source) for sql in types for source in PARAM_VALUES]
     runtime = asyncio.run(run_params(schema, [(sql.decl, eval(source, namespace)) for sql, source in cells]))  # ruff: ignore[suspicious-eval-usage]
