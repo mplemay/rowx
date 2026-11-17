@@ -2,33 +2,51 @@ import ast
 import asyncio
 from collections import Counter, deque
 from contextlib import AsyncExitStack, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from re import DOTALL, IGNORECASE, Pattern, compile as re_compile, escape as re_escape, sub
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
-from rowx_core.backend import CheckerBackend, CheckerSession, ColumnInfo, Describe
+from rowx_core.backend import (
+    CheckerBackend,
+    CheckerSession,
+    ColumnInfo,
+    Describe,
+    UnsupportedCapabilityError,
+)
 from rowx_core.errors import ConnectionBusyError, DatabaseError, InterfaceError
 
-from rowx._backend import backend_for
-from rowx.check.compare import ColumnDesc, DescribeDesc, Finding, compare, compare_param
+from rowx._backend import BackendMissing, UnsupportedSchemeError, backend_for
+from rowx.check.compare import (
+    ColumnDesc,
+    DescribeDesc,
+    Finding,
+    compare,
+    compare_param_result,
+    expected_type,
+    shown_param,
+)
 from rowx.check.construction import template_reports
 from rowx.check.discover import discover_source, too_deep
 from rowx.check.model import Diagnostic, Rule, Span
 from rowx.check.params import ParamInference
-from rowx.check.render import Report, null_reason_note
+from rowx.check.render import Report, null_reason_note, strip_controls
 from rowx.check.resolve import ModuleGraph, RowType, resolve_row_type, roots_for
 from rowx.check.sourcemap import SourceMap, SourceMapper
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
-    from rowx.check.config import Config
-    from rowx.check.model import FileResult, QueryCall
+    from rowx_core.backend import ScratchBuild
 
-type Outcome = Describe | DatabaseError
+    from rowx.check.config import Config
+    from rowx.check.model import FileResult, QueryCall, QueryKind
+    from rowx.check.params import ParamType
+
+type Outcome = Describe | DatabaseError | _Operational
+type RowComparison = Literal["compared", "partially compared", "not compared"]
 
 PASSWORD_PARAM: Final[Pattern[str]] = re_compile(
     r"(?P<key>password\s*=\s*)(?P<value>'(?:[^'\\]|\\.)*'?|[^\s&]+)",
@@ -41,6 +59,16 @@ PASSWORD_PARAM_KV: Final[Pattern[str]] = re_compile(
 )
 URL_SCHEME: Final[Pattern[str]] = re_compile(r"\s*[A-Za-z][A-Za-z0-9+.-]*://")
 USERINFO: Final[Pattern[str]] = re_compile(r"(?P<key>://[^/?#\s:@]*:)(?P<value>[^/?#\s]*)@")
+ROW_INCOMPLETE_RULES: Final[frozenset[Rule]] = frozenset({
+    "type-mismatch",
+    "unsupported-type",
+    "arity-mismatch",
+    "unexpected-column",
+    "missing-column",
+    "duplicate-column",
+    "ambiguous-column",
+    "column-name-mismatch",
+})
 
 
 class CheckError(Exception):
@@ -61,18 +89,66 @@ class Statistics:
     by_rule: Counter[Rule] = field(default_factory=Counter)
 
 
-@dataclass(slots=True, kw_only=True, frozen=True)
-class ScratchBuild:
-    url: str
-    seconds: float
-
-
-# `gate` runs once, before anything is described, and only when there is something to describe
-# `scratch` builds the database to describe against from the server URL, and drops it when the run ends
+# `gate` runs once, before anything is described, and only when there is something to describe; it gets the first URL
+# `scratch` builds the database to describe against from the target URL, for that many workers, and tears it down when
+# the run ends
+# `own` starts a database that the run owns and yields its URL; the run then describes with exactly one worker
 @dataclass(slots=True, kw_only=True, frozen=True)
 class Hooks:
     gate: Callable[[str], Awaitable[int | None]] | None = None
-    scratch: Callable[[str], AbstractAsyncContextManager[ScratchBuild]] | None = None
+    scratch: Callable[[str, int], AbstractAsyncContextManager[ScratchBuild]] | None = None
+    own: Callable[[str], AbstractAsyncContextManager[str]] | None = None
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class ParameterCoverage:
+    span: Span | None
+    sql_type: str
+    sql_type_key: str | None
+    sql_element_key: str | None
+    python_type: ParamType | None
+    # None means the available evidence cannot establish a complete comparison.
+    mismatch: bool | None
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class InspectedColumn:
+    name: str
+    sql_type: str
+    python_type: str | None
+    nullable: bool
+    reason: str
+
+
+@dataclass(slots=True, kw_only=True)
+class SiteCoverage:
+    path: Path
+    span: Span
+    kind: QueryKind
+    described: bool = False
+    row_comparison: RowComparison = "not compared"
+    parameters_aligned: bool = False
+    parameters: tuple[ParameterCoverage, ...] = ()
+    sql_failed: bool = False
+    operational_failure: bool = False
+    row_failed: bool = False
+    row_unresolved: bool = False
+    parameters_failed: bool = False
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class InspectedParameter:
+    sql_type: str
+    python_type: str | None
+    mismatch: bool | None
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class InspectedSite:
+    path: str
+    span: Span
+    columns: tuple[InspectedColumn, ...]
+    parameters: tuple[InspectedParameter, ...]
 
 
 @dataclass(slots=True, kw_only=True)
@@ -80,6 +156,8 @@ class RunResult:
     reports: list[Report]
     sources: dict[Path, str]
     statistics: Statistics
+    coverage: list[SiteCoverage] = field(default_factory=list)
+    inspection: list[InspectedSite] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -89,6 +167,7 @@ class _Site:
     sourcemap: SourceMap
     row_type: RowType | None
     inference: ParamInference | None
+    coverage: SiteCoverage
 
 
 def _unescape(raw: str) -> str:
@@ -178,6 +257,11 @@ async def _connect(dsn: str, timeout_ms: int, backend: CheckerBackend) -> Checke
 
 
 @dataclass(slots=True, frozen=True)
+class _Operational:
+    error: DatabaseError
+
+
+@dataclass(slots=True, frozen=True)
 class _Lost:
     error: Exception
 
@@ -212,6 +296,8 @@ class _Worker:
                     raise CheckError(msg) from None
                 case "lost":
                     return _Lost(error)
+                case "operational" if isinstance(error, DatabaseError):
+                    return _Operational(error)
                 case _:
                     if isinstance(error, DatabaseError):
                         return error
@@ -229,19 +315,19 @@ class _Worker:
         return outcome
 
 
+# one worker per URL (at most one per statement), so a URL that appears twice is shared by two workers
 async def describe_all(
-    dsn: str,
+    urls: Sequence[str],
     statements: list[str],
-    jobs: int,
     timeout_ms: int,
     backend: CheckerBackend | None = None,
 ) -> dict[str, Outcome]:
-    selected = backend if backend is not None else backend_for(dsn).checker()
+    selected = backend if backend is not None else backend_for(urls[0]).checker()
     pending = deque(statements)
     results: dict[str, Outcome] = {}
 
-    async def run() -> None:
-        worker = _Worker(dsn, timeout_ms, selected)
+    async def run(url: str) -> None:
+        worker = _Worker(url, timeout_ms, selected)
         try:
             await worker._open()  # ruff: ignore[private-member-access]
             while pending:
@@ -252,8 +338,8 @@ async def describe_all(
 
     try:
         async with asyncio.TaskGroup() as group:
-            for _ in range(min(jobs, len(statements))):
-                group.create_task(run())
+            for url in urls[: len(statements)]:
+                group.create_task(run(url))
     except* CheckError as errors:
         raise min(errors.exceptions, key=str) from None
     return results
@@ -329,9 +415,18 @@ def _report(  # ruff: ignore[too-many-arguments]
     column_index: int | None = None,
     field: str | None = None,
     order: int = 0,
+    wider_nullability: bool = False,
 ) -> Report:
     diagnostic = Diagnostic(rule=rule, message=message, path=site.call.path, span=span, notes=notes)
-    return Report(diagnostic=diagnostic, help=help, label=label, column_index=column_index, field=field, order=order)
+    return Report(
+        diagnostic=diagnostic,
+        help=help,
+        label=label,
+        column_index=column_index,
+        field=field,
+        order=order,
+        wider_nullability=wider_nullability,
+    )
 
 
 def _param_reports(site: _Site, described: Describe, backend: CheckerBackend) -> list[Report]:
@@ -356,21 +451,36 @@ def _param_reports(site: _Site, described: Describe, backend: CheckerBackend) ->
 
 def _param_type_reports(site: _Site, described: Describe, backend: CheckerBackend) -> list[Report]:
     holes = site.sourcemap.holes
-    # with a count mismatch the interpolations no longer line up with `$n`
-    if site.inference is None or len(described.params) != len(holes):
-        return []
+    # Count mismatches make positional pairing unreliable.
     template = site.call.template
-    if template is None:
-        return []
-    evident = site.inference.interpolations(template)
-    if len(evident) != len(holes):
-        return []
+    evident = (
+        site.inference.interpolations(template)
+        if site.inference is not None and template is not None and len(described.params) == len(holes)
+        else None
+    )
+    aligned = evident is not None and len(described.params) == len(holes) == len(evident)
+    site.coverage.parameters_aligned = aligned
     reports: list[Report] = []
-    for index, (param, found) in enumerate(zip(described.params, evident, strict=True)):
-        if (
-            finding := compare_param(index, param.type_name, param.type_key, found, param.element_key, backend)
-        ) is not None:
-            reports.append(_report(site, finding.rule, finding.message, holes[index]))
+    facts: list[ParameterCoverage] = []
+    for index, param in enumerate(described.params):
+        found = evident[index] if aligned else None
+        finding, complete = compare_param_result(
+            index, param.type_name, param.type_key, found, param.element_key, backend
+        )
+        span = holes[index] if aligned else None
+        facts.append(
+            ParameterCoverage(
+                span=span,
+                sql_type=param.type_name,
+                sql_type_key=param.type_key,
+                sql_element_key=param.element_key,
+                python_type=found,
+                mismatch=(finding is not None) if complete else None,
+            )
+        )
+        if finding is not None and span is not None:
+            reports.append(_report(site, finding.rule, finding.message, span))
+    site.coverage.parameters = tuple(facts)
     return reports
 
 
@@ -406,18 +516,23 @@ def _row_reports(site: _Site, described: Describe, backend: CheckerBackend) -> l
     span = _row_span(site)
     notes = _alias_note(row_type)
     if row_type.kind == "none":
+        site.coverage.row_comparison = "partially compared" if visible else "compared"
         if not visible:
             return []
         message = f"the query returns {_plural(len(visible), 'column')} but the row type is `None`"
         return [_report(site, "missing-row-type", message, span, notes=notes, help="annotate the row type")]
     if not visible:
+        site.coverage.row_comparison = "partially compared"
         message = "the query returns no columns but the row type is not `None`"
         return [_report(site, "unexpected-row-type", message, span, notes=notes, help="use .execute()")]
     descs = tuple(_column_desc(column) for column in columns)
-    return [
-        _finding_report(site, finding, descs, order)
-        for order, finding in enumerate(compare(DescribeDesc(columns=descs), row_type, backend))
-    ]
+    findings = compare(DescribeDesc(columns=descs), row_type, backend)
+    incomplete = any(finding.rule in ROW_INCOMPLETE_RULES for finding in findings) or (
+        row_type.kind == "named" and any(field.names is None for field in row_type.fields)
+    )
+    site.coverage.row_unresolved = row_type.kind == "named" and any(field.names is None for field in row_type.fields)
+    site.coverage.row_comparison = "partially compared" if incomplete else "compared"
+    return [_finding_report(site, finding, descs, order) for order, finding in enumerate(findings)]
 
 
 def _finding_report(
@@ -464,17 +579,78 @@ def _finding_report(
         column_index=finding.column,
         field=field_key,
         order=order if named else 0,
+        wider_nullability=finding.wider_nullability,
     )
 
 
 def _evaluate(site: _Site, outcome: Outcome, backend: CheckerBackend) -> list[Report]:
-    if isinstance(outcome, DatabaseError):
-        return [_sql_error(site, outcome, backend)]
+    if isinstance(outcome, (DatabaseError, _Operational)):
+        site.coverage.sql_failed = True
+        site.coverage.operational_failure = isinstance(outcome, _Operational)
+        error = outcome.error if isinstance(outcome, _Operational) else outcome
+        return [replace(_sql_error(site, error, backend), operational=isinstance(outcome, _Operational))]
+    site.coverage.described = True
+    params = _param_reports(site, outcome, backend)
+    rows = _row_reports(site, outcome, backend)
+    site.coverage.parameters_failed = any(report.diagnostic.rule == "param-count-mismatch" for report in params)
+    site.coverage.row_failed = any(not report.wider_nullability for report in rows)
     return [
-        *_param_reports(site, outcome, backend),
-        *_row_reports(site, outcome, backend),
+        *params,
+        *rows,
         *_override_reports(site, outcome, backend),
     ]
+
+
+def _inspection(
+    site: _Site, outcome: Describe, backend: CheckerBackend, dsns: tuple[str, ...], root: Path
+) -> InspectedSite:
+    def clean(value: str) -> str:
+        value = strip_controls(value)
+        for dsn in dsns:
+            value = redact(value, dsn)
+        return value
+
+    columns: list[InspectedColumn] = []
+    for column in outcome.columns:
+        key = column.type_key
+        supported = key in backend.types and (key != "array" or column.element_key in backend.types)
+        mapping = expected_type(_column_desc(column), backend) if supported else None
+        reason = (
+            "nullability unknown, assumed nullable"
+            if column.reason == "Computed"
+            else null_reason_note(column.reason, column.reason_detail, column=column.name)
+        )
+        columns.append(
+            InspectedColumn(
+                name=clean(column.name),
+                sql_type=clean(column.type_name),
+                python_type=clean(mapping) if bool(mapping) else None,
+                nullable=column.nullable,
+                reason=clean(reason),
+            )
+        )
+    parameters = tuple(
+        InspectedParameter(
+            sql_type=clean(param.sql_type),
+            python_type=clean(shown_param(param.python_type)) if param.python_type is not None else None,
+            mismatch=param.mismatch,
+        )
+        for param in site.coverage.parameters
+    )
+    try:
+        path = site.call.path.relative_to(root)
+    except ValueError:
+        path = site.call.path
+    return InspectedSite(path=clean(str(path)), span=site.call.span, columns=tuple(columns), parameters=parameters)
+
+
+# an unchecked file is not described; the type table is vocabulary and opening it does not connect
+def _vocabulary_backend(dsn: str | None) -> CheckerBackend | None:
+    supplied = (dsn,) if dsn is not None and dsn.strip() else ()
+    for url in (*supplied, "postgres://"):
+        with suppress(BackendMissing, UnsupportedSchemeError, UnsupportedCapabilityError):
+            return backend_for(url).checker()
+    return None
 
 
 def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
@@ -483,19 +659,23 @@ def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-argumen
     path: Path,
     result: FileResult,
     backend: CheckerBackend | None,
-    dsn: str | None = None,
+    dsn: str | None,
+    coverage: dict[Span, SiteCoverage],
 ) -> tuple[list[Report], list[_Site]]:
     reports: list[Report] = []
     sites: list[_Site] = []
     inference = ParamInference(result.tree, backend, dsn) if result.tree is not None else None
     mapper = SourceMapper(result.source or "", None if backend is None else backend.compiler)
     reports.extend(template_reports(path, result.templates, mapper, inference))
+    # one vocabulary load for the file; a URL that cannot be loaded must not reach resolve_row_type
+    row_backend = backend if backend is not None else _vocabulary_backend(dsn)
+    row_dsn = dsn if backend is not None else None
     for call in result.calls:
-        if call.template is None:
-            continue
-        resolution = resolve_row_type(graph, call, roots, backend, dsn)
+        resolution = resolve_row_type(graph, call, roots, row_backend, row_dsn)
         if resolution.diagnostic is not None:
             reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
+        if call.template is None:
+            continue
         sites.append(
             _Site(
                 call=call,
@@ -503,19 +683,22 @@ def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-argumen
                 sourcemap=mapper.build(call.template),
                 row_type=resolution.row_type,
                 inference=inference,
+                coverage=coverage[call.span],
             ),
         )
     return reports, sites
 
 
-def _collect(
+def _collect(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     config: Config,
     files: Iterable[Path],
     stats: Statistics,
     backend: CheckerBackend | None,
     dsn: str | None = None,
+    coverage: list[SiteCoverage] | None = None,
+    boundary: Path | None = None,
 ) -> tuple[list[_Site], list[Report], dict[Path, str], CheckerBackend | None]:
-    graph = ModuleGraph()
+    graph = ModuleGraph(boundary)
     sites: list[_Site] = []
     reports: list[Report] = []
     sources: dict[Path, str] = {}
@@ -524,9 +707,13 @@ def _collect(
         result = discover_source(path, path.read_bytes())
         reports.extend(Report(diagnostic=diagnostic) for diagnostic in result.diagnostics)
         stats.unchecked += result.unchecked_count
+        file_coverage = {span: SiteCoverage(path=path, span=span, kind=kind) for kind, span in result.recognized}
+        if coverage is not None:
+            coverage.extend(file_coverage.values())
         roots = roots_for(config, path)
         if result.source is None:
             continue
+        sources[path] = result.source
         selected = backend
         if selected is None and any(call.template is not None for call in result.calls):
             if dsn is None or not dsn.strip():
@@ -535,7 +722,7 @@ def _collect(
             selected = backend_for(dsn).checker()
             backend = selected
         try:
-            file_reports, file_sites = _file_sites(graph, roots, path, result, selected, dsn)
+            file_reports, file_sites = _file_sites(graph, roots, path, result, selected, dsn, file_coverage)
         except RecursionError:
             # fail closed for this file only: nothing else it produced is trusted
             reports.extend(Report(diagnostic=diagnostic) for diagnostic in too_deep(path).diagnostics)
@@ -548,6 +735,12 @@ def _collect(
     return sites, reports, sources, backend
 
 
+# how many distinct statements a run over `files` describes, for sizing a scratch before that run starts
+def count_statements(config: Config, files: Iterable[Path], dsn: str, boundary: Path | None = None) -> int:
+    sites, _, _, _ = _collect(config, files, Statistics(), None, dsn, None, boundary)
+    return len({site.sourcemap.sql for site in sites})
+
+
 async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     config: Config,
     files: Iterable[Path],
@@ -555,11 +748,16 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
     jobs: int,
     hooks: Hooks | None = None,
     backend: CheckerBackend | None = None,
+    *,
+    inspect: bool = False,
+    boundary: Path | None = None,
 ) -> RunResult:
     hooks = hooks or Hooks()
     stats = Statistics()
     selected = backend
-    sites, reports, sources, selected = _collect(config, files, stats, selected, dsn)
+    coverage: list[SiteCoverage] = []
+    inspection: list[InspectedSite] = []
+    sites, reports, sources, selected = _collect(config, files, stats, selected, dsn, coverage, boundary)
     statements = sorted({site.sourcemap.sql for site in sites})
     stats.distinct_sql = len(statements)
     if statements:
@@ -568,19 +766,35 @@ async def run_check(  # ruff: ignore[too-many-arguments, too-many-positional-arg
             raise CheckError(msg)
         if selected is None:
             selected = backend_for(dsn).checker()
-        target = dsn
+        urls = (dsn,) * jobs
         async with AsyncExitStack() as stack:
-            if hooks.scratch is not None:
-                built = await stack.enter_async_context(hooks.scratch(dsn))
-                target = built.url
+            if hooks.own is not None:
+                urls = (await stack.enter_async_context(hooks.own(dsn)),)
+            elif hooks.scratch is not None:
+                # never more workers than statements, so a scratch that builds a database per worker builds no spare
+                workers = min(jobs, len(statements))
+                built = await stack.enter_async_context(hooks.scratch(dsn, workers))
+                # one URL is shared by every worker, several are one per worker
+                urls = built.urls * workers if len(built.urls) == 1 else built.urls[:workers]
                 stats.scratch_seconds = built.seconds
             if hooks.gate is not None:
-                stats.migrations = await hooks.gate(target)
-            outcomes = await describe_all(target, statements, jobs, config.statement_timeout_ms, selected)
+                stats.migrations = await hooks.gate(urls[0])
+            outcomes = await describe_all(urls, statements, config.statement_timeout_ms, selected)
         for site in sites:
             # collection inferred parameters before a backend existed; bind before they are compared
             if site.inference is not None:
                 site.inference.bind(selected)
-            reports.extend(_evaluate(site, outcomes[site.sourcemap.sql], selected))
+            outcome = outcomes[site.sourcemap.sql]
+            reports.extend(_evaluate(site, outcome, selected))
+            if inspect and not isinstance(outcome, (DatabaseError, _Operational)):
+                inspection.append(
+                    _inspection(
+                        site,
+                        outcome,
+                        selected,
+                        tuple(dict.fromkeys(value for value in (dsn, *urls) if value)),
+                        config.root,
+                    )
+                )
     stats.by_rule.update(report.diagnostic.rule for report in reports)
-    return RunResult(reports=reports, sources=sources, statistics=stats)
+    return RunResult(reports=reports, sources=sources, statistics=stats, coverage=coverage, inspection=inspection)

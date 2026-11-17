@@ -218,20 +218,45 @@ class Pool:
         # with any hook set the release is on the caller's path, because the hooks need its loop
         self._hooked = any(hook is not None for hook in (init, setup, reset))
         self._tasks: set[asyncio.Task[None]] = set()
-        self._impl = PoolImpl(
-            resolved,
-            min_size=min_size,
-            max_size=max_size,
-            acquire_timeout=acquire_timeout,
-            idle_timeout=idle_timeout,
-            max_lifetime=max_lifetime,
-            max_queries=max_queries,
-            ping_after=ping_after,
-            reset_query=reset_query,
-        )
+        self._acquire_timeout = acquire_timeout
+
+        def build(target: ConnectOptions) -> PoolImpl:
+            return PoolImpl(
+                target,
+                min_size=min_size,
+                max_size=max_size,
+                acquire_timeout=acquire_timeout,
+                idle_timeout=idle_timeout,
+                max_lifetime=max_lifetime,
+                max_queries=max_queries,
+                ping_after=ping_after,
+                reset_query=reset_query,
+            )
+
+        # Protected hooks for subclasses in other distributions (`rowx_embedded.Database`), which build the native pool
+        # after construction: `_build` makes a native pool for the given options, `_native` is the pool the constructor
+        # makes (`None` defers it), `_inner` holds the built pool, `_started` returns it (starting it first when it
+        # does not exist yet, within `limit` seconds), and `_via_python` sends every query through a checked-out
+        # connection (as hooks do) rather than straight to the native pool.
+        self._build: Callable[[ConnectOptions], PoolImpl] = build
+        self._inner: PoolImpl | None = self._native(resolved)
+        self._via_python = self._hooked
+
+    def _native(self, options: ConnectOptions, /) -> PoolImpl | None:
+        return self._build(options)
+
+    @property
+    def _impl(self) -> PoolImpl:
+        if self._inner is None:
+            msg = "the pool has not started"
+            raise InterfaceError(msg)
+        return self._inner
+
+    async def _started(self, limit: float | None = None) -> PoolImpl:  # ruff: ignore[unused-method-argument]
+        return self._impl
 
     async def open(self) -> None:
-        await self._impl.open()
+        await (await self._started(self._acquire_timeout)).open()
 
     async def close(self, *, timeout: float | None = None) -> None:  # ruff: ignore[async-function-with-timeout]
         await self._impl.close(timeout)
@@ -289,7 +314,7 @@ class Pool:
             view._inner = None  # ruff: ignore[private-member-access]
 
     async def _checkout(self, limit: float | None) -> Connection:
-        impl = await self._impl.acquire(limit)
+        impl = await (await self._started(self._acquire_timeout if limit is None else limit)).acquire(limit)
         conn = Connection(impl, pool=self)
         if not self._hooked:
             return conn
@@ -342,7 +367,7 @@ class Pool:
         arity: int | None,
         shape: ShapeSpec | RowShape | None,
     ) -> list[object]:
-        if self._hooked:
+        if self._via_python:
             async with self.acquire() as conn:
                 return await conn._fetch(sql, params, mask, scalar, limit_one, arity, shape)  # ruff: ignore[private-member-access]
         return await self._impl._fetch(sql, params, mask, scalar, limit_one, arity, native_shape(shape))  # ruff: ignore[private-member-access]
@@ -357,12 +382,12 @@ class Pool:
         batch_size: int,
         shape: ShapeSpec | RowShape | None,
     ) -> RowStreamImpl | PooledStream:
-        if self._hooked:
+        if self._via_python:
             return PooledStream(self, (sql, params, mask, scalar, arity, batch_size, shape))
         return self._impl._stream(sql, params, mask, scalar, arity, batch_size, native_shape(shape))  # ruff: ignore[private-member-access]
 
     async def _execute(self, sql: str, params: list[object]) -> int:
-        if self._hooked:
+        if self._via_python:
             async with self.acquire() as conn:
                 return await conn._execute(sql, params)  # ruff: ignore[private-member-access]
         return await self._impl._execute(sql, params)  # ruff: ignore[private-member-access]

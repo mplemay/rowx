@@ -1,6 +1,7 @@
 [
   {
     "rule": "missing-column",
+    "severity": "error",
     "message": "field \"name\" of `User` has no column",
     "file": "queries.py",
     "line": 4,
@@ -18,6 +19,7 @@
   },
   {
     "rule": "missing-column",
+    "severity": "error",
     "message": "field \"email\" of `User` has no column",
     "file": "queries.py",
     "line": 4,
@@ -35,6 +37,7 @@
   },
   {
     "rule": "unexpected-column",
+    "severity": "error",
     "message": "column 3 \"email\" matches no field of `Small`",
     "file": "queries.py",
     "line": 5,
@@ -50,6 +53,7 @@
   },
   {
     "rule": "duplicate-column",
+    "severity": "error",
     "message": "columns 1 and 2 are both named \"id\"",
     "file": "queries.py",
     "line": 6,
@@ -65,6 +69,7 @@
   },
   {
     "rule": "duplicate-column",
+    "severity": "error",
     "message": "columns 1 and 2 are both unnamed (`?column?`)",
     "file": "queries.py",
     "line": 7,
@@ -80,6 +85,7 @@
   },
   {
     "rule": "column-name-mismatch",
+    "severity": "error",
     "message": "column 1 \"name\" faces field \"id\" of `Pair` (position 1)",
     "file": "queries.py",
     "line": 8,
@@ -97,6 +103,7 @@
   },
   {
     "rule": "column-name-mismatch",
+    "severity": "error",
     "message": "column 2 \"id\" faces field \"name\" of `Pair` (position 2)",
     "file": "queries.py",
     "line": 8,
@@ -114,6 +121,7 @@
   },
   {
     "rule": "arity-mismatch",
+    "severity": "error",
     "message": "the query returns 1 columns but `Pair` takes exactly 2",
     "file": "queries.py",
     "line": 9,
@@ -129,6 +137,7 @@
   },
   {
     "rule": "arity-mismatch",
+    "severity": "error",
     "message": "the query returns 4 columns but `Trailing` takes between 1 and 3",
     "file": "queries.py",
     "line": 10,
@@ -144,6 +153,7 @@
   },
   {
     "rule": "type-mismatch",
+    "severity": "error",
     "message": "column 1 \"id\" is `int` but field \"id\" of `Typed` is `str`",
     "file": "queries.py",
     "line": 11,
@@ -161,6 +171,7 @@
   },
   {
     "rule": "nullability-mismatch",
+    "severity": "error",
     "message": "column 3 \"email\" may be NULL but field \"email\" of `Strict` is `str`",
     "file": "queries.py",
     "line": 12,
@@ -179,6 +190,7 @@
   },
   {
     "rule": "unexpected-column",
+    "severity": "error",
     "message": "column 3 \"other\" matches no field of `Movie`",
     "file": "queries.py",
     "line": 13,
@@ -194,6 +206,7 @@
   },
   {
     "rule": "missing-column",
+    "severity": "error",
     "message": "field \"slug\" of `Doc` has no column",
     "file": "queries.py",
     "line": 18,
@@ -211,6 +224,7 @@
   },
   {
     "rule": "unexpected-column",
+    "severity": "error",
     "message": "column 3 \"?column?\" matches no field of `Small`",
     "file": "queries.py",
     "line": 19,
@@ -226,6 +240,7 @@
   },
   {
     "rule": "unexpected-column",
+    "severity": "error",
     "message": "column 1 \"id!\" matches no field of `Small`",
     "file": "queries.py",
     "line": 20,
@@ -241,6 +256,7 @@
   },
   {
     "rule": "missing-column",
+    "severity": "error",
     "message": "field \"id\" of `Small` has no column",
     "file": "queries.py",
     "line": 20,
@@ -258,6 +274,7 @@
   },
   {
     "rule": "column-name-mismatch",
+    "severity": "error",
     "message": "column 2 \"email\" faces field \"name\" of `Triple` (position 2)",
     "file": "queries.py",
     "line": 21,
@@ -275,6 +292,7 @@
   },
   {
     "rule": "column-name-mismatch",
+    "severity": "error",
     "message": "column 3 \"name\" faces field \"email\" of `Triple` (position 3)",
     "file": "queries.py",
     "line": 21,
@@ -292,6 +310,7 @@
   },
   {
     "rule": "type-mismatch",
+    "severity": "error",
     "message": "column 1 \"id\" is `int` but field \"id\" of `Labeled` is `str`",
     "file": "queries.py",
     "line": 22,
@@ -309,6 +328,7 @@
   },
   {
     "rule": "nullability-mismatch",
+    "severity": "error",
     "message": "column 3 \"email\" may be NULL but field \"email\" of `Labeled` is `str`",
     "file": "queries.py",
     "line": 22,

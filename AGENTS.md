@@ -25,6 +25,10 @@
   - *Files:* [ignores (project)](.gitignore)
   - *Rules:*
     - **Always use all lowercase single-line conventional commit messages (ex: `feat: add query builder`).**
+- **GitHub Actions:** Workflow steps
+  - *Rules:*
+    - A step that is a script lives in `scripts/` and the workflow calls it. A step that runs one command can stay
+      inline.
 
 ## Conventions
 
@@ -114,17 +118,19 @@ rowx is typesafe raw SQL for Python 3.14+ with no ORM. Queries are PEP 750 t-str
 `query[tuple[int, str]](t"...")`, run by a Rust driver built on tokio-postgres. A static checker, `rowx check`,
 validates every query against a live Postgres 18 database by preparing and describing it.
 
-- [Design](docs/design/README.md) is the contract. Never edit it in a feature PR.
-- `docs/design/` is frozen and non-normative until #253's docs work lands; PRs in #253 don't update it.
-- If the spec is ambiguous, don't guess silently: raise it in the PR description and propose a design change.
+- The reference pages under `docs/reference/` are the user contract. A feature PR must not change that contract
+  silently.
+- Describe a spec gap in the PR and update the reference in a follow-up docs PR.
 
 ## Commands (`just`)
 
 | Command | What it does |
 |---|---|
 | `just check` | All gates through `uv run prek run --all-files` |
+| `just release X.Y.Z` | Bump the lockstep version, regenerate the changelog with git-cliff, and open the release pull request |
 | `just fmt` | Format rust, python, and shell through the prek hooks |
-| `just test-rust` | `cargo test --workspace` (DB tests run if `ROWX_TEST_DSN` is set) |
+| `just test-rust` | `cargo test` over the default members, which leave out `rowx-embedded` (DB tests run if `ROWX_TEST_DSN` is set) |
+| `just test-rust-embedded` | `cargo test -p rowx-embedded-host` (builds the Wasmer tree) |
 | `just test-py` | `uv run pytest` |
 | `just db-up` / `just db-down` | Start or stop `postgres:18` |
 | `just bench` | Release build plus `bench/fetch_100k.py` |

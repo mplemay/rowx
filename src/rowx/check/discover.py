@@ -774,7 +774,7 @@ class _Finder(ast.NodeVisitor):
                         IndirectUse(kind="private", name=alias.name, span=self._lines.span(alias)),
                     )
             elif module in ROWX_MODULES and alias.name == "*":
-                self._indirect(node, "`from rowx import *`")
+                self._indirect(node, f"`from {module} import *`")
 
     @override
     def visit_MatchClass(self, node: ast.MatchClass) -> None:
@@ -939,6 +939,7 @@ class _Finder(ast.NodeVisitor):
         self._visit_all(node.keywords)
         if ref.ambiguous:
             return
+        self.result.recognized.append((ref.kind, self._lines.span(node)))
         row_type = subscript.slice if subscript is not None else None
         row_type_span = self._lines.span(row_type) if row_type is not None else None
         if ref.kind == "query_unchecked":
@@ -1101,14 +1102,20 @@ def discover_source(path: Path, data: bytes) -> FileResult:
         end_line = error.end_lineno or line
         end_col = error.end_offset or col + 1
         end_col = max(end_col, col + 1) if end_line == line else end_col
-        return _syntax_error(path, error.msg, Span(line=line, col=col, end_line=end_line, end_col=end_col))
+        result = _syntax_error(path, error.msg, Span(line=line, col=col, end_line=end_line, end_col=end_col))
+        result.source = source
+        return result
     except (ValueError, RecursionError, MemoryError) as error:
-        return _syntax_error(path, f"cannot parse file: {error}", Span(line=1, col=1, end_line=1, end_col=2))
+        result = _syntax_error(path, f"cannot parse file: {error}", Span(line=1, col=1, end_line=1, end_col=2))
+        result.source = source
+        return result
     try:
         finder = _Finder(path, tree, lines)
         finder.visit(tree)
     except RecursionError:
-        return too_deep(path)
+        result = too_deep(path)
+        result.source = source
+        return result
     finder.result.templates = finder.facts()
     finder.result.source = source
     return finder.result

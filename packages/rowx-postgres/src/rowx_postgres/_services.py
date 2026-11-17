@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from os import PathLike
     from types import TracebackType
 
-    from rowx_core.backend import Describe, Failure, MigrationService
+    from rowx_core.backend import CacheDirectory, Describe, Failure, MigrationService
     from rowx_core.migrations import Migration, MigrationResult, MigrationStatus
 
 
@@ -81,6 +81,15 @@ class PostgresCheckerSession(CheckerSession):
                 return "timeout"
             if error.sqlstate == "57P01" or error.sqlstate.startswith("08"):
                 return "lost"
+            if error.sqlstate in {"42501", "55006", "55P03"} or error.sqlstate.startswith((
+                "40",
+                "53",
+                "57",
+                "58",
+                "F0",
+                "XX",
+            )):
+                return "operational"
         return "other"
 
 
@@ -217,8 +226,15 @@ class PostgresMigrations:
 
 
 class PostgresProvisioner(Provisioner):
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, cache: CacheDirectory | None = None) -> None:
+        # a template database lives on the server, so there is nothing to cache
+        del cache
         self._dsn = dsn
+
+    @property
+    @override
+    def identity(self) -> tuple[str, ...]:
+        return ()
 
     @override
     async def ensure_template(

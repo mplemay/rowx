@@ -33,6 +33,14 @@ POLL_LIMIT: Final[int] = 2000
 ADVISORY_KEY: Final[int] = 727_001
 
 
+def run_with_one[T](dsn: str, body: Callable[[Connection], Awaitable[T]]) -> T:
+    async def run() -> T:
+        async with await connect(dsn) as conn:
+            return await body(conn)
+
+    return asyncio.run(run())
+
+
 def run_with_two[T](dsn: str, body: Callable[[Connection, Connection], Awaitable[T]]) -> T:
     # the second connection observes the first through the catalog
     async def run() -> T:
@@ -51,12 +59,12 @@ async def activity(observer: Connection, pid: int) -> tuple[str, str]:
 
 
 def test_ping_works(schema: str) -> None:
-    async def body(conn: Connection, _observer: Connection) -> None:
+    async def body(conn: Connection) -> None:
         await conn.ping()
         await conn.ping()
         assert await query[int](t"SELECT 1").one(conn) == 1
 
-    run_with_two(schema, body)
+    run_with_one(schema, body)
 
 
 def test_ping_on_a_closed_connection_is_an_interface_error(schema: str) -> None:
@@ -88,6 +96,7 @@ def test_ping_on_a_busy_connection_raises_busy(schema: str) -> None:
     run_with_two(schema, body)
 
 
+@pytest.mark.server(needs="sessions")
 def test_reset_rolls_back_an_open_transaction_from_a_raw_begin(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> tuple[str, str, bool]:
         pid = await backend_pid(conn)
@@ -103,6 +112,7 @@ def test_reset_rolls_back_an_open_transaction_from_a_raw_begin(schema: str) -> N
     assert run_with_two(schema, body) == ("idle in transaction", "idle", False)
 
 
+@pytest.mark.server(needs="sessions")
 def test_reset_rolls_back_a_failed_transaction(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> tuple[str, str, int]:
         pid = await backend_pid(conn)
@@ -117,6 +127,7 @@ def test_reset_rolls_back_a_failed_transaction(schema: str) -> None:
     assert run_with_two(schema, body) == ("idle in transaction (aborted)", "idle", 1)
 
 
+@pytest.mark.server(needs="sessions")
 def test_reset_rolls_back_a_savepoint_started_transaction(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> str:
         pid = await backend_pid(conn)
@@ -128,6 +139,7 @@ def test_reset_rolls_back_a_savepoint_started_transaction(schema: str) -> None:
     assert run_with_two(schema, body) == "idle"
 
 
+@pytest.mark.server(needs="sessions")
 def test_reset_sends_no_rollback_when_nothing_is_open(schema: str) -> None:
     # a ROLLBACK outside a transaction makes the server log WARNING 25P01, so the statement text
     # the server saw last is the proof that none was sent
@@ -146,6 +158,7 @@ def test_reset_sends_no_rollback_when_nothing_is_open(schema: str) -> None:
     assert "ROLLBACK" not in last
 
 
+@pytest.mark.server(needs="sessions")
 def test_reset_clears_the_flag_after_a_rollback(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> str:
         pid = await backend_pid(conn)
@@ -158,6 +171,7 @@ def test_reset_clears_the_flag_after_a_rollback(schema: str) -> None:
     assert "ROLLBACK" not in run_with_two(schema, body)
 
 
+@pytest.mark.server(needs="sessions")
 def test_reset_releases_advisory_locks(schema: str) -> None:
     async def body(conn: Connection, observer: Connection) -> tuple[int, int]:
         pid = await backend_pid(conn)
@@ -171,7 +185,7 @@ def test_reset_releases_advisory_locks(schema: str) -> None:
 
 
 def test_reset_clears_listen_registrations_and_sets(schema: str) -> None:
-    async def body(conn: Connection, _observer: Connection) -> tuple[int, int, str, str]:
+    async def body(conn: Connection) -> tuple[int, int, str, str]:
         listening = query[int](t"SELECT count(*)::int4 FROM pg_listening_channels()")
         original = await query[str](t"SHOW work_mem").one(conn)
         await query(t"LISTEN rowx_reset_test").execute(conn)
@@ -181,20 +195,20 @@ def test_reset_clears_listen_registrations_and_sets(schema: str) -> None:
         assert changed == "11MB"
         return listened, await listening.one(conn), original, await query[str](t"SHOW work_mem").one(conn)
 
-    listened, after, original, restored = run_with_two(schema, body)
+    listened, after, original, restored = run_with_one(schema, body)
     assert (listened, after) == (1, 0)
     assert restored == original
 
 
 def test_reset_leaves_prepared_statements_unchanged(schema: str) -> None:
-    async def body(conn: Connection, _observer: Connection) -> tuple[int, int]:
+    async def body(conn: Connection) -> tuple[int, int]:
         count = query[int](t"SELECT count(*)::int4 FROM pg_prepared_statements")
         await query[int](t"SELECT 1").one(conn)
         before = await count.one(conn)
         await conn.reset()
         return before, await count.one(conn)
 
-    before, after = run_with_two(schema, body)
+    before, after = run_with_one(schema, body)
     assert before > 0
     assert before == after
 
@@ -235,6 +249,7 @@ async def assert_drifted(conn: Connection, match: str) -> None:
         await conn.ping()
 
 
+@pytest.mark.server(divergence="encoding")
 def test_a_changed_client_encoding_fails_the_next_call_naming_it(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
@@ -245,6 +260,7 @@ def test_a_changed_client_encoding_fails_the_next_call_naming_it(schema: str) ->
     asyncio.run(run())
 
 
+@pytest.mark.server(divergence="encoding")
 def test_the_statement_that_changes_the_encoding_itself_fails(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
@@ -286,6 +302,7 @@ def test_the_unicode_alias_keeps_the_connection(schema: str, alias: str) -> None
     assert asyncio.run(run()) == 1
 
 
+@pytest.mark.server(divergence="encoding")
 def test_a_change_undone_inside_one_statement_is_never_reported_and_keeps_the_connection(schema: str) -> None:
     async def run() -> int:
         async with await connect(schema) as conn:
@@ -298,6 +315,7 @@ def test_a_change_undone_inside_one_statement_is_never_reported_and_keeps_the_co
     assert asyncio.run(run()) == 1
 
 
+@pytest.mark.server(divergence="encoding")
 def test_the_taint_survives_reset_all_and_a_later_utf8(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
@@ -309,6 +327,7 @@ def test_the_taint_survives_reset_all_and_a_later_utf8(schema: str) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.server(divergence="encoding")
 def test_set_local_client_encoding_in_a_transaction_taints(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
@@ -319,6 +338,7 @@ def test_set_local_client_encoding_in_a_transaction_taints(schema: str) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.server(divergence="encoding")
 def test_rows_of_the_drifting_statement_fail_for_one(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
@@ -329,6 +349,7 @@ def test_rows_of_the_drifting_statement_fail_for_one(schema: str) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.server(divergence="encoding")
 def test_rows_of_the_drifting_statement_fail_for_all(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
@@ -339,6 +360,7 @@ def test_rows_of_the_drifting_statement_fail_for_all(schema: str) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.server(divergence="encoding")
 def test_rows_of_the_drifting_statement_fail_for_a_fetch_stream(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
@@ -349,6 +371,7 @@ def test_rows_of_the_drifting_statement_fail_for_a_fetch_stream(schema: str) -> 
     asyncio.run(run())
 
 
+@pytest.mark.server(divergence="encoding")
 def test_a_body_exception_is_kept_when_the_rollback_fails_on_a_drifted_connection(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
@@ -363,6 +386,7 @@ def test_a_body_exception_is_kept_when_the_rollback_fails_on_a_drifted_connectio
     asyncio.run(run())
 
 
+@pytest.mark.server(divergence="encoding")
 def test_a_clean_exit_on_a_drifted_connection_raises_the_drift_error(schema: str) -> None:
     async def run() -> None:
         async with await connect(schema) as conn:
@@ -389,6 +413,7 @@ def lax_strings_role(schema: str) -> Iterator[str]:
             admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
 
 
+@pytest.mark.server(needs="sessions")
 def test_a_role_default_of_standard_conforming_strings_off_fails_the_first_call(lax_strings_role: str) -> None:
     async def run() -> None:
         async with await connect(lax_strings_role) as conn:
@@ -437,6 +462,7 @@ def test_negative_timeout_is_interface_error() -> None:
         asyncio.run(run())
 
 
+@pytest.mark.server(needs="auth")
 def test_bad_password_is_database_error(schema: str) -> None:
     async def run() -> None:
         await connect(_with_password(schema, "definitely-wrong"))
@@ -526,39 +552,47 @@ def _connect_error(dsn: str) -> None:
         asyncio.run(_connect_and_check(dsn))
 
 
+@pytest.mark.server(needs="tls")
 def test_verify_full_with_the_right_ca_succeeds(ssl_dsn: str) -> None:
     dsn = _kv(ssl_dsn, host="localhost", sslmode="verify-full", sslrootcert=str(CERTS / "ca.crt"))
     assert asyncio.run(_connect_and_check(dsn)) is True
 
 
+@pytest.mark.server(needs="tls")
 def test_verify_full_with_the_wrong_ca_fails(ssl_dsn: str) -> None:
     dsn = _kv(ssl_dsn, host="localhost", sslmode="verify-full", sslrootcert=str(CERTS / "other-ca.crt"))
     _connect_error(dsn)
 
 
+@pytest.mark.server(needs="tls")
 def test_verify_full_against_the_wrong_host_fails(ssl_dsn: str) -> None:
     dsn = _kv(ssl_dsn, host="wrong-host.example", sslmode="verify-full", sslrootcert=str(CERTS / "ca.crt"))
     _connect_error(dsn)
 
 
+@pytest.mark.server(needs="tls")
 def test_verify_ca_against_the_wrong_host_succeeds(ssl_dsn: str) -> None:
     dsn = _kv(ssl_dsn, host="wrong-host.example", sslmode="verify-ca", sslrootcert=str(CERTS / "ca.crt"))
     assert asyncio.run(_connect_and_check(dsn)) is True
 
 
+@pytest.mark.server(needs="tls")
 def test_verify_ca_with_the_wrong_ca_fails(ssl_dsn: str) -> None:
     dsn = _kv(ssl_dsn, sslmode="verify-ca", sslrootcert=str(CERTS / "other-ca.crt"))
     _connect_error(dsn)
 
 
+@pytest.mark.server(needs="tls")
 def test_require_succeeds_without_a_ca(ssl_dsn: str) -> None:
     assert asyncio.run(_connect_and_check(_kv(ssl_dsn, sslmode="require"))) is True
 
 
+@pytest.mark.server(needs="tls")
 def test_require_with_a_ca_verifies_the_chain(ssl_dsn: str) -> None:
     _connect_error(_kv(ssl_dsn, sslmode="require", sslrootcert=str(CERTS / "other-ca.crt")))
 
 
+@pytest.mark.server(needs="tls")
 def test_prefer_encrypts_when_the_server_supports_it(ssl_dsn: str) -> None:
     assert asyncio.run(_connect_and_check(ssl_dsn)) is True
 
@@ -578,15 +612,18 @@ def test_prefer_against_a_non_ssl_server_falls_back_to_plaintext() -> None:
     assert asyncio.run(run()) is False
 
 
+@pytest.mark.server(needs="tls")
 def test_disable_is_plaintext(ssl_dsn: str) -> None:
     assert asyncio.run(_connect_and_check(_kv(ssl_dsn, sslmode="disable"))) is False
 
 
 @pytest.mark.parametrize("key", ["sslcert", "sslkey", "sslcrl"])
+@pytest.mark.server(needs="tls")
 def test_client_certificate_settings_raise_interface_error(ssl_dsn: str, key: str) -> None:
     _connect_error(_kv(ssl_dsn, **{key: "/nonexistent"}))
 
 
+@pytest.mark.server(needs="tls")
 def test_unreadable_sslrootcert_raises_interface_error(ssl_dsn: str) -> None:
     _connect_error(_kv(ssl_dsn, sslmode="verify-full", sslrootcert="/nonexistent/ca.pem"))
 

@@ -1,0 +1,113 @@
+[project]
+site_name = "rowx"
+site_description = "Typesafe raw SQL for Python without an ORM."
+site_url = "https://mplemay.github.io/rowx/"
+repo_url = "https://github.com/mplemay/rowx"
+repo_name = "mplemay/rowx"
+docs_dir = "docs"
+site_dir = "site"
+strict = true
+nav = [
+  { "Home" = "index.md" },
+  { "Start" = [
+    { "First query" = "guide/get-started.md" },
+    { "Check" = "guide/checker.md" },
+    { "From SQLAlchemy" = "from-sqlalchemy.md" },
+  ] },
+  { "Guide" = [
+    { "Overview" = "guide.md" },
+    { "Queries" = "guide/query.md" },
+    { "Parameters" = "guide/parameters.md" },
+    { "Rows" = "guide/rows.md" },
+    { "Executors" = "guide/executors.md" },
+    { "Streaming" = "guide/streaming.md" },
+    { "Errors" = "guide/errors.md" },
+    { "CI" = "guide/ci.md" },
+    { "Migrations" = "guide/migrations.md" },
+    { "Testing" = "guide/testing.md" },
+    { "Embedded Postgres" = "guide/embedded.md" },
+    { "Security" = "guide/security.md" },
+  ] },
+  { "Why rowx" = "why.md" },
+  { "Reference" = [
+    { "Overview" = "reference/index.md" },
+    { "API" = "reference/api.md" },
+    { "Type mapping" = "reference/type-mapping.md" },
+    { "Types" = "types.md" },
+    { "Known limits" = "known-limits.md" },
+    { "Checker" = "reference/checker.md" },
+    { "Nullability" = "reference/nullability.md" },
+    { "Migrations" = "reference/migrations.md" },
+    { "Security" = "reference/security.md" },
+    { "Driver" = "reference/driver.md" },
+    { "Embedded Postgres" = "reference/embedded.md" },
+    { "Packages" = "packages.md" },
+  ] },
+  { "Changelog" = "changelog.md" },
+  { "Contributing" = [
+    { "Architecture" = "contributing/architecture.md" },
+    { "Decisions" = "contributing/decisions.md" },
+    { "Testing" = "contributing/testing.md" },
+    { "Dependencies" = "contributing/dependencies.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.copy",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.plugins.search]
+enabled = true
+
+[project.validation]
+invalid_links = true
+invalid_link_anchors = true
+
+# Keep GitHub-style heading ids, and accept ```python test fences.
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+toc.permalink = true
+toc.slugify.object = "pymdownx.slugs.slugify"
+toc.slugify.kwds.case = "lower"
+pymdownx.arithmatex.generic = true
+pymdownx.betterem = {}
+pymdownx.caret = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.superfences.relaxed_headers = true
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tasklist.custom_checkbox = true
+pymdownx.tilde = {}

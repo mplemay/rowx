@@ -14,11 +14,12 @@ fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 distributions="$(cd "$1" && pwd)"
+rowx_wheels=("$distributions"/rowx-*.whl)
 venv="$(mktemp -d)"
 trap 'rm -rf "$venv"' EXIT
 
 uv venv --python "${PYTHON:-python3}" "$venv"
-uv pip install --refresh --python "$venv/bin/python" --no-index --find-links "$distributions" 'rowx[postgres]'
+uv pip install --refresh --python "$venv/bin/python" "${rowx_wheels[0]}[postgres]" "$distributions"/rowx_core-*.whl "$distributions"/rowx_postgres-*.whl
 
 # run from a scratch directory so the source tree's src/rowx can't shadow the installed wheel
 cd "$venv"

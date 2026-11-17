@@ -192,6 +192,56 @@ def test_indirect_use(source: str) -> None:
 def test_star_import_is_indirect() -> None:
     result = run("from rowx import *\n")
     assert rules(result) == ["indirect-query"]
+    assert result.diagnostics[0].message.startswith("`from rowx import *`")
+
+
+@pytest.mark.parametrize("module", ["rowx", "rowx_core"])
+def test_star_import_names_the_module(module: str) -> None:
+    result = run(f"from {module} import *\n")
+    assert rules(result) == ["indirect-query"]
+    assert result.diagnostics[0].message.startswith(f"`from {module} import *`")
+
+
+def test_rowx_core_package_attribute_is_not_a_query() -> None:
+    result = run('import rowx_core\nrowx_core.core.query[int](t"select 1")\n')
+    assert not result.calls
+    assert not result.diagnostics
+
+
+def test_other_rowx_submodule_attribute_is_not_a_query() -> None:
+    result = run('import rowx\nrowx.errors.query[int](t"select 1")\n')
+    assert not result.calls
+    assert not result.diagnostics
+
+
+def test_import_rowx_core_attribute_is_not_a_query() -> None:
+    result = run('import rowx.core\nrowx.core.query[int](t"select 1")\n')
+    assert not result.calls
+    assert not result.diagnostics
+
+
+def test_query_imported_from_rowx_core_is_not_a_query() -> None:
+    result = run('from rowx.core import query\nquery[int](t"select 1")\n')
+    assert not result.calls
+    assert not result.diagnostics
+
+
+def test_core_imported_from_rowx_is_not_a_query() -> None:
+    result = run('from rowx import core\ncore.query[int](t"select 1")\n')
+    assert not result.calls
+    assert not result.diagnostics
+
+
+def test_import_rowx_core_binds_the_package_name() -> None:
+    result = run('import rowx.core\nrowx.query[int](t"select 1")\n')
+    assert not result.diagnostics
+    [call] = result.calls
+    assert call.kind == "query"
+
+
+def test_star_import_from_rowx_core_is_not_indirect() -> None:
+    result = run("from rowx.core import *\n")
+    assert "indirect-query" not in rules(result)
 
 
 def test_indirect_does_not_hide_other_hits() -> None:

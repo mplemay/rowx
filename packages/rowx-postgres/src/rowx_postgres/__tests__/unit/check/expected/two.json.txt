@@ -1,6 +1,7 @@
 [
   {
     "rule": "sql-error",
+    "severity": "error",
     "message": "boom",
     "file": "app/a.py",
     "line": 1,
@@ -16,6 +17,7 @@
   },
   {
     "rule": "nullability-mismatch",
+    "severity": "error",
     "message": "column 3 \"email\" may be NULL but tuple element 3 is `str`",
     "file": "app/users.py",
     "line": 2,

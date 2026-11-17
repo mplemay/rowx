@@ -35,11 +35,15 @@ class Report:
     field: str | None = None
     # the position of the report among those at one span, which a named row uses to keep the order the design gives
     order: int = 0
+    wider_nullability: bool = False
+    severity: Literal["error", "warning"] = "error"
+    operational: bool = False
 
 
 type _TemplateReason = Literal[
     "NotNullColumn",
     "NullableColumn",
+    "ScanFilterNotNull",
     "NotValidatedConstraint",
     "ForeignOrView",
     "ViewColumn",
@@ -59,6 +63,7 @@ type _TemplateReason = Literal[
 NULL_NOTES: Final[dict[_TemplateReason, str]] = {
     "NullableColumn": "nullable because {d} has no NOT NULL constraint",
     "NotNullColumn": "NOT NULL because {d} is declared NOT NULL",
+    "ScanFilterNotNull": "NOT NULL because a scan filter rejects NULL for {d}",
     "NotValidatedConstraint": "{d} has a NOT NULL constraint that is not validated, so it may still hold NULL",
     "ForeignOrView": "comes from a foreign table or view, which may hold NULL",
     "ViewColumn": "NOT NULL because the definition of the view proves {d} is never NULL",
@@ -87,6 +92,7 @@ def null_reason_note(reason: _TemplateReason, detail: str | None = None, *, colu
         case (
             "NullableColumn"
             | "NotNullColumn"
+            | "ScanFilterNotNull"
             | "NotValidatedConstraint"
             | "ForeignOrView"
             | "ViewColumn"
@@ -177,7 +183,7 @@ def _block(report: Report, source: str | None, width: int, root: Path | None) ->
     span = diagnostic.span
     pad = " " * width
     out = [
-        f"error[{diagnostic.rule}]: {strip_controls(diagnostic.message)}",
+        f"{report.severity}[{diagnostic.rule}]: {strip_controls(diagnostic.message)}",
         f"{pad}--> {_relative(diagnostic.path, root)}:{span.line}:{span.col}",
     ]
     if source is not None and 1 <= span.line <= len(_source_lines(source)):
@@ -215,6 +221,7 @@ def render_json(reports: Iterable[Report], root: Path | None = None) -> str:
         items.append(
             {
                 "rule": diagnostic.rule,
+                "severity": report.severity,
                 "message": diagnostic.message,
                 "file": _relative(diagnostic.path, root),
                 "line": span.line,

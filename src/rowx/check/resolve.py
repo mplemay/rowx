@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from rowx._backend import backend_for
 from rowx.check.model import Diagnostic, QueryCall, Rule, Span
+from rowx.check.walk import literal_prefix
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -675,7 +676,13 @@ def _reject_shadowed(tree: ast.Module, row_type: ast.expr) -> None:
 
 
 def roots_for(config: Config, path: Path) -> tuple[Path, ...]:
-    roots = [root for entry in config.include if (root := (config.root / entry).resolve()).is_dir()]
+    roots: list[Path] = []
+    for entry in config.include:
+        root = (config.root / literal_prefix(entry)).resolve()
+        if root.is_file():
+            root = root.parent
+        if root.is_dir():
+            roots.append(root)
     # a src layout: the directory containing the file's top-level package is also a root
     directory = path.resolve().parent
     start = directory
@@ -688,8 +695,9 @@ def roots_for(config: Config, path: Path) -> tuple[Path, ...]:
 
 # user code is parsed, never imported or executed, and `sys.path` is never read
 class ModuleGraph:
-    def __init__(self) -> None:
+    def __init__(self, boundary: Path | None = None) -> None:
         self._modules: dict[Path, _Module | None] = {}
+        self._boundary = boundary
 
     def load(self, path: Path) -> _Module | None:
         resolved = path.resolve()
@@ -706,6 +714,8 @@ class ModuleGraph:
 
     def find_in(self, base: Path, parts: list[str]) -> _Module | None:
         target = base.joinpath(*parts)
+        if self._boundary is not None and not target.resolve().is_relative_to(self._boundary):
+            return None
         if parts and (candidate := target.with_name(parts[-1] + ".py")).is_file():
             return self.load(candidate)
         if (candidate := target / INIT_FILE).is_file():

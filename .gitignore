@@ -21,3 +21,7 @@ target/
 /.rowx-test-dsn
 .rumdl_cache/
 /.rowx-certs/
+
+# Zensical
+/site/
+/.cache/

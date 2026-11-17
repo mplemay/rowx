@@ -119,8 +119,11 @@ impl CancelTarget {
         // kept to read until the server closes, which also works under TLS (ciphertext is discarded)
         let mut stream = Shared::new(stream);
         let owned = stream.clone();
-        let tls = MakeTlsConnect::<Shared<S>>::make_tls_connect(&mut self.tls.clone(), host)
-            .map_err(|e| Error::Interface(e.to_string()))?;
+        // `MakeRustlsConnect` builds a connector without failing, so its error is uninhabited
+        let tls = match MakeTlsConnect::<Shared<S>>::make_tls_connect(&mut self.tls.clone(), host) {
+            Ok(connect) => connect,
+            Err(error) => match error {},
+        };
         self.token.cancel_query_raw(owned, tls).await?;
         let mut sink = [0_u8; 64];
         while stream.read(&mut sink).await.map_err(|e| io_error(&e))? != 0 {}

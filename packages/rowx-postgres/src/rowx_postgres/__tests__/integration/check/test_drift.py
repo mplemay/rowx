@@ -65,6 +65,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.mark.usefixtures("project")
+@pytest.mark.server(needs="create-database")
 def test_the_drift_gate_does_not_wait_while_another_backend_holds_the_migrator_lock(
     database: tuple[str, str],
     capsys: pytest.CaptureFixture[str],
@@ -96,6 +97,7 @@ def test_the_drift_gate_does_not_wait_while_another_backend_holds_the_migrator_l
         assert row == (1, 0)
 
 
+@pytest.mark.server(needs="create-database")
 def test_config_ignore_missing_lets_a_missing_migration_pass(
     project: Path,
     database: tuple[str, str],
@@ -152,6 +154,7 @@ def unprivileged_dsn(database: tuple[str, str]) -> Iterator[tuple[str, str]]:
 
 
 @pytest.mark.usefixtures("project")
+@pytest.mark.server(needs="create-database")
 def test_a_role_without_select_on_the_history_table_exits_two_with_a_grant_hint(
     database: tuple[str, str],
     unprivileged_dsn: tuple[str, str],

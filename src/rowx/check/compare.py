@@ -51,6 +51,7 @@ class Finding:
     # the indices into a named row's fields that the finding concerns, for the field notes and the JSON `field`
     fields: tuple[int, ...] = ()
     notes: tuple[str, ...] = ()
+    wider_nullability: bool = False
 
 
 def _rules(backend: CheckerBackend | None) -> CheckerBackend:
@@ -79,7 +80,7 @@ def _label(column: ColumnDesc, index: int) -> str:
     return f'column {index + 1} "{column.name}"'
 
 
-def _expected(column: ColumnDesc, rules: CheckerBackend) -> str:
+def expected_type(column: ColumnDesc, rules: CheckerBackend) -> str:
     if column.type_key == "array":
         leaf = _py_result(rules, column.element_key) if column.element_key is not None else "?"
         return f"list[{leaf}]"
@@ -184,6 +185,7 @@ def _nullability_finding(
             help=help_,
             reason=column.reason,
             reason_detail=column.reason_detail,
+            wider_nullability=not column.nullable,
         ),
     ]
 
@@ -206,9 +208,9 @@ def _compare_element(  # ruff: ignore[too-many-arguments, too-many-positional-ar
         return []
     if not _leaf_matches(column, elem, rules):
         if subject is not None:
-            message = f"{_label(column, index)} is `{_expected(column, rules)}` but {subject} is `{_shown(elem)}`"
+            message = f"{_label(column, index)} is `{expected_type(column, rules)}` but {subject} is `{_shown(elem)}`"
         else:
-            expected = _expected(column, rules)
+            expected = expected_type(column, rules)
             message = f"{_label(column, index)}: column type is `{expected}` but the annotation is `{_shown(elem)}`"
         return [
             Finding(
@@ -380,10 +382,8 @@ def compare(
             return findings
 
 
-def _shown_param(evident: ParamType) -> str:
-    return (
-        f"list[{_shown_param(evident.item)}]" if evident.name == "list" and evident.item is not None else evident.name
-    )
+def shown_param(evident: ParamType) -> str:
+    return f"list[{shown_param(evident.item)}]" if evident.name == "list" and evident.item is not None else evident.name
 
 
 # `None` binds NULL for every parameter, and an unknown or unsupported parameter is never reported here
@@ -408,7 +408,7 @@ def _param_finding(  # ruff: ignore[too-many-arguments, too-many-positional-argu
     accepted = ", ".join(f"`{name}`" for name in rules.types[key].accepted_params)
     message = (
         f'parameter ${index + 1} has type "{type_name}", {noun} accepts {accepted}, '
-        f"but the interpolation is `{_shown_param(evident)}`"
+        f"but the interpolation is `{shown_param(evident)}`"
     )
     return Finding(rule="param-type-mismatch", message=message)
 
@@ -426,6 +426,29 @@ def _element_finding(
     return _param_finding(index, type_name, element_key, evident, "whose element", rules)
 
 
+def compare_param_result(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
+    index: int,
+    type_name: str,
+    type_key: str | None,
+    evident: ParamType | None,
+    element_key: str | None = None,
+    backend: CheckerBackend | None = None,
+) -> tuple[Finding | None, bool]:
+    if evident is None or type_key is None:
+        return None, False
+    if evident.name == "None":
+        return None, True
+    rules = _rules(backend)
+    if not _accepts(rules, evident.name, type_key):
+        return _param_finding(index, type_name, type_key, evident, "which", rules), True
+    if type_key == "array":
+        leaf = _array_leaf(evident)
+        if element_key is None or leaf is None:
+            return None, False
+        return _element_finding(index, type_name, element_key, evident, rules), True
+    return None, True
+
+
 def compare_param(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     index: int,
     type_name: str,
@@ -434,11 +457,4 @@ def compare_param(  # ruff: ignore[too-many-arguments, too-many-positional-argum
     element_key: str | None = None,
     backend: CheckerBackend | None = None,
 ) -> Finding | None:
-    if evident is None or type_key is None or evident.name == "None":
-        return None
-    rules = _rules(backend)
-    if not _accepts(rules, evident.name, type_key):
-        return _param_finding(index, type_name, type_key, evident, "which", rules)
-    if type_key == "array" and element_key is not None:
-        return _element_finding(index, type_name, element_key, evident, rules)
-    return None
+    return compare_param_result(index, type_name, type_key, evident, element_key, backend)[0]

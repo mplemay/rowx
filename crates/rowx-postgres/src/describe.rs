@@ -14,6 +14,7 @@ use crate::types::{Matcher, TYPE_TABLE};
 pub enum NullReason {
     NotNullColumn,
     NullableColumn,
+    ScanFilterNotNull,
     NotValidatedConstraint,
     ForeignOrView,
     ViewColumn,
@@ -35,6 +36,7 @@ impl NullReason {
         match self {
             Self::NotNullColumn => "NotNullColumn",
             Self::NullableColumn => "NullableColumn",
+            Self::ScanFilterNotNull => "ScanFilterNotNull",
             Self::NotValidatedConstraint => "NotValidatedConstraint",
             Self::ForeignOrView => "ForeignOrView",
             Self::ViewColumn => "ViewColumn",
@@ -354,9 +356,13 @@ async fn functions_are_unshadowed(client: &Client) -> bool {
         .is_ok_and(|rows| rows.is_empty())
 }
 
-// the promotions to Nullable, per column whether a set operation proves it NOT NULL, and per column whether its
-// computed expression does
-type PlanVerdicts = (Vec<Option<NullReason>>, Vec<bool>, Vec<bool>);
+// Per-column nullability promotions and independent NOT NULL proofs from the plan.
+struct PlanVerdicts {
+    promotions: Vec<Option<NullReason>>,
+    set_operation: Vec<bool>,
+    computed: Vec<bool>,
+    scan_filter: Vec<bool>,
+}
 
 // The EXPLAIN is a simple query, because the extended protocol would demand values for `$n`. It names the
 // statement the server already parsed and never carries SQL text, so what runs is exactly what Parse accepted.
@@ -427,11 +433,12 @@ async fn analyse_plan(
     // the lookup only runs when a function name is what proves a column
     let functions = !explain::needs_function_check(plan, column_count)
         || functions_are_unshadowed(client).await;
-    (
-        explain::walk(plan, column_count, origins),
-        explain::proven_not_null(plan, column_count, &leaves),
-        explain::proven_computed(plan, column_count, functions),
-    )
+    PlanVerdicts {
+        promotions: explain::walk(plan, column_count, origins),
+        set_operation: explain::proven_not_null(plan, column_count, &leaves),
+        computed: explain::proven_computed(plan, column_count, functions),
+        scan_filter: explain::scan_filter_not_null(plan, column_count, origins),
+    }
 }
 
 // The server-side name of the statement just prepared from `sql`. A dropped statement's `Close` is
@@ -496,7 +503,10 @@ async fn plan_verdicts(
         return explain_statement(client, sql, stmt, column_count, origins).await;
     };
     let based = client.prepare_typed(sql, &types).await.ok()?;
-    explain_statement(client, sql, &based, column_count, origins).await
+    let mut verdicts = explain_statement(client, sql, &based, column_count, origins).await?;
+    // A surrogate parameter type can select a different overload and therefore a different scan filter.
+    verdicts.scan_filter.fill(false);
+    Some(verdicts)
 }
 
 // the nullability-relevant part of a column, so a view's definition can be analysed without its types
@@ -556,11 +566,14 @@ async fn refine(
     if slots.is_empty() {
         return Ok(true);
     }
-    if let Some((promotions, proven, computed)) =
-        plan_verdicts(client, sql, stmt, slots.len(), &column_origins).await
-    {
-        for (((slot, promotion), proven), computed) in
-            slots.iter_mut().zip(promotions).zip(proven).zip(computed)
+    if let Some(verdicts) = plan_verdicts(client, sql, stmt, slots.len(), &column_origins).await {
+        for (((((slot, promotion), proven), computed), scan_filter), column) in slots
+            .iter_mut()
+            .zip(verdicts.promotions)
+            .zip(verdicts.set_operation)
+            .zip(verdicts.computed)
+            .zip(verdicts.scan_filter)
+            .zip(stmt.columns())
         {
             if slot.reason == NullReason::Computed && (proven || computed) {
                 slot.nullable = false;
@@ -569,6 +582,16 @@ async fn refine(
                 } else {
                     NullReason::SetOperation
                 };
+            }
+            if slot.reason == NullReason::NullableColumn
+                && scan_filter
+                && matches!(
+                    base_type(column.type_()).kind(),
+                    Kind::Simple | Kind::Enum(_)
+                )
+            {
+                slot.nullable = false;
+                slot.reason = NullReason::ScanFilterNotNull;
             }
             if let Some(reason) = promotion {
                 slot.nullable = true;

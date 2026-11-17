@@ -1,6 +1,7 @@
 [
   {
     "rule": "unexpected-column",
+    "severity": "error",
     "message": "column 1 \"id\" matches no field of `Aliased`",
     "file": "queries.py",
     "line": 4,
@@ -16,6 +17,7 @@
   },
   {
     "rule": "missing-column",
+    "severity": "error",
     "message": "field \"id\" of `Aliased` has no column",
     "file": "queries.py",
     "line": 4,
@@ -33,6 +35,7 @@
   },
   {
     "rule": "duplicate-column",
+    "severity": "error",
     "message": "columns 1 \"id\" and 2 \"user_id\" both map to field \"id\" of `Either`",
     "file": "queries.py",
     "line": 8,
@@ -50,6 +53,7 @@
   },
   {
     "rule": "ambiguous-column",
+    "severity": "error",
     "message": "column 1 \"y\" matches fields \"x\" and \"y\" of `Overlap`",
     "file": "queries.py",
     "line": 9,
@@ -68,6 +72,7 @@
   },
   {
     "rule": "type-mismatch",
+    "severity": "error",
     "message": "column 2 \"name\" is `str` but field \"name\" of `Choices` is `int`",
     "file": "queries.py",
     "line": 10,
@@ -86,6 +91,7 @@
   },
   {
     "rule": "type-mismatch",
+    "severity": "error",
     "message": "column 2 \"name\" is `str` but field \"name\" of `Choices` is `int`",
     "file": "queries.py",
     "line": 11,
@@ -104,6 +110,7 @@
   },
   {
     "rule": "type-mismatch",
+    "severity": "error",
     "message": "column 2 \"score\" is `decimal.Decimal` but field \"score\" of `Score` is `int`",
     "file": "queries.py",
     "line": 13,
@@ -121,6 +128,7 @@
   },
   {
     "rule": "duplicate-column",
+    "severity": "error",
     "message": "columns 1 \"id\" and 2 \"user_id\" both map to field \"id\" of `Row`",
     "file": "queries.py",
     "line": 14,

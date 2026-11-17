@@ -1,6 +1,7 @@
 [
   {
     "rule": "type-mismatch",
+    "severity": "error",
     "message": "column 2 \"item\" is `str` but field \"item\" of `Page[int]` is `int`",
     "file": "queries.py",
     "line": 4,
@@ -19,6 +20,7 @@
   },
   {
     "rule": "type-mismatch",
+    "severity": "error",
     "message": "column 3 \"extra\" is `str` but field \"extra\" of `Child[int]` is `int`",
     "file": "queries.py",
     "line": 6,
@@ -37,6 +39,7 @@
   },
   {
     "rule": "type-mismatch",
+    "severity": "error",
     "message": "column 2 \"name\": column type is `str` but the annotation is `int`",
     "file": "queries.py",
     "line": 7,

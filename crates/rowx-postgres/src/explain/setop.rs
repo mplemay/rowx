@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::{Marked, Origin, children, mark_joins, outputs, str_key};
+use super::{Marked, Origin, children, is_plain_ident, mark_joins, outputs, str_key};
 
 /// The base columns the plan proves NOT NULL, looked up in the catalog by the caller.
 pub type NotNullLeaves = HashSet<Origin>;
@@ -102,15 +102,6 @@ pub fn leaf_columns(plan: &Value) -> Vec<Origin> {
     found.sort();
     found.dedup();
     found
-}
-
-// only a plain unquoted lowercase identifier is trusted to be the attribute name
-fn is_plain_ident(text: &str) -> bool {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 fn plain_column<'a>(expr: &'a str, alias: &str) -> Option<&'a str> {

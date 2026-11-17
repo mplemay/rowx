@@ -81,7 +81,13 @@ def test_money_is_read_through_a_query(schema: str) -> None:
 # the same text means different minor units after a SET
 @pytest.mark.parametrize(
     ("locale", "scale"),
-    [("C", 2), ("en_US.utf8", 2), ("ja_JP.UTF-8", 0), ("ja_JP.utf8", 0)],
+    [
+        ("C", 2),
+        ("en_US.utf8", 2),
+        # the engine has no locale data, so lc_monetary stays C
+        pytest.param("ja_JP.UTF-8", 0, marks=pytest.mark.server(divergence="locale")),
+        pytest.param("ja_JP.utf8", 0, marks=pytest.mark.server(divergence="locale")),
+    ],
 )
 def test_minor_units_follow_the_session_locale_without_a_stored_scale(schema: str, locale: str, scale: int) -> None:
     async def body(conn: Connection) -> tuple[object, object, object]:
