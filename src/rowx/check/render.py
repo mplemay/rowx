@@ -231,11 +231,8 @@ def render_json(reports: Iterable[Report], root: Path | None = None) -> str:
             "notes": list(diagnostic.notes),
             "help": report.help,
             "sqlstate": report.sqlstate,
-        }
-        # only a backend with a native error name adds it, so PostgreSQL output is unchanged
-        if report.code is not None:
-            item["code"] = report.code
-        item |= {
+            # only a backend with a native error name adds it, so PostgreSQL output is unchanged
+            **({"code": report.code} if report.code is not None else {}),
             "sql": report.sql,
             "column_index": report.column_index,
             "field": report.field,

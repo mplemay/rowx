@@ -9,6 +9,7 @@ from rowx_core import Compiler
 from rowx_core.backend import CheckerBackend, CheckerSession
 from rowx_core.errors import DatabaseError, InterfaceError
 
+from rowx._backend import backend_for
 from rowx.check.cli import main
 from rowx.check.config import load_config
 from rowx.check.runner import CheckError, RunResult, describe_all, redact, run_check
@@ -139,8 +140,6 @@ def test_sql_errors_are_outcomes_not_failures(monkeypatch: pytest.MonkeyPatch, f
 def _sql_error_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: CheckerBackend, error: DatabaseError
 ) -> Report:
-    from rowx._backend import backend_for  # ruff: ignore[import-outside-top-level]
-
     path = tmp_path / "site.py"
     path.write_text('from rowx import query\nquery[int](t"SELECT 1")\n', encoding="utf-8")
 
@@ -401,7 +400,6 @@ def test_a_file_nested_too_deeply_does_not_hide_the_others(tmp_path: Path, capsy
 def test_operational_sql_failure_survives_cli_ignore_all(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake_backend: CheckerBackend
 ) -> None:
-    from rowx._backend import backend_for  # ruff: ignore[import-outside-top-level]
     from rowx.check.runner import _Operational  # ruff: ignore[import-outside-top-level]
 
     path = tmp_path / "site.py"
