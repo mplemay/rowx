@@ -87,8 +87,10 @@ See [Embedded Postgres](guide/embedded.md).
 0.3.0 published the split as three lockstep wheels. `rowx-core` is pure Python, imports as `rowx_core`, and has
 no runtime dependencies. `rowx-postgres` imports as `rowx_postgres`, its native module is `rowx_postgres._core`, and
 it depends only on matching `rowx-core`. `rowx` is pure Python, imports as `rowx`, and depends on matching
-`rowx-core`. The `postgres` extra installs matching `rowx-postgres`. This tree is version 0.4.2. 0.4.2 adds
-`rowx-embedded` in lockstep with the others. It is not on PyPI until the `v0.4.2` tag is published.
+`rowx-core`. The `postgres` extra installs matching `rowx-postgres`. 0.4.2 added `rowx-embedded` in lockstep
+with the others.
+
+This tree is version 0.4.2.
 
 `rowx` re-exports the query API of `rowx_core`. `rowx.core` re-exports the `rowx_core` names that `rowx` and
 `rowx.errors` do not already export. `rowx.postgres` re-exports `rowx_postgres` and still needs the `postgres` extra.
