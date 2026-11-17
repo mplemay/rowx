@@ -64,3 +64,14 @@ docs:
 # build the documentation site in strict mode
 docs-build:
     uv run --group docs zensical build --clean --strict
+
+# regenerate docs/changelog.md. pass the upcoming tag while preparing a release: just changelog vX.Y.Z
+changelog tag="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=(--offline -o docs/changelog.md)
+    if [[ -n "{{ tag }}" ]]; then
+      args+=(--tag "{{ tag }}")
+    fi
+    uvx --from git-cliff==2.14.2 git-cliff "${args[@]}"
+    uv run rumdl fmt docs/changelog.md

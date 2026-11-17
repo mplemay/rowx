@@ -38,6 +38,18 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: scripts/validate-release.sh
 
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
+        with:
+          tool: git-cliff@2.14.2
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Check the changelog
+        run: scripts/check-changelog.sh
+
   build-wheels:
     name: Wheel (${{ matrix.name }})
     needs: validate
@@ -668,3 +680,29 @@ jobs:
 
       - name: Publish rowx
         run: uv publish --trusted-publishing always "dist/rowx/*"
+
+  github-release:
+    name: GitHub release
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      needs.publish-rowx.result == 'success'
+    needs: publish-rowx
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create or update the GitHub release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
+        with:
+          tool: git-cliff@2.14.2
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: scripts/publish-github-release.sh
