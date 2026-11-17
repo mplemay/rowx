@@ -66,6 +66,10 @@ class _Release(Protocol):
 
     def render_changelog(self, root: Path, *, top_date: str | None = None) -> str: ...
 
+    def _link_open_pull_request(self, text: str, number: int) -> str: ...
+
+    def _pull_request_number(self, root: Path) -> int | None: ...
+
 
 def _load_release() -> _Release:
     spec = spec_from_file_location(RELEASE_MODULE, SCRIPT)
@@ -196,6 +200,48 @@ def test_replace_top_heading_date_changes_only_the_first_date() -> None:
 
 def test_release_committer_date_is_noon_utc() -> None:
     assert RELEASE.release_committer_date(RELEASE_DAY) == RELEASE_INSTANT
+
+
+UNRELEASED_CHANGELOG: Final[str] = (
+    "# Changelog\n\n"
+    "## [unreleased]\n\n"
+    "### Bug fixes\n\n"
+    "- Accept the factored embedded extra marker\n\n"
+    "## [0.4.2](https://example.com) - 2026-11-16\n\n"
+    "- Drop the deprecated pep 639 license classifier"
+    " ([#329](https://github.com/mplemay/rowx/pull/329))\n"
+)
+LINKED_BULLET: Final[str] = (
+    "- Accept the factored embedded extra marker ([#359](https://github.com/mplemay/rowx/pull/359))\n"
+)
+
+
+def test_open_pull_request_links_only_unreleased_bullets() -> None:
+    linked = RELEASE._link_open_pull_request(UNRELEASED_CHANGELOG, 359)
+    assert LINKED_BULLET in linked
+    assert "([#329](https://github.com/mplemay/rowx/pull/329))" in linked
+    assert RELEASE._link_open_pull_request(linked, 359) == linked
+
+
+def test_actions_pull_request_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/359/merge")
+    assert RELEASE._pull_request_number(REPO) == 359
+
+
+def test_push_event_keeps_commit_message_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+    monkeypatch.delenv("GITHUB_REF", raising=False)
+    assert RELEASE._pull_request_number(REPO) is None
+
+
+def test_pull_request_number_ignores_other_repositories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/359/merge")
+    assert RELEASE._pull_request_number(tmp_path) is None
 
 
 def test_virtual_tag_render_matches_the_tagged_commit(tmp_path: Path) -> None:

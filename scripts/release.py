@@ -19,6 +19,10 @@ VERSION_PATTERN: Final = compile_regex(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[
 DAY: Final = compile_regex(r"^\d{4}-\d{2}-\d{2}$")
 # the first dated release heading; later headings keep the dates git-cliff gave their tags
 HEADING_DATE: Final = compile_regex(r"^(## \[[^\]]+\].*) - \d{4}-\d{2}-\d{2}$", flags=MULTILINE)
+UNRELEASED_HEADING: Final[str] = "## [unreleased]\n"
+NEXT_RELEASE_HEADING: Final[str] = "\n## ["
+PULL_REQUEST_URL: Final[str] = "https://github.com/mplemay/rowx/pull/"
+PULL_REF_PARTS: Final[int] = 4
 # noon UTC stays on the same calendar day in the timezones git-cliff and GitHub Actions use
 RELEASE_COMMIT_TIME: Final[str] = "T12:00:00Z"
 VERSION_LINE_FILES: Final[tuple[str, ...]] = (
@@ -208,6 +212,9 @@ def render_changelog(root: Path, *, top_date: str | None = None) -> str:
         # a virtual --tag is dated with the clock; the tagged commit's noon UTC time is stable
         day = top_date if top_date is not None else _committer_utc_day(root)
         text = replace_top_heading_date(text, day)
+    # squash merge appends " (#n)" to the pull request title; branch commits do not have it yet
+    if (number := _pull_request_number(root)) is not None:
+        text = _link_open_pull_request(text, number)
     return _format_changelog(text)
 
 
@@ -343,6 +350,67 @@ def _committer_utc_day(root: Path) -> str:
         message = f"unexpected committer time {seconds}"
         raise SystemExit(message) from None
     return datetime.fromtimestamp(instant, UTC).date().isoformat()
+
+
+def _pull_request_number(root: Path) -> int | None:
+    if root.resolve() != ROOT.resolve():
+        return None
+    event = environ.get("GITHUB_EVENT_NAME")
+    if event == "pull_request":
+        return _actions_pull_request()
+    if event == "push":
+        return None
+    return _branch_pull_request(root)
+
+
+def _actions_pull_request() -> int | None:
+    parts = environ.get("GITHUB_REF", "").split("/")
+    # refs/pull/<number>/merge
+    if len(parts) != PULL_REF_PARTS or parts[0] != "refs" or parts[1] != "pull" or not parts[2].isdigit():
+        return None
+    return int(parts[2])
+
+
+def _branch_pull_request(root: Path) -> int | None:
+    if (executable := which("gh")) is None:
+        return None
+    completed = run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [executable, "pr", "view", "--json", "number", "--jq", ".number"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    number = completed.stdout.strip()
+    if not number.isdigit():
+        return None
+    return int(number)
+
+
+def _link_open_pull_request(text: str, number: int) -> str:
+    start = text.find(UNRELEASED_HEADING)
+    if start < 0:
+        return text
+    body = start + len(UNRELEASED_HEADING)
+    end = text.find(NEXT_RELEASE_HEADING, body)
+    if end < 0:
+        end = len(text)
+    return text[:body] + _link_bullets(text[body:end], number) + text[end:]
+
+
+def _link_bullets(section: str, number: int) -> str:
+    link = f"([#{number}]({PULL_REQUEST_URL}{number}))"
+    lines: list[str] = []
+    for line in section.splitlines(keepends=True):
+        content = line.rstrip("\n")
+        if content.startswith("- ") and PULL_REQUEST_URL not in content:
+            newline = "\n" if line.endswith("\n") else ""
+            lines.append(f"{content} {link}{newline}")
+            continue
+        lines.append(line)
+    return "".join(lines)
 
 
 def _local_tag_commit(root: Path, version: str) -> str | None:
