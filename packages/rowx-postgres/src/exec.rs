@@ -170,13 +170,7 @@ pub fn driver_shape<'a>(
             arity,
             ..Shape::default()
         },
-        |named| Shape {
-            mask: Some(named.data().nullable()),
-            limit_one,
-            fields: Some(named.data().specs()),
-            matching: named.data().matching(),
-            ..Shape::default()
-        },
+        |named| named.data().shape(limit_one),
     )
 }
 

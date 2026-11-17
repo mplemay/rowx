@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString, PyTuple};
 use rowx_core::row_shape::{Mapping, column_name};
 
-use crate::errors::{interface_error, row_construct_error};
+use crate::errors::{interface_error, row_construct_failed};
 use crate::shape::{Form, RowShapeData};
 
 /// Bit 0 of a column's flags: the column is nullable.
@@ -236,24 +236,8 @@ fn field_out_of_range(py: Python<'_>) -> PyErr {
 // are not the row's fault and pass through
 fn wrap(py: Python<'_>, err: PyErr, shape: &RowShapeData, row_index: usize) -> PyErr {
     if err.is_instance_of::<PyException>(py) {
-        construct_error(py, err, shape.type_name(), row_index)
+        row_construct_failed(py, err, shape.type_name(), row_index)
     } else {
         err
     }
-}
-
-/// A named row whose constructor or validator raised `cause`, an `Exception`.
-#[must_use]
-pub fn construct_error(py: Python<'_>, cause: PyErr, type_name: &str, row_index: usize) -> PyErr {
-    let detail = cause.value(py).repr().map_or_else(
-        |_| "<unrepresentable>".to_owned(),
-        |r| r.to_string_lossy().into_owned(),
-    );
-    row_construct_error(
-        py,
-        &format!("{type_name} row {row_index}: {detail}"),
-        type_name,
-        row_index,
-        cause,
-    )
 }

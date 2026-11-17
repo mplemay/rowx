@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 use rowx_core::row_shape::{
-    FieldSpec, Matching, Names, ShapeError, ShapeErrors, column_name, map_columns,
+    FieldSpec, Matching, Names, Shape, ShapeError, ShapeErrors, column_name, map_columns,
 };
 
 use crate::row::nullable_mask;
@@ -123,6 +123,17 @@ impl RowShapeData {
     #[must_use]
     pub const fn matching(&self) -> Matching {
         self.matching
+    }
+
+    #[must_use]
+    pub fn shape(&self, limit_one: bool) -> Shape<'_> {
+        Shape {
+            mask: Some(self.nullable()),
+            limit_one,
+            fields: Some(self.specs()),
+            matching: self.matching(),
+            ..Shape::default()
+        }
     }
 
     #[must_use]
@@ -391,7 +402,9 @@ fn sole_field(name: &str, specs: &[FieldSpec]) -> Option<usize> {
 /// [`ShapeIssueData`]. A pyclass names its module as a literal, so each extension declares its own
 /// thin wrappers.
 ///
-/// The caller needs `pyo3` and `std::sync::Arc` in scope paths used below (`pyo3` as a dependency).
+/// Also declares the `map_columns` pyfunction, which returns `ShapeIssue`s. The macro uses absolute
+/// `::pyo3` and `::std` paths, so the calling crate needs only a direct `pyo3` dependency (and
+/// `rowx-py-core`).
 #[macro_export]
 macro_rules! declare_row_classes {
     ($module:literal) => {
@@ -489,6 +502,24 @@ macro_rules! declare_row_classes {
             const fn actual(&self) -> Option<usize> {
                 self.0.actual
             }
+        }
+
+        /// Maps result columns onto fields without a `RowShape`, for the checker.
+        ///
+        /// Returns the field each column fills (`None` for a pass-through) and every violation. A by-name
+        /// row that breaks a rule still reports the columns that match exactly one field, so the checker
+        /// can keep judging their types; a positional row maps nothing once it has an error.
+        // pyo3 cannot extract a borrowed slice of `String`, so the list is taken by value
+        #[allow(clippy::needless_pass_by_value)]
+        #[::pyo3::pyfunction(name = "map_columns")]
+        #[must_use]
+        pub fn map_columns_py(
+            columns: Vec<String>,
+            fields: Vec<(Option<Vec<String>>, bool)>,
+            positional: bool,
+        ) -> (Vec<Option<usize>>, Vec<ShapeIssue>) {
+            let (mapping, issues) = $crate::shape::map_columns_data(&columns, fields, positional);
+            (mapping, issues.into_iter().map(ShapeIssue).collect())
         }
     };
 }
