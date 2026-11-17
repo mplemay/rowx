@@ -14,6 +14,5 @@ workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 generated="$workdir/changelog.md"
 
-uv run --frozen --no-sync git-cliff --offline -o "$generated"
-uv run --frozen --no-sync rumdl fmt "$generated"
+uv run --frozen --no-sync python scripts/release.py render-changelog -o "$generated"
 diff -u docs/changelog.md "$generated"

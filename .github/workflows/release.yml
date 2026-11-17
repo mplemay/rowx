@@ -34,7 +34,8 @@ jobs:
       - name: Validate version and tag
         id: version
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          # a v* ref publishes, including a workflow_dispatch of that tag; a branch dispatch stays a dry run
+          EVENT_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && 'push' || github.event_name }}
           TAG_NAME: ${{ github.ref_name }}
         run: scripts/validate-release.sh
 
@@ -470,7 +471,7 @@ jobs:
 
   publish-core:
     name: Publish rowx-core
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v')
     needs:
       [
         validate,
@@ -523,7 +524,7 @@ jobs:
   publish-postgres:
     name: Publish rowx-postgres
     if: >-
-      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(github.ref, 'refs/tags/v') &&
       needs.publish-core.result == 'success'
     needs: publish-core
     runs-on: ubuntu-latest
@@ -588,7 +589,7 @@ jobs:
   publish-embedded:
     name: Publish rowx-embedded
     if: >-
-      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(github.ref, 'refs/tags/v') &&
       needs.publish-postgres.result == 'success'
     needs: [validate, check-distributions, publish-postgres]
     runs-on: ubuntu-latest
@@ -620,7 +621,7 @@ jobs:
   publish-rowx:
     name: Publish rowx
     if: >-
-      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(github.ref, 'refs/tags/v') &&
       needs.publish-postgres.result == 'success' && needs.publish-embedded.result == 'success'
     needs: [publish-postgres, publish-embedded]
     runs-on: ubuntu-latest
@@ -680,7 +681,7 @@ jobs:
   github-release:
     name: GitHub release
     if: >-
-      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(github.ref, 'refs/tags/v') &&
       needs.publish-rowx.result == 'success'
     needs: publish-rowx
     runs-on: ubuntu-latest

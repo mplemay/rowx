@@ -25,6 +25,10 @@
   - *Files:* [ignores (project)](.gitignore)
   - *Rules:*
     - **Always use all lowercase single-line conventional commit messages (ex: `feat: add query builder`).**
+- **GitHub Actions:** Workflow steps
+  - *Rules:*
+    - A step that is a script lives in `scripts/` and the workflow calls it. A step that runs one command can stay
+      inline.
 
 ## Conventions
 
@@ -123,6 +127,7 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Command | What it does |
 |---|---|
 | `just check` | All gates through `uv run prek run --all-files` |
+| `just release X.Y.Z` | Bump the lockstep version, regenerate the changelog with git-cliff, and open the release pull request |
 | `just fmt` | Format rust, python, and shell through the prek hooks |
 | `just test-rust` | `cargo test` over the default members, which leave out `rowx-embedded` (DB tests run if `ROWX_TEST_DSN` is set) |
 | `just test-rust-embedded` | `cargo test -p rowx-embedded-host` (builds the Wasmer tree) |
