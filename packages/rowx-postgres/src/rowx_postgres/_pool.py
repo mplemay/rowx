@@ -1,7 +1,13 @@
 import asyncio
-from collections.abc import Awaitable, Callable, Generator, Sequence
-from typing import TYPE_CHECKING, Any, Final, Self
+from collections.abc import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Final, Self
 
+from rowx_core._pool import (  # ruff: ignore[import-private-name]
+    BaseAcquire,
+    BasePooledStream,
+    BasePoolTransaction,
+    StreamArgs as BaseStreamArgs,
+)
 from rowx_core.errors import InterfaceError
 
 from rowx_postgres._compiler import COMPILER
@@ -9,17 +15,17 @@ from rowx_postgres._connection import RESET_QUERY, Connection
 from rowx_postgres._core import Pool as PoolImpl
 from rowx_postgres._options import ConnectOptions
 from rowx_postgres._shape import native_shape
+from rowx_postgres._transaction import Transaction
 
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from rowx_core import Compiler, ShapeSpec, StreamHandle
+    from rowx_core import Compiler, ShapeSpec
 
     from rowx_postgres._core import Connection as ConnectionImpl, RowShape, RowStream as RowStreamImpl
-    from rowx_postgres._transaction import Transaction
 
 type Hook = Callable[[Connection], Awaitable[None]]
-type StreamArgs = tuple[str, list[object], Sequence[int] | None, bool, int | None, int, ShapeSpec | RowShape | None]
+type StreamArgs = BaseStreamArgs[RowShape]
 
 DEFAULT_MAX_SIZE: Final[int] = 10
 DEFAULT_ACQUIRE_TIMEOUT: Final[float] = 30.0
@@ -59,124 +65,20 @@ def validate(  # ruff: ignore[too-many-arguments]
         raise ValueError(msg)
 
 
-class Acquire:
-    def __init__(self, pool: Pool, timeout: float | None, /) -> None:
-        self._pool = pool
-        self._timeout = timeout
-        self._conn: Connection | None = None
-
-    def __await__(self) -> Generator[Any, Any, Connection]:
-        return self._pool._checkout(self._timeout).__await__()  # ruff: ignore[private-member-access]
-
-    async def __aenter__(self) -> Connection:
-        self._conn = await self._pool._checkout(self._timeout)  # ruff: ignore[private-member-access]
-        return self._conn
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        conn, self._conn = self._conn, None
-        if conn is not None:
-            await self._pool._finish(conn)  # ruff: ignore[private-member-access]
+class Acquire(BaseAcquire[Connection]):
+    pass
 
 
-class PoolTransaction:
+class PoolTransaction(BasePoolTransaction[Connection, Transaction]):
     def __init__(self, pool: Pool, /, *, isolation: str | None, readonly: bool, deferrable: bool) -> None:
-        self._pool = pool
-        self._isolation = isolation
-        self._readonly = readonly
-        self._deferrable = deferrable
-        self._entered = False
-        self._conn: Connection | None = None
-        self._tx: Transaction | None = None
-
-    async def __aenter__(self) -> Transaction:
-        # set before any await, so a concurrent or repeated entry can't check out a second connection
-        if self._entered:
-            msg = "a transaction can only be entered once"
-            raise InterfaceError(msg)
-        self._entered = True
-        conn = await self._pool._checkout(None)  # ruff: ignore[private-member-access]
-        tx = conn.transaction(isolation=self._isolation, readonly=self._readonly, deferrable=self._deferrable)
-        try:
-            await tx.__aenter__()
-        except BaseException:
-            # a failed or cancelled BEGIN must not leak the checkout; release resets the connection
-            await self._pool._finish(conn)  # ruff: ignore[private-member-access]
-            raise
-        self._conn = conn
-        self._tx = tx
-        return tx
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        conn, tx = self._conn, self._tx
-        self._conn = self._tx = None
-        if conn is None or tx is None:
-            return
-        try:
-            await tx.__aexit__(exc_type, exc, tb)
-        finally:
-            # the connection goes back even when the ending statement raised
-            await self._pool._finish(conn)  # ruff: ignore[private-member-access]
+        super().__init__(
+            pool,
+            lambda conn: conn.transaction(isolation=isolation, readonly=readonly, deferrable=deferrable),
+        )
 
 
-class PooledStream:
-    # a stream on a pool that has hooks: the hooks need the caller's loop, so Python acquires
-    def __init__(self, pool: Pool, args: StreamArgs, /) -> None:
-        self._pool = pool
-        self._args = args
-        self._conn: Connection | None = None
-        self._inner: StreamHandle | None = None
-        self._closed = False
-
-    async def _next(self) -> list[object]:
-        if self._closed:
-            return []
-        if self._inner is None:
-            self._conn = await self._pool._checkout(None)  # ruff: ignore[private-member-access]
-            if self._stopped():
-                await self._give_back()
-                return []
-            self._inner = self._conn._stream(*self._args)  # ruff: ignore[private-member-access]
-        try:
-            batch = await self._inner._next()  # ruff: ignore[private-member-access]
-        except BaseException:
-            self._closed = True
-            await self._give_back()
-            raise
-        if not batch:
-            self._closed = True
-            await self._give_back()
-        return batch
-
-    def _stopped(self) -> bool:
-        # close() may run while the first _next is still waiting for a connection
-        return self._closed
-
-    def close(self) -> None:
-        self._closed = True
-        if self._inner is not None:
-            self._inner.close()
-        if self._conn is not None:
-            conn, self._conn = self._conn, None
-            self._pool._release_soon(conn)  # ruff: ignore[private-member-access]
-
-    @property
-    def rows_affected(self) -> int | None:
-        return None if self._inner is None else self._inner.rows_affected
-
-    async def _give_back(self) -> None:
-        conn, self._conn = self._conn, None
-        if conn is not None:
-            await self._pool._finish(conn)  # ruff: ignore[private-member-access]
+class PooledStream(BasePooledStream[Connection]):
+    pass
 
 
 class Pool:
