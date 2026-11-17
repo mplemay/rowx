@@ -69,7 +69,7 @@ docs:
 docs-build:
     uv run --group docs zensical build --clean --strict
 
-# regenerate docs/changelog.md from feat, fix, perf, and breaking commits
+# regenerate docs/changelog.md from the tagged releases
 changelog:
     #!/usr/bin/env bash
     set -euo pipefail

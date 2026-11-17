@@ -267,12 +267,28 @@ def _rowx_requires(*requirements: str) -> tuple[str, ...]:
 EMBEDDED_POSTGRES: Final[str] = f"{POSTGRES_PIN} ; extra == 'embedded'"
 POSTGRES_EXTRA_REQUIREMENT: Final[str] = f"{POSTGRES_PIN} ; extra == 'postgres'"
 ALL_CLAUSES: Final[tuple[str, ...]] = (DARWIN_CLAUSE, LINUX_AARCH64_CLAUSE, LINUX_X86_CLAUSE)
+# uv 0.13.9 factors the repeated linux machines into one parenthesized or
+FACTORED_EMBEDDED_MARKER: Final[str] = (
+    "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'embedded'"
+    " or (platform_machine == 'aarch64' or platform_machine == 'x86_64')"
+    " and sys_platform == 'linux' and extra == 'embedded'"
+)
 
 
 def test_rowx_wheel_accepts_reordered_embedded_clauses(tmp_path: Path) -> None:
     requires = _rowx_requires(
         POSTGRES_EXTRA_REQUIREMENT,
         _embedded_requirement(*reversed(ALL_CLAUSES)),
+        PYTEST_REQUIREMENT,
+        EMBEDDED_POSTGRES,
+    )
+    VALIDATE_WHEEL(_write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, requires=requires)))
+
+
+def test_rowx_wheel_accepts_factored_embedded_marker(tmp_path: Path) -> None:
+    requires = _rowx_requires(
+        POSTGRES_EXTRA_REQUIREMENT,
+        f"{EMBEDDED_PIN} ; {FACTORED_EMBEDDED_MARKER}",
         PYTEST_REQUIREMENT,
         EMBEDDED_POSTGRES,
     )
