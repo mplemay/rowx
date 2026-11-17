@@ -5,6 +5,9 @@ each checked statement against a live Postgres 18 database, describes it, and co
 imports or executes application code. A query is checked at its construction site, including a declaration nothing
 calls. Runtime compilation uses the executor you pass. The checker does not infer that flow.
 
+Planned ([#334](https://github.com/mplemay/rowx/issues/334)): it can also check against a SQLite database (see the
+SQLite URL note under [Config](#config)).
+
 The checked import roots are `from rowx import query` and `from rowx_core import query`.
 
 ## CLI
@@ -98,15 +101,13 @@ the database URL already sets. Unknown keys are a config error (exit 2), with a 
 URL precedence is `--database-url`, then the configured environment variable. The implementation is
 `src/rowx/check/config.py`.
 
-### SQLite URLs (planned)
-
 Planned ([#334](https://github.com/mplemay/rowx/issues/334)): `--database-url` accepts a SQLite target. SQLite needs
 the `rowx[sqlite]` extra.
 
 - Accepted forms are `sqlite:///relative.db`, `sqlite:////abs/path.db` and `sqlite::memory:`. The path is
   percent-decoded. A Windows drive letter is written `sqlite:///C:/x.db`. An empty path is rejected.
-- Rejected, with a hint showing the `sqlite:///` form: `sqlite:path`, a bare path, `sqlite://host/...`, `file:` URIs,
-  and the query options `mode=memory`, `immutable`, `vfs` and `cache=shared`.
+- Rejected, with a hint showing the `sqlite:///` form: `sqlite:path`, a bare file path such as `app.db`,
+  `sqlite://host/...`, `file:` URIs, and the query options `mode=memory`, `immutable`, `vfs` and `cache=shared`.
 - A bare string without a scheme stays a PostgreSQL keyword DSN.
 - The checker opens a file read-only (`mode=ro`).
 - `sqlite::memory:` implies `--scratch` and skips the drift gate. `rowx database` and `rowx migrate` reject it.
@@ -414,6 +415,10 @@ migration still fails. Implementation: `src/rowx/check/drift.py`.
 the migrations, and checks against that. The temporary database is dropped at the end, including on cancellation.
 The connecting role needs `CREATEDB`. The drift gate does not run in this mode. Implementation:
 `src/rowx/check/scratch.py`.
+
+Planned ([#334](https://github.com/mplemay/rowx/issues/334)): for a `sqlite::memory:` URL, scratch applies the
+migrations to the in-memory database. There is no server, no temporary database to create or drop and no `CREATEDB`.
+Like an explicit `--scratch`, it needs `[tool.rowx.migrate]` (exit 2 otherwise).
 
 ## Module map
 

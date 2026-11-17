@@ -418,7 +418,7 @@ Error
 ├── InterfaceError
 │   ├── ConnectionBusyError
 │   └── PoolTimeoutError
-├── DatabaseError           # .sqlstate .message .detail .hint .position
+├── DatabaseError           # .sqlstate .message .detail .hint .position .code (planned)
 ├── RowNotFound
 ├── RowShapeError
 ├── DecodeError
@@ -443,9 +443,10 @@ subclasses are not provided.
 
 Planned ([#356](https://github.com/mplemay/rowx/issues/356)): `DatabaseError.sqlstate` keeps its 5-character contract
 for every backend. `DatabaseError` gains an optional `code: str | None` attribute carrying the backend's native error
-name. For SQLite it is the extended result code name, such as `SQLITE_CONSTRAINT_UNIQUE`. For PostgreSQL it is `None`.
-For SQLite, `.position` comes from `sqlite3_error_offset`. SQLite codes map to a SQLSTATE as follows, with the
-`SQLITE_` prefix omitted:
+name. For SQLite it is always the extended result code name, such as `SQLITE_CONSTRAINT_UNIQUE`. For PostgreSQL it is
+`None`. For SQLite, `.position` is derived from `sqlite3_error_offset` (a 0-based UTF-8 byte offset) and converted to
+the same 1-based character index; it is `None` when SQLite reports no offset. SQLite codes map to a SQLSTATE as follows,
+with the `SQLITE_` prefix omitted:
 
 | SQLite code | `sqlstate` |
 |---|---|
@@ -465,5 +466,3 @@ For SQLite, `.position` comes from `sqlite3_error_offset`. SQLite codes map to a
 | `CORRUPT` | `XX001` |
 | `NOTADB` | `XX002` |
 | Every other code, including plain `SQLITE_ERROR` (syntax error, missing table, missing column) | `HY000` |
-
-`code` always carries the extended name.
