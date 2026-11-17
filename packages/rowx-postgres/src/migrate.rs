@@ -21,7 +21,9 @@ use rowx_postgres::pool::Pool as PgPool;
 
 use crate::conn::Connection;
 use crate::errors::{MigrateFailure, PgError, name_to_py_err, to_py_err};
-use crate::exec::{Access, watch, watch_flag};
+use rowx_py_core::exec::{watch, watch_flag};
+
+use crate::exec::{Access, AccessExt};
 use crate::pool::Pool;
 
 #[derive(Debug, Clone, Copy)]
@@ -149,7 +151,10 @@ impl<F> Drop for StopFirst<F> {
 }
 
 async fn run_job(cancel: Cancel, access: Access, hook: Hook, job: Job) -> PyResult<Py<PyAny>> {
-    access.reserve(&cancel.state, &hook).await?;
+    access
+        .reserve(&cancel.state, &hook)
+        .await
+        .map_err(PgError::from)?;
     let inner = Arc::clone(&cancel.backend.conn);
     let pool = access.pool.clone();
     let state = Arc::clone(&cancel.state);

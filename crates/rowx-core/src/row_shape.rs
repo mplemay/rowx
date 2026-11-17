@@ -292,11 +292,183 @@ fn positional(names: &[&str], fields: &[FieldSpec]) -> Vec<ShapeError> {
         .collect()
 }
 
+/// What the caller expects of the result, checked before and while rows stream in.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Shape<'a> {
+    /// `true` marks a nullable column, so `false` rejects NULL there. For a named shape (`fields`
+    /// set) it is per field instead, and the per-column mask comes from the mapping.
+    pub mask: Option<&'a [bool]>,
+    pub scalar: bool,
+    pub limit_one: bool,
+    pub arity: Option<usize>,
+    /// The fields of a named row type; the columns are mapped onto them before execution.
+    pub fields: Option<&'a [FieldSpec]>,
+    pub matching: Matching,
+}
+
+/// A result whose columns do not fit the [`Shape`] the caller expects.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ShapeCheckError {
+    /// An arity, scalar or mask-length violation.
+    #[error("{0}")]
+    RowShape(String),
+    /// A named row's columns do not map onto its fields; the binding renders the text from the
+    /// indices and the raw column names.
+    #[error("{errors}")]
+    Mapping {
+        errors: ShapeErrors,
+        columns: Vec<String>,
+    },
+    /// The shape itself is malformed (a named shape without one nullability flag per field).
+    #[error("{0}")]
+    Interface(String),
+}
+
+/// A NULL in a column that is not nullable.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum NullError {
+    #[error("NULL in a non-nullable column at index {index}")]
+    Column { index: usize },
+    /// A mapped column. The indices are 0-based, `name` is the raw column name, and `row` counts
+    /// the rows delivered so far.
+    #[error("NULL in non-nullable field {field} (column {column} {name:?}, row {row})")]
+    Field {
+        column: usize,
+        field: usize,
+        row: usize,
+        name: Box<str>,
+    },
+}
+
+/// Why a NULL check stopped: a NULL it found, or a cell it could not read.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum NullCheckError<E> {
+    #[error(transparent)]
+    Null(NullError),
+    #[error("{0}")]
+    Read(E),
+}
+
+fn missing_field_mask() -> ShapeCheckError {
+    ShapeCheckError::Interface("a named shape needs one nullability flag per field".to_owned())
+}
+
+/// A named shape must carry a flag for every field, or NULL checks would silently switch off.
+///
+/// # Errors
+/// `Interface` when the mask is missing or its length differs from the number of fields.
+pub fn check_field_mask(
+    fields: &[FieldSpec],
+    mask: Option<&[bool]>,
+) -> Result<(), ShapeCheckError> {
+    match mask {
+        Some(mask) if mask.len() == fields.len() => Ok(()),
+        Some(mask) => Err(ShapeCheckError::Interface(format!(
+            "the nullability mask covers {} fields, the named shape has {}",
+            mask.len(),
+            fields.len()
+        ))),
+        None => Err(missing_field_mask()),
+    }
+}
+
+/// Checks `shape` against the result's raw column names and maps them onto the fields of a named
+/// shape.
+///
+/// # Errors
+/// `RowShape` for an arity, scalar or mask-length violation, `Mapping` for a mapping failure and
+/// `Interface` for a malformed named shape.
+pub fn check_shape(shape: &Shape<'_>, names: &[&str]) -> Result<Option<Mapping>, ShapeCheckError> {
+    let count = names.len();
+    if let Some(arity) = shape.arity
+        && arity != count
+    {
+        return Err(ShapeCheckError::RowShape(format!(
+            "expected {arity} columns, the query returns {count}"
+        )));
+    }
+    if shape.scalar && count != 1 {
+        return Err(ShapeCheckError::RowShape(format!(
+            "a scalar result needs exactly 1 column, the query returns {count}"
+        )));
+    }
+    // a named shape's mask is per field, so the mapping replaces the column length check
+    if let Some(fields) = shape.fields {
+        check_field_mask(fields, shape.mask)?;
+        return map_columns(names, fields, shape.matching)
+            .map(Some)
+            .map_err(|errors| ShapeCheckError::Mapping {
+                errors,
+                columns: names.iter().map(|n| (*n).to_owned()).collect(),
+            });
+    }
+    if let Some(mask) = shape.mask
+        && mask.len() != count
+    {
+        return Err(ShapeCheckError::RowShape(format!(
+            "the nullability mask covers {} columns, the query returns {count}",
+            mask.len()
+        )));
+    }
+    Ok(None)
+}
+
+/// The per-column mask of a named shape: a mapped column takes its field's flag, a pass-through
+/// column is nullable. `check_shape` guarantees one flag per field, so a miss is a caller bug.
+///
+/// # Errors
+/// `Interface` when the shape has no mask or the mask is shorter than a mapped field.
+pub fn column_mask(shape: &Shape<'_>, mapping: &Mapping) -> Result<Vec<bool>, ShapeCheckError> {
+    let fields = shape.mask.ok_or_else(missing_field_mask)?;
+    mapping
+        .columns
+        .iter()
+        .map(|field| {
+            field.map_or(Ok(true), |f| {
+                fields.get(f).copied().ok_or_else(missing_field_mask)
+            })
+        })
+        .collect()
+}
+
+/// Rejects a NULL in a column whose `mask` entry is `false`. `is_null` reads one cell, which can
+/// fail; `names` are the raw column names, and `row_index` counts the rows delivered so far.
+///
+/// # Errors
+/// `Null` for the first NULL in a non-nullable column (a mapped column reports its field too),
+/// `Read` when `is_null` fails.
+pub fn check_nulls<E>(
+    names: &[impl AsRef<str>],
+    row_index: usize,
+    mask: &[bool],
+    mapping: Option<&Mapping>,
+    mut is_null: impl FnMut(usize) -> Result<bool, E>,
+) -> Result<(), NullCheckError<E>> {
+    for (index, nullable) in mask.iter().enumerate() {
+        if !nullable && is_null(index).map_err(NullCheckError::Read)? {
+            // a named shape reports the field too, so the binding can render its message
+            if let Some(field) = mapping.and_then(|m| m.columns.get(index).copied().flatten()) {
+                return Err(NullCheckError::Null(NullError::Field {
+                    column: index,
+                    field,
+                    row: row_index,
+                    name: names
+                        .get(index)
+                        .map_or_else(Box::default, |n| n.as_ref().into()),
+                }));
+            }
+            return Err(NullCheckError::Null(NullError::Column { index }));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FieldSpec, Mapping, Matching, Names, Override, ShapeError, ShapeErrors, column_name,
-        map_columns,
+        FieldSpec, Mapping, Matching, Names, NullCheckError, NullError, Override, Shape,
+        ShapeCheckError, ShapeError, ShapeErrors, check_field_mask, check_nulls, check_shape,
+        column_mask, column_name, map_columns,
     };
 
     fn field(names: &[&str], required: bool) -> FieldSpec {
@@ -644,6 +816,290 @@ mod tests {
                     name: "w".into()
                 },
             ])
+        );
+    }
+
+    fn unknown_fields(count: usize) -> Vec<FieldSpec> {
+        (0..count)
+            .map(|_| FieldSpec {
+                names: Names::Unknown,
+                required: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn field_mask_must_cover_every_field() {
+        assert_eq!(
+            check_field_mask(&unknown_fields(2), Some(&[true, false])),
+            Ok(())
+        );
+        assert!(matches!(
+            check_field_mask(&unknown_fields(2), Some(&[true])),
+            Err(ShapeCheckError::Interface(_))
+        ));
+        assert!(matches!(
+            check_field_mask(&unknown_fields(2), Some(&[true, false, true])),
+            Err(ShapeCheckError::Interface(_))
+        ));
+        assert!(matches!(
+            check_field_mask(&unknown_fields(2), None),
+            Err(ShapeCheckError::Interface(_))
+        ));
+    }
+
+    #[test]
+    fn field_mask_errors_keep_their_text() {
+        assert_eq!(
+            check_field_mask(&unknown_fields(2), Some(&[true])),
+            Err(ShapeCheckError::Interface(
+                "the nullability mask covers 1 fields, the named shape has 2".to_owned()
+            ))
+        );
+        assert_eq!(
+            check_field_mask(&unknown_fields(2), None)
+                .map_err(|e| e.to_string())
+                .err()
+                .as_deref(),
+            Some("a named shape needs one nullability flag per field")
+        );
+    }
+
+    #[test]
+    fn check_shape_accepts_a_plain_result() {
+        let shape = Shape {
+            arity: Some(2),
+            mask: Some(&[true, false]),
+            ..Shape::default()
+        };
+        assert_eq!(check_shape(&shape, &["a", "b"]), Ok(None));
+        assert_eq!(check_shape(&Shape::default(), &["a", "b", "c"]), Ok(None));
+    }
+
+    #[test]
+    fn check_shape_rejects_an_arity_mismatch() {
+        let shape = Shape {
+            arity: Some(3),
+            ..Shape::default()
+        };
+        assert_eq!(
+            check_shape(&shape, &["a", "b"]),
+            Err(ShapeCheckError::RowShape(
+                "expected 3 columns, the query returns 2".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn check_shape_scalar_needs_exactly_one_column() {
+        let shape = Shape {
+            scalar: true,
+            ..Shape::default()
+        };
+        assert_eq!(check_shape(&shape, &["a"]), Ok(None));
+        for names in [&[][..], &["a", "b"][..]] {
+            assert_eq!(
+                check_shape(&shape, names),
+                Err(ShapeCheckError::RowShape(format!(
+                    "a scalar result needs exactly 1 column, the query returns {}",
+                    names.len()
+                )))
+            );
+        }
+    }
+
+    #[test]
+    fn check_shape_rejects_a_mask_of_the_wrong_length() {
+        let shape = Shape {
+            mask: Some(&[true]),
+            ..Shape::default()
+        };
+        assert_eq!(
+            check_shape(&shape, &["a", "b"]),
+            Err(ShapeCheckError::RowShape(
+                "the nullability mask covers 1 columns, the query returns 2".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn check_shape_maps_a_named_shape() {
+        let fields = [req("a"), req("b")];
+        let shape = Shape {
+            mask: Some(&[true, false]),
+            fields: Some(&fields),
+            ..Shape::default()
+        };
+        assert_eq!(
+            check_shape(&shape, &["b", "a"]),
+            Ok(Some(Mapping {
+                columns: vec![Some(1), Some(0)],
+                absent: vec![]
+            }))
+        );
+    }
+
+    #[test]
+    fn check_shape_reports_a_named_mapping_failure() {
+        let fields = [req("a")];
+        let shape = Shape {
+            mask: Some(&[true]),
+            fields: Some(&fields),
+            ..Shape::default()
+        };
+        assert_eq!(
+            check_shape(&shape, &["a", "extra"]),
+            Err(ShapeCheckError::Mapping {
+                errors: ShapeErrors(vec![ShapeError::UnexpectedColumn {
+                    index: 1,
+                    name: "extra".into()
+                }]),
+                columns: vec!["a".to_owned(), "extra".to_owned()],
+            })
+        );
+    }
+
+    #[test]
+    fn check_shape_requires_a_field_mask_for_a_named_shape() {
+        let fields = [req("a"), req("b")];
+        for mask in [None, Some(&[true][..])] {
+            let shape = Shape {
+                mask,
+                fields: Some(&fields),
+                ..Shape::default()
+            };
+            assert!(matches!(
+                check_shape(&shape, &["a", "b"]),
+                Err(ShapeCheckError::Interface(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn column_mask_takes_each_columns_field_flag() {
+        let mapping = Mapping {
+            columns: vec![Some(1), None, Some(0)],
+            absent: vec![],
+        };
+        let shape = Shape {
+            mask: Some(&[false, true]),
+            ..Shape::default()
+        };
+        // a pass-through column is nullable
+        assert_eq!(column_mask(&shape, &mapping), Ok(vec![true, true, false]));
+    }
+
+    #[test]
+    fn column_mask_without_a_flag_is_an_interface_error() {
+        let mapping = Mapping {
+            columns: vec![Some(1)],
+            absent: vec![],
+        };
+        let short = Shape {
+            mask: Some(&[true]),
+            ..Shape::default()
+        };
+        assert!(matches!(
+            column_mask(&short, &mapping),
+            Err(ShapeCheckError::Interface(_))
+        ));
+        assert!(matches!(
+            column_mask(&Shape::default(), &mapping),
+            Err(ShapeCheckError::Interface(_))
+        ));
+    }
+
+    fn nulls_at(nulls: &[usize]) -> impl FnMut(usize) -> Result<bool, String> + '_ {
+        |index| Ok(nulls.contains(&index))
+    }
+
+    #[test]
+    fn check_nulls_names_the_plain_column() {
+        let err = check_nulls(&["a", "b"], 0, &[true, false], None, nulls_at(&[1]));
+        assert_eq!(
+            err,
+            Err(NullCheckError::Null(NullError::Column { index: 1 }))
+        );
+        assert_eq!(
+            NullError::Column { index: 1 }.to_string(),
+            "NULL in a non-nullable column at index 1"
+        );
+    }
+
+    #[test]
+    fn check_nulls_names_the_mapped_field() {
+        let mapping = Mapping {
+            columns: vec![Some(2), Some(0)],
+            absent: vec![],
+        };
+        let err = check_nulls(
+            &["id", "email"],
+            7,
+            &[true, false],
+            Some(&mapping),
+            nulls_at(&[1]),
+        );
+        let expected = NullError::Field {
+            column: 1,
+            field: 0,
+            row: 7,
+            name: "email".into(),
+        };
+        assert_eq!(err, Err(NullCheckError::Null(expected.clone())));
+        assert_eq!(
+            expected.to_string(),
+            "NULL in non-nullable field 0 (column 1 \"email\", row 7)"
+        );
+    }
+
+    #[test]
+    fn check_nulls_treats_a_pass_through_column_as_plain() {
+        let mapping = Mapping {
+            columns: vec![None],
+            absent: vec![],
+        };
+        let err = check_nulls(&["x"], 0, &[false], Some(&mapping), nulls_at(&[0]));
+        assert_eq!(
+            err,
+            Err(NullCheckError::Null(NullError::Column { index: 0 }))
+        );
+    }
+
+    #[test]
+    fn check_nulls_passes_nullable_columns_and_values() {
+        assert_eq!(
+            check_nulls(&["a", "b"], 0, &[true, true], None, nulls_at(&[0, 1])),
+            Ok(())
+        );
+        assert_eq!(
+            check_nulls(&["a", "b"], 0, &[false, false], None, nulls_at(&[])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn check_nulls_reads_only_non_nullable_cells() {
+        let mut read = Vec::new();
+        let result = check_nulls(&["a", "b", "c"], 0, &[true, false, false], None, |i| {
+            read.push(i);
+            Ok::<_, String>(false)
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, [1, 2]);
+    }
+
+    #[test]
+    fn check_nulls_propagates_a_read_error() {
+        let result = check_nulls(&["a", "b"], 0, &[false, false], None, |index| {
+            if index == 0 {
+                Ok(false)
+            } else {
+                Err("cell 1 is unreadable".to_owned())
+            }
+        });
+        assert_eq!(
+            result,
+            Err(NullCheckError::Read("cell 1 is unreadable".to_owned()))
         );
     }
 }

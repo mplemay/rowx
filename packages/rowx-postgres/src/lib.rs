@@ -10,11 +10,14 @@ pub mod pool;
 pub mod stream;
 pub mod types;
 
+use std::sync::Arc;
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyString, PyTuple};
 use pyo3::wrap_pyfunction;
 use rowx_postgres::{Kind, Type};
+use rowx_py_core::row::{Layout, RowForm, construct};
 
 #[pyfunction]
 fn _cancel_requests_sent() -> u64 {
@@ -96,6 +99,36 @@ fn _decode<'py>(
     codec::decode(py, &hook_type(spec, 0)?, Some(raw.as_bytes()))
 }
 
+// test hook: builds one named row through the shared constructor path, as a result row would be.
+// `cells` are the already decoded values, `targets` the field each fills (`None` passes through) and
+// `keys` the column keys a validator row is built from
+#[pyfunction]
+#[pyo3(signature = (shape, cells, targets, keys, row_index = 0))]
+fn _construct<'py>(
+    py: Python<'py>,
+    shape: &named::RowShape,
+    cells: &Bound<'py, PyList>,
+    targets: Vec<Option<usize>>,
+    keys: Vec<String>,
+    row_index: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let layout = Layout {
+        form: RowForm::Named(Arc::clone(shape.data())),
+        flags: Vec::new(),
+        targets,
+        keys: keys
+            .into_iter()
+            .map(|key| PyString::intern(py, &key).unbind())
+            .collect(),
+    };
+    let cell = |index: usize| {
+        cells
+            .get_item(index)
+            .map_err(|_| errors::interface_error(py, "a column has no cell in the test row"))
+    };
+    construct(py, cell, &layout, shape.data(), row_index)
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<admin::DatabaseInfo>()?;
     module.add_function(wrap_pyfunction!(admin::database_exists, module)?)?;
@@ -120,6 +153,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(types::type_table, module)?)?;
     module.add_function(wrap_pyfunction!(_cancel_requests_sent, module)?)?;
     module.add_function(wrap_pyfunction!(_catalog_queries, module)?)?;
+    module.add_function(wrap_pyfunction!(_construct, module)?)?;
     module.add_function(wrap_pyfunction!(_param_formats, module)?)?;
     module.add_function(wrap_pyfunction!(_decode, module)?)?;
     Ok(())
@@ -131,7 +165,7 @@ mod _core {
 
     #[pymodule_init]
     fn init(module: &Bound<'_, PyModule>) -> PyResult<()> {
-        rowx_py_core::runtime::init()?;
+        rowx_py_core::runtime::init(None)?;
         let py = module.py();
         rowx_py_core::errors::init(py)?;
         crate::register(module)
