@@ -25,6 +25,10 @@
   - *Files:* [ignores (project)](.gitignore)
   - *Rules:*
     - **Always use all lowercase single-line conventional commit messages (ex: `feat: add query builder`).**
+- **GitHub Actions:** Workflow steps
+  - *Rules:*
+    - A step that is a script lives in `scripts/` and the workflow calls it. A step that runs one command can stay
+      inline.
 
 ## Conventions
 

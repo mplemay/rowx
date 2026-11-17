@@ -12,7 +12,7 @@ because an earlier one failed, re-run that skipped job after the failed one succ
 `rowx-core` and `rowx-postgres`.
 
 `just release X.Y.Z notes.md` bumps the lockstep version, writes the changelog section from `notes.md`, and opens the
-release pull request. After that pull request merges, a green CI push to main calls `tag-release.yml`. That workflow
+release pull request. After that pull request merges, a green CI push to main runs the tag release job. That job
 creates `vX.Y.Z` on the merge commit and dispatches `release.yml` on the tag. A tag push from `GITHUB_TOKEN` does not
 start `release.yml`.
 
