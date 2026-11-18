@@ -64,7 +64,7 @@ impl ConnectOptions {
 
 /// What the worker thread owns and runs jobs against.
 #[derive(Debug)]
-pub struct Ctx {
+pub(crate) struct Ctx {
     pub(crate) conn: rusqlite::Connection,
     pub(crate) shared: Arc<Shared>,
     pub(crate) state: Arc<State>,
@@ -113,10 +113,6 @@ impl Drop for Lifeline {
     }
 }
 
-fn config_error(err: rusqlite::Error) -> Error {
-    err.into()
-}
-
 // the pragma answers with the mode the database is in afterwards, which is the old one when the
 // switch did not happen
 fn require_wal(mode: &str) -> Result<(), Error> {
@@ -137,8 +133,7 @@ fn journal_error(found: &str) -> Error {
 // Every pragma is set explicitly, because the bundled build changes SQLite's defaults
 // (`SQLITE_DEFAULT_FOREIGN_KEYS=1`).
 fn apply_pragmas(conn: &rusqlite::Connection, options: &ConnectOptions) -> Result<Box<str>, Error> {
-    conn.busy_timeout(options.busy_timeout)
-        .map_err(config_error)?;
+    conn.busy_timeout(options.busy_timeout)?;
     // a double-quoted name that matches no column is an error, not a string literal
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
@@ -331,6 +326,7 @@ impl Connection {
     }
 
     /// How many rows the worker has read from SQLite so far; tests use it to see back-pressure.
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn rows_stepped(&self) -> u64 {
         self.shared.rows_stepped()
@@ -363,12 +359,20 @@ impl Connection {
         answer.await.map_err(|_| TaskStopped)?
     }
 
+    /// A raw `sqlite3_interrupt` handle that does not set the cancel flag; tests use it to interrupt
+    /// without the flag's pre-check.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn interrupt_handle(&self) -> Arc<InterruptHandle> {
+        self.backend.interrupt_handle()
+    }
+
     /// Runs `job` against the raw handle on the worker thread. The tests use it to set up fixtures and
     /// to make the worker unwind; nothing in the driver calls it.
     ///
     /// # Errors
     /// `Closed` after `close()`, `Stopped` when the worker died.
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     pub async fn run_raw<T, F>(&self, job: F) -> Result<T, Error>
     where
         T: Send + 'static,
@@ -377,15 +381,18 @@ impl Connection {
         self.call(move |ctx| Ok(job(&mut ctx.conn))).await
     }
 
-    /// Runs one statement that returns no rows (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...) and returns the
-    /// rows it changed. It is not for scripts: a second statement is an error.
+    /// Runs one control statement that returns no rows (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...). It is not
+    /// for scripts: a second statement is an error.
     ///
     /// # Errors
     /// `Sqlite` for a failure SQLite reports, `Interface` for a script or a statement that returns rows.
-    pub async fn simple(&self, sql: &str) -> Result<u64, Error> {
+    pub async fn simple(&self, sql: &str) -> Result<(), Error> {
         let sql = sql.to_owned();
-        self.call(move |ctx| crate::exec::execute_sql(ctx, &sql, Vec::new()))
-            .await
+        self.call(move |ctx| {
+            crate::exec::execute_sql(ctx, &sql, &[])?;
+            Ok(())
+        })
+        .await
     }
 
     /// # Errors
@@ -441,6 +448,10 @@ impl Connection {
         let Some(jobs) = self.jobs.take() else {
             return;
         };
+        // `Job::Close` queues behind a running job, and a closed state never sends a cancel, so wake a
+        // worker that is stepping or parked on a full stream channel before waiting for it
+        self.shared.request_cancel();
+        self.backend.interrupt();
         let (done, closed) = oneshot::channel();
         if jobs.send(Job::Close(done)).is_ok() {
             // a worker that already died answers by dropping the sender; the database is gone either way

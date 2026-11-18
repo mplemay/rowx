@@ -349,7 +349,7 @@ async fn the_statement_cache_capacity_can_be_zero() -> TestResult {
 async fn simple_runs_one_statement_and_rejects_a_script() -> TestResult {
     let conn = connect(&memory()).await?;
     conn.simple("CREATE TABLE t (a)").await?;
-    assert_eq!(conn.simple("INSERT INTO t VALUES (1)").await?, 1);
+    conn.simple("INSERT INTO t VALUES (1)").await?;
     let err = conn
         .simple("INSERT INTO t VALUES (2); INSERT INTO t VALUES (3)")
         .await
@@ -509,5 +509,31 @@ async fn a_failure_after_some_rows_arrives_after_those_rows() -> TestResult {
         }
     ));
     streaming.done.wait().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execute_of_a_row_returning_write_is_refused_before_it_runs() -> TestResult {
+    let conn = connect(&memory()).await?;
+    run(&conn, "CREATE TABLE t (a INTEGER)").await?;
+    let err = run(&conn, "INSERT INTO t VALUES (1) RETURNING a")
+        .await
+        .err()
+        .ok_or("a statement that returns rows is not an execute")?;
+    assert!(matches!(err, Error::Interface(_)), "{err:?}");
+    // the write was never applied
+    assert_eq!(ints(&conn, "SELECT count(*) FROM t").await?, [0]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn execute_of_a_select_is_refused_without_effect() -> TestResult {
+    let conn = connect(&memory()).await?;
+    let err = run(&conn, "SELECT 1")
+        .await
+        .err()
+        .ok_or("a query is not an execute")?;
+    assert!(matches!(err, Error::Interface(_)), "{err:?}");
+    assert_eq!(ints(&conn, "SELECT 2").await?, [2]);
     Ok(())
 }

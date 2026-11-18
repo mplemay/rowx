@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rowx_core::error::TaskStopped;
 pub use rowx_core::row_shape::Shape;
@@ -8,7 +9,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Rows, Statement, ffi, params_from_iter};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::cancel::Shared;
+use crate::cancel::{Shared, Unsent};
 use crate::conn::{Connection, Ctx};
 use crate::error::Error;
 use crate::timeout::{Armed, Timer};
@@ -20,7 +21,7 @@ pub type Row = Vec<Option<Scalar>>;
 
 /// A [`Shape`] the worker thread can own.
 #[derive(Debug, Clone, Default)]
-pub struct OwnedShape {
+pub(crate) struct OwnedShape {
     mask: Option<Vec<bool>>,
     scalar: bool,
     limit_one: bool,
@@ -196,6 +197,7 @@ impl RowSource<'_> {
             }
             None
         };
+        #[cfg(feature = "test-support")]
         if row.is_some() {
             self.shared.count_row();
         }
@@ -256,15 +258,34 @@ fn with_query<R>(
 }
 
 /// Runs a statement that returns no rows and reports the rows it changed.
-pub(crate) fn execute_sql(ctx: &Ctx, sql: &str, params: Vec<Param>) -> Result<u64, Error> {
+pub(crate) fn execute_sql(ctx: &Ctx, sql: &str, params: &[Param]) -> Result<u64, Error> {
     if ctx.shared.is_cancelled() {
         return Err(interrupted());
     }
     // declared before the statement, so it drops after the statement was reset
-    let _armed = ctx.timer.as_ref().map(Timer::arm);
+    let armed;
     let mut stmt = ctx.conn.prepare_cached(sql)?;
-    let changed = stmt.execute(params_from_iter(params))?;
-    u64::try_from(changed).map_err(|_| Error::Interface("negative change count".to_owned()))
+    // checked before anything steps: `Statement::execute` applies a write before it notices the rows,
+    // so `INSERT ... RETURNING` would be committed and then reported as an error
+    if stmt.column_count() > 0 {
+        return Err(Error::Interface(
+            "the statement returns rows; use fetch or stream".to_owned(),
+        ));
+    }
+    if params.len() != stmt.parameter_count() {
+        return Err(
+            rusqlite::Error::InvalidParameterCount(params.len(), stmt.parameter_count()).into(),
+        );
+    }
+    for (index, param) in params.iter().enumerate() {
+        stmt.raw_bind_parameter(index + 1, param)?;
+    }
+    // The clock starts right before the step: `sqlite3_interrupt` with no statement running is a no-op
+    // that the first step clears, so an interrupt fired during prepare or bind would be lost.
+    armed = ctx.timer.as_ref().map(Timer::arm);
+    let changed = stmt.raw_execute();
+    drop(armed);
+    u64::try_from(changed?).map_err(|_| Error::Interface("negative change count".to_owned()))
 }
 
 /// The rows of a `fetch`, and the column-to-field mapping when the shape is named.
@@ -339,6 +360,8 @@ struct Opened {
 pub struct RowBatches {
     rx: mpsc::Receiver<Item>,
     shared: Arc<Shared>,
+    // set by the worker when a cancel ended the stream while the channel was full
+    cut: Arc<AtomicBool>,
     mapping: Option<Mapping>,
     columns: Vec<String>,
     // set once the stream ended, by its end or by an error
@@ -362,8 +385,8 @@ impl RowBatches {
     /// The next batch. A failure after some rows were read comes after them, in the next call.
     ///
     /// # Errors
-    /// `Decode`/`NullField`/`Sqlite` for a failure while reading, `Stopped` when the worker ended the
-    /// stream without an end (a cancel, or a dead worker).
+    /// `Decode`/`NullField`/`Sqlite` for a failure while reading (a cancel that cut the stream is
+    /// `SQLITE_INTERRUPT`), `Stopped` when the worker died without ending the stream.
     pub async fn next_batch(&mut self) -> Result<Batch, Error> {
         if self.ended {
             return Ok(Batch::End {
@@ -386,7 +409,11 @@ impl RowBatches {
             }
             None => {
                 self.ended = true;
-                Err(TaskStopped.into())
+                if self.cut.load(Ordering::Acquire) {
+                    Err(interrupted())
+                } else {
+                    Err(TaskStopped.into())
+                }
             }
         }
     }
@@ -425,19 +452,29 @@ struct StreamJob {
     shape: OwnedShape,
     batch_size: usize,
     tx: mpsc::Sender<Item>,
+    cut: Arc<AtomicBool>,
     open: oneshot::Sender<Result<Opened, Error>>,
     done: oneshot::Sender<()>,
 }
 
-// Whether the worker should keep going after a send.
-fn deliver(shared: &Shared, tx: &mpsc::Sender<Item>, item: Item) -> bool {
-    shared.send(tx, item).is_ok()
+// Whether the worker should keep going after a send. A cancel that ends a send is recorded for the
+// receiver, which otherwise could not tell it from a dead worker.
+fn deliver(shared: &Shared, tx: &mpsc::Sender<Item>, cut: &AtomicBool, item: Item) -> bool {
+    match shared.send(tx, item) {
+        Ok(()) => true,
+        Err(Unsent::Cancelled) => {
+            cut.store(true, Ordering::Release);
+            false
+        }
+        Err(Unsent::Closed) => false,
+    }
 }
 
 fn run_stream(
     source: &mut RowSource<'_>,
     batch_size: usize,
     tx: &mpsc::Sender<Item>,
+    cut: &AtomicBool,
     open: &mut Option<oneshot::Sender<Result<Opened, Error>>>,
 ) -> Result<(), Error> {
     // the first step runs before the open reply: it is where a stale statement is re-prepared and
@@ -481,6 +518,7 @@ fn run_stream(
             && !deliver(
                 source.shared,
                 tx,
+                cut,
                 Ok(Batch::Rows(std::mem::take(&mut batch))),
             )
         {
@@ -493,7 +531,7 @@ fn run_stream(
             let end = Batch::End {
                 rows_affected: source.rows_affected(),
             };
-            deliver(source.shared, tx, Ok(end));
+            deliver(source.shared, tx, cut, Ok(end));
             return Ok(());
         }
     }
@@ -506,12 +544,13 @@ fn stream_job(ctx: &Ctx, job: StreamJob) {
         shape,
         batch_size,
         tx,
+        cut,
         open,
         done,
     } = job;
     let mut open = Some(open);
     let outcome = with_query(ctx, &sql, params, &shape, |source| {
-        run_stream(source, batch_size, &tx, &mut open)
+        run_stream(source, batch_size, &tx, &cut, &mut open)
     });
     if let Err(err) = outcome {
         match open.take() {
@@ -519,7 +558,7 @@ fn stream_job(ctx: &Ctx, job: StreamJob) {
                 let _ = reply.send(Err(err));
             }
             None => {
-                deliver(&ctx.shared, &tx, Err(err));
+                deliver(&ctx.shared, &tx, &cut, Err(err));
             }
         }
     }
@@ -535,7 +574,7 @@ impl Connection {
     /// `Sqlite` for a failure SQLite reports, `Interface` for a statement that returns rows.
     pub async fn execute(&self, sql: &str, params: Vec<Param>) -> Result<u64, Error> {
         let sql = sql.to_owned();
-        self.call(move |ctx| execute_sql(ctx, &sql, params)).await
+        self.call(move |ctx| execute_sql(ctx, &sql, &params)).await
     }
 
     /// Runs a query and collects its rows.
@@ -571,12 +610,14 @@ impl Connection {
         let (tx, rx) = mpsc::channel(limits.buffer.max(1));
         let (open, opened) = oneshot::channel();
         let (done, finished) = oneshot::channel();
+        let cut = Arc::new(AtomicBool::new(false));
         let job = StreamJob {
             sql: sql.to_owned(),
             params,
             shape: OwnedShape::from(shape),
             batch_size: limits.batch_size.max(1),
             tx,
+            cut: Arc::clone(&cut),
             open,
             done,
         };
@@ -586,6 +627,7 @@ impl Connection {
             batches: RowBatches {
                 rx,
                 shared: Arc::clone(self.shared()),
+                cut,
                 mapping: opened.mapping,
                 columns: opened.columns,
                 ended: false,

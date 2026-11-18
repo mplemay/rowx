@@ -3,7 +3,7 @@ pub mod conn;
 pub mod dsn;
 pub mod error;
 pub mod exec;
-pub mod timeout;
+mod timeout;
 pub mod types;
 pub mod value;
 

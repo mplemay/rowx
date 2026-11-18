@@ -30,7 +30,10 @@ struct Inner {
 /// worker arms it with a lock and a notify, the thread owns no runtime handle, and the interrupt runs
 /// where nothing else shares the thread. The thread exits when the timer drops.
 #[derive(Debug)]
-pub struct Timer {
+// `unreachable_pub` and `redundant_pub_crate` disagree about an item of a private module that the rest
+// of the crate uses, so this one lint is waived on the two types
+#[allow(clippy::redundant_pub_crate)]
+pub(super) struct Timer {
     inner: Arc<Inner>,
 }
 
@@ -41,7 +44,10 @@ impl Timer {
     ///
     /// # Errors
     /// The IO error when the thread cannot be spawned.
-    pub fn new(timeout: Duration, interrupt: impl Fn() + Send + 'static) -> io::Result<Self> {
+    pub(super) fn new(
+        timeout: Duration,
+        interrupt: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
         let inner = Arc::new(Inner {
             slot: Mutex::new(Slot {
                 generation: 0,
@@ -61,7 +67,7 @@ impl Timer {
 
     /// Starts the clock for one statement (or one batch of a stream); dropping the guard stops it.
     #[must_use]
-    pub fn arm(&self) -> Armed {
+    pub(super) fn arm(&self) -> Armed {
         let generation = {
             let mut slot = lock(&self.inner.slot);
             slot.generation = slot.generation.wrapping_add(1);
@@ -114,7 +120,10 @@ fn run(inner: &Inner, interrupt: &impl Fn()) {
 
 /// One running clock; it stops when dropped or finished.
 #[derive(Debug)]
-pub struct Armed {
+// `unreachable_pub` and `redundant_pub_crate` disagree about an item of a private module that the rest
+// of the crate uses, so this one lint is waived on the two types
+#[allow(clippy::redundant_pub_crate)]
+pub(super) struct Armed {
     inner: Arc<Inner>,
     generation: u64,
 }
@@ -131,7 +140,7 @@ impl Armed {
 
     /// Stops the clock and reports whether it fired meanwhile.
     #[must_use]
-    pub fn finish(self) -> bool {
+    pub(super) fn finish(self) -> bool {
         self.disarm()
     }
 }

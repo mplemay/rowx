@@ -1,6 +1,8 @@
 use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "test-support")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use rowx_core::cancel::Backend;
@@ -13,11 +15,12 @@ pub use rowx_core::cancel::{spawn, spawn_stream};
 
 /// What a connection shares with the worker thread, its cancel handle and its timer.
 #[derive(Debug)]
-pub struct Shared {
+pub(crate) struct Shared {
     // set by `send_cancel` and checked by the worker between steps and batches, so a cancel that lands
     // before a statement steps is still honoured; cleared by `is_alive` once the worker has joined
     cancel: AtomicBool,
     alive: AtomicBool,
+    #[cfg(feature = "test-support")]
     stepped: AtomicU64,
     // pairs with `wake`: a worker parked on a full stream channel sleeps here
     gate: Mutex<()>,
@@ -34,6 +37,7 @@ impl Default for Shared {
         Self {
             cancel: AtomicBool::new(false),
             alive: AtomicBool::new(true),
+            #[cfg(feature = "test-support")]
             stepped: AtomicU64::new(0),
             gate: Mutex::new(()),
             wake: Condvar::new(),
@@ -43,7 +47,7 @@ impl Default for Shared {
 
 /// Why a batch did not reach the stream's receiver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unsent {
+pub(crate) enum Unsent {
     /// The receiver is gone.
     Closed,
     /// A cancel arrived while the channel was full.
@@ -52,43 +56,45 @@ pub enum Unsent {
 
 impl Shared {
     #[must_use]
-    pub fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
     }
 
-    pub fn request_cancel(&self) {
+    pub(crate) fn request_cancel(&self) {
         self.cancel.store(true, Ordering::Release);
         self.wake();
     }
 
     /// Takes the cancel flag, so a late `send_cancel` cannot leak into the next operation.
-    pub fn clear_cancel(&self) {
+    pub(crate) fn clear_cancel(&self) {
         self.cancel.store(false, Ordering::Release);
     }
 
     #[must_use]
-    pub fn is_alive(&self) -> bool {
+    pub(crate) fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
     }
 
-    pub fn mark_dead(&self) {
+    pub(crate) fn mark_dead(&self) {
         self.alive.store(false, Ordering::Release);
         self.wake();
     }
 
-    pub fn count_row(&self) {
+    #[cfg(feature = "test-support")]
+    pub(crate) fn count_row(&self) {
         self.stepped.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn rows_stepped(&self) -> u64 {
+    pub(crate) fn rows_stepped(&self) -> u64 {
         self.stepped.load(Ordering::Relaxed)
     }
 
     /// Wakes a worker parked on a full channel. Taking the gate first orders the wake after the
     /// worker's decision to park: the worker holds the gate from its failed `try_send` until the
     /// condition variable releases it, so a slot freed or a flag set just before cannot be missed.
-    pub fn wake(&self) {
+    pub(crate) fn wake(&self) {
         drop(lock(&self.gate));
         self.wake.notify_all();
     }
@@ -99,7 +105,7 @@ impl Shared {
     /// # Errors
     /// `Unsent::Closed` when the receiver dropped, `Unsent::Cancelled` when a cancel arrived while
     /// the channel was full.
-    pub fn send<T>(&self, tx: &Sender<T>, mut item: T) -> Result<(), Unsent> {
+    pub(crate) fn send<T>(&self, tx: &Sender<T>, mut item: T) -> Result<(), Unsent> {
         let mut guard = lock(&self.gate);
         loop {
             match tx.try_send(item) {
@@ -121,6 +127,9 @@ impl Shared {
 }
 
 /// The SQLite side of cancellation: `sqlite3_interrupt` plus the flag the worker polls.
+///
+/// `is_alive` consumes a pending cancel (it clears the flag so the next operation starts clean), so it
+/// must only be called after the operation's task has joined, as `rowx_core::cancel::settle` does.
 #[derive(Clone)]
 pub struct SqliteBackend {
     interrupt: Arc<InterruptHandle>,
@@ -137,6 +146,15 @@ impl SqliteBackend {
     pub(crate) const fn new(interrupt: Arc<InterruptHandle>, shared: Arc<Shared>) -> Self {
         Self { interrupt, shared }
     }
+
+    pub(crate) fn interrupt(&self) {
+        self.interrupt.interrupt();
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn interrupt_handle(&self) -> Arc<InterruptHandle> {
+        Arc::clone(&self.interrupt)
+    }
 }
 
 impl Backend for SqliteBackend {
@@ -152,7 +170,8 @@ impl Backend for SqliteBackend {
     }
 
     // Called after the task joined, which means the worker replied and is quiescent, so the flag is
-    // taken here and the next operation starts clean.
+    // taken here and the next operation starts clean. Calling it earlier would swallow a cancel that
+    // is still pending.
     fn is_alive(&self) -> impl Future<Output = bool> {
         self.shared.clear_cancel();
         std::future::ready(self.shared.is_alive())

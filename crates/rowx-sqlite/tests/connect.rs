@@ -1,6 +1,7 @@
 // pub, so the shared helpers are reachable from the crate root and need no visibility waiver
 pub mod common;
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
@@ -111,6 +112,7 @@ async fn a_read_only_open_of_a_non_wal_file_takes_the_mode_it_finds() -> TestRes
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_failed_switch_to_wal_is_an_error() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -122,6 +124,14 @@ async fn a_failed_switch_to_wal_is_an_error() -> TestResult {
     // SQLite opens a write-protected file read-only even when asked for read-write, and then cannot
     // switch its journal mode
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444))?;
+    // root ignores the mode bits and SQLite then opens the file read-write, so there is nothing to test
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .is_ok()
+    {
+        return Ok(());
+    }
     let options = file_options(&dir, "locked.db", OpenMode::ReadWrite);
     let err = connect(&options)
         .await
@@ -255,5 +265,19 @@ async fn dropping_a_connection_ends_its_worker_and_releases_the_database() -> Te
     // default 5 s busy timeout is only the hang guard here
     let next = connect(&file(&dir)).await?;
     next.simple("BEGIN IMMEDIATE").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn loading_extensions_stays_disabled() -> TestResult {
+    let conn = connect(&memory()).await?;
+    let err = fetch(&conn, "SELECT load_extension('x')")
+        .await
+        .err()
+        .ok_or("extension loading must be disabled")?;
+    assert!(
+        matches!(&err, Error::Sqlite { message, .. } if message.contains("not authorized")),
+        "{err:?}"
+    );
     Ok(())
 }

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use common::{
     LONG_QUERY, TestResult, backend_of, cancel_of, connect, failure, fetch, file, ints, memory,
-    run, wait_until, within,
+    path, run, wait_until, within,
 };
 use rowx_core::cancel::Backend;
 use rowx_core::error::TaskStopped;
@@ -94,14 +94,16 @@ async fn an_interrupt_with_nothing_running_does_nothing() -> TestResult {
     Ok(())
 }
 
-const LONG_WRITE: &str = "INSERT INTO t WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000) SELECT n FROM c";
+// rows of about a kilobyte each, so the write outgrows the page cache and spills into the WAL file
+const LONG_WRITE: &str = "INSERT INTO t WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000) SELECT n, zeroblob(1000) FROM c";
 
 #[tokio::test]
-async fn a_cancelled_write_in_a_transaction_reconciles_the_transaction_state() -> TestResult {
-    let conn = Arc::new(connect(&memory()).await?);
-    run(&conn, "CREATE TABLE t (n INTEGER)").await?;
+async fn a_cancel_during_a_write_in_a_transaction_rolls_the_transaction_back() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let conn = Arc::new(connect(&file(&dir)).await?);
+    run(&conn, "CREATE TABLE t (n INTEGER, pad BLOB)").await?;
     conn.simple("BEGIN").await?;
-    run(&conn, "INSERT INTO t VALUES (0)").await?;
+    run(&conn, "INSERT INTO t VALUES (0, NULL)").await?;
 
     let cancel = cancel_of(&conn);
     let hook = Hook::new(cancel.state.claim()?);
@@ -109,6 +111,10 @@ async fn a_cancelled_write_in_a_transaction_reconciles_the_transaction_state() -
     let pending = spawn(&cancel, &hook, async move {
         worker.execute(LONG_WRITE, Vec::<Param>::new()).await
     })?;
+    // The write is stepping once its dirty pages no longer fit the page cache and reach the WAL file,
+    // which another thread can observe. The cancel therefore lands on a running statement.
+    let wal = path(&dir, "test.db-wal");
+    wait_until(|| std::fs::metadata(&wal).is_ok_and(|meta| meta.len() > 1_000_000)).await?;
     hook.fire();
     let err = within(pending.wait())
         .await??
@@ -117,17 +123,36 @@ async fn a_cancelled_write_in_a_transaction_reconciles_the_transaction_state() -
     assert_eq!(failure(&err), Some(("SQLITE_INTERRUPT", "57014")));
     within(cancel.state.wait_settled()).await??;
 
-    // Whether the interrupt reached the statement (SQLite rolls the whole transaction back) or the
-    // flag stopped it before it ran (the transaction stays open) depends on timing; either way the
-    // connection and the state agree, and the pool can reset it.
-    if conn.is_autocommit().await? {
-        assert!(!cancel.state.maybe_in_txn());
-        assert_eq!(ints(&conn, "SELECT count(*) FROM t").await?, [0]);
-    } else {
-        assert!(cancel.state.maybe_in_txn());
-        conn.reset(true).await?;
-        assert!(conn.is_autocommit().await?);
-    }
+    // SQLite rolled the whole transaction back, so the mark a cancel leaves is cleared
+    assert!(conn.is_autocommit().await?);
+    assert!(!cancel.state.maybe_in_txn());
+    assert_eq!(ints(&conn, "SELECT count(*) FROM t").await?, [0]);
+    run(&conn, "INSERT INTO t VALUES (1, NULL)").await?;
+    assert_eq!(ints(&conn, "SELECT count(*) FROM t").await?, [1]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cancel_before_a_write_steps_leaves_the_transaction_open() -> TestResult {
+    let conn = connect(&memory()).await?;
+    let backend = backend_of(&conn);
+    run(&conn, "CREATE TABLE t (n INTEGER)").await?;
+    conn.simple("BEGIN").await?;
+    run(&conn, "INSERT INTO t VALUES (0)").await?;
+
+    // nothing is running, so only the flag is left for the next statement to find
+    backend.send_cancel().await?;
+    let err = run(&conn, "INSERT INTO t VALUES (1)")
+        .await
+        .err()
+        .ok_or("the flag should stop the write")?;
+    assert_eq!(failure(&err), Some(("SQLITE_INTERRUPT", "57014")));
+    // the write never ran, so SQLite did not roll anything back
+    assert!(!conn.is_autocommit().await?);
+    assert!(backend.is_alive().await);
+    assert_eq!(ints(&conn, "SELECT n FROM t").await?, [0]);
+    conn.reset(true).await?;
+    assert!(conn.is_autocommit().await?);
     Ok(())
 }
 
@@ -157,7 +182,8 @@ async fn an_interrupted_read_in_a_transaction_keeps_the_transaction_open() -> Te
 
 // Observation recorded for #335: `sqlite3_interrupt` does not wake a connection that waits in the
 // busy handler. The statement fails with SQLITE_BUSY once `busy_timeout` has run out, not with
-// SQLITE_INTERRUPT, so a cancel's latency can reach `busy_timeout`.
+// SQLITE_INTERRUPT, so a cancel's latency can reach `busy_timeout`. The interrupts here are raw: the
+// cancel flag is never set, so the statement cannot be stopped by its pre-step check instead.
 #[tokio::test]
 async fn an_interrupt_does_not_wake_the_busy_handler_so_a_cancel_waits_out_the_busy_timeout()
 -> TestResult {
@@ -166,41 +192,35 @@ async fn an_interrupt_does_not_wake_the_busy_handler_so_a_cancel_waits_out_the_b
     run(&holder, "CREATE TABLE t (a INTEGER)").await?;
     run(&holder, "BEGIN IMMEDIATE").await?;
 
-    let busy_timeout = Duration::from_secs(3);
+    let busy_timeout = Duration::from_secs(1);
     let mut options = file(&dir);
     options.busy_timeout = busy_timeout;
     let waiter = Arc::new(connect(&options).await?);
-    let cancel = cancel_of(&waiter);
-    let hook = Hook::new(cancel.state.claim()?);
+    let interrupt = waiter.interrupt_handle();
     let worker = Arc::clone(&waiter);
     let started = Instant::now();
-    let pending = spawn(&cancel, &hook, async move {
-        worker.simple("BEGIN IMMEDIATE").await
-    })?;
+    let mut waiting = tokio::spawn(async move { worker.simple("BEGIN IMMEDIATE").await });
 
-    // Give the waiter time to reach the busy handler. This is an experiment, not synchronisation:
-    // whatever the timing, the statement ends within the busy timeout, and the assertions below hold
-    // only when the interrupt really arrived during the wait.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    hook.fire();
-    let err = within(pending.wait())
-        .await??
-        .err()
-        .ok_or("the write lock is held elsewhere")?;
+    // interrupt again and again until the statement ends; an interrupt that lands before the statement
+    // steps is dropped by SQLite, and one that lands while it waits is ignored by the busy handler
+    let outcome = within(async {
+        loop {
+            tokio::select! {
+                joined = &mut waiting => break joined,
+                () = tokio::time::sleep(Duration::from_millis(20)) => interrupt.interrupt(),
+            }
+        }
+    })
+    .await??;
     let elapsed = started.elapsed();
-    within(cancel.state.wait_settled()).await??;
+    let err = outcome.err().ok_or("the write lock is held elsewhere")?;
 
     assert_eq!(failure(&err), Some(("SQLITE_BUSY", "55P03")), "{err:?}");
     assert!(
-        elapsed >= busy_timeout / 2,
+        elapsed >= busy_timeout * 9 / 10,
         "the interrupt woke the busy handler after {elapsed:?}"
     );
-    // SQLite's backoff overshoots a little, and the hang guard is generous
-    assert!(
-        elapsed < busy_timeout + Duration::from_secs(10),
-        "{elapsed:?}"
-    );
-    // the connection is settled and usable
+    // the connection is usable
     assert_eq!(ints(&waiter, "SELECT 1").await?, [1]);
     Ok(())
 }

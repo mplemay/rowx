@@ -19,11 +19,18 @@ pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 // a hang guard, never the mechanism a test relies on
 const HANG_GUARD: Duration = Duration::from_secs(60);
 
-// a recursive CTE that runs far longer than any test waits
-pub const LONG_QUERY: &str = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000000) SELECT count(*) FROM c";
+// a recursive CTE prefix that counts far longer than any test waits
+macro_rules! endless_cte {
+    () => {
+        "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000000) "
+    };
+}
+
+// a query that runs far longer than any test waits
+pub const LONG_QUERY: &str = concat!(endless_cte!(), "SELECT count(*) FROM c");
 
 // rows without end, for a stream whose consumer stops
-pub const ENDLESS_ROWS: &str = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000000) SELECT n FROM c";
+pub const ENDLESS_ROWS: &str = concat!(endless_cte!(), "SELECT n FROM c");
 
 #[must_use]
 pub const fn memory() -> ConnectOptions {

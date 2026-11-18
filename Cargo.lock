@@ -2961,6 +2961,7 @@ version = "0.4.2"
 dependencies = [
  "libsqlite3-sys",
  "rowx-core",
+ "rowx-sqlite",
  "rusqlite",
  "tempfile",
  "thiserror",

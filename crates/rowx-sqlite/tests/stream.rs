@@ -2,13 +2,14 @@
 pub mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::{
-    ENDLESS_ROWS, Running, TestResult, connect, drain, ints, limits, memory, start_stream,
+    ENDLESS_ROWS, Running, TestResult, connect, drain, failure, ints, limits, memory, start_stream,
     wait_until, within,
 };
+use rowx_core::row_shape::Shape;
 use rowx_core::state::Phase;
-use rowx_sqlite::error::Error;
 use rowx_sqlite::exec::Batch;
 
 const COUNTED_ROWS: &str = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000) SELECT n FROM c";
@@ -74,10 +75,18 @@ async fn cancelling_a_stream_whose_receiver_is_alive_and_whose_channel_is_full()
         running.batches.next_batch().await?,
         Batch::Rows(_)
     ));
-    assert!(matches!(
-        running.batches.next_batch().await,
-        Err(Error::Stopped(_))
-    ));
+    // the cancel cut the stream while its channel was full, which is an interrupt, not a dead worker
+    let err = running
+        .batches
+        .next_batch()
+        .await
+        .err()
+        .ok_or("the stream was cut off")?;
+    assert_eq!(
+        failure(&err),
+        Some(("SQLITE_INTERRUPT", "57014")),
+        "{err:?}"
+    );
     assert!(matches!(
         running.batches.next_batch().await?,
         Batch::End {
@@ -91,6 +100,9 @@ async fn cancelling_a_stream_whose_receiver_is_alive_and_whose_channel_is_full()
     Ok(())
 }
 
+// two quick rows, then a step that runs far longer than any test waits
+const STALLING_ROWS: &str = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000000) SELECT n FROM c WHERE n <= 2 OR n = 999999999999999";
+
 #[tokio::test]
 async fn a_dropped_consumer_future_during_a_stream_with_an_open_cursor_leaves_the_connection_usable()
 -> TestResult {
@@ -99,21 +111,65 @@ async fn a_dropped_consumer_future_during_a_stream_with_an_open_cursor_leaves_th
         mut batches,
         hook,
         cancel,
-    } = start_stream(&conn, ENDLESS_ROWS, limits(2, 1)).await?;
-    wait_until(|| conn.rows_stepped() >= 4).await?;
+    } = start_stream(&conn, STALLING_ROWS, limits(2, 1)).await?;
+    wait_until(|| conn.rows_stepped() >= 2).await?;
+    assert!(matches!(batches.next_batch().await?, Batch::Rows(rows) if rows.len() == 2));
 
-    // the consumer awaits a batch in its own task, which is then dropped mid-await, as asyncio does
-    // when it cancels a task; the cursor is still open on the worker
-    let consumer = tokio::spawn(async move {
-        let _ = batches.next_batch().await;
-        std::future::pending::<()>().await;
-    });
-    consumer.abort();
-    assert!(consumer.await.is_err());
+    // The worker is inside a step that does not return, so the next batch never arrives. The consumer's
+    // future is dropped mid-await, as asyncio does when it cancels a task, while the receiver and the
+    // open cursor live on. The timeout only drops the future; nothing relies on how long it waits.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), batches.next_batch())
+            .await
+            .is_err()
+    );
+    // the claim is still held: only the cancel ends the operation
+    assert_eq!(cancel.state.phase(), Phase::Busy);
+
     hook.fire();
     within(cancel.state.wait_settled()).await??;
-
     assert_eq!(cancel.state.phase(), Phase::Idle);
+    // the receiver is still alive, and the connection is usable
     assert_eq!(ints(&conn, "SELECT 7").await?, [7]);
+    let err = batches
+        .next_batch()
+        .await
+        .err()
+        .ok_or("the stream was interrupted")?;
+    assert_eq!(
+        failure(&err),
+        Some(("SQLITE_INTERRUPT", "57014")),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn closing_with_a_full_stream_and_a_live_receiver_does_not_hang() -> TestResult {
+    let mut conn = connect(&memory()).await?;
+    let streaming = conn
+        .stream(ENDLESS_ROWS, Vec::new(), &Shape::default(), limits(2, 1))
+        .await?;
+    // the channel is full and the worker is parked on it, with the receiver alive
+    wait_until(|| conn.rows_stepped() >= 4).await?;
+    tokio::time::timeout(Duration::from_secs(5), conn.close()).await?;
+    assert!(conn.is_broken());
+    drop(streaming);
+    Ok(())
+}
+
+#[tokio::test]
+async fn closing_while_a_stream_is_stepping_does_not_hang() -> TestResult {
+    let mut conn = connect(&memory()).await?;
+    let mut streaming = conn
+        .stream(ENDLESS_ROWS, Vec::new(), &Shape::default(), limits(100, 2))
+        .await?;
+    // a consumer that keeps up, so the worker is stepping rather than parked
+    let consumer =
+        tokio::spawn(async move { while streaming.batches.next_batch().await.is_ok() {} });
+    wait_until(|| conn.rows_stepped() >= 1000).await?;
+    tokio::time::timeout(Duration::from_secs(5), conn.close()).await?;
+    within(consumer).await??;
+    assert!(conn.is_broken());
     Ok(())
 }
