@@ -2962,7 +2962,9 @@ dependencies = [
  "libsqlite3-sys",
  "rowx-core",
  "rusqlite",
+ "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

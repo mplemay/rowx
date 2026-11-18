@@ -1,5 +1,9 @@
+pub mod cancel;
+pub mod conn;
 pub mod dsn;
 pub mod error;
+pub mod exec;
+pub mod timeout;
 pub mod types;
 pub mod value;
 
