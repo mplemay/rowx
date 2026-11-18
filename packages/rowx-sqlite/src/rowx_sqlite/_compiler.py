@@ -33,7 +33,6 @@ SCAN_TOKEN: Final[re.Pattern[str]] = re.compile(
 )
 IDENT_CHAR: Final[re.Pattern[str]] = re.compile(rf"[{IDENT_CLASS}]")
 SQL_SPACE: Final[str] = " \t\n\f\r"
-CLOSE_QUOTE: Final[dict[str, str]] = {"'": "'", '"': '"', "`": "`", "[": "]"}
 
 type TokenKind = Literal["word", "quoted", "string", "number", "param", "punct"]
 
@@ -47,16 +46,23 @@ class Token:
     value: str
 
 
+FOLD_TABLE: Final[dict[int, int]] = {c: c + 32 for c in range(ord("A"), ord("Z") + 1)}
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class Lexed:
+    tokens: tuple[Token, ...]
+    # False when the text ends inside a string, quoted identifier or comment
+    closed: bool
+
+
 def _is_ident_char(ch: str) -> bool:
-    return (ch.isascii() and (ch.isalnum() or ch in "_$")) or not ch.isascii()
+    return IDENT_CHAR.fullmatch(ch) is not None
 
 
 def fold(name: str) -> str:
     # SQLite folds ASCII letters only
     return name.translate(FOLD_TABLE)
-
-
-FOLD_TABLE: Final[dict[int, int]] = {c: c + 32 for c in range(ord("A"), ord("Z") + 1)}
 
 
 def _skip_quoted(text: str, i: int, quote: str) -> int:
@@ -132,7 +138,7 @@ def _simple_token(text: str, m: re.Match[str]) -> Token:
     return Token(kind="punct", start=start, end=end, value=m[0])
 
 
-def tokenize(text: str) -> tuple[tuple[Token, ...], bool]:
+def tokenize(text: str) -> Lexed:
     tokens: list[Token] = []
     i = 0
     while m := SCAN_TOKEN.match(text, i):
@@ -143,25 +149,25 @@ def tokenize(text: str) -> tuple[tuple[Token, ...], bool]:
         if kind == "comment":
             i = _skip_comment(text, i, m[0])
             if i < 0:
-                return tuple(tokens), False
+                return Lexed(tokens=tuple(tokens), closed=False)
             continue
         if kind == "quote":
             if (quoted := _quoted_token(text, m.start())) is None:
-                return tuple(tokens), False
+                return Lexed(tokens=tuple(tokens), closed=False)
             tokens.append(quoted)
             i = quoted.end
             continue
         tokens.append(_simple_token(text, m))
         i = tokens[-1].end
-    return tuple(tokens), True
+    return Lexed(tokens=tuple(tokens), closed=True)
 
 
 def _ends_in_code(text: str) -> bool:
-    return tokenize(text)[1]
+    return tokenize(text).closed
 
 
 def parameter_spans(sql: str) -> tuple[tuple[int, int], ...]:
-    return tuple((t.start, t.end) for t in tokenize(sql)[0] if t.kind == "param")
+    return tuple((t.start, t.end) for t in tokenize(sql).tokens if t.kind == "param")
 
 
 def _check_parameters(compiled: Compiled) -> Compiled:
@@ -223,6 +229,15 @@ FROM_ENDS: Final[frozenset[str]] = frozenset(
 )
 COMPOUND_WORDS: Final[frozenset[str]] = frozenset({"union", "intersect", "except"})
 SUBQUERY_STARTS: Final[frozenset[str]] = frozenset({"select", "with", "values"})
+NAME_KINDS: Final[frozenset[TokenKind]] = frozenset({"word", "quoted", "string"})
+CONFLICT_WORDS: Final[frozenset[str]] = frozenset({"rollback", "abort", "replace", "fail", "ignore"})
+# words that follow UPDATE without being its target: DO UPDATE SET, BEFORE UPDATE OF/ON, ON UPDATE CASCADE/SET/NO/RESTRICT
+UPDATE_NOT_TARGETS: Final[frozenset[str]] = frozenset({"set", "of", "on", "cascade", "no", "restrict", "from"})
+# SQLite accepts `with` and `window` as identifiers; every other FROM-ending word is reserved
+NOT_CTE_NAMES: Final[frozenset[str]] = (FROM_ENDS - {"window"}) | {"from", "as"}
+
+
+type CteState = Literal["name", "after_name", "as", "after_body"]
 
 
 @dataclass(slots=True)
@@ -230,21 +245,26 @@ class _Frame:
     kind: Literal["plain", "cte_body"] = "plain"
     from_active: bool = False
     expect_table: bool = False
-    # None, or where a WITH clause is: name, after_name, as, after_body
-    cte: str | None = None
+    # None, or where the WITH clause header is
+    cte: CteState | None = None
     join_words: set[str] = field(default_factory=set)
 
 
+def _name_part(tok: Token) -> str:
+    # a string used as a name compares folded, like a word or quoted identifier
+    return fold(tok.value) if tok.kind == "string" else tok.value
+
+
 def _name_parts(tokens: tuple[Token, ...], i: int) -> tuple[tuple[str, ...], int]:
-    parts = [tokens[i].value]
+    parts = [_name_part(tokens[i])]
     i += 1
     while (
         i + 1 < len(tokens)
         and tokens[i].value == "."
         and tokens[i].kind == "punct"
-        and tokens[i + 1].kind in {"word", "quoted", "string"}
+        and tokens[i + 1].kind in NAME_KINDS
     ):
-        parts.append(tokens[i + 1].value)
+        parts.append(_name_part(tokens[i + 1]))
         i += 2
     return tuple(parts), i
 
@@ -255,14 +275,15 @@ def _is_punct(tok: Token, value: str) -> bool:
 
 class _Walker:
     def __init__(self, tokens: tuple[Token, ...]) -> None:
-        self.tokens = tokens
-        self.i = 0
-        self.stack = [_Frame()]
+        self.tokens: tuple[Token, ...] = tokens
+        # `_step` and its helpers run after `i` has moved past the current token, so the current one is `i - 1`
+        self.i: int = 0
+        self.stack: list[_Frame] = [_Frame()]
         self.sources: list[tuple[str, ...]] = []
         self.ctes: set[str] = set()
-        self.subquery = False
-        self.compound = False
-        self.outer = False
+        self.subquery: bool = False
+        self.compound: bool = False
+        self.outer: bool = False
 
     def run(self) -> StatementFacts:
         while self.i < len(self.tokens):
@@ -285,7 +306,7 @@ class _Walker:
             return
         elif _is_punct(tok, "("):
             self._open(f)
-        elif f.expect_table and tok.kind in {"word", "quoted", "string"}:
+        elif f.expect_table and tok.kind in NAME_KINDS:
             self._source()
         elif _is_punct(tok, ","):
             f.expect_table = f.expect_table or f.from_active
@@ -336,34 +357,119 @@ class _Walker:
         f.join_words.clear()
         self.stack.append(_Frame(from_active=group, expect_table=group))
 
+    def _at(self, index: int) -> Token | None:
+        return self.tokens[index] if 0 <= index < len(self.tokens) else None
+
+    def _prev(self) -> Token | None:
+        return self._at(self.i - 2)
+
+    def _record(self, start: int) -> None:
+        parts, self.i = _name_parts(self.tokens, start)
+        self.sources.append(parts)
+
     def _source(self) -> None:
         f = self.stack[-1]
-        parts, self.i = _name_parts(self.tokens, self.i - 1)
-        self.sources.append(parts)
+        self._record(self.i - 1)
         f.expect_table = False
         f.join_words.clear()
 
     # IS [NOT] DISTINCT FROM is an operator, not a FROM clause
     def _after_distinct(self) -> bool:
-        current = self.i - 1
-        return current > 0 and self.tokens[current - 1].kind == "word" and self.tokens[current - 1].value == "distinct"
+        prev = self._prev()
+        return prev is not None and prev.kind == "word" and prev.value == "distinct"
+
+    # `with` is also a valid column name or alias, so outside the start of a statement it must look like a CTE header
+    def _starts_with_clause(self) -> bool:
+        prev = self._prev()
+        if prev is None or _is_punct(prev, ";"):
+            return True
+        if _is_punct(prev, "."):
+            return False
+        # covers `(WITH ...`, `AS WITH ...` (CREATE VIEW or TABLE) and `INSERT INTO t WITH ...`
+        j = self.i
+        if (tok := self._at(j)) is not None and tok.kind == "word" and tok.value == "recursive":
+            j += 1
+        name, after = self._at(j), self._at(j + 1)
+        if name is None or after is None:
+            return False
+        named = name.kind == "quoted" or (name.kind == "word" and name.value not in NOT_CTE_NAMES)
+        return named and (_is_punct(after, "(") or (after.kind == "word" and after.value == "as"))
+
+    # a word from FROM_ENDS closes the FROM clause only as the clause keyword, not as an alias or qualified column
+    def _ends_from(self, word: str) -> bool:
+        prev = self._prev()
+        if prev is not None and (_is_punct(prev, ".") or (prev.kind == "word" and prev.value == "as")):
+            return False
+        if word != "window":
+            return True
+        # a WINDOW clause is `WINDOW <name> AS (...)`
+        name, after = self._at(self.i), self._at(self.i + 1)
+        return (
+            name is not None
+            and name.kind in {"word", "quoted"}
+            and after is not None
+            and after.kind == "word"
+            and after.value == "as"
+        )
+
+    # `x IN name`, `x IN schema.name` and `x IN fn(...)` read a table, view or table-valued function
+    def _in_target(self) -> None:
+        if (nxt := self._at(self.i)) is not None and nxt.kind in NAME_KINDS:
+            self._record(self.i)
+            self.subquery = True
+
+    # UPDATE [OR <conflict>] <target>
+    def _update_target(self) -> None:
+        prev = self._prev()
+        if prev is not None and _is_punct(prev, "."):
+            return
+        j = self.i
+        or_tok, conflict = self._at(j), self._at(j + 1)
+        if (
+            or_tok is not None
+            and or_tok.kind == "word"
+            and or_tok.value == "or"
+            and conflict is not None
+            and conflict.value in CONFLICT_WORDS
+        ):
+            j += 2
+        target = self._at(j)
+        if (
+            target is None
+            or target.kind not in NAME_KINDS
+            or (target.kind == "word" and target.value in UPDATE_NOT_TARGETS)
+        ):
+            return
+        self._record(j)
+
+    def _clause_word(self, f: _Frame, word: str) -> None:
+        if word == "with":
+            if self._starts_with_clause():
+                f.cte = "name"
+        elif word == "from":
+            if not self._after_distinct():
+                f.from_active = True
+                f.expect_table = True
+        elif word in FROM_ENDS:
+            if self._ends_from(word):
+                f.from_active = False
+                f.expect_table = False
+        elif word == "into":
+            f.expect_table = True
+        elif word == "in":
+            self._in_target()
+        elif word == "update":
+            self._update_target()
 
     def _word(self, f: _Frame, word: str) -> None:
         if word in COMPOUND_WORDS:
             self.compound = True
-        if word == "with":
-            f.cte = "name"
-        elif word == "from" and not self._after_distinct():
-            f.from_active = True
-            f.expect_table = True
-        elif word == "join":
+        if word == "join":
             self.outer = self.outer or bool(f.join_words & OUTER_WORDS)
             f.expect_table = True
             f.join_words.clear()
             return
-        elif word in FROM_ENDS:
-            f.from_active = False
-            f.expect_table = False
+        self._clause_word(f, word)
         if word in JOIN_WORDS:
             f.join_words.add(word)
         else:
@@ -371,7 +477,7 @@ class _Walker:
 
 
 def statement_facts(sql: str) -> StatementFacts:
-    return _Walker(tokenize(sql)[0]).run()
+    return _Walker(tokenize(sql).tokens).run()
 
 
 class SqliteCompiler:

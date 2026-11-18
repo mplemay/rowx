@@ -11,15 +11,14 @@ from rowx_sqlite._compiler import (
     COMPILER,
     DIALECT,
     Compiled,
-    StatementFacts,
     compile_parts,
     compile_template,
     parameter_spans,
     statement_facts,
 )
 
-X: Final[int] = 1
-Y: Final[int] = 2
+FIRST_VALUE: Final[int] = 1
+SECOND_VALUE: Final[int] = 2
 
 DEFAULT_SEED: Final[int] = 357
 DEFAULT_COUNT: Final[int] = 1000
@@ -34,38 +33,34 @@ def check(c: Compiled, sql: str, params: list[str], segments: list[str]) -> None
     assert len(c.segments) == len(c.placeholders) + 1
 
 
-def facts(sql: str) -> StatementFacts:
-    return statement_facts(sql)
-
-
 def test_placeholders_are_dense_question_numbers() -> None:
-    c, values = compile_template(t"{X}{X}", dynamic=False)
+    c, values = compile_template(t"{FIRST_VALUE}{FIRST_VALUE}", dynamic=False)
     check(c, "?1 ?2", ["?1", "?2"], ["", " ", ""])
     assert values == [1, 1]
     assert COMPILER.compile_parts(["a", "b"]).sql == "a ?1 b"
 
 
 def test_adjacency_after_identifier() -> None:
-    c, _ = compile_template(t"SELECT 1 AS x{Y}", dynamic=False)
+    c, _ = compile_template(t"SELECT 1 AS x{SECOND_VALUE}", dynamic=False)
     check(c, "SELECT 1 AS x ?1", ["?1"], ["SELECT 1 AS x ", ""])
 
 
 def test_adjacency_before_digit_and_identifier() -> None:
-    c, _ = compile_template(t"{X}1", dynamic=False)
+    c, _ = compile_template(t"{FIRST_VALUE}1", dynamic=False)
     check(c, "?1 1", ["?1"], ["", " 1"])
-    c, _ = compile_template(t"{X}x", dynamic=False)
+    c, _ = compile_template(t"{FIRST_VALUE}x", dynamic=False)
     check(c, "?1 x", ["?1"], ["", " x"])
-    c, _ = compile_template(t"{X}é", dynamic=False)
+    c, _ = compile_template(t"{FIRST_VALUE}é", dynamic=False)
     assert c.sql == "?1 é"
 
 
 def test_no_space_next_to_punctuation() -> None:
-    c, _ = compile_template(t"a = ({X}, {Y})", dynamic=False)
+    c, _ = compile_template(t"a = ({FIRST_VALUE}, {SECOND_VALUE})", dynamic=False)
     check(c, "a = (?1, ?2)", ["?1", "?2"], ["a = (", ", ", ")"])
 
 
 def test_non_ascii_is_identifier_char() -> None:
-    c, _ = compile_template(t"é{X}", dynamic=False)
+    c, _ = compile_template(t"é{FIRST_VALUE}", dynamic=False)
     assert c.sql == "é ?1"
 
 
@@ -81,8 +76,8 @@ def test_padding_offsets() -> None:
 
 
 def test_nested_flatten_and_renumber() -> None:
-    inner = t"b = {Y}"
-    c, values = compile_template(t"a = {X} AND {inner} AND c = {X}", dynamic=True)
+    inner = t"b = {SECOND_VALUE}"
+    c, values = compile_template(t"a = {FIRST_VALUE} AND {inner} AND c = {FIRST_VALUE}", dynamic=True)
     assert c.sql == "a = ?1 AND b = ?2 AND c = ?3"
     assert values == [1, 2, 1]
 
@@ -133,11 +128,11 @@ def test_static_sigils_are_rejected(sql: str) -> None:
 
 def test_static_sigil_next_to_interpolation_is_rejected() -> None:
     with pytest.raises(TypeError, match="interpolation"):
-        compile_template(t"SELECT ?1, {X}", dynamic=False)
+        compile_template(t"SELECT ?1, {FIRST_VALUE}", dynamic=False)
 
 
 def test_dollar_is_an_identifier_character_inside_a_name() -> None:
-    c, _ = compile_template(t"SELECT foo$bar, a$1, {X} FROM t$x", dynamic=False)
+    c, _ = compile_template(t"SELECT foo$bar, a$1, {FIRST_VALUE} FROM t$x", dynamic=False)
     assert c.sql == "SELECT foo$bar, a$1, ?1 FROM t$x"
     assert parameter_spans("SELECT foo$bar, a$1") == ()
     assert parameter_spans("SELECT 1 AS $x") == ((12, 14),)
@@ -220,9 +215,9 @@ def test_ends_in_code_true_in_code(sql: str) -> None:
 
 def test_interpolation_inside_a_string_or_comment_is_rejected() -> None:
     with pytest.raises(TypeError, match="inside a string"):
-        compile_template(t"SELECT '{X}'", dynamic=False)
+        compile_template(t"SELECT '{FIRST_VALUE}'", dynamic=False)
     with pytest.raises(TypeError, match="inside a string"):
-        compile_template(t"SELECT 1 /* {X} */", dynamic=False)
+        compile_template(t"SELECT 1 /* {FIRST_VALUE} */", dynamic=False)
     with pytest.raises(TypeError, match="inside a string"):
         compile_parts(["SELECT 1 -- ", ""])
     with pytest.raises(TypeError, match="inside a string"):
@@ -236,16 +231,16 @@ def test_lexing_is_linear() -> None:
 
 
 def test_facts_simple_select_has_only_base_tables() -> None:
-    f = facts('SELECT a FROM t JOIN "S"."U" AS u ON t.a = u.a, [v w] x INNER JOIN y CROSS JOIN z')
+    f = statement_facts('SELECT a FROM t JOIN "S"."U" AS u ON t.a = u.a, [v w] x INNER JOIN y CROSS JOIN z')
     assert f.sources == (("t",), ("s", "u"), ("v w",), ("y",), ("z",))
-    assert not (f.cte_names)
-    assert not (f.has_subquery)
-    assert not (f.has_compound)
-    assert not (f.has_outer_join)
+    assert not f.cte_names
+    assert not f.has_subquery
+    assert not f.has_compound
+    assert not f.has_outer_join
 
 
 def test_facts_names_fold_ascii_only_and_unquote() -> None:
-    f = facts('SELECT 1 FROM `Ab`, "É""x", Main.T')
+    f = statement_facts('SELECT 1 FROM `Ab`, "É""x", Main.T')
     assert f.sources == (("ab",), ('É"x',), ("main", "t"))
 
 
@@ -262,7 +257,7 @@ def test_facts_names_fold_ascii_only_and_unquote() -> None:
     ],
 )
 def test_facts_outer_joins(sql: str) -> None:
-    assert facts(sql).has_outer_join
+    assert statement_facts(sql).has_outer_join
 
 
 @pytest.mark.parametrize(
@@ -275,7 +270,7 @@ def test_facts_outer_joins(sql: str) -> None:
     ],
 )
 def test_facts_no_outer_join(sql: str) -> None:
-    assert not facts(sql).has_outer_join
+    assert not statement_facts(sql).has_outer_join
 
 
 @pytest.mark.parametrize(
@@ -289,7 +284,7 @@ def test_facts_no_outer_join(sql: str) -> None:
     ],
 )
 def test_facts_compound(sql: str) -> None:
-    assert facts(sql).has_compound
+    assert statement_facts(sql).has_compound
 
 
 @pytest.mark.parametrize(
@@ -305,17 +300,17 @@ def test_facts_compound(sql: str) -> None:
     ],
 )
 def test_facts_subquery(sql: str) -> None:
-    assert facts(sql).has_subquery
+    assert statement_facts(sql).has_subquery
 
 
 def test_facts_parenthesised_join_group_is_not_a_subquery() -> None:
-    f = facts("SELECT 1 FROM (a JOIN b ON 1), c")
+    f = statement_facts("SELECT 1 FROM (a JOIN b ON 1), c")
     assert not f.has_subquery
     assert f.sources == (("a",), ("b",), ("c",))
 
 
 def test_facts_cte_names_including_shadowing() -> None:
-    f = facts(
+    f = statement_facts(
         "WITH RECURSIVE T(x) AS (SELECT 1), u AS MATERIALIZED (SELECT 2), w AS NOT MATERIALIZED (SELECT 3) SELECT * FROM t, u, w"
     )
     assert f.cte_names == {"t", "u", "w"}
@@ -324,38 +319,125 @@ def test_facts_cte_names_including_shadowing() -> None:
 
 
 def test_facts_sources_inside_subqueries_and_after_them() -> None:
-    f = facts("SELECT 1 FROM (SELECT 1 FROM a WHERE x IN (SELECT 1 FROM b)) s JOIN c ON 1 WHERE 1 ORDER BY 1")
+    f = statement_facts("SELECT 1 FROM (SELECT 1 FROM a WHERE x IN (SELECT 1 FROM b)) s JOIN c ON 1 WHERE 1 ORDER BY 1")
     assert f.sources == (("a",), ("b",), ("c",))
 
 
 def test_facts_commas_outside_from_are_not_sources() -> None:
-    f = facts("SELECT a, b, f(c, d) FROM t WHERE x IN (1, 2) GROUP BY a, b ORDER BY a, b LIMIT 1, 2")
+    f = statement_facts("SELECT a, b, f(c, d) FROM t WHERE x IN (1, 2) GROUP BY a, b ORDER BY a, b LIMIT 1, 2")
     assert f.sources == (("t",),)
 
 
 def test_facts_table_valued_function_is_a_source() -> None:
-    f = facts("SELECT value FROM json_each('[1]') AS j, t")
+    f = statement_facts("SELECT value FROM json_each('[1]') AS j, t")
     assert f.sources == (("json_each",), ("t",))
 
 
 def test_facts_is_distinct_from_is_not_a_from_clause() -> None:
-    f = facts("SELECT a IS NOT DISTINCT FROM b FROM t")
+    f = statement_facts("SELECT a IS NOT DISTINCT FROM b FROM t")
     assert f.sources == (("t",),)
 
 
-def test_facts_dml_sources() -> None:
-    assert facts("DELETE FROM t WHERE 1").sources == (("t",),)
-    assert facts("UPDATE t SET a = 1 FROM u WHERE 1").sources == (("u",),)
+@pytest.mark.parametrize(
+    ("sql", "sources"),
+    [
+        ("DELETE FROM t WHERE 1", (("t",),)),
+        ("UPDATE t SET a = 1 FROM u WHERE 1", (("t",), ("u",))),
+        ("UPDATE OR REPLACE main.t SET a = 1", (("main", "t"),)),
+        ("UPDATE OR IGNORE t SET a = 1", (("t",),)),
+        ("INSERT INTO t (a, b) VALUES (1, 2)", (("t",),)),
+        ("INSERT INTO s.vw SELECT 1", (("s", "vw"),)),
+        ("INSERT OR ROLLBACK INTO t VALUES (1)", (("t",),)),
+        ("REPLACE INTO t VALUES (1)", (("t",),)),
+        ("INSERT INTO t VALUES (1) ON CONFLICT DO UPDATE SET a = 1", (("t",),)),
+    ],
+)
+def test_facts_dml_sources(sql: str, sources: tuple[tuple[str, ...], ...]) -> None:
+    assert statement_facts(sql).sources == sources
+
+
+@pytest.mark.parametrize(
+    ("sql", "sources"),
+    [
+        ("select with from t", (("t",),)),
+        ("select a as with from t", (("t",),)),
+        ("select t.with from t left join u", (("t",), ("u",))),
+        ("select f(with) from t", (("t",),)),
+        ("select a with, b from t", (("t",),)),
+    ],
+)
+def test_facts_with_as_identifier_is_not_a_cte(sql: str, sources: tuple[tuple[str, ...], ...]) -> None:
+    f = statement_facts(sql)
+    assert f.sources == sources
+    assert not f.cte_names
+
+
+def test_facts_with_identifier_still_sees_outer_join() -> None:
+    assert statement_facts("select t.with from t left join u").has_outer_join
+
+
+@pytest.mark.parametrize(
+    ("sql", "names"),
+    [
+        ("with recursive r(n) as (select 1) select * from r", {"r"}),
+        ("with a as (select 1), b as (select 2) select * from a, b", {"a", "b"}),
+        ("select * from (with x as (select 1) select * from x)", {"x"}),
+        ("select (with x as (select 1) select * from x)", {"x"}),
+        ("create view v as with x as (select 1) select * from x", {"x"}),
+        ("insert into t with x as (select 1) select * from x", {"x"}),
+        ("select 1; with x as (select 1) select * from x", {"x"}),
+        ("select 1 as a; with window as (select 1) select * from window", {"window"}),
+    ],
+)
+def test_facts_with_clause_positions(sql: str, names: set[str]) -> None:
+    f = statement_facts(sql)
+    assert f.cte_names == names
+    assert f.has_subquery
+
+
+@pytest.mark.parametrize(
+    ("sql", "sources"),
+    [
+        ("select * from t as window, u", (("t",), ("u",))),
+        ("select * from t window, u", (("t",), ("u",))),
+        ("select * from t join u on t.window=1, v", (("t",), ("u",), ("v",))),
+        ("select * from t join u on window=1, v", (("t",), ("u",), ("v",))),
+    ],
+)
+def test_facts_from_ending_word_as_identifier_keeps_the_from_clause(
+    sql: str, sources: tuple[tuple[str, ...], ...]
+) -> None:
+    assert statement_facts(sql).sources == sources
+
+
+def test_facts_window_clause_ends_from() -> None:
+    f = statement_facts("select sum(a) over w from t window w as (order by a), u")
+    assert f.sources == (("t",),)
+
+
+def test_facts_in_table_name_is_a_source() -> None:
+    f = statement_facts("select a from t where a in u")
+    assert f.sources == (("t",), ("u",))
+    assert f.has_subquery
+    assert statement_facts("select a from t where a in main.vw").sources == (("t",), ("main", "vw"))
+    assert statement_facts("select a from t where a not in json_each('[1]')").sources == (("t",), ("json_each",))
+    f = statement_facts("select a from t where a in (1, 2)")
+    assert f.sources == (("t",),)
+    assert not f.has_subquery
+
+
+def test_facts_string_table_name_folds_to_match_a_cte() -> None:
+    assert statement_facts("with x as (select 1) select * from 'X'").sources == (("x",),)
 
 
 def test_facts_ignore_strings_and_comments() -> None:
-    f = facts("SELECT 'from x', \"from\" /* from y */ FROM t -- join z\n")
+    f = statement_facts("SELECT 'from x', \"from\" /* from y */ FROM t -- join z\n")
     assert f.sources == (("t",),)
 
 
 def test_facts_tolerate_unbalanced_input() -> None:
-    assert facts("SELECT 1 FROM a ) ) JOIN b").sources == (("a",), ("b",))
-    assert facts("SELECT (((").sources == ()
+    assert statement_facts("SELECT 1 FROM a ) ) JOIN b").sources == (("a",), ("b",))
+    assert statement_facts("SELECT (((").sources == ()
 
 
 def fuzz_settings() -> tuple[int, int]:
@@ -492,20 +574,25 @@ def sqlite_names(db: sqlite3.Connection, sql: str) -> list[str] | None:
         return list(names)
 
 
-# sqlite3_bind_parameter_count for the spans the lexer found: `?` and new names take the next index, `?N` takes N
-def lexer_count(sql: str) -> int:
+# The parameter slots sqlite3_bind_parameter_count and sqlite3_bind_parameter_name report for the spans the lexer
+# found: `?` and a new name take the next index, `?N` takes index N (the first name given to an index wins), and a
+# repeated name reuses its index. A slot nothing named is None.
+def lexer_slots(sql: str) -> list[str | None]:
+    slots: dict[int, str] = {}
     count = 0
-    seen: set[str] = set()
+    by_text: set[str] = set()
     for start, end in parameter_spans(sql):
         text = sql[start:end]
         if text == "?":
             count += 1
         elif text[0] == "?":
-            count = max(count, int(text[1:]))
-        elif text not in seen:
-            seen.add(text)
+            count = max(count, number := int(text[1:]))
+            slots.setdefault(number, text[1:])
+        elif text not in by_text:
+            by_text.add(text)
             count += 1
-    return count
+            slots[count] = text[1:]
+    return [slots.get(index) for index in range(1, count + 1)]
 
 
 def replace_spans(sql: str, spans: tuple[tuple[int, int], ...]) -> str:
@@ -524,7 +611,7 @@ def differential(db: sqlite3.Connection, strings: list[str]) -> bool | None:
     leftover = sqlite_count(db, replace_spans(sql, compiled.placeholders))
     if total is None or leftover is None:
         return None
-    assert lexer_count(sql) == total, f"lexer disagrees with sqlite on {sql!r}"
+    assert len(lexer_slots(sql)) == total, f"lexer disagrees with sqlite on {sql!r}"
     # a hole is live when it alone, with the others blanked, makes SQLite count exactly that many parameters
     live = all(
         sqlite_count(db, replace_spans(sql, compiled.placeholders[:k] + compiled.placeholders[k + 1 :])) == k + 1
@@ -538,12 +625,11 @@ def differential(db: sqlite3.Connection, strings: list[str]) -> bool | None:
     else:
         accepted = True
     assert accepted == expected, f"accepted={accepted} but sqlite says leftover={leftover} total={total} holes={holes}"
-    names = sqlite_names(db, sql)
-    if names is not None and "?" not in sql.replace("'", ""):
-        spans = parameter_spans(sql)
-        mine = list(dict.fromkeys(sql[a + 1 : b] for a, b in spans if sql[a] != "?"))
-        if not any(sql[a] == "?" for a, _ in spans):
-            assert mine == names, f"names {mine} vs sqlite {names} on {sql!r}"
+    # python's sqlite3 reports a name for each slot and gives up on a bare `?`, so this runs on mixed statements too;
+    # it binds by name with the sigil stripped, so `?1` and `$1` are one key
+    if (names := sqlite_names(db, sql)) is not None:
+        mine = list(dict.fromkeys(lexer_slots(sql)))
+        assert mine == names, f"names {mine} vs sqlite {names} on {sql!r}"
     return accepted
 
 
