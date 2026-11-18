@@ -239,6 +239,13 @@ pub fn encode_aware(aware: &Aware) -> Result<Value, EncodeError> {
     Ok(Value::Text(format!("{}+00:00", format_datetime(&utc))))
 }
 
+// what follows the time in stored text
+enum Zone {
+    Naive,
+    Offset(i32),
+    Invalid,
+}
+
 // a cursor over ASCII text that never indexes
 struct Cursor<'a> {
     bytes: &'a [u8],
@@ -324,17 +331,22 @@ impl<'a> Cursor<'a> {
         valid_date(date).then_some(date)
     }
 
-    fn time(&mut self) -> Option<Time> {
+    // `HH:MM:SS[.ffffff]`, or with `lenient` also `HH:MM` (seconds 0)
+    fn time(&mut self, lenient: bool) -> Option<Time> {
         let hour = self.number(2)?;
         if !self.eat(b':') {
             return None;
         }
         let minute = self.number(2)?;
-        if !self.eat(b':') {
+        let has_seconds = self.eat(b':');
+        let (second, microsecond) = if lenient && !has_seconds {
+            (0, 0)
+        } else if !has_seconds {
             return None;
-        }
-        let second = self.number(2)?;
-        let microsecond = if self.eat(b'.') { self.fraction()? } else { 0 };
+        } else {
+            let second = self.number(2)?;
+            (second, if self.eat(b'.') { self.fraction()? } else { 0 })
+        };
         let time = Time {
             hour: u8::try_from(hour).ok()?,
             minute: u8::try_from(minute).ok()?,
@@ -344,51 +356,66 @@ impl<'a> Cursor<'a> {
         valid_time(time).then_some(time)
     }
 
-    // `Z` or `+HH:MM` / `-HH:MM`; `Ok(None)` when there is none
-    fn offset(&mut self) -> Result<Option<i32>, ()> {
+    // `Z`, `+HH:MM`, `+HHMM` or `+HH` (and `-`); `Naive` when there is no offset at all
+    fn offset(&mut self) -> Zone {
+        self.parse_offset().unwrap_or(Zone::Invalid)
+    }
+
+    fn parse_offset(&mut self) -> Option<Zone> {
         let sign: i32 = match self.peek() {
-            None => return Ok(None),
+            None => return Some(Zone::Naive),
             Some(b'Z' | b'z') => {
                 self.bump();
-                return Ok(Some(0));
+                return Some(Zone::Offset(0));
             }
             Some(b'+') => 1,
             Some(b'-') => -1,
-            Some(_) => return Err(()),
+            Some(_) => return None,
         };
         self.bump();
-        let hours = self.number(2).ok_or(())?;
-        if !self.eat(b':') {
-            return Err(());
-        }
-        let minutes = self.number(2).ok_or(())?;
+        let hours = self.number(2)?;
+        let minutes = if self.eat(b':') || self.peek().is_some() {
+            self.number(2)?
+        } else {
+            0
+        };
         if hours >= 24 || minutes >= 60 {
-            return Err(());
+            return None;
         }
-        let total = i32::try_from(hours)
-            .map_err(|_| ())?
-            .checked_mul(3600)
-            .ok_or(())?
-            .checked_add(
-                i32::try_from(minutes)
-                    .map_err(|_| ())?
-                    .checked_mul(60)
-                    .ok_or(())?,
-            )
-            .ok_or(())?;
-        total.checked_mul(sign).map(Some).ok_or(())
+        let total = i32::try_from(
+            hours
+                .checked_mul(3600)?
+                .checked_add(minutes.checked_mul(60)?)?,
+        )
+        .ok()?;
+        total.checked_mul(sign).map(Zone::Offset)
     }
 }
 
-// `YYYY-MM-DD` then a space or `T`, then the time, then an optional `Z` or numeric offset
+// `YYYY-MM-DD`, optionally followed by a space or `T` and a time (`HH:MM[:SS[.ffffff]]`), then an
+// optional offset; a date alone is midnight
 fn parse_datetime(text: &str) -> Option<(DateTime, Option<i32>)> {
     let mut cursor = Cursor::new(text);
     let date = cursor.date()?;
-    if !(cursor.eat(b' ') || cursor.eat(b'T')) {
-        return None;
-    }
-    let time = cursor.time()?;
-    let offset = cursor.offset().ok()?;
+    let time = if cursor
+        .peek()
+        .is_some_and(|byte| matches!(byte, b' ' | b'T'))
+    {
+        cursor.bump();
+        cursor.time(true)?
+    } else {
+        Time {
+            hour: 0,
+            minute: 0,
+            second: 0,
+            microsecond: 0,
+        }
+    };
+    let offset = match cursor.offset() {
+        Zone::Naive => None,
+        Zone::Offset(seconds) => Some(seconds),
+        Zone::Invalid => return None,
+    };
     cursor.done().then_some((DateTime { date, time }, offset))
 }
 
@@ -408,8 +435,10 @@ fn julian_datetime(day: f64) -> Result<DateTime, DecodeError> {
     })
 }
 
-/// Reads ISO-8601 text (a space or `T` separator, an optional fraction), an INTEGER as Unix seconds and
-/// a REAL as a Julian day. Text with an offset is an error in a naive column.
+/// Reads ISO-8601 text, an INTEGER as Unix seconds and a REAL as a Julian day.
+///
+/// Text takes a space or `T` separator, optional seconds and fraction, or a date alone for midnight.
+/// Text with an offset is an error in a naive column.
 ///
 /// # Errors
 /// A BLOB, text in another form or with an offset, and a number outside years 1..=9999.
@@ -421,7 +450,7 @@ pub fn decode_datetime(value: ValueRef<'_>) -> Result<DateTime, DecodeError> {
                 "the stored datetime has a UTC offset but the column is naive; declare it TIMESTAMPTZ",
             )),
             None => Err(DecodeError::new(
-                "the stored TEXT is not an ISO-8601 datetime (YYYY-MM-DD HH:MM:SS[.ffffff])",
+                "the stored TEXT is not an ISO-8601 datetime (YYYY-MM-DD[ HH:MM[:SS[.ffffff]]])",
             )),
         },
         ValueRef::Integer(seconds) => unix_datetime(seconds),
@@ -483,7 +512,7 @@ pub fn decode_time(value: ValueRef<'_>) -> Result<Time, DecodeError> {
     };
     let mut cursor = Cursor::new(text::decode_str(value)?);
     cursor
-        .time()
+        .time(false)
         .filter(|_| cursor.done())
         .ok_or_else(|| DecodeError::new("the stored TEXT is not an ISO time (HH:MM:SS[.ffffff])"))
 }
@@ -571,9 +600,12 @@ mod tests {
     fn datetime_rejects_malformed_text() {
         for value in [
             "",
-            "2024-05-06",
-            "2024-05-06 07:08",
             "2024-5-6 07:08:09",
+            "2024-05-06 7:08",
+            "2024-05-06 07",
+            "2024-05-06 07:08:",
+            "2024-05-06T",
+            "2024-05-06 ",
             "2024-13-06 07:08:09",
             "2024-02-30 07:08:09",
             "2023-02-29 07:08:09",
@@ -593,7 +625,24 @@ mod tests {
     }
 
     #[test]
+    fn datetime_reads_date_only_and_minute_precision_text() {
+        assert_eq!(
+            decode_datetime(text("2024-05-06")),
+            Ok(dt(date(2024, 5, 6), time(0, 0, 0, 0)))
+        );
+        for value in ["2024-05-06 07:08", "2024-05-06T07:08"] {
+            assert_eq!(
+                decode_datetime(text(value)),
+                Ok(dt(date(2024, 5, 6), time(7, 8, 0, 0))),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
     fn naive_column_rejects_an_offset_in_the_text() {
+        assert!(decode_datetime(text("2024-05-06Z")).is_err());
+        assert!(decode_datetime(text("2024-05-06 07:08+02")).is_err());
         assert!(decode_datetime(text("2024-05-06 07:08:09Z")).is_err());
         assert!(decode_datetime(text("2024-05-06 07:08:09+02:00")).is_err());
     }
@@ -743,16 +792,51 @@ mod tests {
     fn aware_read_without_an_offset_or_with_a_bad_one_raises() {
         for value in [
             "2024-05-06 07:08:09",
+            "2024-05-06",
+            "2024-05-06 07:08",
             "2024-05-06 07:08:09+2:00",
-            "2024-05-06 07:08:09+02",
-            "2024-05-06 07:08:09+0200",
+            "2024-05-06 07:08:09+02:",
+            "2024-05-06 07:08:09+020",
+            "2024-05-06 07:08:09+02:0",
             "2024-05-06 07:08:09+24:00",
+            "2024-05-06 07:08:09+2400",
+            "2024-05-06 07:08:09+24",
             "2024-05-06 07:08:09+02:60",
+            "2024-05-06 07:08:09+0260",
             "2024-05-06 07:08:09 UTC",
             "0001-01-01 00:00:00+01:00",
             "9999-12-31 23:59:59-01:00",
         ] {
             assert!(decode_aware(text(value)).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn aware_reads_every_offset_form_and_short_text() {
+        let utc = |hour, minute, second| {
+            Ok(Aware {
+                local: dt(date(2024, 5, 6), time(hour, minute, second, 0)),
+                offset_seconds: 0,
+            })
+        };
+        for (value, expected) in [
+            ("2024-05-06 07:08:09+02:00", utc(5, 8, 9)),
+            ("2024-05-06 07:08:09+0200", utc(5, 8, 9)),
+            ("2024-05-06 07:08:09+02", utc(5, 8, 9)),
+            ("2024-05-06 07:08:09-0530", utc(12, 38, 9)),
+            ("2024-05-06 07:08:09-05", utc(12, 8, 9)),
+            ("2024-05-06 07:08+02:00", utc(5, 8, 0)),
+            ("2024-05-06T07:08Z", utc(7, 8, 0)),
+            ("2024-05-06Z", utc(0, 0, 0)),
+            (
+                "2024-05-06+02:00",
+                Ok(Aware {
+                    local: dt(date(2024, 5, 5), time(22, 0, 0, 0)),
+                    offset_seconds: 0,
+                }),
+            ),
+        ] {
+            assert_eq!(decode_aware(text(value)), expected, "{value}");
         }
     }
 
@@ -862,12 +946,81 @@ mod tests {
             unix_seconds(&dt(date(1969, 12, 31), time(23, 59, 59, 0))),
             Some(-1)
         );
-        // a full cycle of every day from the epoch to 2100 round-trips
+        // every sampled instant from 0001-01-01 up to 2100 (stepping a little over 37 days) survives
+        // from_unix followed by unix_seconds
         let mut seconds = -62_135_596_800_i64;
         while seconds < 4_102_444_800 {
             let datetime = from_unix(seconds, 0);
             assert_eq!(datetime.as_ref().and_then(unix_seconds), Some(seconds));
             seconds += 86_400 * 37 + 1234;
         }
+    }
+
+    #[test]
+    fn century_leap_rules() {
+        for value in ["1900-02-29", "2100-02-29"] {
+            assert!(decode_date(text(value)).is_err(), "{value}");
+            assert!(decode_datetime(text(value)).is_err(), "{value}");
+        }
+        for year in [1900, 2100] {
+            assert!(encode_date(date(year, 2, 29)).is_err(), "{year}");
+            assert!(
+                encode_datetime(&dt(date(year, 2, 29), time(0, 0, 0, 0))).is_err(),
+                "{year}"
+            );
+        }
+        assert_eq!(decode_date(text("2000-02-29")), Ok(date(2000, 2, 29)));
+        assert!(encode_date(date(2000, 2, 29)).is_ok());
+        assert_eq!(decode_date(text("2000-03-01")), Ok(date(2000, 3, 1)));
+    }
+
+    // instants worked out by hand: 2000-02-29 00:00:00 UTC is 11016 days after the epoch, and
+    // 11016 * 86400 = 951782400; the last second of 9999 is 253402300800 - 1
+    #[test]
+    fn known_unix_instants() {
+        for (seconds, expected) in [
+            (951_782_400, dt(date(2000, 2, 29), time(0, 0, 0, 0))),
+            (-86_400, dt(date(1969, 12, 31), time(0, 0, 0, 0))),
+            (253_402_300_799, dt(date(9999, 12, 31), time(23, 59, 59, 0))),
+        ] {
+            assert_eq!(from_unix(seconds, 0), Some(expected), "{seconds}");
+            assert_eq!(unix_seconds(&expected), Some(seconds), "{seconds}");
+            assert_eq!(decode_datetime(ValueRef::Integer(seconds)), Ok(expected));
+        }
+        assert_eq!(from_unix(253_402_300_800, 0), None);
+        assert!(decode_datetime(ValueRef::Integer(253_402_300_800)).is_err());
+    }
+
+    // 1721425.5 is 719162 days before the epoch's 2440587.5, and 719162 * 86400 = 62135596800 seconds,
+    // so it is 0001-01-01 00:00:00. 9999-12-31 00:00:00 is JD 5373483.5 (2932896 days after the epoch)
+    // and 5373484.5 is 10000-01-01. 5373484.499999 is 0.999999 day into the last day, 86399913.6 ms,
+    // which rounds to 86399914 ms: 23:59:59.914. Noise below half a millisecond rounds away as SQLite
+    // does: 2451604.0 (2000-02-29 12:00:00) plus 1e-9 day (0.0864 ms) is unchanged, plus 7e-9 day
+    // (0.6048 ms) is one millisecond later.
+    #[test]
+    fn julian_day_bounds_and_millisecond_rounding() {
+        let first = dt(date(1, 1, 1), time(0, 0, 0, 0));
+        assert_eq!(decode_datetime(ValueRef::Real(1_721_425.5)), Ok(first));
+        assert!(decode_datetime(ValueRef::Real(1_721_425.0)).is_err());
+        assert!(decode_datetime(ValueRef::Real(1_721_425.499_9)).is_err());
+        assert_eq!(
+            decode_datetime(ValueRef::Real(5_373_483.5)),
+            Ok(dt(date(9999, 12, 31), time(0, 0, 0, 0)))
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Real(5_373_484.499_999)),
+            Ok(dt(date(9999, 12, 31), time(23, 59, 59, 914_000)))
+        );
+        assert!(decode_datetime(ValueRef::Real(5_373_484.5)).is_err());
+        assert!(decode_datetime(ValueRef::Real(5_373_485.0)).is_err());
+        let noon = dt(date(2000, 2, 29), time(12, 0, 0, 0));
+        assert_eq!(
+            decode_datetime(ValueRef::Real(2_451_604.0 + 1e-9)),
+            Ok(noon)
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Real(2_451_604.0 + 7e-9)),
+            Ok(dt(date(2000, 2, 29), time(12, 0, 0, 1000)))
+        );
     }
 }

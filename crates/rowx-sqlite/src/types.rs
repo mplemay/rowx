@@ -31,15 +31,10 @@ impl ColumnType {
         self.kind
     }
 
-    /// The column has no declared type (an expression, or a table column declared without one).
+    /// The column has no declared type (an expression, or a table column declared without one). An
+    /// untyped column is always nullable.
     #[must_use]
     pub const fn is_untyped(self) -> bool {
-        self.untyped
-    }
-
-    /// An untyped column carries no NOT NULL guarantee a checker could rely on.
-    #[must_use]
-    pub const fn always_nullable(self) -> bool {
         self.untyped
     }
 
@@ -58,10 +53,10 @@ impl ColumnType {
 /// by storage class, as does a column without a declared type. Substring rules make `POINT` and
 /// `INTERVAL` integer columns, the same trap SQLite itself has.
 ///
-/// A STRICT table only has `INT`, `INTEGER`, `REAL`, `TEXT`, `BLOB` and `ANY` columns (`ANY` decodes by
-/// storage class); any other declared type is not possible there and falls back to the rules above.
+/// STRICT tables need no special case: their six allowed names (`INT`, `INTEGER`, `REAL`, `TEXT`, `BLOB`
+/// and `ANY`) resolve by the same rules, with `ANY` decoding by storage class through numeric affinity.
 #[must_use]
-pub fn lookup(declared: Option<&str>, strict: bool) -> ColumnType {
+pub fn lookup(declared: Option<&str>) -> ColumnType {
     let Some(declared) = declared.map(str::trim).filter(|text| !text.is_empty()) else {
         return ColumnType {
             kind: Kind::Any,
@@ -69,24 +64,10 @@ pub fn lookup(declared: Option<&str>, strict: bool) -> ColumnType {
         };
     };
     let upper = declared.to_ascii_uppercase();
-    if strict && let Some(kind) = strict_kind(&upper) {
-        return ColumnType::typed(kind);
-    }
     if let Some(kind) = named_kind(strip_arguments(&upper)) {
         return ColumnType::typed(kind);
     }
     ColumnType::typed(affinity_kind(&upper))
-}
-
-fn strict_kind(upper: &str) -> Option<Kind> {
-    match upper {
-        "INT" | "INTEGER" => Some(Kind::Integer),
-        "REAL" => Some(Kind::Real),
-        "TEXT" => Some(Kind::Text),
-        "BLOB" => Some(Kind::Blob),
-        "ANY" => Some(Kind::Any),
-        _ => None,
-    }
 }
 
 // `VARCHAR(255)` and `DECIMAL(10, 2)` name their type before the first parenthesis
@@ -107,10 +88,6 @@ fn named_kind(name: &str) -> Option<Kind> {
         "DECIMAL" | "NUMERIC" => Some(Kind::Decimal),
         "UUID" => Some(Kind::Uuid),
         "JSON" => Some(Kind::Json),
-        "INTEGER" => Some(Kind::Integer),
-        "REAL" => Some(Kind::Real),
-        "TEXT" => Some(Kind::Text),
-        "BLOB" => Some(Kind::Blob),
         _ => None,
     }
 }
@@ -135,7 +112,7 @@ mod tests {
     use super::{Kind, lookup};
 
     fn kind(declared: &str) -> Kind {
-        lookup(Some(declared), false).kind()
+        lookup(Some(declared)).kind()
     }
 
     #[test]
@@ -202,7 +179,7 @@ mod tests {
     #[test]
     fn numeric_affinity_decodes_by_storage_class() {
         for declared in ["ANY", "NUMBER", "TIMESTAMP WITH TIME ZONE", "STUFF"] {
-            let column = lookup(Some(declared), false);
+            let column = lookup(Some(declared));
             assert_eq!(column.kind(), Kind::Any, "{declared}");
             assert!(!column.is_untyped(), "{declared}");
         }
@@ -216,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_tables_allow_six_types() {
+    fn strict_table_names_need_no_special_case() {
         for (declared, expected) in [
             ("INT", Kind::Integer),
             ("INTEGER", Kind::Integer),
@@ -226,7 +203,7 @@ mod tests {
             ("BLOB", Kind::Blob),
             ("ANY", Kind::Any),
         ] {
-            let column = lookup(Some(declared), true);
+            let column = lookup(Some(declared));
             assert_eq!(column.kind(), expected, "{declared}");
             assert!(!column.is_untyped());
         }
@@ -235,13 +212,10 @@ mod tests {
     #[test]
     fn untyped_columns_decode_by_storage_class_and_are_nullable() {
         for declared in [None, Some(""), Some("   ")] {
-            for strict in [false, true] {
-                let column = lookup(declared, strict);
-                assert_eq!(column.kind(), Kind::Any);
-                assert!(column.is_untyped());
-                assert!(column.always_nullable());
-            }
+            let column = lookup(declared);
+            assert_eq!(column.kind(), Kind::Any);
+            assert!(column.is_untyped());
         }
-        assert!(!lookup(Some("INTEGER"), false).always_nullable());
+        assert!(!lookup(Some("INTEGER")).is_untyped());
     }
 }

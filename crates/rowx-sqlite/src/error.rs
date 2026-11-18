@@ -119,9 +119,6 @@ impl From<NullCheckError<Self>> for Error {
     }
 }
 
-// the bundled bindings predate this code (SQLite 3.46), so it is spelled out
-const CONSTRAINT_DATATYPE: i32 = 3091;
-
 macro_rules! names {
     ($code:expr, $($name:ident),+ $(,)?) => {
         match $code {
@@ -201,18 +198,21 @@ const fn io_name(code: i32) -> &'static str {
         SQLITE_IOERR_ROLLBACK_ATOMIC,
         SQLITE_IOERR_DATA,
         SQLITE_IOERR_CORRUPTFS,
+        SQLITE_IOERR_IN_PAGE,
+        SQLITE_IOERR_BADKEY,
+        SQLITE_IOERR_CODEC,
     )
 }
 
 const fn extended_name(code: i32) -> &'static str {
-    if code == CONSTRAINT_DATATYPE {
-        return "SQLITE_CONSTRAINT_DATATYPE";
-    }
     names!(
         code,
         SQLITE_ERROR_MISSING_COLLSEQ,
         SQLITE_ERROR_RETRY,
         SQLITE_ERROR_SNAPSHOT,
+        SQLITE_ERROR_RESERVESIZE,
+        SQLITE_ERROR_KEY,
+        SQLITE_ERROR_UNABLE,
         SQLITE_LOCKED_SHAREDCACHE,
         SQLITE_LOCKED_VTAB,
         SQLITE_BUSY_RECOVERY,
@@ -245,8 +245,10 @@ const fn extended_name(code: i32) -> &'static str {
         SQLITE_CONSTRAINT_VTAB,
         SQLITE_CONSTRAINT_ROWID,
         SQLITE_CONSTRAINT_PINNED,
+        SQLITE_CONSTRAINT_DATATYPE,
         SQLITE_NOTICE_RECOVER_WAL,
         SQLITE_NOTICE_RECOVER_ROLLBACK,
+        SQLITE_NOTICE_RBU,
         SQLITE_WARNING_AUTOINDEX,
         SQLITE_AUTH_USER,
     )
@@ -290,7 +292,7 @@ pub const fn sqlstate(code: i32) -> &'static str {
         ffi::SQLITE_CONSTRAINT_NOTNULL => "23502",
         ffi::SQLITE_CONSTRAINT_FOREIGNKEY => "23503",
         ffi::SQLITE_CONSTRAINT_CHECK => "23514",
-        CONSTRAINT_DATATYPE => "22000",
+        ffi::SQLITE_CONSTRAINT_DATATYPE => "22000",
         ffi::SQLITE_BUSY_SNAPSHOT => "40001",
         _ => match code & 0xff {
             ffi::SQLITE_CONSTRAINT => "23000",
@@ -310,7 +312,7 @@ pub const fn sqlstate(code: i32) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONSTRAINT_DATATYPE, Error, code_name, sqlstate};
+    use super::{Error, code_name, sqlstate};
     use crate::dsn::DsnError;
     use crate::value::{DecodeError, EncodeError};
     use rowx_core::row_shape::{NullCheckError, NullError, ShapeCheckError};
@@ -325,7 +327,7 @@ mod tests {
             (ffi::SQLITE_CONSTRAINT_NOTNULL, "23502"),
             (ffi::SQLITE_CONSTRAINT_FOREIGNKEY, "23503"),
             (ffi::SQLITE_CONSTRAINT_CHECK, "23514"),
-            (CONSTRAINT_DATATYPE, "22000"),
+            (ffi::SQLITE_CONSTRAINT_DATATYPE, "22000"),
             (ffi::SQLITE_MISMATCH, "22000"),
             (ffi::SQLITE_CONSTRAINT, "23000"),
             (ffi::SQLITE_CONSTRAINT_TRIGGER, "23000"),
@@ -385,7 +387,10 @@ mod tests {
                 ffi::SQLITE_CONSTRAINT_PRIMARYKEY,
                 "SQLITE_CONSTRAINT_PRIMARYKEY",
             ),
-            (CONSTRAINT_DATATYPE, "SQLITE_CONSTRAINT_DATATYPE"),
+            (
+                ffi::SQLITE_CONSTRAINT_DATATYPE,
+                "SQLITE_CONSTRAINT_DATATYPE",
+            ),
             (ffi::SQLITE_CONSTRAINT, "SQLITE_CONSTRAINT"),
             (ffi::SQLITE_BUSY_SNAPSHOT, "SQLITE_BUSY_SNAPSHOT"),
             (ffi::SQLITE_READONLY_DBMOVED, "SQLITE_READONLY_DBMOVED"),
@@ -402,8 +407,22 @@ mod tests {
     }
 
     #[test]
-    fn extended_codes_are_the_documented_values() {
-        assert_eq!(CONSTRAINT_DATATYPE, ffi::SQLITE_CONSTRAINT | (12 << 8));
+    fn later_extended_names_resolve_to_themselves() {
+        macro_rules! check {
+            ($($name:ident),+ $(,)?) => {
+                $(assert_eq!(code_name(ffi::$name), stringify!($name));)+
+            };
+        }
+        check!(
+            SQLITE_CONSTRAINT_DATATYPE,
+            SQLITE_ERROR_RESERVESIZE,
+            SQLITE_ERROR_KEY,
+            SQLITE_ERROR_UNABLE,
+            SQLITE_IOERR_IN_PAGE,
+            SQLITE_IOERR_BADKEY,
+            SQLITE_IOERR_CODEC,
+            SQLITE_NOTICE_RBU,
+        );
     }
 
     #[test]

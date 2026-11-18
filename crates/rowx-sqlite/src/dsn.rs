@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use rusqlite::OpenFlags;
@@ -51,12 +52,27 @@ pub enum Target {
 }
 
 impl Target {
-    /// The name handed to `sqlite3_open_v2`, which is never parsed as a URI.
+    /// The name handed to `sqlite3_open_v2`, which never parses it as a URI.
+    ///
+    /// Omitting `SQLITE_OPEN_URI` is not enough: the bundled build compiles with `SQLITE_USE_URI`, which
+    /// is global and makes SQLite parse any name starting with `file:` as a URI. A path that decodes to
+    /// `file:...` (for example from `%3A` escapes) would therefore smuggle in `?mode=memory` and similar
+    /// options. Such a path is necessarily relative, so a `./` prefix keeps it a plain file name.
     #[must_use]
-    pub fn open_path(&self) -> &Path {
+    pub fn open_path(&self) -> Cow<'_, Path> {
         match self {
-            Self::Memory => Path::new(":memory:"),
-            Self::File(path) => path,
+            Self::Memory => Cow::Borrowed(Path::new(":memory:")),
+            Self::File(path) => {
+                let looks_like_uri = path
+                    .to_str()
+                    .and_then(|text| text.get(..5))
+                    .is_some_and(|head| head.eq_ignore_ascii_case("file:"));
+                if looks_like_uri {
+                    Cow::Owned(Path::new(".").join(path))
+                } else {
+                    Cow::Borrowed(path)
+                }
+            }
         }
     }
 }
@@ -84,8 +100,9 @@ impl OpenOptions {
         Self { target, mode }
     }
 
-    /// Flags are built from scratch, so `SQLITE_OPEN_URI` is never set (the bundled build compiles with
-    /// `SQLITE_USE_URI`, which would otherwise treat a path starting with `file:` as a URI).
+    /// Flags are built from scratch, so `SQLITE_OPEN_URI` is never set. That alone does not stop URI
+    /// parsing, because the bundled build compiles with the global `SQLITE_USE_URI`; see
+    /// [`Target::open_path`], whose `./` prefix is what prevents it.
     #[must_use]
     pub fn flags(&self) -> OpenFlags {
         let access = match (&self.target, self.mode) {
@@ -315,6 +332,55 @@ mod tests {
             Target::File("a/b.db".into()).open_path().to_str(),
             Some("a/b.db")
         );
+    }
+
+    #[test]
+    fn open_path_neutralises_file_prefixes() {
+        for (dsn, expected) in [
+            (
+                "sqlite:///file:a.db%3Fmode%3Dmemory",
+                "./file:a.db?mode=memory",
+            ),
+            ("sqlite:///file:a.db", "./file:a.db"),
+            ("sqlite:///FILE:a.db", "./FILE:a.db"),
+            ("sqlite:///File:a.db", "./File:a.db"),
+            ("sqlite:///profile:a.db", "profile:a.db"),
+        ] {
+            let target = parse(dsn);
+            assert_eq!(
+                target
+                    .as_ref()
+                    .map(|t| t.open_path().to_str().map(str::to_owned)),
+                Ok(Some(expected.to_owned())),
+                "{dsn}"
+            );
+        }
+    }
+
+    // the bundled SQLite treats a `file:` name as a URI everywhere, so the neutralised name must open a
+    // literal file whose name contains `file:` and `?`
+    #[cfg(not(windows))]
+    #[test]
+    fn neutralised_name_opens_a_literal_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "rowx-sqlite-dsn-{}-neutralised_name_opens_a_literal_file",
+            std::process::id()
+        ));
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let target = parse("sqlite:///file:x.db%3Fmode%3Dmemory").ok();
+        assert!(target.is_some());
+        if let Some(target) = target {
+            let path = dir.join(target.open_path());
+            let flags = OpenOptions::new(target, OpenMode::ReadWriteCreate).flags();
+            let opened = rusqlite::Connection::open_with_flags(&path, flags);
+            assert!(opened.is_ok());
+            if let Ok(conn) = opened {
+                assert!(conn.path().is_some_and(|p| !p.is_empty()));
+                assert!(conn.execute_batch("CREATE TABLE t (a)").is_ok());
+            }
+            assert!(dir.join("file:x.db?mode=memory").exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

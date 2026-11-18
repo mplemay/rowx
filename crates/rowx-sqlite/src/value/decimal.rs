@@ -1,6 +1,6 @@
 use rusqlite::types::{Value, ValueRef};
 
-use super::{DecodeError, EncodeError, mismatch, text};
+use super::{DecodeError, mismatch, text};
 
 /// A decimal number as validated text: an optional sign, digits with an optional fraction and an
 /// optional exponent. NaN, infinities and surrounding whitespace are not accepted.
@@ -8,14 +8,10 @@ use super::{DecodeError, EncodeError, mismatch, text};
 pub struct Decimal(String);
 
 impl Decimal {
-    /// # Errors
-    /// Text that is not a finite decimal number.
-    pub fn parse(text: &str) -> Result<Self, EncodeError> {
-        if is_valid(text) {
-            Ok(Self(text.to_owned()))
-        } else {
-            Err(EncodeError::new("the text is not a finite decimal number"))
-        }
+    /// `None` for text that is not a finite decimal number.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        is_valid(text).then(|| Self(text.to_owned()))
     }
 
     #[must_use]
@@ -59,8 +55,8 @@ fn is_valid(text: &str) -> bool {
 /// Reads TEXT exactly, an INTEGER as its digits, and a REAL through Rust's shortest round-trip float
 /// formatting.
 ///
-/// The REAL form is `{:?}` (`{:?}`, which like Python's `repr` keeps `1.0` and switches to an exponent for very large
-/// and very small values).
+/// A REAL is formatted with Rust's shortest round-trip `{:?}`, which names the same decimal value as
+/// Python's `repr` though the text can differ (for example `1e21` versus `1e+21`).
 ///
 /// # Errors
 /// A BLOB, invalid decimal text and a non-finite REAL.
@@ -72,7 +68,7 @@ pub fn decode(value: ValueRef<'_>) -> Result<Decimal, DecodeError> {
         other => return Err(mismatch("TEXT, INTEGER or REAL for a DECIMAL", other)),
     };
     Decimal::parse(&stored)
-        .map_err(|_| DecodeError::new("the stored value is not a finite decimal number"))
+        .ok_or_else(|| DecodeError::new("the stored value is not a finite decimal number"))
 }
 
 #[must_use]
@@ -109,7 +105,7 @@ mod tests {
             "0.000",
         ] {
             assert_eq!(text(value), Ok(value.to_owned()), "{value}");
-            assert!(Decimal::parse(value).is_ok(), "{value}");
+            assert!(Decimal::parse(value).is_some(), "{value}");
         }
     }
 
@@ -120,7 +116,7 @@ mod tests {
             "Infinity", "-inf", "0x10", "1_000", "1e+",
         ] {
             assert!(text(value).is_err(), "{value}");
-            assert!(Decimal::parse(value).is_err(), "{value}");
+            assert!(Decimal::parse(value).is_none(), "{value}");
         }
     }
 
@@ -159,7 +155,7 @@ mod tests {
         let decimal = Decimal::parse("12.50");
         assert_eq!(
             decimal.as_ref().map(encode),
-            Ok(Value::Text("12.50".to_owned()))
+            Some(Value::Text("12.50".to_owned()))
         );
     }
 }

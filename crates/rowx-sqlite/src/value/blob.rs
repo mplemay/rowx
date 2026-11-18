@@ -4,17 +4,11 @@ use super::{DecodeError, mismatch};
 
 /// # Errors
 /// Any storage class but BLOB.
-pub fn decode_slice(value: ValueRef<'_>) -> Result<&[u8], DecodeError> {
+pub fn decode(value: ValueRef<'_>) -> Result<Vec<u8>, DecodeError> {
     match value {
-        ValueRef::Blob(bytes) => Ok(bytes),
+        ValueRef::Blob(bytes) => Ok(bytes.to_vec()),
         other => Err(mismatch("BLOB", other)),
     }
-}
-
-/// # Errors
-/// As [`decode_slice`].
-pub fn decode(value: ValueRef<'_>) -> Result<Vec<u8>, DecodeError> {
-    decode_slice(value).map(<[u8]>::to_vec)
 }
 
 #[must_use]
@@ -24,13 +18,13 @@ pub const fn encode(value: Vec<u8>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, decode_slice, encode};
+    use super::{decode, encode};
     use rusqlite::types::{Value, ValueRef};
 
     #[test]
     fn blobs_round_trip() {
         assert_eq!(decode(ValueRef::Blob(&[0, 1, 255])), Ok(vec![0, 1, 255]));
-        assert_eq!(decode_slice(ValueRef::Blob(&[])), Ok(&[][..]));
+        assert_eq!(decode(ValueRef::Blob(&[])), Ok(Vec::new()));
         assert_eq!(encode(vec![0, 1]), Value::Blob(vec![0, 1]));
     }
 

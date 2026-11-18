@@ -24,32 +24,32 @@ impl Uuid {
     /// Parses the hyphenated form in either case.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        let mut nibbles = Vec::with_capacity(32);
-        let mut count = 0usize;
+        // bounded before any work: the stored text is untrusted
+        if text.len() != 36 {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        let mut high: Option<u8> = None;
+        let mut out = 0usize;
         for (at, byte) in text.bytes().enumerate() {
-            count = count.saturating_add(1);
             if matches!(at, 8 | 13 | 18 | 23) {
                 if byte != b'-' {
                     return None;
                 }
-            } else {
-                nibbles.push(
-                    char::from(byte)
-                        .to_digit(16)
-                        .and_then(|d| u8::try_from(d).ok())?,
-                );
+                continue;
+            }
+            let nibble = char::from(byte)
+                .to_digit(16)
+                .and_then(|d| u8::try_from(d).ok())?;
+            match high.take() {
+                None => high = Some(nibble),
+                Some(high) => {
+                    *bytes.get_mut(out)? = high << 4 | nibble;
+                    out = out.saturating_add(1);
+                }
             }
         }
-        if count != 36 {
-            return None;
-        }
-        let bytes: Vec<u8> = nibbles
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|[high, low]| high << 4 | low)
-            .collect();
-        <[u8; 16]>::try_from(bytes).ok().map(Self)
+        Some(Self(bytes))
     }
 }
 
@@ -104,10 +104,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_is_bounded_by_length() {
+        let long = format!("{TEXT}{}", "a".repeat(1000));
+        assert_eq!(Uuid::parse(&long), None);
+        assert_eq!(Uuid::parse(TEXT), Some(Uuid(BYTES)));
+    }
+
+    #[test]
     fn anything_else_raises() {
         let unhyphenated = TEXT.replace('-', "");
         let misplaced = "123e4567e-89b-12d3-a456-426614174000";
         let non_hex = "123e4567-e89b-12d3-a456-42661417400g";
+        let long = format!("{TEXT}{}", "a".repeat(1000));
         let multibyte = "123e4567-e89b-12d3-a456-42661417400é";
         for value in [
             ValueRef::Text(b""),
@@ -115,6 +123,7 @@ mod tests {
             ValueRef::Text(misplaced.as_bytes()),
             ValueRef::Text(non_hex.as_bytes()),
             ValueRef::Text(multibyte.as_bytes()),
+            ValueRef::Text(long.as_bytes()),
             ValueRef::Text(TEXT.as_bytes().split_at(35).0),
             ValueRef::Text(&[0xff]),
             ValueRef::Blob(BYTES.split_at(15).0),
