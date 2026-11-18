@@ -5,6 +5,8 @@ use super::{DecodeError, EncodeError, mismatch, text, trunc_i64};
 const MIN_YEAR: i64 = 1;
 const MAX_YEAR: i64 = 9999;
 const SECONDS_PER_DAY: i64 = 86_400;
+const SECONDS_PER_HOUR: i64 = 3600;
+const SECONDS_PER_MINUTE: i64 = 60;
 // the Julian day number of 1970-01-01T00:00:00Z
 const UNIX_EPOCH_JULIAN_DAY: f64 = 2_440_587.5;
 const MILLIS_PER_DAY: f64 = 86_400_000.0;
@@ -122,17 +124,17 @@ fn civil_from_days(days: i64) -> Option<(i64, i64, i64)> {
     Some((year, month, day))
 }
 
-fn unix_seconds(datetime: &DateTime) -> Option<i64> {
-    let date = &datetime.date;
+fn unix_seconds(datetime: DateTime) -> Option<i64> {
+    let date = datetime.date;
     let days = days_from_civil(
         i64::from(date.year),
         i64::from(date.month),
         i64::from(date.day),
     )?;
-    let time = &datetime.time;
+    let time = datetime.time;
     days.checked_mul(SECONDS_PER_DAY)?
-        .checked_add(i64::from(time.hour).checked_mul(3600)?)?
-        .checked_add(i64::from(time.minute).checked_mul(60)?)?
+        .checked_add(i64::from(time.hour).checked_mul(SECONDS_PER_HOUR)?)?
+        .checked_add(i64::from(time.minute).checked_mul(SECONDS_PER_MINUTE)?)?
         .checked_add(i64::from(time.second))
 }
 
@@ -142,7 +144,7 @@ fn from_unix(seconds: i64, microsecond: u32) -> Option<DateTime> {
     if !(MIN_YEAR..=MAX_YEAR).contains(&year) {
         return None;
     }
-    let of_day = u32::try_from(seconds.rem_euclid(SECONDS_PER_DAY)).ok()?;
+    let of_day = seconds.rem_euclid(SECONDS_PER_DAY);
     Some(DateTime {
         date: Date {
             year: u16::try_from(year).ok()?,
@@ -150,12 +152,19 @@ fn from_unix(seconds: i64, microsecond: u32) -> Option<DateTime> {
             day: u8::try_from(day).ok()?,
         },
         time: Time {
-            hour: u8::try_from(of_day / 3600).ok()?,
-            minute: u8::try_from(of_day / 60 % 60).ok()?,
-            second: u8::try_from(of_day % 60).ok()?,
+            hour: u8::try_from(of_day / SECONDS_PER_HOUR).ok()?,
+            minute: u8::try_from(of_day / SECONDS_PER_MINUTE % 60).ok()?,
+            second: u8::try_from(of_day % SECONDS_PER_MINUTE).ok()?,
             microsecond,
         },
     })
+}
+
+// the UTC datetime of a local one at `offset_seconds` east of UTC, `None` outside years 1..=9999
+fn to_utc(local: DateTime, offset_seconds: i32) -> Option<DateTime> {
+    unix_seconds(local)
+        .and_then(|seconds| seconds.checked_sub(i64::from(offset_seconds)))
+        .and_then(|seconds| from_unix(seconds, local.time.microsecond))
 }
 
 // SQLite computes a Julian day to the millisecond, so does this
@@ -180,7 +189,7 @@ fn format_time(time: Time) -> String {
     }
 }
 
-fn format_datetime(datetime: &DateTime) -> String {
+fn format_datetime(datetime: DateTime) -> String {
     format!(
         "{} {}",
         format_date(datetime.date),
@@ -210,7 +219,7 @@ pub fn encode_time(time: Time) -> Result<Value, EncodeError> {
 ///
 /// # Errors
 /// A date or time out of range.
-pub fn encode_datetime(datetime: &DateTime) -> Result<Value, EncodeError> {
+pub fn encode_datetime(datetime: DateTime) -> Result<Value, EncodeError> {
     if !valid_date(datetime.date) || !valid_time(datetime.time) {
         return Err(EncodeError::new("the datetime is out of range"));
     }
@@ -222,21 +231,18 @@ pub fn encode_datetime(datetime: &DateTime) -> Result<Value, EncodeError> {
 /// # Errors
 /// A date or time out of range, an offset of a day or more, or an instant that falls outside years
 /// 1..=9999 once converted to UTC.
-pub fn encode_aware(aware: &Aware) -> Result<Value, EncodeError> {
+pub fn encode_aware(aware: Aware) -> Result<Value, EncodeError> {
     let range = || EncodeError::new("the datetime is out of range once converted to UTC");
     if !valid_date(aware.local.date)
         || !valid_time(aware.local.time)
-        || aware.offset_seconds.unsigned_abs() >= 86_400
+        || i64::from(aware.offset_seconds.unsigned_abs()) >= SECONDS_PER_DAY
     {
         return Err(EncodeError::new(
             "the datetime or its UTC offset is out of range",
         ));
     }
-    let utc = unix_seconds(&aware.local)
-        .and_then(|seconds| seconds.checked_sub(i64::from(aware.offset_seconds)))
-        .and_then(|seconds| from_unix(seconds, aware.local.time.microsecond))
-        .ok_or_else(range)?;
-    Ok(Value::Text(format!("{}+00:00", format_datetime(&utc))))
+    let utc = to_utc(aware.local, aware.offset_seconds).ok_or_else(range)?;
+    Ok(Value::Text(format!("{}+00:00", format_datetime(utc))))
 }
 
 // what follows the time in stored text
@@ -383,9 +389,9 @@ impl<'a> Cursor<'a> {
             return None;
         }
         let total = i32::try_from(
-            hours
-                .checked_mul(3600)?
-                .checked_add(minutes.checked_mul(60)?)?,
+            i64::from(hours)
+                .checked_mul(SECONDS_PER_HOUR)?
+                .checked_add(i64::from(minutes).checked_mul(SECONDS_PER_MINUTE)?)?,
         )
         .ok()?;
         total.checked_mul(sign).map(Zone::Offset)
@@ -444,7 +450,7 @@ fn julian_datetime(day: f64) -> Result<DateTime, DecodeError> {
 /// A BLOB, text in another form or with an offset, and a number outside years 1..=9999.
 pub fn decode_datetime(value: ValueRef<'_>) -> Result<DateTime, DecodeError> {
     match value {
-        ValueRef::Text(_) => match parse_datetime(text::decode_str(value)?) {
+        ValueRef::Text(bytes) => match parse_datetime(text::utf8(bytes)?) {
             Some((datetime, None)) => Ok(datetime),
             Some((_, Some(_))) => Err(DecodeError::new(
                 "the stored datetime has a UTC offset but the column is naive; declare it TIMESTAMPTZ",
@@ -470,14 +476,10 @@ pub fn decode_aware(value: ValueRef<'_>) -> Result<Aware, DecodeError> {
         offset_seconds: 0,
     };
     match value {
-        ValueRef::Text(_) => match parse_datetime(text::decode_str(value)?) {
-            Some((datetime, Some(offset))) => unix_seconds(&datetime)
-                .and_then(|seconds| seconds.checked_sub(i64::from(offset)))
-                .and_then(|seconds| from_unix(seconds, datetime.time.microsecond))
-                .map(utc)
-                .ok_or_else(|| {
-                    DecodeError::new("the stored datetime is outside years 1 to 9999 in UTC")
-                }),
+        ValueRef::Text(bytes) => match parse_datetime(text::utf8(bytes)?) {
+            Some((datetime, Some(offset))) => to_utc(datetime, offset).map(utc).ok_or_else(|| {
+                DecodeError::new("the stored datetime is outside years 1 to 9999 in UTC")
+            }),
             Some((_, None)) => Err(DecodeError::new(
                 "the stored datetime has no UTC offset but the column is TIMESTAMPTZ; store an offset or `Z`",
             )),
@@ -494,10 +496,10 @@ pub fn decode_aware(value: ValueRef<'_>) -> Result<Aware, DecodeError> {
 /// # Errors
 /// Anything but TEXT in `YYYY-MM-DD` form.
 pub fn decode_date(value: ValueRef<'_>) -> Result<Date, DecodeError> {
-    let ValueRef::Text(_) = value else {
+    let ValueRef::Text(bytes) = value else {
         return Err(mismatch("TEXT (YYYY-MM-DD) for a DATE", value));
     };
-    let mut cursor = Cursor::new(text::decode_str(value)?);
+    let mut cursor = Cursor::new(text::utf8(bytes)?);
     cursor
         .date()
         .filter(|_| cursor.done())
@@ -507,10 +509,10 @@ pub fn decode_date(value: ValueRef<'_>) -> Result<Date, DecodeError> {
 /// # Errors
 /// Anything but TEXT in `HH:MM:SS[.ffffff]` form.
 pub fn decode_time(value: ValueRef<'_>) -> Result<Time, DecodeError> {
-    let ValueRef::Text(_) = value else {
+    let ValueRef::Text(bytes) = value else {
         return Err(mismatch("TEXT (HH:MM:SS) for a TIME", value));
     };
-    let mut cursor = Cursor::new(text::decode_str(value)?);
+    let mut cursor = Cursor::new(text::utf8(bytes)?);
     cursor
         .time(false)
         .filter(|_| cursor.done())
@@ -547,32 +549,22 @@ mod tests {
         ValueRef::Text(value.as_bytes())
     }
 
-    fn written(value: Result<Value, super::EncodeError>) -> Option<String> {
-        match value {
-            Ok(Value::Text(text)) => Some(text),
-            _ => None,
-        }
+    fn stored(value: &str) -> Value {
+        Value::Text(value.to_owned())
     }
 
     #[test]
     fn datetime_writes_without_offset_and_omits_a_zero_fraction() {
         let whole = dt(date(2024, 2, 29), time(23, 59, 58, 0));
         let fractional = dt(date(1, 1, 1), time(0, 0, 0, 120_000));
+        assert_eq!(encode_datetime(whole), Ok(stored("2024-02-29 23:59:58")));
         assert_eq!(
-            written(encode_datetime(&whole)).as_deref(),
-            Some("2024-02-29 23:59:58")
+            encode_datetime(fractional),
+            Ok(stored("0001-01-01 00:00:00.120000"))
         );
         assert_eq!(
-            written(encode_datetime(&fractional)).as_deref(),
-            Some("0001-01-01 00:00:00.120000")
-        );
-        assert_eq!(
-            written(encode_datetime(&dt(
-                date(9999, 12, 31),
-                time(23, 59, 59, 999_999)
-            )))
-            .as_deref(),
-            Some("9999-12-31 23:59:59.999999")
+            encode_datetime(dt(date(9999, 12, 31), time(23, 59, 59, 999_999))),
+            Ok(stored("9999-12-31 23:59:59.999999"))
         );
     }
 
@@ -676,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_range_numbers_and_other_classes_raise() {
+    fn out_of_range_numbers_and_other_classes_are_errors() {
         for value in [
             ValueRef::Integer(i64::MAX),
             ValueRef::Integer(i64::MIN),
@@ -706,36 +698,36 @@ mod tests {
     #[test]
     fn aware_writes_utc_with_an_explicit_offset() {
         let utc = |local, offset_seconds| {
-            written(encode_aware(&Aware {
+            encode_aware(Aware {
                 local,
                 offset_seconds,
-            }))
+            })
         };
         let local = dt(date(2024, 5, 6), time(7, 8, 9, 0));
-        assert_eq!(utc(local, 0).as_deref(), Some("2024-05-06 07:08:09+00:00"));
+        assert_eq!(utc(local, 0), Ok(stored("2024-05-06 07:08:09+00:00")));
         assert_eq!(
-            utc(local, 2 * 3600).as_deref(),
-            Some("2024-05-06 05:08:09+00:00")
+            utc(local, 2 * 3600),
+            Ok(stored("2024-05-06 05:08:09+00:00"))
         );
         assert_eq!(
-            utc(local, -(5 * 3600 + 1800)).as_deref(),
-            Some("2024-05-06 12:38:09+00:00")
+            utc(local, -(5 * 3600 + 1800)),
+            Ok(stored("2024-05-06 12:38:09+00:00"))
         );
         // the conversion rolls the date over
         assert_eq!(
-            utc(dt(date(2024, 3, 1), time(0, 30, 0, 250)), 3600).as_deref(),
-            Some("2024-02-29 23:30:00.000250+00:00")
+            utc(dt(date(2024, 3, 1), time(0, 30, 0, 250)), 3600),
+            Ok(stored("2024-02-29 23:30:00.000250+00:00"))
         );
         assert_eq!(
-            utc(dt(date(2023, 12, 31), time(23, 0, 0, 0)), -3600).as_deref(),
-            Some("2024-01-01 00:00:00+00:00")
+            utc(dt(date(2023, 12, 31), time(23, 0, 0, 0)), -3600),
+            Ok(stored("2024-01-01 00:00:00+00:00"))
         );
     }
 
     #[test]
     fn aware_write_outside_the_year_range_or_offset_range_is_an_error() {
         let edge = |local, offset_seconds| {
-            encode_aware(&Aware {
+            encode_aware(Aware {
                 local,
                 offset_seconds,
             })
@@ -789,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn aware_read_without_an_offset_or_with_a_bad_one_raises() {
+    fn aware_read_without_an_offset_or_with_a_bad_one_is_an_error() {
         for value in [
             "2024-05-06 07:08:09",
             "2024-05-06",
@@ -841,33 +833,29 @@ mod tests {
     }
 
     #[test]
-    fn aware_write_then_read_round_trips() {
+    fn aware_write_then_read_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let local = dt(date(2024, 5, 6), time(7, 8, 9, 123_456));
         let aware = Aware {
             local,
             offset_seconds: -7 * 3600,
         };
-        let stored = written(encode_aware(&aware));
-        let read = stored.as_deref().map(|stored| decode_aware(text(stored)));
+        let Value::Text(written) = encode_aware(aware)? else {
+            return Err("an aware datetime is written as TEXT".into());
+        };
         assert_eq!(
-            read,
-            Some(Ok(Aware {
+            decode_aware(text(&written)),
+            Ok(Aware {
                 local: dt(date(2024, 5, 6), time(14, 8, 9, 123_456)),
                 offset_seconds: 0,
-            }))
+            })
         );
+        Ok(())
     }
 
     #[test]
     fn dates_use_iso_text() {
-        assert_eq!(
-            written(encode_date(date(2024, 2, 29))).as_deref(),
-            Some("2024-02-29")
-        );
-        assert_eq!(
-            written(encode_date(date(1, 1, 1))).as_deref(),
-            Some("0001-01-01")
-        );
+        assert_eq!(encode_date(date(2024, 2, 29)), Ok(stored("2024-02-29")));
+        assert_eq!(encode_date(date(1, 1, 1)), Ok(stored("0001-01-01")));
         assert_eq!(decode_date(text("2024-02-29")), Ok(date(2024, 2, 29)));
         assert_eq!(decode_date(text("9999-12-31")), Ok(date(9999, 12, 31)));
         for value in [
@@ -900,13 +888,10 @@ mod tests {
 
     #[test]
     fn times_use_iso_text() {
+        assert_eq!(encode_time(time(1, 2, 3, 0)), Ok(stored("01:02:03")));
         assert_eq!(
-            written(encode_time(time(1, 2, 3, 0))).as_deref(),
-            Some("01:02:03")
-        );
-        assert_eq!(
-            written(encode_time(time(23, 59, 59, 5))).as_deref(),
-            Some("23:59:59.000005")
+            encode_time(time(23, 59, 59, 5)),
+            Ok(stored("23:59:59.000005"))
         );
         assert_eq!(decode_time(text("01:02:03")), Ok(time(1, 2, 3, 0)));
         assert_eq!(decode_time(text("01:02:03.25")), Ok(time(1, 2, 3, 250_000)));
@@ -932,18 +917,18 @@ mod tests {
 
     #[test]
     fn encode_rejects_an_impossible_calendar_date() {
-        assert!(encode_datetime(&dt(date(2023, 2, 29), time(0, 0, 0, 0))).is_err());
-        assert!(encode_datetime(&dt(date(2024, 2, 29), time(0, 60, 0, 0))).is_err());
+        assert!(encode_datetime(dt(date(2023, 2, 29), time(0, 0, 0, 0))).is_err());
+        assert!(encode_datetime(dt(date(2024, 2, 29), time(0, 60, 0, 0))).is_err());
     }
 
     #[test]
     fn calendar_helpers_agree_on_known_instants() {
         let datetime = dt(date(2000, 2, 29), time(12, 0, 0, 0));
-        assert_eq!(unix_seconds(&datetime), Some(951_825_600));
+        assert_eq!(unix_seconds(datetime), Some(951_825_600));
         assert_eq!(from_unix(951_825_600, 0), Some(datetime));
         assert_eq!(from_julian_day(2_451_604.0), Some(datetime));
         assert_eq!(
-            unix_seconds(&dt(date(1969, 12, 31), time(23, 59, 59, 0))),
+            unix_seconds(dt(date(1969, 12, 31), time(23, 59, 59, 0))),
             Some(-1)
         );
         // every sampled instant from 0001-01-01 up to 2100 (stepping a little over 37 days) survives
@@ -951,7 +936,7 @@ mod tests {
         let mut seconds = -62_135_596_800_i64;
         while seconds < 4_102_444_800 {
             let datetime = from_unix(seconds, 0);
-            assert_eq!(datetime.as_ref().and_then(unix_seconds), Some(seconds));
+            assert_eq!(datetime.and_then(unix_seconds), Some(seconds));
             seconds += 86_400 * 37 + 1234;
         }
     }
@@ -965,12 +950,12 @@ mod tests {
         for year in [1900, 2100] {
             assert!(encode_date(date(year, 2, 29)).is_err(), "{year}");
             assert!(
-                encode_datetime(&dt(date(year, 2, 29), time(0, 0, 0, 0))).is_err(),
+                encode_datetime(dt(date(year, 2, 29), time(0, 0, 0, 0))).is_err(),
                 "{year}"
             );
         }
         assert_eq!(decode_date(text("2000-02-29")), Ok(date(2000, 2, 29)));
-        assert!(encode_date(date(2000, 2, 29)).is_ok());
+        assert_eq!(encode_date(date(2000, 2, 29)), Ok(stored("2000-02-29")));
         assert_eq!(decode_date(text("2000-03-01")), Ok(date(2000, 3, 1)));
     }
 
@@ -984,7 +969,7 @@ mod tests {
             (253_402_300_799, dt(date(9999, 12, 31), time(23, 59, 59, 0))),
         ] {
             assert_eq!(from_unix(seconds, 0), Some(expected), "{seconds}");
-            assert_eq!(unix_seconds(&expected), Some(seconds), "{seconds}");
+            assert_eq!(unix_seconds(expected), Some(seconds), "{seconds}");
             assert_eq!(decode_datetime(ValueRef::Integer(seconds)), Ok(expected));
         }
         assert_eq!(from_unix(253_402_300_800, 0), None);

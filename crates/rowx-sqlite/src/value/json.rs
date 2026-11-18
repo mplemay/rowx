@@ -54,7 +54,7 @@ mod tests {
     }
 
     #[test]
-    fn jsonb_blob_non_finite_reals_and_null_raise() {
+    fn jsonb_blob_non_finite_reals_and_null_are_errors() {
         for value in [
             ValueRef::Blob(&[0x7c, 0x17]),
             ValueRef::Real(f64::NAN),
@@ -74,31 +74,25 @@ mod tests {
     }
 
     #[test]
-    fn json_column_round_trips_through_sqlite() {
-        let conn = rusqlite::Connection::open_in_memory();
-        assert!(conn.is_ok());
-        if let Ok(conn) = conn {
-            assert!(conn.execute_batch("CREATE TABLE t(j JSON)").is_ok());
-            for text in ["5", "1.5", "[1]"] {
-                let stored = encode(text);
-                assert!(stored.is_ok(), "{text}");
-                if let Ok(stored) = stored {
-                    assert!(
-                        conn.execute("DELETE FROM t", []).is_ok()
-                            && conn.execute("INSERT INTO t VALUES (?1)", [&stored]).is_ok()
-                    );
-                }
-                let read = conn.query_row("SELECT j FROM t", [], |row| {
-                    let value = row.get_ref(0)?;
-                    Ok(crate::value::decode(crate::types::Kind::Json, value))
-                });
-                assert_eq!(
-                    read,
-                    Ok(Ok(Some(crate::value::Scalar::Json(text.to_owned())))),
-                    "{text}"
-                );
-            }
+    fn json_column_round_trips_through_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch("CREATE TABLE t(j JSON)")?;
+        for text in ["5", "1.5", "[1]"] {
+            conn.execute("DELETE FROM t", [])?;
+            conn.execute("INSERT INTO t VALUES (?1)", [&encode(text)?])?;
+            let read = conn.query_row("SELECT j FROM t", [], |row| {
+                Ok(crate::value::decode(
+                    crate::types::Kind::Json,
+                    row.get_ref(0)?,
+                ))
+            })?;
+            assert_eq!(
+                read,
+                Ok(Some(crate::value::Scalar::Json(text.to_owned()))),
+                "{text}"
+            );
         }
+        Ok(())
     }
 
     #[test]

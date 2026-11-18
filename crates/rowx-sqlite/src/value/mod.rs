@@ -149,8 +149,8 @@ pub fn encode(kind: Kind, scalar: &Scalar) -> Result<Value, EncodeError> {
         (Kind::Text | Kind::Any, Scalar::Text(string)) => text::encode(string),
         (Kind::Blob | Kind::Any, Scalar::Blob(bytes)) => Ok(blob::encode(bytes.clone())),
         (Kind::Boolean, Scalar::Boolean(flag)) => Ok(boolean::encode(*flag)),
-        (Kind::DateTime, Scalar::DateTime(datetime)) => temporal::encode_datetime(datetime),
-        (Kind::DateTimeTz, Scalar::Aware(aware)) => temporal::encode_aware(aware),
+        (Kind::DateTime, Scalar::DateTime(datetime)) => temporal::encode_datetime(*datetime),
+        (Kind::DateTimeTz, Scalar::Aware(aware)) => temporal::encode_aware(*aware),
         (Kind::Date, Scalar::Date(date)) => temporal::encode_date(*date),
         (Kind::Time, Scalar::Time(time)) => temporal::encode_time(*time),
         (Kind::Decimal, Scalar::Decimal(decimal)) => Ok(decimal::encode(decimal)),
@@ -265,7 +265,10 @@ mod tests {
         });
         assert!(encode(Kind::DateTime, &aware).is_err());
         assert!(encode(Kind::DateTimeTz, &Scalar::DateTime(datetime())).is_err());
-        assert!(encode(Kind::DateTimeTz, &aware).is_ok());
+        assert_eq!(
+            encode(Kind::DateTimeTz, &aware),
+            Ok(Value::Text("2024-05-06 07:08:09+00:00".to_owned()))
+        );
     }
 
     #[test]

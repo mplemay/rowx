@@ -6,10 +6,15 @@ use super::{DecodeError, EncodeError, mismatch};
 /// Any storage class but TEXT, and TEXT that is not valid UTF-8.
 pub fn decode_str(value: ValueRef<'_>) -> Result<&str, DecodeError> {
     match value {
-        ValueRef::Text(bytes) => std::str::from_utf8(bytes)
-            .map_err(|err| DecodeError::new(format!("the stored TEXT is not valid UTF-8: {err}"))),
+        ValueRef::Text(bytes) => utf8(bytes),
         other => Err(mismatch("TEXT", other)),
     }
+}
+
+// the bytes of a stored TEXT value as UTF-8
+pub(crate) fn utf8(bytes: &[u8]) -> Result<&str, DecodeError> {
+    std::str::from_utf8(bytes)
+        .map_err(|err| DecodeError::new(format!("the stored TEXT is not valid UTF-8: {err}")))
 }
 
 /// # Errors
@@ -45,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_raises() {
+    fn invalid_utf8_is_an_error() {
         assert!(decode(ValueRef::Text(&[0xff, 0xfe])).is_err());
         assert!(decode(ValueRef::Text(&[b'a', 0xc3])).is_err());
     }
@@ -53,7 +58,7 @@ mod tests {
     #[test]
     fn embedded_nul_is_rejected_on_encode() {
         assert!(encode("a\0b").is_err());
-        assert!(encode("").is_ok());
+        assert_eq!(encode(""), Ok(Value::Text(String::new())));
     }
 
     #[test]

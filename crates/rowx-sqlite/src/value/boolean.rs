@@ -34,7 +34,7 @@ mod tests {
     }
 
     #[test]
-    fn anything_else_raises() {
+    fn anything_else_is_an_error() {
         for value in [
             ValueRef::Integer(2),
             ValueRef::Integer(-1),

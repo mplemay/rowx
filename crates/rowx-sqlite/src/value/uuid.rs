@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn anything_else_raises() {
+    fn anything_else_is_an_error() {
         let unhyphenated = TEXT.replace('-', "");
         let misplaced = "123e4567e-89b-12d3-a456-426614174000";
         let non_hex = "123e4567-e89b-12d3-a456-42661417400g";

@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn open_path_neutralises_file_prefixes() {
+    fn open_path_neutralises_file_prefixes() -> Result<(), Box<dyn std::error::Error>> {
         for (dsn, expected) in [
             (
                 "sqlite:///file:a.db%3Fmode%3Dmemory",
@@ -347,15 +347,10 @@ mod tests {
             ("sqlite:///File:a.db", "./File:a.db"),
             ("sqlite:///profile:a.db", "profile:a.db"),
         ] {
-            let target = parse(dsn);
-            assert_eq!(
-                target
-                    .as_ref()
-                    .map(|t| t.open_path().to_str().map(str::to_owned)),
-                Ok(Some(expected.to_owned())),
-                "{dsn}"
-            );
+            let target = parse(dsn)?;
+            assert_eq!(target.open_path().to_str(), Some(expected), "{dsn}");
         }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -378,28 +373,26 @@ mod tests {
     // relative to the test cwd, must create a literal file whose name contains `file:` and `?`
     #[cfg(not(windows))]
     #[test]
-    fn neutralised_name_opens_a_literal_file() {
+    fn neutralised_name_opens_a_literal_file() -> Result<(), Box<dyn std::error::Error>> {
         let name = format!("file:rowx-dsn-test-{}.db?mode=memory", std::process::id());
-        let target = parse(&format!(
-            "sqlite:///file:rowx-dsn-test-{}.db%3Fmode%3Dmemory",
-            std::process::id()
-        ))
-        .ok();
-        assert!(target.is_some());
-        if let Some(target) = target {
+        // the fallible work runs first so the cleanup below happens even when it fails
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let target = parse(&format!(
+                "sqlite:///file:rowx-dsn-test-{}.db%3Fmode%3Dmemory",
+                std::process::id()
+            ))?;
             let open = target.open_path().into_owned();
             assert_eq!(open, std::path::Path::new(".").join(&name));
             let flags = OpenOptions::new(target, OpenMode::ReadWriteCreate).flags();
-            let opened = rusqlite::Connection::open_with_flags(&open, flags);
-            assert!(opened.is_ok());
-            if let Ok(conn) = opened {
-                assert!(conn.execute_batch("CREATE TABLE t (a)").is_ok());
-            }
+            let conn = rusqlite::Connection::open_with_flags(&open, flags)?;
+            conn.execute_batch("CREATE TABLE t (a)")?;
             assert!(std::path::Path::new(&name).exists());
-        }
+            Ok(())
+        })();
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let _ = std::fs::remove_file(format!("{name}{suffix}"));
         }
+        result
     }
 
     #[test]

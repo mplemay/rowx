@@ -52,11 +52,10 @@ fn is_valid(text: &str) -> bool {
     at == bytes.len()
 }
 
-/// Reads TEXT exactly, an INTEGER as its digits, and a REAL through Rust's shortest round-trip float
-/// formatting.
+/// Reads TEXT exactly, an INTEGER as its digits and a REAL as shortest round-trip text.
 ///
-/// A REAL is formatted with Rust's shortest round-trip `{:?}`, which names the same decimal value as
-/// Python's `repr` though the text can differ (for example `1e21` versus `1e+21`).
+/// A REAL uses Rust's `{:?}`, which names the same decimal value as Python's `repr` though the text can
+/// differ (for example `1e21` versus `1e+21`).
 ///
 /// # Errors
 /// A BLOB, invalid decimal text and a non-finite REAL.
@@ -144,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_and_null_raise() {
+    fn blob_and_null_are_errors() {
         assert!(decode(ValueRef::Blob(b"1")).is_err());
         assert!(decode(ValueRef::Null).is_err());
         assert!(decode(ValueRef::Text(&[0xff])).is_err());
