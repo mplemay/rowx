@@ -64,9 +64,10 @@ impl Target {
             Self::Memory => Cow::Borrowed(Path::new(":memory:")),
             Self::File(path) => {
                 let looks_like_uri = path
-                    .to_str()
-                    .and_then(|text| text.get(..5))
-                    .is_some_and(|head| head.eq_ignore_ascii_case("file:"));
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .get(..5)
+                    .is_some_and(|head| head.eq_ignore_ascii_case(b"file:"));
                 if looks_like_uri {
                     Cow::Owned(Path::new(".").join(path))
                 } else {
@@ -357,30 +358,48 @@ mod tests {
         }
     }
 
-    // the bundled SQLite treats a `file:` name as a URI everywhere, so the neutralised name must open a
-    // literal file whose name contains `file:` and `?`
+    #[cfg(unix)]
+    #[test]
+    fn open_path_neutralises_non_utf8_file_prefixes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let raw = std::ffi::OsString::from_vec(b"file:\xff".to_vec());
+        let open = Target::File(std::path::PathBuf::from(raw))
+            .open_path()
+            .into_owned();
+        assert!(
+            open.as_os_str()
+                .as_encoded_bytes()
+                .starts_with(b"./file:\xff")
+        );
+    }
+
+    // the bundled SQLite treats a `file:` name as a URI everywhere, so the neutralised name, opened
+    // relative to the test cwd, must create a literal file whose name contains `file:` and `?`
     #[cfg(not(windows))]
     #[test]
     fn neutralised_name_opens_a_literal_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "rowx-sqlite-dsn-{}-neutralised_name_opens_a_literal_file",
+        let name = format!("file:rowx-dsn-test-{}.db?mode=memory", std::process::id());
+        let target = parse(&format!(
+            "sqlite:///file:rowx-dsn-test-{}.db%3Fmode%3Dmemory",
             std::process::id()
-        ));
-        assert!(std::fs::create_dir_all(&dir).is_ok());
-        let target = parse("sqlite:///file:x.db%3Fmode%3Dmemory").ok();
+        ))
+        .ok();
         assert!(target.is_some());
         if let Some(target) = target {
-            let path = dir.join(target.open_path());
+            let open = target.open_path().into_owned();
+            assert_eq!(open, std::path::Path::new(".").join(&name));
             let flags = OpenOptions::new(target, OpenMode::ReadWriteCreate).flags();
-            let opened = rusqlite::Connection::open_with_flags(&path, flags);
+            let opened = rusqlite::Connection::open_with_flags(&open, flags);
             assert!(opened.is_ok());
             if let Ok(conn) = opened {
-                assert!(conn.path().is_some_and(|p| !p.is_empty()));
                 assert!(conn.execute_batch("CREATE TABLE t (a)").is_ok());
             }
-            assert!(dir.join("file:x.db?mode=memory").exists());
+            assert!(std::path::Path::new(&name).exists());
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{name}{suffix}"));
+        }
     }
 
     #[test]
