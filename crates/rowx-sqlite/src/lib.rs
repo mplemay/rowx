@@ -1,6 +1,3 @@
-// the SQLite backend builds on rowx-core; nothing from it is used until the backend modules land
-use rowx_core as _;
-
 #[must_use]
 pub fn sqlite_version() -> &'static str {
     rusqlite::version()

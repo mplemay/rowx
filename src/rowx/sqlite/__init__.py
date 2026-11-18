@@ -6,5 +6,3 @@ except ModuleNotFoundError as error:
         raise
     msg = 'Install "rowx[sqlite]" to use rowx.sqlite.'
     raise ImportError(msg) from error
-
-__all__: list[str] = []

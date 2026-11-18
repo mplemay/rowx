@@ -43,8 +43,9 @@ Rust tests are `cargo test` over the default workspace members (`just test-rust`
 | Command | What it runs |
 |---|---|
 | `just check` | `uv run prek run --all-files`: rumdl, ruff, `ty check` on `src`, `packages/rowx-core/src`, `packages/rowx-postgres/src`, `packages/rowx-embedded/src` and `packages/rowx-sqlite/src`, `cargo fmt`, `cargo clippy`. |
-| `just test-py` | Builds the SQLite extension (`uv run maturin develop -m packages/rowx-sqlite/Cargo.toml`), then `uv run pytest`. |
-| `just test-sqlite` | `uv run pytest packages/rowx-sqlite/src/rowx_sqlite/__tests__`. |
+| `just build-sqlite` | Builds the SQLite extension (`uv run maturin develop -m packages/rowx-sqlite/Cargo.toml`). |
+| `just test-py` | Runs `just build-sqlite`, then `uv run pytest`. |
+| `just test-sqlite` | Runs `just build-sqlite`, then `uv run pytest packages/rowx-sqlite/src/rowx_sqlite/__tests__`. |
 | `just test-rust` | `cargo test` over the default members (no Wasmer). |
 | `just test-rust-embedded` | `cargo test -p rowx-embedded-host`. |
 | `just docs-build` | `zensical build --clean --strict`. |

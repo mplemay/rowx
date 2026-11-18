@@ -1,6 +1,6 @@
 import importlib
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 if TYPE_CHECKING:
     from rowx_core.backend import Backend
@@ -27,6 +27,7 @@ SCHEMES: Final[dict[str, tuple[str, str]]] = {
 }
 SQLITE_HINT: Final[str] = "use `sqlite:///relative.db`, `sqlite:////absolute/path.db` or `sqlite::memory:`"
 SQLITE_MEMORY: Final[str] = "sqlite::memory:"
+SQLITE_MEMORY_FILE: Final[str] = ":memory:"
 SQLITE_SUFFIXES: Final[tuple[str, ...]] = (".db", ".sqlite", ".sqlite3", ".db3")
 # query options that a SQLite URL may not carry, as name -> the values that are rejected (empty rejects any value)
 SQLITE_REJECTED_OPTIONS: Final[dict[str, frozenset[str]]] = {
@@ -77,6 +78,10 @@ def _check_sqlite_url(token: str) -> None:
         raise _sqlite_error(msg)
     if parsed.path in {"", "/"}:
         msg = "the SQLite URL has an empty path"
+        raise _sqlite_error(msg)
+    # SQLite opens the filename `:memory:` as an in-memory database; strip only the one leading slash
+    if unquote(parsed.path).removeprefix("/").lower() == SQLITE_MEMORY_FILE:
+        msg = "an in-memory database is written `sqlite::memory:`"
         raise _sqlite_error(msg)
     for name, value in options:
         rejected = SQLITE_REJECTED_OPTIONS.get(name.lower())

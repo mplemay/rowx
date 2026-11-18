@@ -233,6 +233,7 @@ def test_an_embedded_dsn_without_the_companion_asks_for_the_embedded_extra(monke
     [
         "sqlite:///relative.db",
         "sqlite:////abs/path.db",
+        "sqlite:////:memory:",
         "sqlite::memory:",
         "SQLite::MEMORY:",
         "SQLITE:///relative.db",
@@ -272,6 +273,8 @@ SQLITE_HINT: Final[str] = "use `sqlite:///relative.db`, `sqlite:////absolute/pat
         ("sqlite://", "empty path"),
         ("sqlite:///", "empty path"),
         ("sqlite:///?mode=ro", "empty path"),
+        ("sqlite:///:memory:", "in-memory database is written"),
+        ("sqlite:///%3Amemory%3A", "in-memory database is written"),
     ],
 )
 def test_rejected_sqlite_forms_name_the_problem_and_show_the_hint(dsn: str, problem: str) -> None:

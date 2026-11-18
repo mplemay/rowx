@@ -132,8 +132,9 @@ validates every query against a live Postgres 18 database by preparing and descr
 | `just fmt` | Format rust, python, and shell through the prek hooks |
 | `just test-rust` | `cargo test` over the default members, which leave out `rowx-embedded` (DB tests run if `ROWX_TEST_DSN` is set) |
 | `just test-rust-embedded` | `cargo test -p rowx-embedded-host` (builds the Wasmer tree) |
-| `just test-py` | Build the SQLite extension, then `uv run pytest` |
-| `just test-sqlite` | `uv run pytest` over `packages/rowx-sqlite/src/rowx_sqlite/__tests__` |
+| `just build-sqlite` | Build the SQLite extension with maturin |
+| `just test-py` | `just build-sqlite`, then `uv run pytest` |
+| `just test-sqlite` | `just build-sqlite`, then `uv run pytest` over `packages/rowx-sqlite/src/rowx_sqlite/__tests__` |
 | `just db-up` / `just db-down` | Start or stop `postgres:18` |
 | `just bench` | Release build plus `bench/fetch_100k.py` |
 
