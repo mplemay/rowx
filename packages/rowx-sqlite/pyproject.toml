@@ -1,0 +1,61 @@
+[project]
+name = "rowx-sqlite"
+version = "0.4.2"
+description = "SQLite backend for rowx"
+readme = "README.md"
+authors = [
+    { name = "Matt LeMay", email = "mplemay@users.noreply.github.com" }
+]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+    "Topic :: Database",
+    "Framework :: AsyncIO",
+]
+keywords = ["sql", "sqlite", "typed", "async", "t-string"]
+dependencies = ["rowx-core==0.4.2"]
+
+[project.urls]
+Documentation = "https://mplemay.github.io/rowx/"
+Repository = "https://github.com/mplemay/rowx"
+Issues = "https://github.com/mplemay/rowx/issues"
+Changelog = "https://github.com/mplemay/rowx/blob/main/docs/changelog.md"
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "rowx_sqlite._core"
+python-packages = ["rowx_sqlite"]
+python-source = "src"
+# source archives need the root `[patch.crates-io]` path; `vendor` here is a symlink to the repository's root `vendor/`
+include = [{ path = "vendor/wasmer-compiler/**/*", format = "sdist" }]
+exclude = [
+    { path = "**/__tests__/**", format = "wheel" },
+    { path = "**/__pycache__/**", format = "wheel" },
+    { path = "**/*.pyc", format = "wheel" },
+]
+
+[tool.uv.sources]
+rowx-core = { workspace = true }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "src/**/*.rs" },
+    { file = "Cargo.toml" },
+    { file = "../../crates/**/*.rs" },
+    { file = "../../crates/**/Cargo.toml" },
+    { file = "../../Cargo.toml" },
+    { file = "../../Cargo.lock" },
+    { file = "../../rust-toolchain.toml" },
+]

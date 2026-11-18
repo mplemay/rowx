@@ -419,7 +419,7 @@ def test_embedded_for_is_none_for_everything_that_is_not_an_embedded_url(monkeyp
     install(monkeypatch, persistent=True)
     assert embedded_for(None) is None
     assert embedded_for("  ") is None
-    assert embedded_for("sqlite://x") is None
+    assert embedded_for("mysql://x") is None
     assert embedded_for("fakedb-embedded:///var/db") is not None
 
 

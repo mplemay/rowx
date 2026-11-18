@@ -42,6 +42,8 @@ POSTGRES_EXTRA: Final[str] = "postgres"
 PYTEST_EXTRA: Final[str] = "pytest"
 EMBEDDED_DISTRIBUTION: Final[str] = "rowx-embedded"
 EMBEDDED_EXTRA: Final[str] = "embedded"
+SQLITE_DISTRIBUTION: Final[str] = "rowx-sqlite"
+SQLITE_EXTRA: Final[str] = "sqlite"
 MARKER_AND: Final[str] = "and"
 MARKER_OR: Final[str] = "or"
 MARKER_EQUALS: Final[str] = "=="
@@ -323,8 +325,15 @@ def _validate_rowx_requires(path: Path, version: str, requirements: list[Require
     if embedded != [expected_embedded]:
         message = f"{path.name} embedded requirements are {embedded}, expected [{expected_embedded}]"
         raise SystemExit(message)
+    expected_sqlite = [(f"{SQLITE_DISTRIBUTION}=={version}", SQLITE_EXTRA)]
+    sqlite = [
+        (requirement, extra) for requirement, extra in extras if _distribution_name(requirement) == SQLITE_DISTRIBUTION
+    ]
+    if sqlite != expected_sqlite:
+        message = f"{path.name} sqlite requirements are {sqlite}, expected {expected_sqlite}"
+        raise SystemExit(message)
     for requirement, extra in extras:
-        if _distribution_name(requirement) == POSTGRES_DISTRIBUTION:
+        if _distribution_name(requirement) in {POSTGRES_DISTRIBUTION, SQLITE_DISTRIBUTION}:
             continue
         if _distribution_name(requirement) != PYTEST_DISTRIBUTION or extra != PYTEST_EXTRA:
             message = f"{path.name} has an unexpected extra requirement: {requirement} ; extra == {extra}"

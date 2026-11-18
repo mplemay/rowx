@@ -27,6 +27,7 @@ REQUESTS_REQUIREMENT: Final[str] = "requests>=2"
 CORE_REQUIREMENT: Final[str] = f"rowx-core=={VERSION}"
 POSTGRES_PIN: Final[str] = f"rowx-postgres=={VERSION}"
 EMBEDDED_PIN: Final[str] = f"rowx-embedded=={VERSION}"
+SQLITE_EXTRA_REQUIREMENT: Final[str] = f"rowx-sqlite=={VERSION} ; extra == 'sqlite'"
 PYTEST_REQUIREMENT: Final[str] = "pytest>=9.2.0 ; extra == 'pytest'"
 DARWIN_CLAUSE: Final[str] = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'embedded'"
 LINUX_AARCH64_CLAUSE: Final[str] = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'embedded'"
@@ -108,6 +109,7 @@ def _default_requires(namespace: str) -> tuple[str, ...]:
             f"{POSTGRES_PIN} ; extra == 'embedded'",
             _embedded_requirement(DARWIN_CLAUSE, LINUX_AARCH64_CLAUSE, LINUX_X86_CLAUSE),
             f"{POSTGRES_PIN} ; extra == 'postgres'",
+            SQLITE_EXTRA_REQUIREMENT,
             PYTEST_REQUIREMENT,
         )
     if namespace == ROWX_CORE:
@@ -261,7 +263,7 @@ def test_rowx_version_mismatch_fails(tmp_path: Path) -> None:
 
 
 def _rowx_requires(*requirements: str) -> tuple[str, ...]:
-    return (CORE_REQUIREMENT, "pathspec<2,>=1.1.1", *requirements)
+    return (CORE_REQUIREMENT, "pathspec<2,>=1.1.1", SQLITE_EXTRA_REQUIREMENT, *requirements)
 
 
 EMBEDDED_POSTGRES: Final[str] = f"{POSTGRES_PIN} ; extra == 'embedded'"
@@ -409,6 +411,28 @@ def test_rowx_wheel_accepts_factored_embedded_marker(tmp_path: Path) -> None:
 def test_rowx_wheel_rejects_malformed_embedded_extra(tmp_path: Path, requires: tuple[str, ...], match: str) -> None:
     path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, requires=requires))
     with pytest.raises(SystemExit, match=match):
+        VALIDATE_WHEEL(path)
+
+
+@pytest.mark.parametrize(
+    "sqlite_requirements",
+    [
+        pytest.param((), id="missing"),
+        pytest.param((f"rowx-sqlite=={WRONG_VERSION} ; extra == 'sqlite'",), id="wrong-pin"),
+        pytest.param((f"rowx-sqlite=={VERSION} ; extra == 'postgres'",), id="wrong-extra"),
+    ],
+)
+def test_rowx_wheel_rejects_malformed_sqlite_extra(tmp_path: Path, sqlite_requirements: tuple[str, ...]) -> None:
+    requires = (
+        CORE_REQUIREMENT,
+        "pathspec<2,>=1.1.1",
+        EMBEDDED_POSTGRES,
+        POSTGRES_EXTRA_REQUIREMENT,
+        _embedded_requirement(*ALL_CLAUSES),
+        *sqlite_requirements,
+    )
+    path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, requires=requires))
+    with pytest.raises(SystemExit, match="sqlite requirements are"):
         VALIDATE_WHEEL(path)
 
 

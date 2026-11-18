@@ -18,4 +18,5 @@ title: "bug: "
 - [ ] New tests are named in the pull request
 - [ ] Changes stay scoped to the feature
 - [ ] Public Python stays typed, and the `_core` stubs are updated when a binding changes
-- [ ] Errors use `thiserror` in `rowx-core` and `rowx-postgres`, and are mapped to Python exceptions only in `errors.rs`
+- [ ] Errors use `thiserror` in `rowx-core`, `rowx-postgres` and `rowx-sqlite`, and are mapped to Python exceptions only
+      in `errors.rs`

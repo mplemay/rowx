@@ -4,7 +4,9 @@ members = [
     "crates/rowx-core",
     "crates/rowx-postgres",
     "crates/rowx-py-core",
+    "crates/rowx-sqlite",
     "packages/rowx-postgres",
+    "packages/rowx-sqlite",
     "packages/rowx-embedded",
     "packages/rowx-embedded/crates/rowx-embedded-host",
 ]
@@ -14,7 +16,9 @@ default-members = [
     "crates/rowx-core",
     "crates/rowx-postgres",
     "crates/rowx-py-core",
+    "crates/rowx-sqlite",
     "packages/rowx-postgres",
+    "packages/rowx-sqlite",
 ]
 # cargo-fuzz targets need nightly and unsafe code, so they stay out of the workspace and its lints.
 exclude = ["fuzz"]
@@ -33,6 +37,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 rowx-core = { path = "crates/rowx-core" }
 rowx-postgres = { path = "crates/rowx-postgres" }
 rowx-py-core = { path = "crates/rowx-py-core" }
+rowx-sqlite = { path = "crates/rowx-sqlite" }
 # the full contrib set the engine can ship (32 extensions); the names are mirrored in `host/src/runtime.rs`
 oliphaunt-wasix = { version = "=0.3.2", features = ["extension-amcheck", "extension-auto-explain", "extension-bloom", "extension-btree-gin", "extension-btree-gist", "extension-citext", "extension-cube", "extension-dict-int", "extension-dict-xsyn", "extension-earthdistance", "extension-file-fdw", "extension-fuzzystrmatch", "extension-hstore", "extension-intarray", "extension-isn", "extension-lo", "extension-ltree", "extension-pageinspect", "extension-pg-buffercache", "extension-pg-freespacemap", "extension-pg-surgery", "extension-pg-trgm", "extension-pg-visibility", "extension-pg-walinspect", "extension-pgcrypto", "extension-seg", "extension-tablefunc", "extension-tcn", "extension-tsm-system-rows", "extension-tsm-system-time", "extension-unaccent", "extension-uuid-ossp"] }
 
