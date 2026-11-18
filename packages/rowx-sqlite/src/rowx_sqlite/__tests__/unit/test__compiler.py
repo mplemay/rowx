@@ -359,6 +359,61 @@ def test_facts_dml_sources(sql: str, sources: tuple[tuple[str, ...], ...]) -> No
 @pytest.mark.parametrize(
     ("sql", "sources"),
     [
+        ("UPDATE of SET a = 1", (("of",),)),
+        ("update no set a=1 returning a", (("no",),)),
+        ("update cascade set a=1", (("cascade",),)),
+        ("update restrict set a=1", (("restrict",),)),
+        ("select update from t", (("t",),)),
+        ("select update, a from t", (("t",),)),
+    ],
+)
+def test_facts_update_target_may_be_a_contextual_keyword(sql: str, sources: tuple[tuple[str, ...], ...]) -> None:
+    assert statement_facts(sql).sources == sources
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "insert into t values (1) on conflict do update set a = 1",
+        "create trigger g after update on t begin select 1; end",
+        "create trigger g before update of a on t begin select 1; end",
+        "create trigger g update of a on t begin select 1; end",
+        "create trigger g update on t begin select 1; end",
+        "create trigger g instead of update of a on v begin select 1; end",
+        "create table f (a references t (a) on update cascade)",
+        "create table f (a references t (a) on update set null)",
+        "create table f (a references t (a) on update no action)",
+        "create table f (a references t (a) on update restrict)",
+    ],
+)
+def test_facts_update_event_is_not_a_target(sql: str) -> None:
+    assert not any(
+        src in {("of",), ("no",), ("cascade",), ("restrict",), ("set",), ("on",)}
+        for src in statement_facts(sql).sources
+    )
+
+
+@pytest.mark.parametrize(
+    ("sql", "names"),
+    [
+        ("with recursive recursive as (select null a) select * from recursive", {"recursive"}),
+        ('with recursive "recursive" as (select 1 a) select * from recursive', {"recursive"}),
+        ("with recursive recursive(a) as (select 1) select * from recursive", {"recursive"}),
+        ("with recursive c as (select 1 a) select * from c", {"c"}),
+        ("with 'c' as (select 1) select * from c", {"c"}),
+        ("with 'C' as (select 1), recursive as (select 2) select * from c, recursive", {"c", "recursive"}),
+        ("select * from (with recursive recursive as (select 1) select * from recursive)", {"recursive"}),
+    ],
+)
+def test_facts_recursive_keyword_is_accepted_once(sql: str, names: set[str]) -> None:
+    f = statement_facts(sql)
+    assert f.cte_names == names
+    assert f.has_subquery
+
+
+@pytest.mark.parametrize(
+    ("sql", "sources"),
+    [
         ("select with from t", (("t",),)),
         ("select a as with from t", (("t",),)),
         ("select t.with from t left join u", (("t",), ("u",))),

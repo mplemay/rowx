@@ -231,13 +231,17 @@ COMPOUND_WORDS: Final[frozenset[str]] = frozenset({"union", "intersect", "except
 SUBQUERY_STARTS: Final[frozenset[str]] = frozenset({"select", "with", "values"})
 NAME_KINDS: Final[frozenset[TokenKind]] = frozenset({"word", "quoted", "string"})
 CONFLICT_WORDS: Final[frozenset[str]] = frozenset({"rollback", "abort", "replace", "fail", "ignore"})
-# words that follow UPDATE without being its target: DO UPDATE SET, BEFORE UPDATE OF/ON, ON UPDATE CASCADE/SET/NO/RESTRICT
-UPDATE_NOT_TARGETS: Final[frozenset[str]] = frozenset({"set", "of", "on", "cascade", "no", "restrict", "from"})
+# words that never name an UPDATE target: `UPDATE SET` is a column list, `UPDATE ON` a trigger, `update FROM` a column
+UPDATE_NOT_TARGETS: Final[frozenset[str]] = frozenset({"set", "on", "from"})
+# a preceding word that makes UPDATE an event instead of a statement: DO UPDATE SET, BEFORE/AFTER/INSTEAD OF UPDATE, ON UPDATE
+UPDATE_EVENT_PREVIOUS: Final[frozenset[str]] = frozenset({"on", "do", "before", "after", "of"})
+# what can follow the target in `UPDATE of ...`; a trigger without timing reads `UPDATE OF col ON t`
+UPDATE_TARGET_FOLLOWERS: Final[frozenset[str]] = frozenset({"set", "as", "indexed", "not"})
 # SQLite accepts `with` and `window` as identifiers; every other FROM-ending word is reserved
 NOT_CTE_NAMES: Final[frozenset[str]] = (FROM_ENDS - {"window"}) | {"from", "as"}
 
 
-type CteState = Literal["name", "after_name", "as", "after_body"]
+type CteState = Literal["start", "name", "after_name", "as", "after_body"]
 
 
 @dataclass(slots=True)
@@ -328,11 +332,13 @@ class _Walker:
     def _cte(self, f: _Frame, tok: Token) -> bool:
         state, f.cte = f.cte, None
         word = tok.value if tok.kind == "word" else None
-        if (state == "after_body" and _is_punct(tok, ",")) or (state == "name" and word == "recursive"):
+        if state == "start" and word == "recursive":
             f.cte = "name"
-        elif state == "name" and tok.kind in {"word", "quoted"}:
-            self.ctes.add(tok.value)
+        elif state in {"start", "name"} and tok.kind in NAME_KINDS:
+            self.ctes.add(_name_part(tok))
             f.cte = "after_name"
+        elif state == "after_body" and _is_punct(tok, ","):
+            f.cte = "name"
         elif state == "after_name" and word == "as":
             f.cte = "as"
         elif state == "after_name" and _is_punct(tok, "("):
@@ -392,7 +398,7 @@ class _Walker:
         name, after = self._at(j), self._at(j + 1)
         if name is None or after is None:
             return False
-        named = name.kind == "quoted" or (name.kind == "word" and name.value not in NOT_CTE_NAMES)
+        named = name.kind in {"quoted", "string"} or (name.kind == "word" and name.value not in NOT_CTE_NAMES)
         return named and (_is_punct(after, "(") or (after.kind == "word" and after.value == "as"))
 
     # a word from FROM_ENDS closes the FROM clause only as the clause keyword, not as an alias or qualified column
@@ -421,7 +427,7 @@ class _Walker:
     # UPDATE [OR <conflict>] <target>
     def _update_target(self) -> None:
         prev = self._prev()
-        if prev is not None and _is_punct(prev, "."):
+        if prev is not None and (_is_punct(prev, ".") or (prev.kind == "word" and prev.value in UPDATE_EVENT_PREVIOUS)):
             return
         j = self.i
         or_tok, conflict = self._at(j), self._at(j + 1)
@@ -440,12 +446,16 @@ class _Walker:
             or (target.kind == "word" and target.value in UPDATE_NOT_TARGETS)
         ):
             return
+        if target.kind == "word" and target.value == "of":
+            after = self._at(j + 1)
+            if after is None or after.kind != "word" or after.value not in UPDATE_TARGET_FOLLOWERS:
+                return
         self._record(j)
 
     def _clause_word(self, f: _Frame, word: str) -> None:
         if word == "with":
             if self._starts_with_clause():
-                f.cte = "name"
+                f.cte = "start"
         elif word == "from":
             if not self._after_distinct():
                 f.from_active = True
