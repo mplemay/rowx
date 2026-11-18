@@ -1,0 +1,1011 @@
+use rusqlite::types::{Value, ValueRef};
+
+use super::{DecodeError, EncodeError, mismatch, text, trunc_i64};
+
+const MIN_YEAR: i64 = 1;
+const MAX_YEAR: i64 = 9999;
+const SECONDS_PER_DAY: i64 = 86_400;
+const SECONDS_PER_HOUR: i64 = 3600;
+const SECONDS_PER_MINUTE: i64 = 60;
+// the Julian day number of 1970-01-01T00:00:00Z
+const UNIX_EPOCH_JULIAN_DAY: f64 = 2_440_587.5;
+const MILLIS_PER_DAY: f64 = 86_400_000.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Date {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Time {
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+    pub microsecond: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DateTime {
+    pub date: Date,
+    pub time: Time,
+}
+
+/// A local datetime and its offset east of UTC in seconds (strictly inside one day). Writing converts it
+/// to UTC; reading always returns UTC with an offset of 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Aware {
+    pub local: DateTime,
+    pub offset_seconds: i32,
+}
+
+const fn is_leap(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+const fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        2 if is_leap(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn valid_date(date: Date) -> bool {
+    let (year, month, day) = (
+        i64::from(date.year),
+        i64::from(date.month),
+        i64::from(date.day),
+    );
+    (MIN_YEAR..=MAX_YEAR).contains(&year)
+        && (1..=12).contains(&month)
+        && (1..=days_in_month(year, month)).contains(&day)
+}
+
+const fn valid_time(time: Time) -> bool {
+    time.hour < 24 && time.minute < 60 && time.second < 60 && time.microsecond < 1_000_000
+}
+
+// Hinnant's days_from_civil: days since 1970-01-01
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    let year = if month <= 2 {
+        year.checked_sub(1)?
+    } else {
+        year
+    };
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400);
+    let mp = if month > 2 {
+        month.checked_sub(3)?
+    } else {
+        month.checked_add(9)?
+    };
+    let doy = mp.checked_mul(153)?.checked_add(2)? / 5;
+    let doy = doy.checked_add(day)?.checked_sub(1)?;
+    let doe = yoe
+        .checked_mul(365)?
+        .checked_add(yoe / 4)?
+        .checked_sub(yoe / 100)?
+        .checked_add(doy)?;
+    era.checked_mul(146_097)?
+        .checked_add(doe)?
+        .checked_sub(719_468)
+}
+
+// Hinnant's civil_from_days: the year, month and day of a day count since 1970-01-01
+fn civil_from_days(days: i64) -> Option<(i64, i64, i64)> {
+    let shifted = days.checked_add(719_468)?;
+    let era = shifted.div_euclid(146_097);
+    let doe = shifted.rem_euclid(146_097);
+    let yoe = doe
+        .checked_sub(doe / 1460)?
+        .checked_add(doe / 36_524)?
+        .checked_sub(doe / 146_096)?
+        / 365;
+    let doy = doe.checked_sub(
+        yoe.checked_mul(365)?
+            .checked_add(yoe / 4)?
+            .checked_sub(yoe / 100)?,
+    )?;
+    let mp = doy.checked_mul(5)?.checked_add(2)? / 153;
+    let day = doy
+        .checked_sub(mp.checked_mul(153)?.checked_add(2)? / 5)?
+        .checked_add(1)?;
+    let month = if mp < 10 {
+        mp.checked_add(3)?
+    } else {
+        mp.checked_sub(9)?
+    };
+    let year = yoe
+        .checked_add(era.checked_mul(400)?)?
+        .checked_add(i64::from(month <= 2))?;
+    Some((year, month, day))
+}
+
+fn unix_seconds(datetime: DateTime) -> Option<i64> {
+    let date = datetime.date;
+    let days = days_from_civil(
+        i64::from(date.year),
+        i64::from(date.month),
+        i64::from(date.day),
+    )?;
+    let time = datetime.time;
+    days.checked_mul(SECONDS_PER_DAY)?
+        .checked_add(i64::from(time.hour).checked_mul(SECONDS_PER_HOUR)?)?
+        .checked_add(i64::from(time.minute).checked_mul(SECONDS_PER_MINUTE)?)?
+        .checked_add(i64::from(time.second))
+}
+
+// the datetime of Unix seconds plus microseconds, `None` outside years 1..=9999
+fn from_unix(seconds: i64, microsecond: u32) -> Option<DateTime> {
+    let (year, month, day) = civil_from_days(seconds.div_euclid(SECONDS_PER_DAY))?;
+    if !(MIN_YEAR..=MAX_YEAR).contains(&year) {
+        return None;
+    }
+    let of_day = seconds.rem_euclid(SECONDS_PER_DAY);
+    Some(DateTime {
+        date: Date {
+            year: u16::try_from(year).ok()?,
+            month: u8::try_from(month).ok()?,
+            day: u8::try_from(day).ok()?,
+        },
+        time: Time {
+            hour: u8::try_from(of_day / SECONDS_PER_HOUR).ok()?,
+            minute: u8::try_from(of_day / SECONDS_PER_MINUTE % 60).ok()?,
+            second: u8::try_from(of_day % SECONDS_PER_MINUTE).ok()?,
+            microsecond,
+        },
+    })
+}
+
+// the UTC datetime of a local one at `offset_seconds` east of UTC, `None` outside years 1..=9999
+fn to_utc(local: DateTime, offset_seconds: i32) -> Option<DateTime> {
+    unix_seconds(local)
+        .and_then(|seconds| seconds.checked_sub(i64::from(offset_seconds)))
+        .and_then(|seconds| from_unix(seconds, local.time.microsecond))
+}
+
+// SQLite computes a Julian day to the millisecond, so does this
+fn from_julian_day(day: f64) -> Option<DateTime> {
+    let millis = trunc_i64(((day - UNIX_EPOCH_JULIAN_DAY) * MILLIS_PER_DAY).round())?;
+    let micros = u32::try_from(millis.rem_euclid(1000))
+        .ok()?
+        .checked_mul(1000)?;
+    from_unix(millis.div_euclid(1000), micros)
+}
+
+fn format_date(date: Date) -> String {
+    format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
+}
+
+fn format_time(time: Time) -> String {
+    let base = format!("{:02}:{:02}:{:02}", time.hour, time.minute, time.second);
+    if time.microsecond == 0 {
+        base
+    } else {
+        format!("{base}.{:06}", time.microsecond)
+    }
+}
+
+fn format_datetime(datetime: DateTime) -> String {
+    format!(
+        "{} {}",
+        format_date(datetime.date),
+        format_time(datetime.time)
+    )
+}
+
+/// # Errors
+/// A date outside years 1..=9999 or with an impossible month or day.
+pub fn encode_date(date: Date) -> Result<Value, EncodeError> {
+    if !valid_date(date) {
+        return Err(EncodeError::new("the date is out of range"));
+    }
+    Ok(Value::Text(format_date(date)))
+}
+
+/// # Errors
+/// An hour, minute, second or microsecond out of range.
+pub fn encode_time(time: Time) -> Result<Value, EncodeError> {
+    if !valid_time(time) {
+        return Err(EncodeError::new("the time is out of range"));
+    }
+    Ok(Value::Text(format_time(time)))
+}
+
+/// Writes `YYYY-MM-DD HH:MM:SS[.ffffff]` with no offset.
+///
+/// # Errors
+/// A date or time out of range.
+pub fn encode_datetime(datetime: DateTime) -> Result<Value, EncodeError> {
+    if !valid_date(datetime.date) || !valid_time(datetime.time) {
+        return Err(EncodeError::new("the datetime is out of range"));
+    }
+    Ok(Value::Text(format_datetime(datetime)))
+}
+
+/// Writes the UTC instant as `YYYY-MM-DD HH:MM:SS[.ffffff]+00:00`.
+///
+/// # Errors
+/// A date or time out of range, an offset of a day or more, or an instant that falls outside years
+/// 1..=9999 once converted to UTC.
+pub fn encode_aware(aware: Aware) -> Result<Value, EncodeError> {
+    let range = || EncodeError::new("the datetime is out of range once converted to UTC");
+    if !valid_date(aware.local.date)
+        || !valid_time(aware.local.time)
+        || i64::from(aware.offset_seconds.unsigned_abs()) >= SECONDS_PER_DAY
+    {
+        return Err(EncodeError::new(
+            "the datetime or its UTC offset is out of range",
+        ));
+    }
+    let utc = to_utc(aware.local, aware.offset_seconds).ok_or_else(range)?;
+    Ok(Value::Text(format!("{}+00:00", format_datetime(utc))))
+}
+
+// what follows the time in stored text
+enum Zone {
+    Naive,
+    Offset(i32),
+    Invalid,
+}
+
+// a cursor over ASCII text that never indexes
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    const fn new(text: &'a str) -> Self {
+        Self {
+            bytes: text.as_bytes(),
+            at: 0,
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.at).copied()
+    }
+
+    const fn bump(&mut self) {
+        self.at = self.at.saturating_add(1);
+    }
+
+    fn eat(&mut self, byte: u8) -> bool {
+        let found = self.peek() == Some(byte);
+        if found {
+            self.bump();
+        }
+        found
+    }
+
+    const fn done(&self) -> bool {
+        self.at >= self.bytes.len()
+    }
+
+    // exactly `count` ASCII digits
+    fn number(&mut self, count: usize) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..count {
+            let digit = char::from(self.peek()?).to_digit(10)?;
+            value = value.checked_mul(10)?.checked_add(digit)?;
+            self.bump();
+        }
+        Some(value)
+    }
+
+    // `.` already consumed: at least one digit; digits beyond the sixth must be zero, so nothing is lost
+    fn fraction(&mut self) -> Option<u32> {
+        let mut micros = 0u32;
+        let mut count = 0usize;
+        while let Some(digit) = self.peek().and_then(|byte| char::from(byte).to_digit(10)) {
+            if count < 6 {
+                micros = micros.checked_mul(10)?.checked_add(digit)?;
+            } else if digit != 0 {
+                return None;
+            }
+            count = count.saturating_add(1);
+            self.bump();
+        }
+        if count == 0 {
+            return None;
+        }
+        for _ in count..6 {
+            micros = micros.checked_mul(10)?;
+        }
+        Some(micros)
+    }
+
+    fn date(&mut self) -> Option<Date> {
+        let year = self.number(4)?;
+        if !self.eat(b'-') {
+            return None;
+        }
+        let month = self.number(2)?;
+        if !self.eat(b'-') {
+            return None;
+        }
+        let day = self.number(2)?;
+        let date = Date {
+            year: u16::try_from(year).ok()?,
+            month: u8::try_from(month).ok()?,
+            day: u8::try_from(day).ok()?,
+        };
+        valid_date(date).then_some(date)
+    }
+
+    // `HH:MM:SS[.ffffff]`, or with `lenient` also `HH:MM` (seconds 0)
+    fn time(&mut self, lenient: bool) -> Option<Time> {
+        let hour = self.number(2)?;
+        if !self.eat(b':') {
+            return None;
+        }
+        let minute = self.number(2)?;
+        let has_seconds = self.eat(b':');
+        let (second, microsecond) = if lenient && !has_seconds {
+            (0, 0)
+        } else if !has_seconds {
+            return None;
+        } else {
+            let second = self.number(2)?;
+            (second, if self.eat(b'.') { self.fraction()? } else { 0 })
+        };
+        let time = Time {
+            hour: u8::try_from(hour).ok()?,
+            minute: u8::try_from(minute).ok()?,
+            second: u8::try_from(second).ok()?,
+            microsecond,
+        };
+        valid_time(time).then_some(time)
+    }
+
+    // `Z`, `+HH:MM`, `+HHMM` or `+HH` (and `-`); `Naive` when there is no offset at all
+    fn offset(&mut self) -> Zone {
+        self.parse_offset().unwrap_or(Zone::Invalid)
+    }
+
+    fn parse_offset(&mut self) -> Option<Zone> {
+        let sign: i32 = match self.peek() {
+            None => return Some(Zone::Naive),
+            Some(b'Z' | b'z') => {
+                self.bump();
+                return Some(Zone::Offset(0));
+            }
+            Some(b'+') => 1,
+            Some(b'-') => -1,
+            Some(_) => return None,
+        };
+        self.bump();
+        let hours = self.number(2)?;
+        let minutes = if self.eat(b':') || self.peek().is_some() {
+            self.number(2)?
+        } else {
+            0
+        };
+        if hours >= 24 || minutes >= 60 {
+            return None;
+        }
+        let total = i32::try_from(
+            i64::from(hours)
+                .checked_mul(SECONDS_PER_HOUR)?
+                .checked_add(i64::from(minutes).checked_mul(SECONDS_PER_MINUTE)?)?,
+        )
+        .ok()?;
+        total.checked_mul(sign).map(Zone::Offset)
+    }
+}
+
+// `YYYY-MM-DD`, optionally followed by a space or `T` and a time (`HH:MM[:SS[.ffffff]]`), then an
+// optional offset; a date alone is midnight
+fn parse_datetime(text: &str) -> Option<(DateTime, Option<i32>)> {
+    let mut cursor = Cursor::new(text);
+    let date = cursor.date()?;
+    let time = if cursor
+        .peek()
+        .is_some_and(|byte| matches!(byte, b' ' | b'T'))
+    {
+        cursor.bump();
+        cursor.time(true)?
+    } else {
+        Time {
+            hour: 0,
+            minute: 0,
+            second: 0,
+            microsecond: 0,
+        }
+    };
+    let offset = match cursor.offset() {
+        Zone::Naive => None,
+        Zone::Offset(seconds) => Some(seconds),
+        Zone::Invalid => return None,
+    };
+    cursor.done().then_some((DateTime { date, time }, offset))
+}
+
+fn unix_datetime(seconds: i64) -> Result<DateTime, DecodeError> {
+    from_unix(seconds, 0).ok_or_else(|| {
+        DecodeError::new(format!(
+            "the stored Unix time {seconds} is outside years 1 to 9999"
+        ))
+    })
+}
+
+fn julian_datetime(day: f64) -> Result<DateTime, DecodeError> {
+    from_julian_day(day).ok_or_else(|| {
+        DecodeError::new(format!(
+            "the stored Julian day {day} is outside years 1 to 9999"
+        ))
+    })
+}
+
+/// Reads ISO-8601 text, an INTEGER as Unix seconds and a REAL as a Julian day.
+///
+/// Text takes a space or `T` separator, optional seconds and fraction, or a date alone for midnight.
+/// Text with an offset is an error in a naive column.
+///
+/// # Errors
+/// A BLOB, text in another form or with an offset, and a number outside years 1..=9999.
+pub fn decode_datetime(value: ValueRef<'_>) -> Result<DateTime, DecodeError> {
+    match value {
+        ValueRef::Text(bytes) => match parse_datetime(text::utf8(bytes)?) {
+            Some((datetime, None)) => Ok(datetime),
+            Some((_, Some(_))) => Err(DecodeError::new(
+                "the stored datetime has a UTC offset but the column is naive; declare it TIMESTAMPTZ",
+            )),
+            None => Err(DecodeError::new(
+                "the stored TEXT is not an ISO-8601 datetime (YYYY-MM-DD[ HH:MM[:SS[.ffffff]]])",
+            )),
+        },
+        ValueRef::Integer(seconds) => unix_datetime(seconds),
+        ValueRef::Real(day) => julian_datetime(day),
+        other => Err(mismatch("TEXT, INTEGER or REAL for a datetime", other)),
+    }
+}
+
+/// As [`decode_datetime`] for an aware column: text with an offset (or `Z`) is converted to UTC, and
+/// Unix seconds and Julian days are UTC already. The result is always UTC.
+///
+/// # Errors
+/// As [`decode_datetime`], and text without an offset, which would leave the zone a guess.
+pub fn decode_aware(value: ValueRef<'_>) -> Result<Aware, DecodeError> {
+    let utc = |local| Aware {
+        local,
+        offset_seconds: 0,
+    };
+    match value {
+        ValueRef::Text(bytes) => match parse_datetime(text::utf8(bytes)?) {
+            Some((datetime, Some(offset))) => to_utc(datetime, offset).map(utc).ok_or_else(|| {
+                DecodeError::new("the stored datetime is outside years 1 to 9999 in UTC")
+            }),
+            Some((_, None)) => Err(DecodeError::new(
+                "the stored datetime has no UTC offset but the column is TIMESTAMPTZ; store an offset or `Z`",
+            )),
+            None => Err(DecodeError::new(
+                "the stored TEXT is not an ISO-8601 datetime with an offset",
+            )),
+        },
+        ValueRef::Integer(seconds) => unix_datetime(seconds).map(utc),
+        ValueRef::Real(day) => julian_datetime(day).map(utc),
+        other => Err(mismatch("TEXT, INTEGER or REAL for a datetime", other)),
+    }
+}
+
+/// # Errors
+/// Anything but TEXT in `YYYY-MM-DD` form.
+pub fn decode_date(value: ValueRef<'_>) -> Result<Date, DecodeError> {
+    let ValueRef::Text(bytes) = value else {
+        return Err(mismatch("TEXT (YYYY-MM-DD) for a DATE", value));
+    };
+    let mut cursor = Cursor::new(text::utf8(bytes)?);
+    cursor
+        .date()
+        .filter(|_| cursor.done())
+        .ok_or_else(|| DecodeError::new("the stored TEXT is not an ISO date (YYYY-MM-DD)"))
+}
+
+/// # Errors
+/// Anything but TEXT in `HH:MM:SS[.ffffff]` form.
+pub fn decode_time(value: ValueRef<'_>) -> Result<Time, DecodeError> {
+    let ValueRef::Text(bytes) = value else {
+        return Err(mismatch("TEXT (HH:MM:SS) for a TIME", value));
+    };
+    let mut cursor = Cursor::new(text::utf8(bytes)?);
+    cursor
+        .time(false)
+        .filter(|_| cursor.done())
+        .ok_or_else(|| DecodeError::new("the stored TEXT is not an ISO time (HH:MM:SS[.ffffff])"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Aware, Date, DateTime, Time, decode_aware, decode_date, decode_datetime, decode_time,
+        encode_aware, encode_date, encode_datetime, encode_time, from_julian_day, from_unix,
+        unix_seconds,
+    };
+    use rusqlite::types::{Value, ValueRef};
+
+    const fn date(year: u16, month: u8, day: u8) -> Date {
+        Date { year, month, day }
+    }
+
+    const fn time(hour: u8, minute: u8, second: u8, microsecond: u32) -> Time {
+        Time {
+            hour,
+            minute,
+            second,
+            microsecond,
+        }
+    }
+
+    const fn dt(date: Date, time: Time) -> DateTime {
+        DateTime { date, time }
+    }
+
+    fn text(value: &str) -> ValueRef<'_> {
+        ValueRef::Text(value.as_bytes())
+    }
+
+    fn stored(value: &str) -> Value {
+        Value::Text(value.to_owned())
+    }
+
+    #[test]
+    fn datetime_writes_without_offset_and_omits_a_zero_fraction() {
+        let whole = dt(date(2024, 2, 29), time(23, 59, 58, 0));
+        let fractional = dt(date(1, 1, 1), time(0, 0, 0, 120_000));
+        assert_eq!(encode_datetime(whole), Ok(stored("2024-02-29 23:59:58")));
+        assert_eq!(
+            encode_datetime(fractional),
+            Ok(stored("0001-01-01 00:00:00.120000"))
+        );
+        assert_eq!(
+            encode_datetime(dt(date(9999, 12, 31), time(23, 59, 59, 999_999))),
+            Ok(stored("9999-12-31 23:59:59.999999"))
+        );
+    }
+
+    #[test]
+    fn datetime_reads_iso_text_with_either_separator() {
+        let expected = Ok(dt(date(2024, 5, 6), time(7, 8, 9, 0)));
+        assert_eq!(decode_datetime(text("2024-05-06 07:08:09")), expected);
+        assert_eq!(decode_datetime(text("2024-05-06T07:08:09")), expected);
+        assert_eq!(
+            decode_datetime(text("2024-05-06 07:08:09.5")),
+            Ok(dt(date(2024, 5, 6), time(7, 8, 9, 500_000)))
+        );
+        assert_eq!(
+            decode_datetime(text("2024-05-06T07:08:09.123456")),
+            Ok(dt(date(2024, 5, 6), time(7, 8, 9, 123_456)))
+        );
+        // SQLite writes milliseconds; trailing zeros past the sixth digit lose nothing
+        assert_eq!(
+            decode_datetime(text("2024-05-06 07:08:09.123000000")),
+            Ok(dt(date(2024, 5, 6), time(7, 8, 9, 123_000)))
+        );
+    }
+
+    #[test]
+    fn datetime_rejects_malformed_text() {
+        for value in [
+            "",
+            "2024-5-6 07:08:09",
+            "2024-05-06 7:08",
+            "2024-05-06 07",
+            "2024-05-06 07:08:",
+            "2024-05-06T",
+            "2024-05-06 ",
+            "2024-13-06 07:08:09",
+            "2024-02-30 07:08:09",
+            "2023-02-29 07:08:09",
+            "2024-05-06 24:00:00",
+            "2024-05-06 07:60:00",
+            "2024-05-06 07:08:60",
+            "2024-05-06  07:08:09",
+            "2024-05-06 07:08:09.",
+            "2024-05-06 07:08:09.1234567",
+            "2024-05-06 07:08:09 ",
+            "0000-01-01 00:00:00",
+            "2024-05-06t07:08:09",
+            "now",
+        ] {
+            assert!(decode_datetime(text(value)).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn datetime_reads_date_only_and_minute_precision_text() {
+        assert_eq!(
+            decode_datetime(text("2024-05-06")),
+            Ok(dt(date(2024, 5, 6), time(0, 0, 0, 0)))
+        );
+        for value in ["2024-05-06 07:08", "2024-05-06T07:08"] {
+            assert_eq!(
+                decode_datetime(text(value)),
+                Ok(dt(date(2024, 5, 6), time(7, 8, 0, 0))),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn naive_column_rejects_an_offset_in_the_text() {
+        assert!(decode_datetime(text("2024-05-06Z")).is_err());
+        assert!(decode_datetime(text("2024-05-06 07:08+02")).is_err());
+        assert!(decode_datetime(text("2024-05-06 07:08:09Z")).is_err());
+        assert!(decode_datetime(text("2024-05-06 07:08:09+02:00")).is_err());
+    }
+
+    #[test]
+    fn unix_seconds_and_julian_days_read_as_datetimes() {
+        assert_eq!(
+            decode_datetime(ValueRef::Integer(0)),
+            Ok(dt(date(1970, 1, 1), time(0, 0, 0, 0)))
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Integer(1_714_979_289)),
+            Ok(dt(date(2024, 5, 6), time(7, 8, 9, 0)))
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Integer(-1)),
+            Ok(dt(date(1969, 12, 31), time(23, 59, 59, 0)))
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Real(2_440_587.5)),
+            Ok(dt(date(1970, 1, 1), time(0, 0, 0, 0)))
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Real(2_460_436.5)),
+            Ok(dt(date(2024, 5, 6), time(0, 0, 0, 0)))
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Real(2_440_587.75)),
+            Ok(dt(date(1970, 1, 1), time(6, 0, 0, 0)))
+        );
+    }
+
+    #[test]
+    fn out_of_range_numbers_and_other_classes_are_errors() {
+        for value in [
+            ValueRef::Integer(i64::MAX),
+            ValueRef::Integer(i64::MIN),
+            ValueRef::Integer(253_402_300_800),
+            ValueRef::Integer(-62_135_596_801),
+            ValueRef::Real(f64::NAN),
+            ValueRef::Real(f64::INFINITY),
+            ValueRef::Real(1e300),
+            ValueRef::Real(-1.0),
+            ValueRef::Blob(b"2024-05-06 07:08:09"),
+            ValueRef::Null,
+            ValueRef::Text(&[0xff]),
+        ] {
+            assert!(decode_datetime(value).is_err(), "{value:?}");
+            assert!(decode_aware(value).is_err(), "{value:?}");
+        }
+        assert_eq!(
+            decode_datetime(ValueRef::Integer(253_402_300_799)),
+            Ok(dt(date(9999, 12, 31), time(23, 59, 59, 0)))
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Integer(-62_135_596_800)),
+            Ok(dt(date(1, 1, 1), time(0, 0, 0, 0)))
+        );
+    }
+
+    #[test]
+    fn aware_writes_utc_with_an_explicit_offset() {
+        let utc = |local, offset_seconds| {
+            encode_aware(Aware {
+                local,
+                offset_seconds,
+            })
+        };
+        let local = dt(date(2024, 5, 6), time(7, 8, 9, 0));
+        assert_eq!(utc(local, 0), Ok(stored("2024-05-06 07:08:09+00:00")));
+        assert_eq!(
+            utc(local, 2 * 3600),
+            Ok(stored("2024-05-06 05:08:09+00:00"))
+        );
+        assert_eq!(
+            utc(local, -(5 * 3600 + 1800)),
+            Ok(stored("2024-05-06 12:38:09+00:00"))
+        );
+        // the conversion rolls the date over
+        assert_eq!(
+            utc(dt(date(2024, 3, 1), time(0, 30, 0, 250)), 3600),
+            Ok(stored("2024-02-29 23:30:00.000250+00:00"))
+        );
+        assert_eq!(
+            utc(dt(date(2023, 12, 31), time(23, 0, 0, 0)), -3600),
+            Ok(stored("2024-01-01 00:00:00+00:00"))
+        );
+    }
+
+    #[test]
+    fn aware_write_outside_the_year_range_or_offset_range_is_an_error() {
+        let edge = |local, offset_seconds| {
+            encode_aware(Aware {
+                local,
+                offset_seconds,
+            })
+        };
+        assert!(edge(dt(date(1, 1, 1), time(0, 0, 0, 0)), 3600).is_err());
+        assert!(edge(dt(date(9999, 12, 31), time(23, 59, 59, 0)), -3600).is_err());
+        assert!(edge(dt(date(2024, 1, 1), time(0, 0, 0, 0)), 86_400).is_err());
+        assert!(edge(dt(date(2024, 1, 1), time(0, 0, 0, 0)), i32::MIN).is_err());
+    }
+
+    #[test]
+    fn aware_reads_convert_offsets_to_utc() {
+        let utc = |year, month, day, hour, minute, second, micro| {
+            Ok(Aware {
+                local: dt(date(year, month, day), time(hour, minute, second, micro)),
+                offset_seconds: 0,
+            })
+        };
+        assert_eq!(
+            decode_aware(text("2024-05-06 07:08:09+00:00")),
+            utc(2024, 5, 6, 7, 8, 9, 0)
+        );
+        assert_eq!(
+            decode_aware(text("2024-05-06T07:08:09Z")),
+            utc(2024, 5, 6, 7, 8, 9, 0)
+        );
+        assert_eq!(
+            decode_aware(text("2024-05-06 07:08:09z")),
+            utc(2024, 5, 6, 7, 8, 9, 0)
+        );
+        assert_eq!(
+            decode_aware(text("2024-05-06 07:08:09.5+02:00")),
+            utc(2024, 5, 6, 5, 8, 9, 500_000)
+        );
+        assert_eq!(
+            decode_aware(text("2024-01-01 00:30:00+01:00")),
+            utc(2023, 12, 31, 23, 30, 0, 0)
+        );
+        assert_eq!(
+            decode_aware(text("2024-05-06 07:08:09-05:30")),
+            utc(2024, 5, 6, 12, 38, 9, 0)
+        );
+        assert_eq!(
+            decode_aware(ValueRef::Integer(0)),
+            utc(1970, 1, 1, 0, 0, 0, 0)
+        );
+        assert_eq!(
+            decode_aware(ValueRef::Real(2_440_587.5)),
+            utc(1970, 1, 1, 0, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn aware_read_without_an_offset_or_with_a_bad_one_is_an_error() {
+        for value in [
+            "2024-05-06 07:08:09",
+            "2024-05-06",
+            "2024-05-06 07:08",
+            "2024-05-06 07:08:09+2:00",
+            "2024-05-06 07:08:09+02:",
+            "2024-05-06 07:08:09+020",
+            "2024-05-06 07:08:09+02:0",
+            "2024-05-06 07:08:09+24:00",
+            "2024-05-06 07:08:09+2400",
+            "2024-05-06 07:08:09+24",
+            "2024-05-06 07:08:09+02:60",
+            "2024-05-06 07:08:09+0260",
+            "2024-05-06 07:08:09 UTC",
+            "0001-01-01 00:00:00+01:00",
+            "9999-12-31 23:59:59-01:00",
+        ] {
+            assert!(decode_aware(text(value)).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn aware_reads_every_offset_form_and_short_text() {
+        let utc = |hour, minute, second| {
+            Ok(Aware {
+                local: dt(date(2024, 5, 6), time(hour, minute, second, 0)),
+                offset_seconds: 0,
+            })
+        };
+        for (value, expected) in [
+            ("2024-05-06 07:08:09+02:00", utc(5, 8, 9)),
+            ("2024-05-06 07:08:09+0200", utc(5, 8, 9)),
+            ("2024-05-06 07:08:09+02", utc(5, 8, 9)),
+            ("2024-05-06 07:08:09-0530", utc(12, 38, 9)),
+            ("2024-05-06 07:08:09-05", utc(12, 8, 9)),
+            ("2024-05-06 07:08+02:00", utc(5, 8, 0)),
+            ("2024-05-06T07:08Z", utc(7, 8, 0)),
+            ("2024-05-06Z", utc(0, 0, 0)),
+            (
+                "2024-05-06+02:00",
+                Ok(Aware {
+                    local: dt(date(2024, 5, 5), time(22, 0, 0, 0)),
+                    offset_seconds: 0,
+                }),
+            ),
+        ] {
+            assert_eq!(decode_aware(text(value)), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn aware_write_then_read_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let local = dt(date(2024, 5, 6), time(7, 8, 9, 123_456));
+        let aware = Aware {
+            local,
+            offset_seconds: -7 * 3600,
+        };
+        let Value::Text(written) = encode_aware(aware)? else {
+            return Err("an aware datetime is written as TEXT".into());
+        };
+        assert_eq!(
+            decode_aware(text(&written)),
+            Ok(Aware {
+                local: dt(date(2024, 5, 6), time(14, 8, 9, 123_456)),
+                offset_seconds: 0,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dates_use_iso_text() {
+        assert_eq!(encode_date(date(2024, 2, 29)), Ok(stored("2024-02-29")));
+        assert_eq!(encode_date(date(1, 1, 1)), Ok(stored("0001-01-01")));
+        assert_eq!(decode_date(text("2024-02-29")), Ok(date(2024, 2, 29)));
+        assert_eq!(decode_date(text("9999-12-31")), Ok(date(9999, 12, 31)));
+        for value in [
+            "",
+            "2023-02-29",
+            "2024-2-29",
+            "2024-02-29 00:00:00",
+            "2024-02-29T",
+            "24-02-29",
+            "2024/02/29",
+            "0000-01-01",
+            "2024-00-10",
+            "2024-01-00",
+            "2024-01-32",
+        ] {
+            assert!(decode_date(text(value)).is_err(), "{value}");
+        }
+        for value in [
+            ValueRef::Integer(20_240_229),
+            ValueRef::Real(1.0),
+            ValueRef::Blob(b"x"),
+            ValueRef::Null,
+        ] {
+            assert!(decode_date(value).is_err(), "{value:?}");
+        }
+        assert!(encode_date(date(2023, 2, 29)).is_err());
+        assert!(encode_date(date(0, 1, 1)).is_err());
+        assert!(encode_date(date(2024, 13, 1)).is_err());
+    }
+
+    #[test]
+    fn times_use_iso_text() {
+        assert_eq!(encode_time(time(1, 2, 3, 0)), Ok(stored("01:02:03")));
+        assert_eq!(
+            encode_time(time(23, 59, 59, 5)),
+            Ok(stored("23:59:59.000005"))
+        );
+        assert_eq!(decode_time(text("01:02:03")), Ok(time(1, 2, 3, 0)));
+        assert_eq!(decode_time(text("01:02:03.25")), Ok(time(1, 2, 3, 250_000)));
+        for value in [
+            "",
+            "1:02:03",
+            "01:02",
+            "24:00:00",
+            "01:60:00",
+            "01:02:60",
+            "01:02:03Z",
+            "01:02:03.",
+            " 01:02:03",
+        ] {
+            assert!(decode_time(text(value)).is_err(), "{value}");
+        }
+        for value in [ValueRef::Integer(3600), ValueRef::Real(0.5), ValueRef::Null] {
+            assert!(decode_time(value).is_err(), "{value:?}");
+        }
+        assert!(encode_time(time(24, 0, 0, 0)).is_err());
+        assert!(encode_time(time(0, 0, 0, 1_000_000)).is_err());
+    }
+
+    #[test]
+    fn encode_rejects_an_impossible_calendar_date() {
+        assert!(encode_datetime(dt(date(2023, 2, 29), time(0, 0, 0, 0))).is_err());
+        assert!(encode_datetime(dt(date(2024, 2, 29), time(0, 60, 0, 0))).is_err());
+    }
+
+    #[test]
+    fn calendar_helpers_agree_on_known_instants() {
+        let datetime = dt(date(2000, 2, 29), time(12, 0, 0, 0));
+        assert_eq!(unix_seconds(datetime), Some(951_825_600));
+        assert_eq!(from_unix(951_825_600, 0), Some(datetime));
+        assert_eq!(from_julian_day(2_451_604.0), Some(datetime));
+        assert_eq!(
+            unix_seconds(dt(date(1969, 12, 31), time(23, 59, 59, 0))),
+            Some(-1)
+        );
+        // every sampled instant from 0001-01-01 up to 2100 (stepping a little over 37 days) survives
+        // from_unix followed by unix_seconds
+        let mut seconds = -62_135_596_800_i64;
+        while seconds < 4_102_444_800 {
+            let datetime = from_unix(seconds, 0);
+            assert_eq!(datetime.and_then(unix_seconds), Some(seconds));
+            seconds += 86_400 * 37 + 1234;
+        }
+    }
+
+    #[test]
+    fn century_leap_rules() {
+        for value in ["1900-02-29", "2100-02-29"] {
+            assert!(decode_date(text(value)).is_err(), "{value}");
+            assert!(decode_datetime(text(value)).is_err(), "{value}");
+        }
+        for year in [1900, 2100] {
+            assert!(encode_date(date(year, 2, 29)).is_err(), "{year}");
+            assert!(
+                encode_datetime(dt(date(year, 2, 29), time(0, 0, 0, 0))).is_err(),
+                "{year}"
+            );
+        }
+        assert_eq!(decode_date(text("2000-02-29")), Ok(date(2000, 2, 29)));
+        assert_eq!(encode_date(date(2000, 2, 29)), Ok(stored("2000-02-29")));
+        assert_eq!(decode_date(text("2000-03-01")), Ok(date(2000, 3, 1)));
+    }
+
+    // instants worked out by hand: 2000-02-29 00:00:00 UTC is 11016 days after the epoch, and
+    // 11016 * 86400 = 951782400; the last second of 9999 is 253402300800 - 1
+    #[test]
+    fn known_unix_instants() {
+        for (seconds, expected) in [
+            (951_782_400, dt(date(2000, 2, 29), time(0, 0, 0, 0))),
+            (-86_400, dt(date(1969, 12, 31), time(0, 0, 0, 0))),
+            (253_402_300_799, dt(date(9999, 12, 31), time(23, 59, 59, 0))),
+        ] {
+            assert_eq!(from_unix(seconds, 0), Some(expected), "{seconds}");
+            assert_eq!(unix_seconds(expected), Some(seconds), "{seconds}");
+            assert_eq!(decode_datetime(ValueRef::Integer(seconds)), Ok(expected));
+        }
+        assert_eq!(from_unix(253_402_300_800, 0), None);
+        assert!(decode_datetime(ValueRef::Integer(253_402_300_800)).is_err());
+    }
+
+    // 1721425.5 is 719162 days before the epoch's 2440587.5, and 719162 * 86400 = 62135596800 seconds,
+    // so it is 0001-01-01 00:00:00. 9999-12-31 00:00:00 is JD 5373483.5 (2932896 days after the epoch)
+    // and 5373484.5 is 10000-01-01. 5373484.499999 is 0.999999 day into the last day, 86399913.6 ms,
+    // which rounds to 86399914 ms: 23:59:59.914. Noise below half a millisecond rounds away as SQLite
+    // does: 2451604.0 (2000-02-29 12:00:00) plus 1e-9 day (0.0864 ms) is unchanged, plus 7e-9 day
+    // (0.6048 ms) is one millisecond later.
+    #[test]
+    fn julian_day_bounds_and_millisecond_rounding() {
+        let first = dt(date(1, 1, 1), time(0, 0, 0, 0));
+        assert_eq!(decode_datetime(ValueRef::Real(1_721_425.5)), Ok(first));
+        assert!(decode_datetime(ValueRef::Real(1_721_425.0)).is_err());
+        assert!(decode_datetime(ValueRef::Real(1_721_425.499_9)).is_err());
+        assert_eq!(
+            decode_datetime(ValueRef::Real(5_373_483.5)),
+            Ok(dt(date(9999, 12, 31), time(0, 0, 0, 0)))
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Real(5_373_484.499_999)),
+            Ok(dt(date(9999, 12, 31), time(23, 59, 59, 914_000)))
+        );
+        assert!(decode_datetime(ValueRef::Real(5_373_484.5)).is_err());
+        assert!(decode_datetime(ValueRef::Real(5_373_485.0)).is_err());
+        let noon = dt(date(2000, 2, 29), time(12, 0, 0, 0));
+        assert_eq!(
+            decode_datetime(ValueRef::Real(2_451_604.0 + 1e-9)),
+            Ok(noon)
+        );
+        assert_eq!(
+            decode_datetime(ValueRef::Real(2_451_604.0 + 7e-9)),
+            Ok(dt(date(2000, 2, 29), time(12, 0, 0, 1000)))
+        );
+    }
+}
