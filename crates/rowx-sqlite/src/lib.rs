@@ -1,3 +1,8 @@
+pub mod dsn;
+pub mod error;
+pub mod types;
+pub mod value;
+
 #[must_use]
 pub fn sqlite_version() -> &'static str {
     rusqlite::version()
