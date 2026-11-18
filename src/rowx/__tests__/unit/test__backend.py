@@ -241,6 +241,9 @@ def test_an_embedded_dsn_without_the_companion_asks_for_the_embedded_extra(monke
         "sqlite:///dir%20name/my%20file.db",
         "sqlite:///x.db?mode=ro",
         "sqlite:///x.db?cache=private",
+        "sqlite:///:memory:.db",
+        "sqlite:///dir/:memory:",
+        "sqlite:////%3Amemory%3A",
     ],
 )
 def test_sqlite_dsns_select_the_sqlite_backend(dsn: str) -> None:
@@ -275,6 +278,9 @@ SQLITE_HINT: Final[str] = "use `sqlite:///relative.db`, `sqlite:////absolute/pat
         ("sqlite:///?mode=ro", "empty path"),
         ("sqlite:///:memory:", "in-memory database is written"),
         ("sqlite:///%3Amemory%3A", "in-memory database is written"),
+        ("sqlite:///:MEMORY:", "in-memory database is written"),
+        ("sqlite:///:memory:?mode=ro", "in-memory database is written"),
+        ("sqlite:///%3AMEMORY%3A", "in-memory database is written"),
     ],
 )
 def test_rejected_sqlite_forms_name_the_problem_and_show_the_hint(dsn: str, problem: str) -> None:
