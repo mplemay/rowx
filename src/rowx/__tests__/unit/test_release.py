@@ -25,6 +25,7 @@ TREE_FILES: Final[tuple[str, ...]] = (
     "packages/rowx-core/pyproject.toml",
     "packages/rowx-postgres/pyproject.toml",
     "packages/rowx-embedded/pyproject.toml",
+    "packages/rowx-sqlite/pyproject.toml",
     "packages/rowx-embedded/Cargo.toml",
     "packages/rowx-embedded/crates/rowx-embedded-host/Cargo.toml",
     "docs/changelog.md",
@@ -102,6 +103,19 @@ def test_bump_updates_lockstep_versions(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert "rowx-core==0.4.3" in project
     assert "rowx-postgres==0.4.2" not in project
     assert "rowx-embedded==0.4.2" not in project
+    assert "rowx-sqlite==0.4.2" not in project
+    assert project.count("rowx-sqlite==0.4.3") == 2
+    for package in ("rowx-core", "rowx-postgres", "rowx-embedded", "rowx-sqlite"):
+        text = (tmp_path / "packages" / package / "pyproject.toml").read_text(encoding="utf-8")
+        assert 'version = "0.4.3"' in text
+        assert "==0.4.2" not in text
+    sqlite = (tmp_path / "packages/rowx-sqlite/pyproject.toml").read_text(encoding="utf-8")
+    assert "rowx-core==0.4.3" in sqlite
+    lock = (tmp_path / "uv.lock").read_text(encoding="utf-8")
+    assert 'name = "rowx-sqlite"\nversion = "0.4.3"' in lock
+    cargo_lock = (tmp_path / "Cargo.lock").read_text(encoding="utf-8")
+    assert 'name = "rowx-sqlite"\nversion = "0.4.3"' in cargo_lock
+    assert 'name = "rowx-sqlite-py"\nversion = "0.4.3"' in cargo_lock
     fuzz = (tmp_path / "fuzz/Cargo.lock").read_text(encoding="utf-8")
     assert 'name = "rowx-core"\nversion = "0.4.3"' in fuzz
     assert 'name = "rowx-postgres"\nversion = "0.4.3"' in fuzz

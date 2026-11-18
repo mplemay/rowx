@@ -21,9 +21,14 @@ test-rust:
 test-rust-embedded:
     cargo test -p rowx-embedded-host
 
-# python tests
+# python tests; testpaths collection imports rowx_sqlite._core, so the SQLite extension is built first
 test-py:
+    uv run maturin develop -m packages/rowx-sqlite/Cargo.toml
     uv run pytest
+
+# the rowx-sqlite package tests
+test-sqlite:
+    uv run pytest packages/rowx-sqlite/src/rowx_sqlite/__tests__
 
 # the embedded lane: the database tests that one embedded session can serve, plus the tests marked `embedded`
 test-embedded:

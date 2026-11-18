@@ -24,6 +24,7 @@ dependencies = ["rowx-core==0.4.2", "pathspec>=1.1.1,<2"]
 
 [project.optional-dependencies]
 postgres = ["rowx-postgres==0.4.2"]
+sqlite = ["rowx-sqlite==0.4.2"]
 # rowx-embedded releases in lockstep with rowx; it ships wheels for macOS arm64 and Linux x86_64/aarch64 only, so the
 # marker leaves it out elsewhere and `rowx[embedded]` still installs (using it then raises InterfaceError)
 embedded = [
@@ -46,12 +47,13 @@ rowx = "rowx.check.cli:main"
 exclude-newer = "7 days"
 
 [tool.uv.workspace]
-members = ["packages/rowx-core", "packages/rowx-postgres", "packages/rowx-embedded"]
+members = ["packages/rowx-core", "packages/rowx-postgres", "packages/rowx-embedded", "packages/rowx-sqlite"]
 
 [tool.uv.sources]
 rowx-core = { workspace = true }
 rowx-postgres = { workspace = true }
 rowx-embedded = { workspace = true }
+rowx-sqlite = { workspace = true }
 
 [tool.uv.build-backend]
 wheel-exclude = ["**/__tests__/**", "**/*.so", "**/*.pyd", "**/*.dll", "**/*.dylib", "**/*.rs", "**/Cargo.toml"]
@@ -65,6 +67,7 @@ build-backend = "uv_build"
 dev = [
     "rowx-postgres==0.4.2",
     "rowx-embedded==0.4.2",
+    "rowx-sqlite==0.4.2",
     "anyio>=4.16.0",
     "maturin>=1.0,<2.0",
     "mypy==2.4.1",
@@ -166,7 +169,7 @@ missing-direct-dependency = "ignore"
 addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
 # pytest-asyncio warns while this is unset, and filterwarnings = "error" fails the session
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["src/rowx/__tests__", "packages/rowx-core/src/rowx_core/__tests__", "packages/rowx-postgres/src/rowx_postgres/__tests__", "packages/rowx-embedded/src/rowx_embedded/__tests__"]
+testpaths = ["src/rowx/__tests__", "packages/rowx-core/src/rowx_core/__tests__", "packages/rowx-postgres/src/rowx_postgres/__tests__", "packages/rowx-embedded/src/rowx_embedded/__tests__", "packages/rowx-sqlite/src/rowx_sqlite/__tests__"]
 norecursedirs = ["target", "dist", "build", ".venv"]
 markers = [
     "db: marks tests that need a live Postgres (ROWX_TEST_DSN)",

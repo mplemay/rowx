@@ -16,6 +16,7 @@ members = [
     "rowx-core",
     "rowx-embedded",
     "rowx-postgres",
+    "rowx-sqlite",
 ]
 
 [[package]]
@@ -827,7 +828,7 @@ dependencies = [
 
 [package.optional-dependencies]
 embedded = [
-    { name = "rowx-embedded", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "rowx-embedded", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' or (platform_machine == 'aarch64' or platform_machine == 'x86_64') and sys_platform == 'linux'" },
     { name = "rowx-postgres" },
 ]
 postgres = [
@@ -835,6 +836,9 @@ postgres = [
 ]
 pytest = [
     { name = "pytest" },
+]
+sqlite = [
+    { name = "rowx-sqlite" },
 ]
 
 [package.dev-dependencies]
@@ -863,6 +867,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "rowx-embedded" },
     { name = "rowx-postgres" },
+    { name = "rowx-sqlite" },
     { name = "ruff" },
     { name = "rumdl" },
     { name = "shellcheck-py" },
@@ -879,11 +884,12 @@ requires-dist = [
     { name = "pathspec", specifier = ">=1.1.1,<2" },
     { name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.2.0" },
     { name = "rowx-core", editable = "packages/rowx-core" },
-    { name = "rowx-embedded", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'embedded') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'embedded') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'embedded')", editable = "packages/rowx-embedded" },
+    { name = "rowx-embedded", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'embedded' or (platform_machine == 'aarch64' or platform_machine == 'x86_64') and sys_platform == 'linux' and extra == 'embedded'", editable = "packages/rowx-embedded" },
     { name = "rowx-postgres", marker = "extra == 'embedded'", editable = "packages/rowx-postgres" },
     { name = "rowx-postgres", marker = "extra == 'postgres'", editable = "packages/rowx-postgres" },
+    { name = "rowx-sqlite", marker = "extra == 'sqlite'", editable = "packages/rowx-sqlite" },
 ]
-provides-extras = ["postgres", "embedded", "pytest"]
+provides-extras = ["postgres", "sqlite", "embedded", "pytest"]
 
 [package.metadata.requires-dev]
 bench = [{ name = "asyncpg", specifier = ">=0.31.0" }]
@@ -909,6 +915,7 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "rowx-embedded", editable = "packages/rowx-embedded" },
     { name = "rowx-postgres", editable = "packages/rowx-postgres" },
+    { name = "rowx-sqlite", editable = "packages/rowx-sqlite" },
     { name = "ruff", specifier = ">=0.17.3" },
     { name = "rumdl", specifier = ">=0.3.2" },
     { name = "shellcheck-py", specifier = "==0.11.0.1" },
@@ -942,6 +949,17 @@ requires-dist = [
 name = "rowx-postgres"
 version = "0.4.2"
 source = { editable = "packages/rowx-postgres" }
+dependencies = [
+    { name = "rowx-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "rowx-core", editable = "packages/rowx-core" }]
+
+[[package]]
+name = "rowx-sqlite"
+version = "0.4.2"
+source = { editable = "packages/rowx-sqlite" }
 dependencies = [
     { name = "rowx-core" },
 ]

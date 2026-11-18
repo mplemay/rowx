@@ -1,7 +1,8 @@
 # Testing
 
-Each package owns `<import_root>/__tests__/`, with `unit/` and `integration/` beside the code they test. Core and
-CLI tests use fake executors or services and need no database. Database tests belong to `rowx_postgres`.
+Each package owns `<import_root>/__tests__/`, with `unit/` and `integration/` beside the code they test. Core and CLI
+tests use fake executors or services and need no database. Database tests belong to `rowx_postgres`. SQLite tests belong
+to `rowx_sqlite`.
 
 | Tree | What it holds |
 |---|---|
@@ -15,6 +16,7 @@ CLI tests use fake executors or services and need no database. Database tests be
 | `packages/rowx-postgres/src/rowx_postgres/__tests__/support/engine.py` | The embedded engine's recorded divergences ([Embedded lane](#embedded-lane)). |
 | `packages/rowx-embedded/src/rowx_embedded/__tests__/unit/` | The embedded glue (`Database`, URL grammar, scratch, snapshot cache) against a fake engine. |
 | `packages/rowx-embedded/src/rowx_embedded/__tests__/integration/` | The glue and the engine binding (`test__engine.py`, slow) against the real engine. They run with the rest of `just test-py`; the glue tests are also marked `embedded`, so the embedded lane runs them. The host's Rust tests run with `just test-rust-embedded` (`cargo test -p rowx-embedded-host`). |
+| `packages/rowx-sqlite/src/rowx_sqlite/__tests__/unit/` | The SQLite package's tests. They need no server and carry no `db` marker. `just test-sqlite` runs them. |
 
 A test file is `test_<module>.py` for the module it covers.
 
@@ -40,8 +42,9 @@ Rust tests are `cargo test` over the default workspace members (`just test-rust`
 
 | Command | What it runs |
 |---|---|
-| `just check` | `uv run prek run --all-files`: rumdl, ruff, `ty check` on `src`, `packages/rowx-core/src` and `packages/rowx-postgres/src`, `cargo fmt`, `cargo clippy`. |
-| `just test-py` | `uv run pytest`. |
+| `just check` | `uv run prek run --all-files`: rumdl, ruff, `ty check` on `src`, `packages/rowx-core/src`, `packages/rowx-postgres/src`, `packages/rowx-embedded/src` and `packages/rowx-sqlite/src`, `cargo fmt`, `cargo clippy`. |
+| `just test-py` | Builds the SQLite extension (`uv run maturin develop -m packages/rowx-sqlite/Cargo.toml`), then `uv run pytest`. |
+| `just test-sqlite` | `uv run pytest packages/rowx-sqlite/src/rowx_sqlite/__tests__`. |
 | `just test-rust` | `cargo test` over the default members (no Wasmer). |
 | `just test-rust-embedded` | `cargo test -p rowx-embedded-host`. |
 | `just docs-build` | `zensical build --clean --strict`. |

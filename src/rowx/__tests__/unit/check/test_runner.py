@@ -376,10 +376,10 @@ def test_unchecked_unknown_scheme_reports_invalid_row_type(
     path = tmp_path / "query.py"
     path.write_text(source, encoding="utf-8")
     config = load_config(path.parent)
-    result = asyncio.run(run_check(config, discover_files(config, path.parent, [path]), "sqlite://x", 1))
+    result = asyncio.run(run_check(config, discover_files(config, path.parent, [path]), "mysql://x", 1))
     assert [report.diagnostic.rule for report in result.reports] == ["invalid-row-type"]
     assert result.statistics.checked == 0
-    code = main(["check", str(path), "--database-url", "sqlite://x"])
+    code = main(["check", str(path), "--database-url", "mysql://x"])
     error = capsys.readouterr().err
     assert code == 1
     assert "unknown database scheme" not in error

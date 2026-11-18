@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 import pytest
+from rowx_core.backend import UnsupportedCapabilityError
 
 from rowx._backend import LOADED, BackendMissing, UnsupportedSchemeError, backend_for, module_for
 
@@ -112,13 +113,13 @@ def test_no_statement_skips_a_postgres_url_when_the_extra_is_missing(tmp_path: P
 
 def test_no_statement_skips_an_unknown_scheme(tmp_path: Path) -> None:
     (tmp_path / "x.py").write_text(ASSIGNMENT, encoding="utf-8")
-    result = _run_blocked(tmp_path, ["check", "--database-url", "sqlite://x", "x.py"])
+    result = _run_blocked(tmp_path, ["check", "--database-url", "mysql://x", "x.py"])
     assert result.returncode == 0, result.stderr
 
 
 def test_unknown_scheme_on_a_statement_exits_two(tmp_path: Path) -> None:
     (tmp_path / "x.py").write_text(QUERY, encoding="utf-8")
-    result = _run_blocked(tmp_path, ["check", "--database-url", "sqlite://x", "x.py"])
+    result = _run_blocked(tmp_path, ["check", "--database-url", "mysql://x", "x.py"])
     assert result.returncode == 2, result.stderr
     assert "unknown database scheme" in result.stderr
     assert "rowx[postgres]" not in result.stderr
@@ -177,7 +178,7 @@ def test_template_concat_does_not_import_a_backend_for_a_postgres_url(tmp_path: 
 
 def test_template_concat_with_an_unknown_scheme_stays_template_construction(tmp_path: Path) -> None:
     (tmp_path / "x.py").write_text(MONEY_CONCAT, encoding="utf-8")
-    result = _run_blocked(tmp_path, ["check", "--database-url", "sqlite://x", "x.py"], "rowx_postgres")
+    result = _run_blocked(tmp_path, ["check", "--database-url", "mysql://x", "x.py"], "rowx_postgres")
     assert result.returncode == 1, result.stderr
     assert "Traceback" not in result.stderr
     assert _mentions_template_construction(result)
@@ -187,7 +188,7 @@ def test_template_concat_with_an_unknown_scheme_stays_template_construction(tmp_
 
 def test_money_query_with_an_unknown_scheme_exits_two(tmp_path: Path) -> None:
     (tmp_path / "x.py").write_text(MONEY_QUERY, encoding="utf-8")
-    result = _run_blocked(tmp_path, ["check", "--database-url", "sqlite://x", "x.py"])
+    result = _run_blocked(tmp_path, ["check", "--database-url", "mysql://x", "x.py"])
     assert result.returncode == 2, result.stderr
     assert "unknown database scheme" in result.stderr
     assert "rowx[postgres]" not in result.stderr
@@ -228,11 +229,91 @@ def test_an_embedded_dsn_without_the_companion_asks_for_the_embedded_extra(monke
 
 
 @pytest.mark.parametrize(
+    "dsn",
+    [
+        "sqlite:///relative.db",
+        "sqlite:////abs/path.db",
+        "sqlite::memory:",
+        "SQLite::MEMORY:",
+        "SQLITE:///relative.db",
+        "sqlite:///C:/x.db",
+        "sqlite:///dir%20name/my%20file.db",
+        "sqlite:///x.db?mode=ro",
+        "sqlite:///x.db?cache=private",
+    ],
+)
+def test_sqlite_dsns_select_the_sqlite_backend(dsn: str) -> None:
+    assert module_for(dsn) == "rowx_sqlite._backend"
+
+
+SQLITE_HINT: Final[str] = "use `sqlite:///relative.db`, `sqlite:////absolute/path.db` or `sqlite::memory:`"
+
+
+@pytest.mark.parametrize(
+    ("dsn", "problem"),
+    [
+        ("sqlite:path", "needs `//`"),
+        ("sqlite:memory:", "needs `//`"),
+        ("app.db", "bare file path"),
+        ("./data/app.SQLITE3", "bare file path"),
+        ("app.sqlite", "bare file path"),
+        ("app.db3", "bare file path"),
+        ("sqlite://host/x.db", "no host"),
+        ("sqlite://localhost/x.db", "no host"),
+        ("file:x.db", "`file:` URI"),
+        ("file:///x.db", "`file:` URI"),
+        ("FILE:///x.db", "`file:` URI"),
+        ("sqlite:///x.db?mode=memory", "option `mode`"),
+        ("sqlite:///x.db?immutable=1", "option `immutable`"),
+        ("sqlite:///x.db?immutable", "option `immutable`"),
+        ("sqlite:///x.db?vfs=unix-none", "option `vfs`"),
+        ("sqlite:///x.db?cache=shared", "option `cache`"),
+        ("sqlite:///x.db?a=b&VFS=x", "option `VFS`"),
+        ("sqlite://", "empty path"),
+        ("sqlite:///", "empty path"),
+        ("sqlite:///?mode=ro", "empty path"),
+    ],
+)
+def test_rejected_sqlite_forms_name_the_problem_and_show_the_hint(dsn: str, problem: str) -> None:
+    with pytest.raises(UnsupportedSchemeError) as raised:
+        module_for(dsn)
+    assert problem in str(raised.value)
+    assert SQLITE_HINT in str(raised.value)
+    assert "unknown database scheme" not in str(raised.value)
+
+
+@pytest.mark.parametrize("dsn", ["host=localhost dbname=x", "mydb", "app.dbx", "dbname=app.db", "host=h dbname=a.db"])
+def test_schemeless_strings_that_are_not_database_files_stay_postgres(dsn: str) -> None:
+    assert module_for(dsn) == "rowx_postgres._backend"
+
+
+def test_a_sqlite_backend_supports_no_capability_yet() -> None:
+    backend = backend_for("sqlite:///x.db")
+    with pytest.raises(UnsupportedCapabilityError):
+        backend.checker()
+
+
+def test_a_sqlite_dsn_without_the_package_asks_for_the_sqlite_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "rowx_sqlite", None)
+    monkeypatch.delitem(LOADED, "rowx_sqlite._backend", raising=False)
+    monkeypatch.delitem(sys.modules, "rowx_sqlite._backend", raising=False)
+    with pytest.raises(BackendMissing, match=r"install `rowx\[sqlite\]`"):
+        backend_for("sqlite:///x.db")
+
+
+def test_a_rejected_sqlite_url_exits_two_with_the_hint(tmp_path: Path) -> None:
+    (tmp_path / "x.py").write_text(QUERY, encoding="utf-8")
+    result = _run_blocked(tmp_path, ["check", "--database-url", "sqlite:path", "x.py"])
+    assert result.returncode == 2, result.stderr
+    assert SQLITE_HINT in result.stderr
+
+
+@pytest.mark.parametrize(
     "argv",
     [
-        ["migrate", "info", "--database-url", "sqlite://x"],
+        ["migrate", "info", "--database-url", "mysql://x"],
         ["migrate", "run", "--database-url", "mysql://x"],
-        ["database", "create", "--database-url", "sqlite://x"],
+        ["database", "create", "--database-url", "mysql://x"],
         ["database", "setup", "--database-url", "mysql://x"],
     ],
 )
@@ -243,7 +324,7 @@ def test_unknown_scheme_on_migrate_and_database_exits_two(tmp_path: Path, argv: 
     assert "rowx[postgres]" not in result.stderr
 
 
-@pytest.mark.parametrize("dsn", ["sqlite://x", "mysql://x"])
+@pytest.mark.parametrize("dsn", ["mysql://x"])
 def test_unknown_scheme_does_not_ask_for_the_postgres_extra(dsn: str) -> None:
     with pytest.raises(UnsupportedSchemeError, match="unknown database scheme") as raised:
         module_for(dsn)
