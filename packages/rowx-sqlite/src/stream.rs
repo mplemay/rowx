@@ -341,7 +341,7 @@ async fn receive(
         Err(err) => {
             shared.finish();
             // a connection closed mid-stream interrupts the statement, which is not a database failure
-            let failure = if core.cancel.state.is_closed() {
+            let failure = if core.cancel.state.is_closed() && err.is_interrupt() {
                 Failure::from(CoreError::Closed)
             } else {
                 Failure::from(err)

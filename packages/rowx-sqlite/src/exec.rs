@@ -42,14 +42,12 @@ pub(crate) enum Depth {
 
 // a dead connection stays dead; every other error leaves the state to the claim's drop (Idle)
 fn fail(state: &State, failure: Failure) -> Failure {
-    // closing interrupts the statement that is running, which is not a database failure
+    // closing interrupts the statement that is running, which is not a database failure; a genuine
+    // error that races with the close keeps its own report
     if state.is_closed()
         && matches!(
             &failure,
-            Failure::Driver {
-                error: Error::Sqlite { .. },
-                ..
-            }
+            Failure::Driver { error, .. } if error.is_interrupt()
         )
     {
         return Failure::from(CoreError::Closed);
@@ -364,14 +362,20 @@ pub(crate) fn begin<'py>(
         }
         let began = conn.simple(sql).await;
         let abandoned = began.is_ok() && hook.is_cancelled();
-        if abandoned {
-            // the cancel flag is still set, so this must not look at it
-            let _ = conn.simple_uncancelled("ROLLBACK").await;
-        }
-        if began.is_err() || abandoned {
+        // the cancel flag is still set, so the rollback must not look at it; a connection that stays
+        // inside the transaction is marked broken
+        let rolled_back = if abandoned {
+            conn.rollback_abandoned().await
+        } else {
+            Ok(())
+        };
+        if began.is_err() || (abandoned && rolled_back.is_ok()) {
             restore_query_only(&core, &conn).await;
         }
         drop(conn);
+        if let Err(err) = rolled_back {
+            return Err(Failure::from(err));
+        }
         match began {
             Err(err) => Err(Failure::from(err)),
             Ok(()) if abandoned => Err(Failure::from(interrupted())),

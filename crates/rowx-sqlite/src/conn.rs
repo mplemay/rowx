@@ -62,6 +62,23 @@ impl ConnectOptions {
     }
 }
 
+const ROLLBACK_ATTEMPTS: usize = 3;
+
+// Rolls back until `is_idle` reports autocommit, at most `attempts` times; `true` when it is idle.
+fn rollback_until_idle(
+    attempts: usize,
+    mut is_idle: impl FnMut() -> bool,
+    mut rollback: impl FnMut(),
+) -> bool {
+    for _ in 0..attempts {
+        if is_idle() {
+            return true;
+        }
+        rollback();
+    }
+    is_idle()
+}
+
 /// What the worker thread owns and runs jobs against.
 #[derive(Debug)]
 pub(crate) struct Ctx {
@@ -415,6 +432,33 @@ impl Connection {
         self.call(|ctx| Ok(ctx.conn.is_autocommit())).await
     }
 
+    /// Ends a transaction nobody is left to finish, retrying a rollback that an interrupt resend broke.
+    /// A connection that is still inside the transaction afterwards is marked broken.
+    ///
+    /// # Errors
+    /// `Broken` when the connection could not be returned to autocommit, `Closed` after `close()`,
+    /// `Stopped` when the worker died.
+    pub async fn rollback_abandoned(&self) -> Result<(), Error> {
+        let idle = self
+            .call(|ctx| {
+                Ok(rollback_until_idle(
+                    ROLLBACK_ATTEMPTS,
+                    || ctx.conn.is_autocommit(),
+                    || {
+                        // a failure is seen through the autocommit check
+                        let _ = ctx.conn.execute_batch("ROLLBACK");
+                    },
+                ))
+            })
+            .await?;
+        if idle {
+            return Ok(());
+        }
+        self.state.mark_broken();
+        self.shared.mark_dead();
+        Err(CoreError::Broken.into())
+    }
+
     /// A cheap round trip through the worker and the database.
     ///
     /// # Errors
@@ -477,8 +521,33 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-    use super::require_wal;
+    use super::{require_wal, rollback_until_idle};
     use crate::error::Error;
+
+    #[test]
+    fn a_rollback_that_keeps_failing_is_tried_a_bounded_number_of_times() {
+        let mut tries = 0;
+        assert!(!rollback_until_idle(3, || false, || tries += 1));
+        assert_eq!(tries, 3);
+    }
+
+    #[test]
+    fn a_rollback_that_succeeds_on_a_retry_leaves_the_connection_idle() {
+        let tries = std::cell::Cell::new(0);
+        assert!(rollback_until_idle(
+            3,
+            || tries.get() >= 2,
+            || tries.set(tries.get() + 1)
+        ));
+        assert_eq!(tries.get(), 2);
+    }
+
+    #[test]
+    fn an_idle_connection_is_not_rolled_back() {
+        let mut tries = 0;
+        assert!(rollback_until_idle(3, || true, || tries += 1));
+        assert_eq!(tries, 0);
+    }
 
     #[test]
     fn wal_is_accepted_in_any_case() {
