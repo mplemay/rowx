@@ -1,3 +1,4 @@
+use rowx_core::error::{CoreError, TaskStopped};
 use rowx_core::row_shape::{NullCheckError, NullError, ShapeCheckError, ShapeErrors};
 use rusqlite::ffi;
 use thiserror::Error;
@@ -43,6 +44,12 @@ pub enum Error {
     Decode(#[from] DecodeError),
     #[error(transparent)]
     Encode(#[from] EncodeError),
+    /// A shared connection or pool error; this driver produces `Closed`.
+    #[error(transparent)]
+    Core(#[from] CoreError),
+    /// The worker thread ended before it answered, so the connection is broken.
+    #[error(transparent)]
+    Stopped(#[from] TaskStopped),
 }
 
 impl Error {
