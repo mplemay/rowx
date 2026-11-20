@@ -63,6 +63,12 @@ impl Error {
         }
     }
 
+    /// `true` for a statement that SQLite interrupted (`SQLITE_INTERRUPT`, whatever the extended code).
+    #[must_use]
+    pub fn is_interrupt(&self) -> bool {
+        matches!(self, Self::Sqlite { code, .. } if code & 0xff == ffi::SQLITE_INTERRUPT)
+    }
+
     /// The SQLSTATE of a SQLite failure; other errors have none.
     #[must_use]
     pub const fn sqlstate(&self) -> Option<&'static str> {
@@ -324,6 +330,14 @@ mod tests {
     use crate::value::{DecodeError, EncodeError};
     use rowx_core::row_shape::{NullCheckError, NullError, ShapeCheckError};
     use rusqlite::ffi;
+
+    #[test]
+    fn only_interrupt_class_codes_are_interrupts() {
+        assert!(Error::from_code(ffi::SQLITE_INTERRUPT, "interrupted", None).is_interrupt());
+        assert!(!Error::from_code(ffi::SQLITE_CONSTRAINT_UNIQUE, "unique", None).is_interrupt());
+        assert!(!Error::from_code(ffi::SQLITE_BUSY, "busy", None).is_interrupt());
+        assert!(!Error::Interface("x".into()).is_interrupt());
+    }
 
     #[test]
     fn sqlstate_table() {
