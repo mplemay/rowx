@@ -283,9 +283,18 @@ pub(crate) fn execute_sql(ctx: &Ctx, sql: &str, params: &[Param]) -> Result<u64,
     // The clock starts right before the step: `sqlite3_interrupt` with no statement running is a no-op
     // that the first step clears, so an interrupt fired during prepare or bind would be lost.
     armed = ctx.timer.as_ref().map(Timer::arm);
+    let total = ctx.conn.total_changes();
     let changed = stmt.raw_execute();
     drop(armed);
-    u64::try_from(changed?).map_err(|_| Error::Interface("negative change count".to_owned()))
+    let changed = changed?;
+    // `sqlite3_changes` keeps the count of the last INSERT, UPDATE or DELETE, so a statement that changed
+    // nothing (DDL, a `DELETE` that matched no row) must not report a stale one
+    let changed = if ctx.conn.total_changes() == total {
+        0
+    } else {
+        changed
+    };
+    u64::try_from(changed).map_err(|_| Error::Interface("negative change count".to_owned()))
 }
 
 /// The rows of a `fetch`, and the column-to-field mapping when the shape is named.

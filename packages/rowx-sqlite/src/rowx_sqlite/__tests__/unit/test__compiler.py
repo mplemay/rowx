@@ -10,7 +10,9 @@ from rowx_core._compiler import compile_parts as compile_parts_impl
 from rowx_sqlite._compiler import (
     COMPILER,
     DIALECT,
+    VERIFY_CACHE_SIZE,
     Compiled,
+    _verify_parameters,
     compile_parts,
     compile_template,
     parameter_spans,
@@ -129,6 +131,41 @@ def test_static_sigils_are_rejected(sql: str) -> None:
 def test_static_sigil_next_to_interpolation_is_rejected() -> None:
     with pytest.raises(TypeError, match="interpolation"):
         compile_template(t"SELECT ?1, {FIRST_VALUE}", dynamic=False)
+
+
+def test_a_verified_statement_is_not_lexed_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    lexed: list[str] = []
+
+    def counting(sql: str) -> tuple[tuple[int, int], ...]:
+        lexed.append(sql)
+        return parameter_spans(sql)
+
+    _verify_parameters.cache_clear()
+    monkeypatch.setattr("rowx_sqlite._compiler.parameter_spans", counting)
+    for value in range(3):
+        compiled, params = compile_template(t"SELECT a FROM t WHERE id = {value}", dynamic=False)
+        assert compiled.sql == "SELECT a FROM t WHERE id = ?1"
+        assert params == [value]
+    assert lexed == ["SELECT a FROM t WHERE id = ?1"]
+
+
+def test_a_rejected_statement_is_rejected_every_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    lexed: list[str] = []
+
+    def counting(sql: str) -> tuple[tuple[int, int], ...]:
+        lexed.append(sql)
+        return parameter_spans(sql)
+
+    _verify_parameters.cache_clear()
+    monkeypatch.setattr("rowx_sqlite._compiler.parameter_spans", counting)
+    for _ in range(2):
+        with pytest.raises(TypeError, match="interpolation"):
+            compile_template(t"SELECT ?1, {FIRST_VALUE}", dynamic=False)
+    assert len(lexed) == 2
+
+
+def test_the_verification_cache_is_bounded() -> None:
+    assert _verify_parameters.cache_info().maxsize == VERIFY_CACHE_SIZE
 
 
 def test_dollar_is_an_identifier_character_inside_a_name() -> None:

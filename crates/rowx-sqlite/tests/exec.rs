@@ -29,6 +29,17 @@ async fn execute_reports_the_rows_it_changed() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_statement_that_changes_nothing_reports_zero_not_the_last_count() -> TestResult {
+    let conn = connect(&memory()).await?;
+    run(&conn, "CREATE TABLE t (a INTEGER)").await?;
+    assert_eq!(run(&conn, "INSERT INTO t VALUES (1), (2), (3)").await?, 3);
+    assert_eq!(run(&conn, "CREATE TABLE other (a)").await?, 0);
+    assert_eq!(run(&conn, "DELETE FROM t WHERE a = 99").await?, 0);
+    assert_eq!(run(&conn, "DROP TABLE other").await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn fetch_decodes_rows_by_declared_type() -> TestResult {
     let conn = connect(&memory()).await?;
     run(
