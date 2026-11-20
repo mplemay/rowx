@@ -56,7 +56,8 @@ impl OwnedShape {
     }
 }
 
-pub(crate) fn interrupted() -> Error {
+#[must_use]
+pub fn interrupted() -> Error {
     Error::from_code(ffi::SQLITE_INTERRUPT, "interrupted", None)
 }
 

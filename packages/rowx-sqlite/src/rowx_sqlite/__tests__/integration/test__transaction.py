@@ -162,6 +162,26 @@ async def test_a_read_only_transaction_keeps_a_read_only_connection_read_only(tm
 
 
 @pytest.mark.asyncio
+async def test_a_read_only_connection_takes_a_default_transaction_deferred(tmp_path: Path) -> None:
+    path = str(tmp_path / "ro.db")
+    writer = await connect(ConnectOptions(path=path, mode="rwc"))
+    await make_table(writer)
+    await writer.close()
+    conn = await connect(ConnectOptions(path=path, read_only=True))
+    try:
+        async with conn.transaction() as tx:
+            assert await count(tx) == 0
+    finally:
+        await conn.close()
+    conn = await connect(ConnectOptions(path=path, mode="ro"))
+    try:
+        async with conn.transaction() as tx:
+            assert await count(tx) == 0
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_read_only_transactions_take_no_mode(conn: Connection) -> None:
     with pytest.raises(InterfaceError, match="read-only"):
         await enter(conn.transaction(mode="immediate", read_only=True))
@@ -361,3 +381,24 @@ async def test_an_interrupted_read_in_a_transaction_leaves_it_open(tmp_path: Pat
         assert await count(conn) == 1
     finally:
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_begin_that_waits_for_the_lock_leaves_no_transaction_behind(tmp_path: Path) -> None:
+    path = str(tmp_path / "wait.db")
+    holder = await connect(ConnectOptions(path=path, mode="rwc"))
+    waiter = await connect(ConnectOptions(path=path, connect_timeout=3))
+    try:
+        await make_table(holder)
+        async with holder.transaction():
+            # the BEGIN waits in SQLite's busy handler, which an interrupt does not wake
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(enter(waiter.transaction()), 0.2)
+        async with waiter.transaction() as tx:
+            await query(t"INSERT INTO t VALUES (1)").execute(tx)
+        assert await count(waiter) == 1
+        await query(t"INSERT INTO t VALUES (2)").execute(holder)
+        assert await count(holder) == 2
+    finally:
+        await holder.close()
+        await waiter.close()

@@ -395,6 +395,20 @@ impl Connection {
         .await
     }
 
+    /// Runs statements without looking at the cancel flag. An abandoned operation cleans up with this
+    /// while its cancel is still pending.
+    ///
+    /// # Errors
+    /// `Sqlite` for a failing statement, `Closed` after `close()`, `Stopped` when the worker died.
+    pub async fn simple_uncancelled(&self, sql: &str) -> Result<(), Error> {
+        let sql = sql.to_owned();
+        self.call(move |ctx| {
+            ctx.conn.execute_batch(&sql)?;
+            Ok(())
+        })
+        .await
+    }
+
     /// # Errors
     /// `Closed` after `close()`, `Stopped` when the worker died.
     pub async fn is_autocommit(&self) -> Result<bool, Error> {

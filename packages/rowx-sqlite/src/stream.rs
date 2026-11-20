@@ -3,10 +3,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyCFunction, PyList};
+use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
-use rowx_py_core::exec::watch;
+use rowx_py_core::errors::interface_error;
+use rowx_py_core::exec::{on_cancel, watch};
 use rowx_py_core::row::{Layout, nullable_mask};
 use rowx_sqlite::cancel::{self, Hook};
 use rowx_sqlite::exec::{Batch, Param, RowBatches, StreamLimits, Streaming};
@@ -14,14 +15,14 @@ use tokio::sync::{Notify, oneshot};
 
 use crate::codec;
 use crate::conn::Core;
-use crate::errors::{Failure, SqliteError, interface_error, to_py_err};
+use crate::errors::{Failure, SqliteError, to_py_err};
 use crate::exec::{decode_row, driver_shape, fail_named};
 use crate::named::{RowShape, layout_named};
 
 type Opened = Result<RowBatches, Failure>;
 
 #[derive(Debug)]
-pub struct StreamArgs {
+pub(crate) struct StreamArgs {
     pub sql: String,
     // per-column flags, see `FetchArgs`
     pub mask: Option<Vec<u8>>,
@@ -53,6 +54,8 @@ struct Shared {
     // set when the task awaiting `_next` was cancelled; the statement is being interrupted
     cancelled: AtomicBool,
     stop: Notify,
+    // wakes the producer, which holds the connection until the stream is over
+    released: Notify,
     hook: Hook,
     rows_affected: Mutex<Option<u64>>,
     // the named layout, built when the stream opens and fixed for it
@@ -71,6 +74,7 @@ impl Shared {
     fn finish(&self) {
         self.finished.store(true, Ordering::Release);
         self.stop.notify_one();
+        self.released.notify_one();
         self.hook.finish();
         let batches = self.batches.lock().ok().and_then(|mut slot| slot.take());
         drop(batches);
@@ -108,7 +112,7 @@ pub struct RowStream {
 impl RowStream {
     /// # Errors
     /// `EncodeError`/`InterfaceError` when a parameter cannot be extracted or there are too many.
-    pub fn new(
+    pub(crate) fn new(
         py: Python<'_>,
         core: &Arc<Core>,
         params: &Bound<'_, PyList>,
@@ -206,7 +210,7 @@ async fn open(
     let (sender, opened) = oneshot::channel();
     let producer = Arc::clone(core);
     if let Err(e) = cancel::spawn_stream(&core.cancel, &shared.hook, || {
-        produce(producer, start, sender)
+        produce(producer, start, sender, Arc::clone(shared))
     }) {
         if shared.is_finished() {
             return Ok(());
@@ -255,18 +259,13 @@ async fn open(
 }
 
 // registered after `watch`, so the cancel path has started when the flag is seen; a cancelled
-// stream is over: later calls return no rows
+// stream is over: later calls return no rows. Finishing lets the producer end, which the cancelled
+// statement's settling waits for.
 fn watch_cancelled(future: &Bound<'_, PyAny>, shared: Arc<Shared>) -> PyResult<()> {
-    let callback = PyCFunction::new_closure(future.py(), None, None, move |args, _kwargs| {
-        if let Ok(done) = args.get_item(0)
-            && done.call_method0("cancelled")?.is_truthy()?
-        {
-            shared.cancelled.store(true, Ordering::Release);
-        }
-        PyResult::Ok(())
-    })?;
-    future.call_method1("add_done_callback", (callback,))?;
-    Ok(())
+    on_cancel(future, move || {
+        shared.cancelled.store(true, Ordering::Release);
+        shared.finish();
+    })
 }
 
 fn empty() -> Py<PyAny> {
@@ -352,8 +351,14 @@ async fn receive(
     }
 }
 
-// holds the connection until the worker is done with the statement, so the next operation waits for it
-async fn produce(core: Arc<Core>, start: Start, opened: oneshot::Sender<Opened>) {
+// holds the connection from the first read until the consumer has seen the stream end (or it is closed,
+// cancelled or dropped), so the connection stays busy while buffered batches are still unread
+async fn produce(
+    core: Arc<Core>,
+    start: Start,
+    opened: oneshot::Sender<Opened>,
+    shared: Arc<Shared>,
+) {
     let conn = core.conn.lock().await;
     if core.aborted() {
         let _ = opened.send(Err(Failure::Aborted));
@@ -377,6 +382,13 @@ async fn produce(core: Arc<Core>, start: Start, opened: oneshot::Sender<Opened>)
             // a caller that stopped waiting drops the batches, which ends the worker
             let _ = opened.send(Ok(batches));
             done.wait().await;
+            // `finish` stores a permit, so a stream that ended meanwhile is not waited for
+            if !shared.is_finished() {
+                tokio::select! {
+                    () = shared.released.notified() => {}
+                    () = core.cancel.state.wait_closed() => {}
+                }
+            }
         }
         Err(err) => {
             let _ = opened.send(Err(Failure::at(err, &args.sql)));

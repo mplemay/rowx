@@ -10,6 +10,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::cancel::Backend;
 use rowx_core::pool::Manage;
 use rowx_core::state::State;
+use rowx_py_core::errors::interface_error;
 use rowx_py_core::runtime;
 use rowx_py_core::time::seconds;
 use rowx_sqlite::cancel::{Cancel, SqliteBackend};
@@ -19,7 +20,7 @@ use rowx_sqlite::error::Error;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
-use crate::errors::{Failure, SqliteError, interface_error, to_py_err};
+use crate::errors::{Failure, SqliteError, to_py_err};
 use crate::exec::{self, Depth, FetchArgs};
 use crate::named::RowShape;
 use crate::stream::{RowStream, StreamArgs};
@@ -79,11 +80,13 @@ pub type Access = rowx_py_core::exec::Access<Standalone>;
 
 /// What an operation, and a stream that outlives its call, share with the connection object.
 #[derive(Debug)]
-pub struct Core {
-    pub cancel: Cancel,
-    pub conn: Mutex<SqliteConnection>,
-    pub access: Access,
-    pub variable_limit: usize,
+pub(crate) struct Core {
+    pub(crate) cancel: Cancel,
+    pub(crate) conn: Mutex<SqliteConnection>,
+    pub(crate) access: Access,
+    pub(crate) variable_limit: usize,
+    // a read-only connection cannot take the default `BEGIN IMMEDIATE`
+    pub(crate) read_only: bool,
     // the transaction helper's depth as the caller sees it: SQLite ends a transaction on its own after an
     // interrupt, which resets the shared state, so the difference between the two marks an aborted one
     open: AtomicU32,
@@ -93,7 +96,7 @@ pub struct Core {
 
 impl Core {
     #[must_use]
-    pub fn new(conn: SqliteConnection, handle: Handle) -> Self {
+    pub(crate) fn new(conn: SqliteConnection, handle: Handle, read_only: bool) -> Self {
         Self {
             cancel: Cancel {
                 state: Arc::clone(conn.state()),
@@ -101,6 +104,7 @@ impl Core {
                 handle,
             },
             variable_limit: conn.variable_limit(),
+            read_only,
             conn: Mutex::new(conn),
             access: Access::default(),
             open: AtomicU32::new(0),
@@ -109,24 +113,24 @@ impl Core {
     }
 
     #[must_use]
-    pub fn depth(&self) -> u32 {
+    pub(crate) fn depth(&self) -> u32 {
         self.open.load(Ordering::Acquire)
     }
 
     /// The caller has an open `transaction()` that SQLite already ended.
     #[must_use]
-    pub fn aborted(&self) -> bool {
+    pub(crate) fn aborted(&self) -> bool {
         self.depth() > 0 && !self.cancel.state.maybe_in_txn()
     }
 
     /// A transaction or savepoint was opened; returns the new depth.
-    pub fn enter(&self) -> u32 {
+    pub(crate) fn enter(&self) -> u32 {
         self.cancel.state.enter_txn();
         self.open.fetch_add(1, Ordering::AcqRel).saturating_add(1)
     }
 
     /// A savepoint was released; returns the new depth.
-    pub fn leave(&self) -> u32 {
+    pub(crate) fn leave(&self) -> u32 {
         self.cancel.state.leave_txn();
         let mut current = self.open.load(Ordering::Acquire);
         loop {
@@ -144,14 +148,15 @@ impl Core {
     }
 
     /// The outermost transaction ended.
-    pub fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.cancel.state.clear_maybe_in_txn();
         self.open.store(0, Ordering::Release);
     }
 
+    // a value that is still pending is the original: the pragma now reads the state a transaction left
     pub(crate) fn remember_query_only(&self, prior: bool) {
         if let Ok(mut slot) = self.restore.lock() {
-            *slot = Some(prior);
+            slot.get_or_insert(prior);
         }
     }
 
@@ -161,7 +166,7 @@ impl Core {
 
     /// # Errors
     /// `InterfaceError` when a statement has more parameters than SQLite allows.
-    pub fn check_params(&self, py: Python<'_>, count: usize) -> PyResult<()> {
+    pub(crate) fn check_params(&self, py: Python<'_>, count: usize) -> PyResult<()> {
         if count > self.variable_limit {
             return Err(interface_error(
                 py,
@@ -185,9 +190,14 @@ pub struct Connection {
 
 impl Connection {
     #[must_use]
-    pub fn new(conn: SqliteConnection, handle: Handle, statement_cache_size: usize) -> Self {
+    pub(crate) fn new(
+        conn: SqliteConnection,
+        handle: Handle,
+        statement_cache_size: usize,
+        read_only: bool,
+    ) -> Self {
         Self {
-            core: Arc::new(Core::new(conn, handle)),
+            core: Arc::new(Core::new(conn, handle, read_only)),
             statement_cache_size,
         }
     }
@@ -291,7 +301,8 @@ impl Connection {
                 "the connection is already in a transaction; use Transaction.transaction() for a savepoint",
             ));
         }
-        let sql = exec::begin_sql(mode, read_only).map_err(|e| to_py_err(py, &e))?;
+        let sql =
+            exec::begin_sql(mode, read_only, self.core.read_only).map_err(|e| to_py_err(py, &e))?;
         exec::begin(py, &self.core, sql, read_only)
     }
 
@@ -434,6 +445,12 @@ pub fn connect<'py>(py: Python<'py>, options: &Bound<'py, PyAny>) -> PyResult<Bo
         let conn = SqliteConnection::connect(&options)
             .await
             .map_err(SqliteError::from)?;
-        Ok(Connection::new(conn, handle, options.statement_cache))
+        let read_only = options.read_only || options.open.mode == OpenMode::ReadOnly;
+        Ok(Connection::new(
+            conn,
+            handle,
+            options.statement_cache,
+            read_only,
+        ))
     })
 }

@@ -3,7 +3,7 @@ use pyo3::types::PyString;
 use rowx_sqlite::exec::Param;
 use rowx_sqlite::value::text;
 
-use crate::errors::encode_error;
+use rowx_py_core::errors::encode_error;
 
 #[must_use]
 pub fn decode<'py>(py: Python<'py>, value: &str) -> Bound<'py, PyAny> {

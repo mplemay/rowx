@@ -5,7 +5,7 @@ use rowx_sqlite::exec::Param;
 use rowx_sqlite::value::uuid::{self, Uuid};
 
 use super::classes::class;
-use crate::errors::encode_error;
+use rowx_py_core::errors::encode_error;
 
 static UUID: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 

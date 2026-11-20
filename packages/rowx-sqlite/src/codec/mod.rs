@@ -16,7 +16,7 @@ use pyo3::types::{
 use rowx_sqlite::exec::Param;
 use rowx_sqlite::value::Scalar;
 
-use crate::errors::encode_error;
+use rowx_py_core::errors::encode_error;
 
 /// One arm per type family; NULL is `None`.
 ///

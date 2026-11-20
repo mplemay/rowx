@@ -5,7 +5,7 @@ use pyo3::types::PyDict;
 use rowx_sqlite::exec::Param;
 use rowx_sqlite::value::json;
 
-use crate::errors::{decode_error, encode_error};
+use rowx_py_core::errors::{decode_error, encode_error};
 
 static LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();

@@ -5,7 +5,7 @@ use rowx_sqlite::exec::Param;
 use rowx_sqlite::value::temporal::{self, Aware, Date, DateTime, Time};
 
 use super::classes::class;
-use crate::errors::encode_error;
+use rowx_py_core::errors::encode_error;
 
 static DATE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static TIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();

@@ -155,6 +155,30 @@ async def test_a_stream_holds_the_connection_until_it_ends(conn: Connection) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_stream_that_fits_in_the_buffer_still_holds_the_connection_until_it_is_read_out(
+    conn: Connection,
+) -> None:
+    await seed(conn)
+    stream = query[int](t"SELECT id FROM users ORDER BY id").fetch(conn, batch_size=1)
+    assert await anext(stream) == 1
+    with pytest.raises(ConnectionBusyError):
+        await query[int](t"SELECT 1").one(conn)
+    assert [row async for row in stream] == [2, 3]
+    assert await query[int](t"SELECT 1").one(conn) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_transaction_cannot_commit_while_its_stream_is_open(conn: Connection) -> None:
+    await seed(conn)
+    async with conn.transaction() as tx:
+        stream = query[int](t"SELECT id FROM users ORDER BY id").fetch(tx, batch_size=1)
+        assert await anext(stream) == 1
+        with pytest.raises(ConnectionBusyError):
+            await tx.commit()
+        assert [row async for row in stream] == [2, 3]
+
+
+@pytest.mark.asyncio
 async def test_execute_reports_rows_affected(conn: Connection) -> None:
     await seed(conn)
     assert (await query(t"UPDATE users SET name = 'x' WHERE id < 3").execute(conn)).rows_affected == 2
@@ -223,6 +247,33 @@ async def test_cancelling_a_stream_ends_it(conn: Connection) -> None:
 
 
 @pytest.mark.asyncio
+async def test_closing_the_connection_during_a_running_fetch_is_an_interface_error(conn: Connection) -> None:
+    long_query = query[int](
+        t"WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000000) SELECT count(*) FROM c",
+    )
+    task = asyncio.ensure_future(long_query.one(conn))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    await conn.close()
+    with pytest.raises(InterfaceError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_closing_the_connection_during_a_running_execute_is_an_interface_error(conn: Connection) -> None:
+    await seed(conn)
+    long_write = query(
+        t"INSERT INTO users (id, name) WITH RECURSIVE c(n) AS (SELECT 10 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000000) SELECT n, 'x' FROM c",
+    )
+    task = asyncio.ensure_future(long_write.execute(conn))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    await conn.close()
+    with pytest.raises(InterfaceError):
+        await task
+
+
+@pytest.mark.asyncio
 async def test_the_statement_timeout_interrupts_a_long_statement(tmp_path: Path) -> None:
     options = ConnectOptions(path=str(tmp_path / "t.db"), mode="rwc", statement_timeout=0.2)
     conn = await connect(options)
@@ -268,6 +319,7 @@ async def run_raw(conn: Connection, sql: str) -> None:
         ("INSERT INTO u (id, email, age, parent) VALUES (3, 'b@x', -1, NULL)", "23514", "SQLITE_CONSTRAINT_CHECK"),
         ("INSERT INTO s (n) VALUES ('text')", "22000", "SQLITE_CONSTRAINT_DATATYPE"),
         ("INSERT INTO g (n) VALUES (1)", "23000", "SQLITE_CONSTRAINT_TRIGGER"),
+        ("INSERT INTO u (id, email) VALUES ('x', 'z')", "22000", "SQLITE_MISMATCH"),
         ("SELECT zeroblob(2000000000)", "54000", "SQLITE_TOOBIG"),
         ("SELEC 1", "HY000", "SQLITE_ERROR"),
         ("SELECT * FROM missing", "HY000", "SQLITE_ERROR"),
@@ -280,6 +332,21 @@ async def test_each_error_maps_to_its_sqlstate_and_code(conn: Connection, sql: s
         await run_raw(conn, sql)
     assert info.value.sqlstate == sqlstate
     assert info.value.code == code
+
+
+async def fill(conn: Connection) -> None:
+    for _ in range(100):
+        await run_raw(conn, "INSERT INTO f VALUES (zeroblob(100000))")
+
+
+@pytest.mark.asyncio
+async def test_a_full_database_maps_to_53100(conn: Connection) -> None:
+    await run_raw(conn, "CREATE TABLE f (b BLOB)")
+    await native_fetch(conn, "PRAGMA max_page_count = 10", [])
+    with pytest.raises(DatabaseError) as info:
+        await fill(conn)
+    assert info.value.sqlstate == "53100"
+    assert info.value.code == "SQLITE_FULL"
 
 
 @pytest.mark.asyncio
@@ -366,6 +433,27 @@ async def test_an_interrupted_statement_maps_to_57014_with_its_code(tmp_path: Pa
                 "SELECT count(*) FROM (WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000000) SELECT n FROM c)",
             )
         assert (info.value.sqlstate, info.value.code) == ("57014", "SQLITE_INTERRUPT")
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_sets_the_busy_timeout() -> None:
+    default = await connect(ConnectOptions(memory=True))
+    custom = await connect(ConnectOptions(memory=True, connect_timeout=1.5))
+    try:
+        assert await native_fetch(default, "PRAGMA busy_timeout", []) == [(5000,)]
+        assert await native_fetch(custom, "PRAGMA busy_timeout", []) == [(1500,)]
+    finally:
+        await default.close()
+        await custom.close()
+
+
+@pytest.mark.asyncio
+async def test_a_statement_timeout_of_zero_means_unlimited() -> None:
+    conn = await connect(ConnectOptions(memory=True, statement_timeout=0))
+    try:
+        assert await query[int](t"SELECT 1").one(conn) == 1
     finally:
         await conn.close()
 

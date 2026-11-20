@@ -1,7 +1,6 @@
 use pyo3::prelude::*;
 use rowx_core::error::{CoreError, TaskStopped};
 use rowx_py_core::errors as shared;
-use rowx_py_core::shape::{render_null, render_shape};
 use rowx_sqlite::error::Error;
 
 use crate::named::RowShape;
@@ -118,15 +117,7 @@ pub fn named_to_py_err(py: Python<'_>, failure: &Failure, shape: &RowShape) -> P
         Failure::Driver {
             error: Error::Shape { errors, columns },
             ..
-        } => shared::row_shape_error(
-            py,
-            &render_shape(
-                shape.data().type_name(),
-                shape.data().key_names(),
-                errors,
-                columns,
-            ),
-        ),
+        } => shared::named_shape_error(py, shape.data(), errors, columns),
         Failure::Driver {
             error:
                 Error::NullField {
@@ -136,17 +127,7 @@ pub fn named_to_py_err(py: Python<'_>, failure: &Failure, shape: &RowShape) -> P
                     name,
                 },
             ..
-        } => {
-            let key = shape
-                .data()
-                .key_names()
-                .get(*field)
-                .map_or("", String::as_str);
-            shared::row_shape_error(
-                py,
-                &render_null(shape.data().type_name(), key, *column, name, *row),
-            )
-        }
+        } => shared::named_null_error(py, shape.data(), *field, *column, name, *row),
         other => to_py_err(py, other),
     }
 }
@@ -165,19 +146,4 @@ impl From<SqliteError> for PyErr {
     fn from(err: SqliteError) -> Self {
         Python::attach(|py| to_py_err(py, &err.0))
     }
-}
-
-#[must_use]
-pub fn interface_error(py: Python<'_>, message: &str) -> PyErr {
-    shared::interface_error(py, message)
-}
-
-#[must_use]
-pub fn decode_error(py: Python<'_>, message: &str) -> PyErr {
-    shared::decode_error(py, message)
-}
-
-#[must_use]
-pub fn encode_error(py: Python<'_>, message: &str) -> PyErr {
-    shared::encode_error(py, message)
 }
