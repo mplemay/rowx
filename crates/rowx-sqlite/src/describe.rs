@@ -4,6 +4,7 @@ use rowx_core::row_shape::{Override, column_name};
 use rusqlite::Connection as Raw;
 
 use crate::error::Error;
+use crate::exec::refresh_schema;
 use crate::types::{Kind, lookup};
 
 /// What the statement's text says about its shape. The lexer lives in Python, so the caller reads it
@@ -253,6 +254,7 @@ fn is_rowid(key: &TableKey, column: &str, declared: Option<&str>) -> bool {
 /// `Sqlite` (with the error offset) when SQLite rejects the SQL, `Interface` for no statement or more
 /// than one.
 pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe, Error> {
+    refresh_schema(conn)?;
     let stmt = match conn.prepare(sql) {
         Ok(stmt) => stmt,
         Err(rusqlite::Error::MultipleStatement) => {

@@ -285,6 +285,48 @@ async def test_a_view_with_an_untrusted_function_fails_to_describe_under_the_che
 
 
 @pytest.mark.asyncio
+async def test_a_describe_sees_a_schema_another_connection_changed(dsn: str, checker: Connection) -> None:
+    before = await describe(checker, "SELECT * FROM r")
+    assert [col.name for col in before.columns] == ["a", "b"]
+    writer = await connect(ConnectOptions(path=dsn.removeprefix("sqlite:///"), mode="rw"))
+    try:
+        await writer._impl._execute("ALTER TABLE r ADD COLUMN extra TEXT", [])
+    finally:
+        await writer.close()
+    after = await describe(checker, "SELECT * FROM r")
+    assert [col.name for col in after.columns] == ["a", "b", "extra"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sql", ["PRAGMA trusted_schema=ON", "PRAGMA query_only=OFF", "PRAGMA trusted_schema(1)"])
+async def test_describing_a_pragma_that_sets_a_value_is_refused_and_changes_nothing(
+    checker: Connection, sql: str
+) -> None:
+    with pytest.raises(DatabaseError) as raised:
+        await describe(checker, sql)
+    assert raised.value.code == "SQLITE_AUTH"
+    assert await checker._fetch("PRAGMA trusted_schema", [], None, True, True, None, None) == [0]  # ruff: ignore[boolean-positional-value-in-call]
+    assert await checker._fetch("PRAGMA query_only", [], None, True, True, None, None) == [1]  # ruff: ignore[boolean-positional-value-in-call]
+    with pytest.raises(DatabaseError, match="unsafe use of rtreedepth"):
+        await describe(checker, "SELECT a FROM unsafe")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sql", ["PRAGMA table_info(t)", "PRAGMA trusted_schema"])
+async def test_read_only_pragmas_still_describe_under_the_checker(checker: Connection, sql: str) -> None:
+    await describe(checker, sql)
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_connection_still_sets_pragmas(dsn: str) -> None:
+    conn = await connect(ConnectOptions(path=dsn.removeprefix("sqlite:///"), mode="rw"))
+    try:
+        await conn._impl._execute("PRAGMA recursive_triggers = ON", [])
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_a_syntax_error_reports_a_position(checker: Connection) -> None:
     with pytest.raises(DatabaseError) as raised:
         await describe(checker, "SELECT a FROM t WHERE )")

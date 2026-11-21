@@ -1,9 +1,10 @@
 pub mod common;
 
-use common::{TestResult, connect, file_options, memory, run};
+use common::{TestResult, connect, file_options, memory, path, pragma, run};
+use rowx_sqlite::conn::ConnectOptions;
 use rowx_sqlite::conn::Connection;
 use rowx_sqlite::describe::{ColumnInfo, Construct, Describe, NullReason, Structure};
-use rowx_sqlite::dsn::OpenMode;
+use rowx_sqlite::dsn::{OpenMode, Target};
 use rowx_sqlite::error::Error;
 use rowx_sqlite::types::Kind;
 
@@ -575,5 +576,86 @@ async fn a_view_using_an_untrusted_function_fails_to_describe_when_the_schema_is
         matches!(&err, Some(Error::Sqlite { message, .. }) if message.contains("unsafe use of rtreedepth")),
         "{err:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_describe_sees_a_schema_another_connection_changed() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let writer = connect(&file_options(&dir, "check.db", OpenMode::ReadWriteCreate)).await?;
+    run(&writer, "CREATE TABLE t (a INTEGER)").await?;
+    let checker = connect(&ConnectOptions::checker(
+        Target::File(path(&dir, "check.db")),
+        None,
+    ))
+    .await?;
+    let before = describe(&checker, "SELECT * FROM t", from(&["t"])).await?;
+    assert_eq!(before.columns.len(), 1);
+    run(&writer, "ALTER TABLE t ADD COLUMN b TEXT").await?;
+    let after = describe(&checker, "SELECT * FROM t", from(&["t"])).await?;
+    let names: Vec<&str> = after.columns.iter().map(|col| col.name.as_str()).collect();
+    assert_eq!(names, ["a", "b"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn describing_a_pragma_that_sets_a_value_is_refused_and_changes_nothing() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let writer = connect(&file_options(&dir, "check.db", OpenMode::ReadWriteCreate)).await?;
+    run(&writer, "CREATE TABLE t (a INTEGER)").await?;
+    run(
+        &writer,
+        "CREATE VIEW u AS SELECT a, rtreedepth(zeroblob(8)) AS r FROM t",
+    )
+    .await?;
+    let checker = connect(&ConnectOptions::checker(
+        Target::File(path(&dir, "check.db")),
+        None,
+    ))
+    .await?;
+    for sql in [
+        "PRAGMA trusted_schema=ON",
+        "PRAGMA query_only=OFF",
+        "PRAGMA trusted_schema(1)",
+    ] {
+        let err = describe(&checker, sql, Structure::default()).await.err();
+        assert!(
+            matches!(&err, Some(Error::Sqlite { name, .. }) if *name == "SQLITE_AUTH"),
+            "{sql}: {err:?}"
+        );
+    }
+    assert_eq!(pragma(&checker, "trusted_schema").await?, 0);
+    assert_eq!(pragma(&checker, "query_only").await?, 1);
+    let err = describe(&checker, "SELECT a FROM u", from(&["u"]))
+        .await
+        .err();
+    assert!(
+        matches!(&err, Some(Error::Sqlite { message, .. }) if message.contains("unsafe use of rtreedepth")),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_pragmas_still_describe_on_the_checker() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let writer = connect(&file_options(&dir, "check.db", OpenMode::ReadWriteCreate)).await?;
+    run(&writer, "CREATE TABLE t (a INTEGER)").await?;
+    let checker = connect(&ConnectOptions::checker(
+        Target::File(path(&dir, "check.db")),
+        None,
+    ))
+    .await?;
+    for sql in ["PRAGMA table_info(t)", "PRAGMA trusted_schema"] {
+        describe(&checker, sql, Structure::default()).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_runtime_connection_still_sets_pragmas() -> TestResult {
+    let conn = connect(&memory()).await?;
+    run(&conn, "PRAGMA recursive_triggers = ON").await?;
+    assert_eq!(pragma(&conn, "recursive_triggers").await?, 1);
     Ok(())
 }
