@@ -70,8 +70,16 @@ impl ConnectOptions {
     }
 
     // a read-only handle never switches the journal mode; see `apply_pragmas`
-    fn is_read_only(&self) -> bool {
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
         self.read_only || self.open.mode == OpenMode::ReadOnly
+    }
+
+    // Distinct from `is_read_only`, which also covers `mode=ro`: a `mode=ro` open without `read_only` starts
+    // with `query_only` off, and a reset must put it back to what the connection had at connect.
+    #[must_use]
+    pub(crate) const fn query_only_at_connect(&self) -> bool {
+        self.read_only
     }
 }
 
@@ -216,7 +224,7 @@ fn apply_pragmas(conn: &rusqlite::Connection, options: &ConnectOptions) -> Resul
     if is_file && !options.is_read_only() {
         require_wal(&mode)?;
     }
-    if options.read_only {
+    if options.query_only_at_connect() {
         conn.pragma_update(None, "query_only", true)?;
     }
     Ok(mode.into())

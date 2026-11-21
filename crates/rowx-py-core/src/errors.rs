@@ -223,6 +223,16 @@ pub fn core_to_py_err(py: Python<'_>, err: CoreError) -> PyErr {
     }
 }
 
+/// # Errors
+/// `InterfaceError` when the current process is not the one (`pid`) that created the pool.
+pub fn ensure_same_process(py: Python<'_>, pid: u32) -> PyResult<()> {
+    if std::process::id() == pid {
+        Ok(())
+    } else {
+        Err(core_to_py_err(py, CoreError::Forked))
+    }
+}
+
 /// A migration file that cannot be resolved; `version` is set when the error is about one version.
 #[must_use]
 pub fn source_error(py: Python<'_>, err: &SourceError) -> PyErr {

@@ -1,6 +1,6 @@
 # Importing the facade should explain how to install its optional dependency.
 try:  # ruff: ignore[non-empty-init-module]
-    from rowx_sqlite import Connection, ConnectOptions, Transaction, connect
+    from rowx_sqlite import Connection, ConnectOptions, Pool, Transaction, connect
 except ModuleNotFoundError as error:
     if error.name != "rowx_sqlite":
         raise
@@ -10,6 +10,7 @@ except ModuleNotFoundError as error:
 __all__ = [
     "ConnectOptions",
     "Connection",
+    "Pool",
     "Transaction",
     "connect",
 ]

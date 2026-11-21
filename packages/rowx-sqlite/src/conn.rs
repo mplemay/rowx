@@ -1,6 +1,5 @@
-use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -8,15 +7,15 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::cancel::Backend;
-use rowx_core::pool::Manage;
-use rowx_core::state::State;
+use rowx_core::error::CoreError;
 use rowx_py_core::errors::interface_error;
 use rowx_py_core::runtime;
 use rowx_py_core::time::seconds;
-use rowx_sqlite::cancel::{Cancel, SqliteBackend};
+use rowx_sqlite::cancel::Cancel;
 use rowx_sqlite::conn::{ConnectOptions, Connection as SqliteConnection};
 use rowx_sqlite::dsn::{self, OpenMode, OpenOptions, Target};
 use rowx_sqlite::error::Error;
+use rowx_sqlite::pool::{Pool as SqlitePool, Pooled, SqliteConn, SqliteManager};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
@@ -25,64 +24,14 @@ use crate::exec::{self, Depth, FetchArgs};
 use crate::named::RowShape;
 use crate::stream::{RowStream, StreamArgs};
 
-/// The manager `Access` is typed over. A connection made by `connect` is never pooled, so none of this
-/// is reached; the pool binding brings a manager of its own.
-#[derive(Debug)]
-pub struct Standalone;
-
-impl Manage for Standalone {
-    type Conn = SqliteConnection;
-    type Error = Error;
-    type Backend = SqliteBackend;
-
-    fn connect(&self) -> impl Future<Output = Result<Self::Conn, Self::Error>> + Send {
-        std::future::ready(Err(Error::Interface(
-            "a standalone connection cannot be reconnected".to_owned(),
-        )))
-    }
-
-    fn state<'a>(&self, conn: &'a Self::Conn) -> &'a Arc<State> {
-        conn.state()
-    }
-
-    fn backend(&self, conn: &Self::Conn) -> Self::Backend {
-        conn.backend()
-    }
-
-    async fn ping(&self, conn: &Self::Conn) -> Result<(), Self::Error> {
-        conn.ping().await
-    }
-
-    async fn reset(&self, conn: &Self::Conn, rollback: bool) -> Result<(), Self::Error> {
-        conn.reset(rollback).await
-    }
-
-    fn is_broken(&self, conn: &Self::Conn) -> bool {
-        conn.is_broken()
-    }
-
-    async fn settled(&self, conn: &Self::Conn) -> bool {
-        conn.state().wait_settled().await.is_ok()
-    }
-
-    async fn forget_statements(&self, conn: &Self::Conn) {
-        // a connection that cannot answer has nothing to forget
-        let _ = conn.forget_statements().await;
-    }
-
-    async fn close(&self, mut conn: Self::Conn) {
-        conn.close().await;
-    }
-}
-
 /// How a call reaches its connection.
-pub type Access = rowx_py_core::exec::Access<Standalone>;
+pub type Access = rowx_py_core::exec::Access<SqliteManager>;
 
 /// What an operation, and a stream that outlives its call, share with the connection object.
 #[derive(Debug)]
 pub(crate) struct Core {
     pub(crate) cancel: Cancel,
-    pub(crate) conn: Mutex<SqliteConnection>,
+    pub(crate) conn: Arc<Mutex<SqliteConnection>>,
     pub(crate) access: Access,
     pub(crate) variable_limit: usize,
     // a read-only connection cannot take the default `BEGIN IMMEDIATE`
@@ -97,6 +46,12 @@ pub(crate) struct Core {
 impl Core {
     #[must_use]
     pub(crate) fn new(conn: SqliteConnection, handle: Handle, read_only: bool) -> Self {
+        Self::over(&SqliteConn::new(conn, read_only), handle, Access::default())
+    }
+
+    // a connection of a pool, claimed through the lease in `access`
+    #[must_use]
+    pub(crate) fn over(conn: &SqliteConn, handle: Handle, access: Access) -> Self {
         Self {
             cancel: Cancel {
                 state: Arc::clone(conn.state()),
@@ -104,12 +59,25 @@ impl Core {
                 handle,
             },
             variable_limit: conn.variable_limit(),
-            read_only,
-            conn: Mutex::new(conn),
-            access: Access::default(),
+            read_only: conn.read_only(),
+            conn: Arc::clone(conn.conn()),
+            access,
             open: AtomicU32::new(0),
             restore: StdMutex::new(None),
         }
+    }
+
+    /// The core of a checkout, claimed through its lease.
+    ///
+    /// # Errors
+    /// `Closed` when the checkout was already released.
+    pub(crate) fn pooled(pool: &SqlitePool, pooled: &Pooled) -> Result<Self, CoreError> {
+        let access = Access {
+            lease: Some(pooled.lease()),
+            pool: Some(pool.clone()),
+        };
+        let handle = Handle::try_current().map_err(|_| CoreError::Closed)?;
+        Ok(Self::over(pooled.conn()?, handle, access))
     }
 
     #[must_use]
@@ -184,6 +152,9 @@ impl Core {
 #[derive(Debug)]
 pub struct Connection {
     core: Arc<Core>,
+    // the checkout of a pooled connection, until it is released or detached
+    pooled: StdMutex<Option<Pooled>>,
+    init_pending: AtomicBool,
     #[pyo3(get)]
     statement_cache_size: usize,
 }
@@ -198,8 +169,46 @@ impl Connection {
     ) -> Self {
         Self {
             core: Arc::new(Core::new(conn, handle, read_only)),
+            pooled: StdMutex::new(None),
+            init_pending: AtomicBool::new(false),
             statement_cache_size,
         }
+    }
+
+    /// Wraps a checkout: its lease is what every claim on this connection is checked against.
+    ///
+    /// # Errors
+    /// `Closed` when the checkout was already released.
+    pub(crate) fn pooled(
+        pooled: Pooled,
+        pool: &SqlitePool,
+        statement_cache_size: usize,
+    ) -> Result<Self, CoreError> {
+        let core = Core::pooled(pool, &pooled)?;
+        let init_pending = pooled.init_pending();
+        Ok(Self {
+            core: Arc::new(core),
+            pooled: StdMutex::new(Some(pooled)),
+            init_pending: AtomicBool::new(init_pending),
+            statement_cache_size,
+        })
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Pooled>> {
+        self.pooled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Takes the checkout and revokes the lease at once, so a stream built on it cannot claim the
+    /// connection again before the release has run.
+    ///
+    /// # Errors
+    /// `Closed` when it was already released or detached.
+    pub(crate) fn take_pooled(&self) -> Result<Pooled, CoreError> {
+        let pooled = self.slot().take().ok_or(CoreError::Closed)?;
+        self.core.cancel.state.renew_lease();
+        Ok(pooled)
     }
 }
 
@@ -212,6 +221,13 @@ impl Connection {
 #[pymethods]
 impl Connection {
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // closing a pooled connection gives it back
+        if let Ok(pooled) = self.take_pooled() {
+            return future_into_py(py, async move {
+                pooled.release().await;
+                Ok(())
+            });
+        }
         let core = Arc::clone(&self.core);
         future_into_py(py, async move {
             core.cancel.state.close();
@@ -362,13 +378,53 @@ impl Connection {
         self.core.variable_limit
     }
 
-    // there is no pool yet, so a connection is never checked out of one
-    #[allow(clippy::unused_self)]
+    // Cancels and settles whatever still runs on the connection, so a reset hook can use it.
+    #[pyo3(name = "_settle")]
+    fn settle<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = Arc::clone(&self.core);
+        future_into_py(py, async move {
+            rowx_py_core::exec::settle(&core.cancel.state, &core.cancel.backend)
+                .await
+                .map_err(SqliteError::from)?;
+            // the settle may have sent cancels; take the flag so the hook's own work is not interrupted
+            if !core.cancel.backend.is_alive().await {
+                let err = if core.cancel.state.is_closed() {
+                    CoreError::Closed
+                } else {
+                    CoreError::Broken
+                };
+                return Err(SqliteError::from(err).into());
+            }
+            Ok(())
+        })
+    }
+
+    // ends an open transaction and puts `query_only` back, so a hook sees an idle connection
+    fn reset<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        exec::reset(py, &self.core)
+    }
+
+    #[getter]
+    fn init_pending(&self) -> bool {
+        self.init_pending.load(Ordering::Acquire)
+    }
+
+    #[pyo3(name = "_clear_init_pending")]
+    fn clear_init_pending(&self) {
+        self.init_pending.store(false, Ordering::Release);
+        if let Some(pooled) = self.slot().as_mut() {
+            pooled.clear_init_pending();
+        }
+    }
+
+    /// Takes the connection out of the pool for good; it then behaves like one from `connect`.
     fn detach(&self, py: Python<'_>) -> PyResult<()> {
-        Err(interface_error(
-            py,
-            "the connection is not checked out of a pool",
-        ))
+        let taken = self.slot().take();
+        taken
+            .ok_or_else(|| interface_error(py, "the connection is not checked out of a pool"))?
+            .detach()
+            .map_err(|e| to_py_err(py, &Failure::from(e)))?;
+        Ok(())
     }
 }
 
@@ -451,7 +507,7 @@ pub fn connect<'py>(py: Python<'py>, options: &Bound<'py, PyAny>) -> PyResult<Bo
         let conn = SqliteConnection::connect(&options)
             .await
             .map_err(SqliteError::from)?;
-        let read_only = options.read_only || options.open.mode == OpenMode::ReadOnly;
+        let read_only = options.is_read_only();
         Ok(Connection::new(
             conn,
             handle,

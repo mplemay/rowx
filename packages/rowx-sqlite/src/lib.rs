@@ -4,6 +4,7 @@ pub mod describe;
 pub mod errors;
 pub mod exec;
 pub mod named;
+pub mod pool;
 pub mod stream;
 pub mod types;
 
@@ -20,6 +21,7 @@ const MAX_WORKER_THREADS: usize = 4;
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<conn::Connection>()?;
+    module.add_class::<pool::Pool>()?;
     module.add_function(wrap_pyfunction!(conn::connect, module)?)?;
     module.add_function(wrap_pyfunction!(conn::parse_dsn, module)?)?;
     module.add_class::<named::RowShape>()?;

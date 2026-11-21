@@ -14,15 +14,11 @@ use rowx_py_core::{errors as shared, runtime};
 use crate::conn::{Connection, options_from_py};
 use crate::errors::{PgError, options_error, to_py_err};
 use rowx_py_core::exec::{watch, watch_flag};
-use rowx_py_core::time::seconds;
+use rowx_py_core::time::{optional_seconds, seconds};
 
 use crate::exec::{self, Access, FetchArgs};
 use crate::named::RowShape;
 use crate::stream::{RowStream, StreamArgs};
-
-fn optional_seconds(name: &str, secs: Option<f64>) -> PyResult<Option<Duration>> {
-    secs.map(|secs| seconds(name, secs)).transpose()
-}
 
 #[pyclass(frozen, module = "rowx_postgres._core", name = "Pool")]
 #[derive(Debug)]
@@ -35,11 +31,7 @@ pub struct Pool {
 
 impl Pool {
     fn check_process(&self, py: Python<'_>) -> PyResult<()> {
-        if std::process::id() == self.pid {
-            Ok(())
-        } else {
-            Err(shared::core_to_py_err(py, CoreError::Forked))
-        }
+        shared::ensure_same_process(py, self.pid)
     }
 
     pub(crate) fn inner_checked(&self, py: Python<'_>) -> PyResult<&PgPool> {

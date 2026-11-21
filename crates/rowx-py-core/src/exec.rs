@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use pyo3::prelude::*;
 use pyo3::types::PyCFunction;
@@ -118,4 +119,27 @@ pub fn watch<B: Backend>(future: &Bound<'_, PyAny>, hook: Hook<B>) -> PyResult<(
 /// Any Python error from registering the callback.
 pub fn watch_flag(future: &Bound<'_, PyAny>, flag: Arc<AtomicBool>) -> PyResult<()> {
     on_cancel(future, move || flag.store(true, Ordering::Release))
+}
+
+// how often a running operation is asked again to stop while its connection is settled
+const SETTLE_RECANCEL: Duration = Duration::from_millis(100);
+
+/// Cancels and settles whatever still runs on a connection, so a reset hook can use it.
+///
+/// # Errors
+/// `Closed`/`Broken` when the connection closed or broke while settling.
+pub async fn settle<B: Backend>(state: &Arc<State>, backend: &B) -> Result<(), CoreError> {
+    if state.is_busy() {
+        // an operation that is cut short may have left a transaction open
+        state.mark_maybe_in_txn();
+        // a cancel request only stops a statement that is running, so it is resent
+        while tokio::time::timeout(SETTLE_RECANCEL, state.wait_unclaimed())
+            .await
+            .is_err()
+        {
+            // a failed request is fine: the next round tries again
+            let _ = backend.send_cancel().await;
+        }
+    }
+    state.wait_settled().await
 }
