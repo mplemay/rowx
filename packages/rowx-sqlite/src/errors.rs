@@ -1,7 +1,12 @@
+use std::sync::Arc;
+
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rowx_core::error::{CoreError, TaskStopped};
+use rowx_core::migrate::{Migration, NameError};
 use rowx_py_core::errors as shared;
 use rowx_sqlite::error::Error;
+use rowx_sqlite::migrate::{ConfigError, MigrateError};
 
 use crate::named::RowShape;
 
@@ -145,5 +150,85 @@ impl<T: Into<Failure>> From<T> for SqliteError {
 impl From<SqliteError> for PyErr {
     fn from(err: SqliteError) -> Self {
         Python::attach(|py| to_py_err(py, &err.0))
+    }
+}
+
+// the only place a migration error becomes a Python exception
+#[must_use]
+pub fn migrate_to_py_err(
+    py: Python<'_>,
+    err: &MigrateError,
+    migrations: &[Migration],
+    reverting: bool,
+) -> PyErr {
+    match err {
+        MigrateError::Source(e) => shared::source_error(py, e),
+        MigrateError::Plan(e) => shared::plan_error(py, e),
+        MigrateError::Failed {
+            version,
+            source,
+            dirty,
+            applied,
+        } => {
+            let cause = to_py_err(py, &Failure::from(source.clone()));
+            // only a failure SQLite reported is a failure of the file itself; anything else is raised as
+            // it is
+            if !matches!(source, Error::Sqlite { .. }) {
+                return cause;
+            }
+            shared::migration_file_failed(
+                py,
+                &shared::FileFailure {
+                    message: &err.to_string(),
+                    version: *version,
+                    dirty: *dirty,
+                    applied,
+                    migrations,
+                    reverting,
+                },
+                cause,
+            )
+        }
+        // the SQLite error (`SQLITE_BUSY`, SQLSTATE 55P03) with the explanation in its place
+        MigrateError::Busy(Error::Sqlite { name, .. }) => shared::database_error(
+            py,
+            "55P03",
+            &err.to_string(),
+            None,
+            None,
+            None,
+            Some(*name).filter(|name| !name.is_empty()),
+        ),
+        MigrateError::Busy(e) | MigrateError::Connection(e) => {
+            to_py_err(py, &Failure::from(e.clone()))
+        }
+        MigrateError::Cancelled => shared::interface_error(py, &err.to_string()),
+    }
+}
+
+/// A bad `table` or `create_schemas` name is a `ValueError`.
+#[must_use]
+pub fn name_to_py_err(err: &NameError) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
+/// A table in a schema SQLite lacks, or a schema to create, is a `ValueError`.
+#[must_use]
+pub fn config_to_py_err(err: &ConfigError) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
+/// Carries a migration error across an `async` block, where the GIL is not held. It also carries
+/// what the error needs to name the file that failed.
+#[derive(Debug)]
+pub struct MigrateFailure {
+    pub error: MigrateError,
+    pub migrations: Arc<Vec<Migration>>,
+    pub reverting: bool,
+}
+
+impl From<MigrateFailure> for PyErr {
+    fn from(err: MigrateFailure) -> Self {
+        Python::attach(|py| migrate_to_py_err(py, &err.error, &err.migrations, err.reverting))
     }
 }

@@ -1,18 +1,13 @@
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
 
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyList, PyTuple};
+use pyo3::types::{PyList, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
-use rowx_core::migrate::{
-    Migration, MigrationStatus, PlanOptions, RevertTarget, SchemaName, TableName, resolve,
-};
+use rowx_core::migrate::{Migration, PlanOptions, RevertTarget, SchemaName, TableName, resolve};
 use rowx_postgres::cancel::{self, Cancel, Hook};
 use rowx_postgres::conn::Connection as PgConnection;
 use rowx_postgres::error::Error;
@@ -22,19 +17,10 @@ use rowx_postgres::pool::Pool as PgPool;
 use crate::conn::Connection;
 use crate::errors::{MigrateFailure, PgError, name_to_py_err, to_py_err};
 use rowx_py_core::exec::{watch, watch_flag};
+use rowx_py_core::migrate::{Op, StopFirst, check_target, migration_rows, to_list};
 
 use crate::exec::{Access, AccessExt};
 use crate::pool::Pool;
-
-#[derive(Debug, Clone, Copy)]
-enum Op {
-    // the target, and whether it is a dry run
-    Run(Option<i64>, bool),
-    Revert(RevertTarget, bool),
-    // the target, and whether it is a dry run
-    Skip(Option<i64>, bool),
-    Info,
-}
 
 // everything one operation needs, owned so it can move into a task
 #[derive(Debug, Clone)]
@@ -46,16 +32,6 @@ struct Job {
     op: Op,
     // set when the Python future is cancelled, so no step starts after that
     cancelled: Arc<AtomicBool>,
-}
-
-const fn state_name(status: MigrationStatus) -> &'static str {
-    match status {
-        MigrationStatus::Applied => "applied",
-        MigrationStatus::Pending => "pending",
-        MigrationStatus::Modified => "modified",
-        MigrationStatus::Missing => "missing",
-        MigrationStatus::Dirty => "dirty",
-    }
 }
 
 // What the call changed is reported with the state the migrations are in afterwards, which the
@@ -121,35 +97,6 @@ fn may_have_changed(op: Op, result: &Result<Vec<MigrationDetail>, MigrateError>)
     }
 }
 
-// Sets the flag when it is dropped unfinished, before its inner future (whose drop sends the cancel
-// request) goes: a struct's `drop` runs before its fields are dropped. pyo3's own done callback, which
-// drops the Rust future, is registered before `watch_flag`, so the callbacks alone can't order them.
-struct StopFirst<F> {
-    flag: Arc<AtomicBool>,
-    finished: bool,
-    inner: Pin<Box<F>>,
-}
-
-impl<F: Future> Future for StopFirst<F> {
-    type Output = F::Output;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
-        let out = self.inner.as_mut().poll(cx);
-        if out.is_ready() {
-            self.finished = true;
-        }
-        out
-    }
-}
-
-impl<F> Drop for StopFirst<F> {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.flag.store(true, Ordering::Release);
-        }
-    }
-}
-
 async fn run_job(cancel: Cancel, access: Access, hook: Hook, job: Job) -> PyResult<Py<PyAny>> {
     access
         .reserve(&cancel.state, &hook)
@@ -202,51 +149,6 @@ async fn run_job(cancel: Cancel, access: Access, hook: Hook, job: Job) -> PyResu
             .into())
         }
     }
-}
-
-// `Info` rows are (version, description, state, installed_on in microseconds since the epoch,
-// execution_time in ns, applied checksum). Every other operation returns (version, elapsed in ns),
-// which only a real run or revert has: a dry run and a skip took no time.
-fn to_list(py: Python<'_>, op: Op, details: Vec<MigrationDetail>) -> PyResult<Py<PyAny>> {
-    let rows = details
-        .into_iter()
-        .map(|d| match op {
-            Op::Info => PyTuple::new(
-                py,
-                [
-                    d.info.version.into_pyobject(py)?.into_any(),
-                    d.info
-                        .description
-                        .unwrap_or_default()
-                        .into_pyobject(py)?
-                        .into_any(),
-                    state_name(d.info.status).into_pyobject(py)?.into_any(),
-                    d.installed_on_micros.into_pyobject(py)?.into_any(),
-                    d.execution_time.into_pyobject(py)?.into_any(),
-                    d.applied_checksum
-                        .as_deref()
-                        .map(|bytes| PyBytes::new(py, bytes))
-                        .into_pyobject(py)?
-                        .into_any(),
-                ],
-            ),
-            Op::Run(_, false) | Op::Revert(_, false) => PyTuple::new(
-                py,
-                [
-                    d.info.version.into_pyobject(py)?.into_any(),
-                    d.execution_time.into_pyobject(py)?.into_any(),
-                ],
-            ),
-            Op::Run(_, true) | Op::Revert(_, true) | Op::Skip(..) => PyTuple::new(
-                py,
-                [
-                    d.info.version.into_pyobject(py)?.into_any(),
-                    py.None().into_bound(py),
-                ],
-            ),
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok(PyList::new(py, rows)?.into_any().unbind())
 }
 
 fn on_connection<'py>(py: Python<'py>, conn: &Connection, job: Job) -> PyResult<Bound<'py, PyAny>> {
@@ -315,33 +217,13 @@ impl Migrator {
         }
     }
 
-    // an unknown target is a bad argument, so it fails before any IO
-    fn check_target(&self, op: Op) -> PyResult<()> {
-        let (Op::Run(Some(target), _)
-        | Op::Skip(Some(target), _)
-        | Op::Revert(RevertTarget::Above(target), _)) = op
-        else {
-            return Ok(());
-        };
-        if self
-            .migrations
-            .iter()
-            .any(|m| m.version == target && !m.kind.is_down())
-        {
-            return Ok(());
-        }
-        Err(PyValueError::new_err(format!(
-            "target migration {target} does not exist"
-        )))
-    }
-
     fn start<'py>(
         &self,
         py: Python<'py>,
         executor: &Bound<'py, PyAny>,
         op: Op,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.check_target(op)?;
+        check_target(&self.migrations, op)?;
         let job = self.job(op);
         if let Ok(conn) = executor.cast::<Connection>() {
             return on_connection(py, conn.get(), job);
@@ -396,38 +278,7 @@ impl Migrator {
     // version: a reversible pair is a single entry
     #[getter]
     fn migrations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let rows = self
-            .migrations
-            .iter()
-            .filter(|m| !m.kind.is_down())
-            .map(|m| {
-                let down = self
-                    .migrations
-                    .iter()
-                    .find(|d| d.version == m.version && d.kind.is_down());
-                let kind = if down.is_some() {
-                    "reversible"
-                } else {
-                    "simple"
-                };
-                PyTuple::new(
-                    py,
-                    [
-                        m.version.into_pyobject(py)?.into_any(),
-                        m.description.as_str().into_pyobject(py)?.into_any(),
-                        kind.into_pyobject(py)?.into_any(),
-                        m.path.as_path().into_pyobject(py)?.into_any(),
-                        down.map(|d| d.path.as_path()).into_pyobject(py)?.into_any(),
-                        PyBytes::new(py, &m.checksum).into_any(),
-                        down.map(|d| PyBytes::new(py, &d.checksum))
-                            .into_pyobject(py)?
-                            .into_any(),
-                        PyBool::new(py, m.no_transaction).to_owned().into_any(),
-                    ],
-                )
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        PyList::new(py, rows)
+        migration_rows(py, &self.migrations)
     }
 
     // the parsed history table, `(name,)` or `(schema, name)`, each part as the server stores it

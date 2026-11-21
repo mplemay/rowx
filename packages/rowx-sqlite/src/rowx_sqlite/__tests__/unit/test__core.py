@@ -23,6 +23,7 @@ def test_core_exposes_the_connection_bindings() -> None:
         "ColumnInfo",
         "Connection",
         "Describe",
+        "Migrator",
         "ParamInfo",
         "Pool",
         "RowShape",
@@ -40,5 +41,13 @@ def test_core_exposes_the_connection_bindings() -> None:
 
 
 def test_every_class_names_the_core_module() -> None:
-    for cls in (_core.Connection, _core.Pool, _core.RowShape, _core.RowStream, _core.ShapeIssue, _core.TypeInfo):
+    for cls in (
+        _core.Connection,
+        _core.Migrator,
+        _core.Pool,
+        _core.RowShape,
+        _core.RowStream,
+        _core.ShapeIssue,
+        _core.TypeInfo,
+    ):
         assert cls.__module__ == "rowx_sqlite._core"

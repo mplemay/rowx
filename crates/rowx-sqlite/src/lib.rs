@@ -4,6 +4,7 @@ pub mod describe;
 pub mod dsn;
 pub mod error;
 pub mod exec;
+pub mod migrate;
 pub mod pool;
 mod timeout;
 pub mod types;
