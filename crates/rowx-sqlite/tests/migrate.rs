@@ -11,12 +11,14 @@ use rowx_core::migrate::{
     Migration, MigrationKind, MigrationStatus, PlanError, PlanOptions, RevertTarget, SchemaName,
     TableName, checksum,
 };
+use rowx_core::row_shape::Shape;
 use rowx_sqlite::conn::Connection;
 use rowx_sqlite::error::Error;
 use rowx_sqlite::migrate::{
     ConfigError, MigrateConfig, MigrateError, MigrationDetail, info, list_applied, revert,
     revert_dry, run, run_dry, skip, skip_dry,
 };
+use rowx_sqlite::value::Scalar;
 use tempfile::TempDir;
 
 const TABLE: &str = "_rowx_migrations";
@@ -80,6 +82,22 @@ async fn table_exists(conn: &Connection, name: &str) -> TestResult<bool> {
     )
     .await?
         == 1)
+}
+
+async fn journal_mode(conn: &Connection) -> TestResult<String> {
+    let fetched = conn
+        .fetch("PRAGMA journal_mode", Vec::new(), &Shape::default())
+        .await?;
+    match fetched
+        .rows
+        .into_iter()
+        .next()
+        .and_then(|row| row.into_iter().next())
+        .flatten()
+    {
+        Some(Scalar::Text(mode)) => Ok(mode),
+        other => Err(format!("not text: {other:?}").into()),
+    }
 }
 
 // (version, success) of every history row
@@ -194,6 +212,11 @@ async fn a_script_with_its_own_transaction_statements_is_rejected_before_it_runs
         "CREATE TABLE early (i int); BEGIN; CREATE TABLE late (i int); COMMIT;",
         "CREATE TABLE early (i int); COMMIT;",
         "CREATE TABLE early (i int); ROLLBACK;",
+        "CREATE TABLE early (i int); END;",
+        "CREATE TABLE early (i int); COMMIT TRANSACTION;",
+        "CREATE TABLE early (i int); BEGIN IMMEDIATE;",
+        "CREATE TABLE early (i int);\n-- a comment\nCOMMIT;",
+        "CREATE TABLE early (i int); COMMIT",
     ]
     .into_iter()
     .enumerate()
@@ -270,10 +293,11 @@ async fn a_no_transaction_file_can_change_the_journal_mode() -> TestResult {
     let conn = connect(&file(&dir)).await?;
     let all = [simple(
         1,
-        "-- no-transaction\nPRAGMA journal_mode = DELETE;\nPRAGMA journal_mode = WAL;",
+        "-- no-transaction\nPRAGMA journal_mode = DELETE;",
     )];
     run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
     assert_eq!(history(&conn).await?, [(1, true)]);
+    assert_eq!(journal_mode(&conn).await?, "delete");
     assert!(conn.is_autocommit().await?);
     Ok(())
 }
