@@ -1,13 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_core::error::CoreError;
 use rowx_py_core::exec::{watch, watch_flag};
-use rowx_py_core::time::seconds;
+use rowx_py_core::time::{optional_seconds, seconds};
 use rowx_py_core::{errors as shared, runtime};
 use rowx_sqlite::cancel::Hook;
 use rowx_sqlite::error::Error;
@@ -18,10 +17,6 @@ use crate::errors::{Failure, SqliteError, to_py_err};
 use crate::exec::{self, FetchArgs};
 use crate::named::RowShape;
 use crate::stream::{RowStream, StreamArgs};
-
-fn optional_seconds(name: &str, secs: Option<f64>) -> PyResult<Option<Duration>> {
-    secs.map(|secs| seconds(name, secs)).transpose()
-}
 
 // a pool failure as the caller sees it
 fn pool_error(err: impl Into<Failure>) -> PyErr {
@@ -39,11 +34,7 @@ pub struct Pool {
 
 impl Pool {
     fn check_process(&self, py: Python<'_>) -> PyResult<()> {
-        if std::process::id() == self.pid {
-            Ok(())
-        } else {
-            Err(shared::core_to_py_err(py, CoreError::Forked))
-        }
+        shared::ensure_same_process(py, self.pid)
     }
 }
 
@@ -151,8 +142,9 @@ impl Pool {
         py: Python<'py>,
         conn: &Bound<'py, Connection>,
         // the reset below is cheap and idempotent, so a reset the caller already ran is not tracked
-        #[allow(unused_variables)] reset_done: bool,
+        reset_done: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = reset_done;
         self.check_process(py)?;
         let pooled = conn
             .get()

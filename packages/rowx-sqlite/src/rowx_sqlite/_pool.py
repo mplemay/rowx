@@ -37,7 +37,7 @@ class Unset(Enum):
     UNSET = "unset"
 
 
-UNSET: Final = Unset.UNSET
+UNSET: Final[Unset] = Unset.UNSET
 
 # A `:memory:` database lives and dies with its one connection, so the pool keeps exactly that one, created at
 # open, and never retires it
@@ -45,7 +45,7 @@ MEMORY_MIN_SIZE: Final[int] = 1
 MEMORY_MAX_SIZE: Final[int] = 1
 
 
-def resolve[T](name: str, value: T | Unset, default: T, memory: bool, *, kept: T) -> T:  # ruff: ignore[boolean-type-hint-positional-argument]
+def resolve[T](name: str, value: T | Unset, default: T, *, memory: bool, kept: T) -> T:
     if isinstance(value, Unset):
         return kept if memory else default
     if memory and value != kept:
@@ -95,12 +95,12 @@ class Pool(BasePool[Connection, ConnectionImpl, RowShape, PoolImpl, ConnectOptio
         resolved = ConnectOptions.from_dsn(options) if isinstance(options, str) else options
         memory = resolved.memory
         sizes = (
-            resolve("min_size", min_size, 0, memory, kept=MEMORY_MIN_SIZE),
-            resolve("max_size", max_size, DEFAULT_MAX_SIZE, memory, kept=MEMORY_MAX_SIZE),
+            resolve("min_size", min_size, 0, memory=memory, kept=MEMORY_MIN_SIZE),
+            resolve("max_size", max_size, DEFAULT_MAX_SIZE, memory=memory, kept=MEMORY_MAX_SIZE),
         )
-        idle = resolve("idle_timeout", idle_timeout, DEFAULT_IDLE_TIMEOUT, memory, kept=None)
-        lifetime = resolve("max_lifetime", max_lifetime, DEFAULT_MAX_LIFETIME, memory, kept=None)
-        queries = resolve("max_queries", max_queries, None, memory, kept=None)
+        idle = resolve("idle_timeout", idle_timeout, DEFAULT_IDLE_TIMEOUT, memory=memory, kept=None)
+        lifetime = resolve("max_lifetime", max_lifetime, DEFAULT_MAX_LIFETIME, memory=memory, kept=None)
+        queries = resolve("max_queries", max_queries, None, memory=memory, kept=None)
         validate(
             min_size=sizes[0],
             max_size=sizes[1],

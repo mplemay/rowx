@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::cancel::SqliteBackend;
 use crate::conn::{ConnectOptions, Connection};
-use crate::dsn::{OpenMode, Target};
+use crate::dsn::Target;
 use crate::error::Error;
 
 pub type Pool = rowx_core::pool::Pool<SqliteManager>;
@@ -118,15 +118,14 @@ impl SqliteManager {
     }
 
     /// The error of a lost `:memory:` database, once a connect was refused.
-    #[must_use]
-    pub fn gone(&self) -> Option<Error> {
+    fn gone(&self) -> Option<Error> {
         self.refused
             .load(Ordering::Acquire)
             .then(|| Error::Interface(GONE.to_owned()))
     }
 
     /// Resolves once a connect was refused, so a caller waiting for a connection can stop waiting.
-    pub async fn wait_gone(&self) -> Error {
+    async fn wait_gone(&self) -> Error {
         loop {
             let notified = self.wake.notified();
             tokio::pin!(notified);
@@ -136,10 +135,6 @@ impl SqliteManager {
             }
             notified.await;
         }
-    }
-
-    fn read_only(&self) -> bool {
-        self.options.read_only || self.options.open.mode == OpenMode::ReadOnly
     }
 }
 
@@ -159,7 +154,7 @@ impl Manage for SqliteManager {
         if self.memory {
             self.opened.store(true, Ordering::Release);
         }
-        Ok(SqliteConn::new(conn, self.read_only()))
+        Ok(SqliteConn::new(conn, self.options.is_read_only()))
     }
 
     fn state<'a>(&self, conn: &'a SqliteConn) -> &'a Arc<State> {
@@ -178,7 +173,7 @@ impl Manage for SqliteManager {
     // have rolled it back already, and a `ROLLBACK` outside one is an error), so it is asked. The `query_only`
     // a read-only transaction turned on is put back as well.
     async fn reset(&self, conn: &SqliteConn, _rollback: bool) -> Result<(), Error> {
-        let writable = !self.options.read_only;
+        let writable = !self.options.is_read_only();
         let guard = conn.conn.lock().await;
         guard
             .call(move |ctx| {
@@ -228,7 +223,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::dsn::{OpenOptions, Target};
+    use crate::dsn::{OpenMode, OpenOptions, Target};
 
     fn memory() -> ConnectOptions {
         ConnectOptions::new(OpenOptions::new(Target::Memory, OpenMode::ReadWriteCreate))
@@ -315,6 +310,35 @@ mod tests {
             .run_raw(|raw| raw.pragma_query_value(None, "query_only", |row| row.get(0)))
             .await??;
         assert!(!on);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_leaves_query_only_alone_on_a_read_only_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        // the file has to exist before it can be opened read-only
+        let seed = SqliteManager::new(file(&dir, "o.db"));
+        let first = seed.connect().await?;
+        seed.close(first).await;
+        let manager = SqliteManager::new(ConnectOptions::new(OpenOptions::new(
+            Target::File(dir.path().join("o.db")),
+            OpenMode::ReadOnly,
+        )));
+        let conn = manager.connect().await?;
+        conn.conn
+            .lock()
+            .await
+            .simple("PRAGMA query_only = ON")
+            .await?;
+        manager.reset(&conn, false).await?;
+        let on: bool = conn
+            .conn
+            .lock()
+            .await
+            .run_raw(|raw| raw.pragma_query_value(None, "query_only", |row| row.get(0)))
+            .await??;
+        assert!(on);
         Ok(())
     }
 

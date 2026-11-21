@@ -19,9 +19,6 @@ use rowx_sqlite::pool::{Pool as SqlitePool, Pooled, SqliteConn, SqliteManager};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
-// how often a running operation is asked again to stop while its connection is settled
-const SETTLE_RECANCEL: Duration = Duration::from_millis(100);
-
 use crate::errors::{Failure, SqliteError, to_py_err};
 use crate::exec::{self, Depth, FetchArgs};
 use crate::named::RowShape;
@@ -386,20 +383,9 @@ impl Connection {
     fn settle<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = Arc::clone(&self.core);
         future_into_py(py, async move {
-            let state = &core.cancel.state;
-            if state.is_busy() {
-                // an operation that is cut short may have left a transaction open
-                state.mark_maybe_in_txn();
-                // an interrupt only stops a statement that is running, so it is resent
-                while tokio::time::timeout(SETTLE_RECANCEL, state.wait_unclaimed())
-                    .await
-                    .is_err()
-                {
-                    // a failed request is fine: the next round tries again
-                    let _ = core.cancel.backend.send_cancel().await;
-                }
-            }
-            state.wait_settled().await.map_err(SqliteError::from)?;
+            rowx_py_core::exec::settle(&core.cancel.state, &core.cancel.backend)
+                .await
+                .map_err(SqliteError::from)?;
             Ok(())
         })
     }

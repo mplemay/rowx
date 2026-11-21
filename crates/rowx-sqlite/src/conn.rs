@@ -70,7 +70,8 @@ impl ConnectOptions {
     }
 
     // a read-only handle never switches the journal mode; see `apply_pragmas`
-    fn is_read_only(&self) -> bool {
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
         self.read_only || self.open.mode == OpenMode::ReadOnly
     }
 }
