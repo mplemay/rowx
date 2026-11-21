@@ -12,6 +12,7 @@ use rusqlite::{InterruptHandle, OpenFlags};
 use tokio::sync::oneshot;
 
 use crate::cancel::{Shared, SqliteBackend};
+use crate::describe::{self, Describe, Structure};
 use crate::dsn::{OpenMode, OpenOptions, Target};
 use crate::error::Error;
 use crate::timeout::Timer;
@@ -396,6 +397,23 @@ impl Connection {
         F: FnOnce(&mut rusqlite::Connection) -> T + Send + 'static,
     {
         self.call(move |ctx| Ok(job(&mut ctx.conn))).await
+    }
+
+    /// Describes one statement without running it: its result columns, their origins and nullability, and
+    /// its parameters. `structure` is what the caller read from the statement's text.
+    ///
+    /// # Errors
+    /// `Sqlite` (with the error offset) when SQLite rejects the SQL, `Interface` for no statement or more
+    /// than one, `Closed` after `close()`, `Stopped` when the worker died.
+    pub async fn describe(&self, sql: &str, structure: Structure) -> Result<Describe, Error> {
+        let sql = sql.to_owned();
+        self.call(move |ctx| {
+            if ctx.shared.is_cancelled() {
+                return Err(crate::exec::interrupted());
+            }
+            describe::describe(&ctx.conn, &sql, &structure)
+        })
+        .await
     }
 
     /// Runs one control statement that returns no rows (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...). It is not
