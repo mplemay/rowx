@@ -50,7 +50,8 @@ case "$CI_PACKAGE" in
 
       uv run python examples/embedded/notes.py
       cd examples/embedded
-      DATABASE_URL=embedded:// uv run --project ../.. rowx check -j 4
+      export DATABASE_URL=embedded://
+      uv run --project ../.. rowx check -j 4
       uv run --project ../.. pytest -p no:cacheprovider -o rowx_require_database=true
     fi
     ;;
