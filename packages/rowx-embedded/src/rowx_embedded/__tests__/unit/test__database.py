@@ -94,6 +94,28 @@ def test_a_database_close_waits_for_the_start_in_flight_and_returns_with_the_ins
     run(main)
 
 
+def test_an_open_that_times_out_while_close_waits_reports_the_start_timeout(engine: FakeEngine) -> None:
+    engine.gate = threading.Event()
+
+    async def main() -> None:
+        pool = Database(acquire_timeout=0.2)
+        opening = asyncio.ensure_future(pool.open())
+        await asyncio.to_thread(engine.entered.wait, WAIT_SECONDS)
+        closing = asyncio.ensure_future(pool.close())
+        # close() is parked on the boot thread, which cannot finish while the gate is shut
+        await asyncio.sleep(0.05)
+        assert not closing.done()
+        with pytest.raises(PoolTimeoutError, match="start"):
+            await opening
+        assert not closing.done()
+        assert engine.gate is not None
+        engine.gate.set()
+        await closing
+        assert engine.started[0].closes == 1
+
+    run(main)
+
+
 def test_terminate_racing_the_start_leaves_no_instance(engine: FakeEngine) -> None:
     engine.gate = threading.Event()
 
