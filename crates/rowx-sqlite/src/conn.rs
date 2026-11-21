@@ -48,6 +48,17 @@ impl ConnectOptions {
         }
     }
 
+    /// The session the checker describes through: read-only, `query_only`, untrusted schema, and the
+    /// statement timeout bounding each describe.
+    #[must_use]
+    pub const fn checker(target: Target, statement_timeout: Option<Duration>) -> Self {
+        let mut options = Self::new(OpenOptions::new(target, OpenMode::ReadOnly));
+        options.statement_timeout = statement_timeout;
+        options.read_only = true;
+        options.untrusted = true;
+        options
+    }
+
     // `read_only` wins over the mode the caller picked
     fn flags(&self) -> OpenFlags {
         if self.read_only {
@@ -411,6 +422,8 @@ impl Connection {
             if ctx.shared.is_cancelled() {
                 return Err(crate::exec::interrupted());
             }
+            // the clock covers the prepare, the only step a describe runs
+            let _armed = ctx.timer.as_ref().map(Timer::arm);
             describe::describe(&ctx.conn, &sql, &structure)
         })
         .await

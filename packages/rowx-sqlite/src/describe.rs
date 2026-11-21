@@ -1,10 +1,11 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
 use rowx_py_core::runtime;
 use rowx_py_core::time::seconds;
 use rowx_sqlite::conn::{ConnectOptions, Connection as SqliteConnection};
 use rowx_sqlite::describe::{self as sqlite, Construct, Structure};
-use rowx_sqlite::dsn::{self, OpenMode, OpenOptions};
+use rowx_sqlite::dsn;
 use rowx_sqlite::error::Error;
 use std::time::Duration;
 
@@ -110,30 +111,39 @@ impl From<sqlite::Describe> for Describe {
     }
 }
 
-/// `flags` is (has a CTE, has a subquery, has a compound select, has an outer join), as the lexer found them.
+fn construct(name: &str) -> PyResult<Construct> {
+    match name {
+        "cte" => Ok(Construct::CommonTableExpression),
+        "subquery" => Ok(Construct::Subquery),
+        "compound" => Ok(Construct::CompoundSelect),
+        "outer_join" => Ok(Construct::OuterJoin),
+        "aggregate" => Ok(Construct::Aggregate),
+        other => Err(PyValueError::new_err(format!(
+            "unknown construct {other:?}"
+        ))),
+    }
+}
+
+/// `constructs` names what the lexer found in the statement: `cte`, `subquery`, `compound`,
+/// `outer_join` or `aggregate`.
 ///
 /// # Errors
-/// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed; `DatabaseError` (with
-/// `.position`) when SQLite rejects the SQL, `InterfaceError` for no statement or more than one, raised
-/// when the future is awaited.
+/// `ValueError` for an unknown construct name; `ConnectionBusyError`/`InterfaceError` when the connection
+/// cannot be claimed; `DatabaseError` (with `.position`) when SQLite rejects the SQL, `InterfaceError` for
+/// no statement or more than one, raised when the future is awaited.
 #[pyfunction]
+#[pyo3(signature = (conn, sql, sources, *, constructs))]
 pub fn describe<'py>(
     py: Python<'py>,
     conn: &Connection,
     sql: String,
     sources: Vec<Vec<String>>,
-    flags: (bool, bool, bool, bool),
+    constructs: Vec<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (has_cte, has_subquery, has_compound, has_outer_join) = flags;
-    let constructs = [
-        (has_cte, Construct::CommonTableExpression),
-        (has_subquery, Construct::Subquery),
-        (has_compound, Construct::CompoundSelect),
-        (has_outer_join, Construct::OuterJoin),
-    ]
-    .into_iter()
-    .filter_map(|(found, construct)| found.then_some(construct))
-    .collect();
+    let constructs = constructs
+        .into_iter()
+        .map(|name| construct(&name))
+        .collect::<PyResult<Vec<_>>>()?;
     let structure = Structure {
         sources,
         constructs,
@@ -163,11 +173,11 @@ pub fn connect_checker<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let target = dsn::parse(dsn).map_err(|e| to_py_err(py, &Failure::from(Error::Dsn(e))))?;
     let timeout = seconds("statement_timeout", statement_timeout)?;
-    let mut options = ConnectOptions::new(OpenOptions::new(target, OpenMode::ReadOnly));
-    options.read_only = true;
-    options.untrusted = true;
     // like `connect`, zero means no limit
-    options.statement_timeout = Some(timeout).filter(|limit| *limit > Duration::ZERO);
+    let options = ConnectOptions::checker(
+        target,
+        Some(timeout).filter(|limit| *limit > Duration::ZERO),
+    );
     let handle = runtime::handle()?;
     future_into_py(py, async move {
         let conn = SqliteConnection::connect(&options)

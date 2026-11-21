@@ -355,6 +355,37 @@ def test_facts_cte_names_including_shadowing() -> None:
     assert f.has_subquery
 
 
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("select count(*) from t", True),
+        ("select a, max(a) from t", True),
+        ("select COUNT ( * ) from t", True),
+        ("select coalesce(sum(a), 0) from t", True),
+        ("select a from t having 1", True),
+        ("select group_concat(a, ',') from t", True),
+        ("select a from t group by a", False),
+        ("select count(*) from t group by a", False),
+        ("select count(*) from t group by a having count(*) > 1", False),
+        ("select count(*) over () from t", False),
+        ("select count(*) filter (where a > 1) over (partition by b) from t", False),
+        ("select count(*) filter (where a > 1) from t", True),
+        ("select max(a, 1) from t", False),
+        ("select min(a, b, 1) from t", False),
+        ("select max(f(a, b)) from t", True),
+        ("select count from t", False),
+        ("select t.count(a) from t", False),
+        ("select count(a, ", True),
+        ("select a from t where a in (select count(*) from u)", False),
+        ("with c as (select count(*) from t) select * from c", False),
+        ("select a from (select max(a) as a from t)", False),
+        ("select count(*) from t where a in (select a from u group by a)", True),
+    ],
+)
+def test_facts_has_aggregate(sql: str, *, expected: bool) -> None:
+    assert statement_facts(sql).has_aggregate is expected
+
+
 def test_facts_sources_inside_subqueries_and_after_them() -> None:
     f = statement_facts("SELECT 1 FROM (SELECT 1 FROM a WHERE x IN (SELECT 1 FROM b)) s JOIN c ON 1 WHERE 1 ORDER BY 1")
     assert f.sources == (("a",), ("b",), ("c",))

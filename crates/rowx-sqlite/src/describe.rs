@@ -26,6 +26,8 @@ pub enum Construct {
     CompoundSelect,
     /// LEFT, RIGHT, FULL, OUTER and NATURAL joins.
     OuterJoin,
+    /// An aggregate with no GROUP BY returns one row over an empty table, so every bare column is NULL then.
+    Aggregate,
 }
 
 impl Construct {
@@ -35,6 +37,7 @@ impl Construct {
             Self::Subquery => "subquery",
             Self::CompoundSelect => "compound select",
             Self::OuterJoin => "outer join",
+            Self::Aggregate => "aggregate",
         }
     }
 }
@@ -366,6 +369,7 @@ mod tests {
             (Construct::Subquery, "subquery"),
             (Construct::CompoundSelect, "compound select"),
             (Construct::OuterJoin, "outer join"),
+            (Construct::Aggregate, "aggregate"),
         ] {
             let structure = Structure {
                 constructs: vec![construct],

@@ -4,6 +4,7 @@ from typing import Any, Literal
 from rowx_sqlite._options import ConnectOptions, TransactionMode
 
 type RowFormName = Literal["positional", "keyword", "dict", "validator"]
+type ConstructName = Literal["cte", "subquery", "compound", "outer_join", "aggregate"]
 type MatchingName = Literal["by_name", "positional"]
 type IssueKind = Literal[
     "missing-column",
@@ -179,6 +180,7 @@ async def describe(
     conn: Connection,
     sql: str,
     sources: Sequence[Sequence[str]],
-    flags: tuple[bool, bool, bool, bool],
+    *,
+    constructs: Sequence[ConstructName],
 ) -> Describe: ...
 async def connect_checker(dsn: str, statement_timeout: float = 10.0) -> Connection: ...

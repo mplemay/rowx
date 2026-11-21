@@ -4,7 +4,7 @@ import pytest
 import pytest_asyncio
 from rowx_core.errors import DatabaseError, InterfaceError
 from rowx_sqlite import ConnectOptions, connect
-from rowx_sqlite._core import connect_checker
+from rowx_sqlite._core import connect_checker, describe as describe_impl
 from rowx_sqlite._describe import describe
 
 if TYPE_CHECKING:
@@ -25,6 +25,8 @@ SCHEMA: Final[tuple[str, ...]] = (
     "CREATE TABLE s (id INTEGER PRIMARY KEY, x TEXT NOT NULL) STRICT",
     "CREATE TABLE r (a TEXT NOT NULL, b TEXT)",
     "CREATE TABLE typed (i INTEGER, f REAL, tx TEXT, bl BLOB, bo BOOLEAN, dt DATETIME, u UUID, j JSON, n DECIMAL(10, 2))",
+    "CREATE TABLE w (k INTEGER PRIMARY KEY, v TEXT) WITHOUT ROWID",
+    "CREATE TABLE pk2 (id INTEGER, v TEXT, PRIMARY KEY (id))",
     "CREATE VIEW v AS SELECT a, b FROM t",
     "CREATE VIEW vl AS SELECT t.a, s.x FROM t LEFT JOIN s ON t.id = s.id",
     "CREATE VIEW unsafe AS SELECT a, rtreedepth(zeroblob(8)) AS d FROM t",
@@ -106,6 +108,33 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
         "SELECT count(*) AS n, max(a) AS m, a + 1 AS p FROM t",
         (("n", True, UNPROVEN), ("m", True, UNPROVEN), ("p", True, UNPROVEN)),
     ),
+    "aggregate without group by": (
+        "SELECT a, max(a) AS m FROM t",
+        (("a", True, UNPROVEN), ("m", True, UNPROVEN)),
+    ),
+    "count without group by": ("SELECT id, count(*) AS n FROM t", (("id", True, UNPROVEN), ("n", True, UNPROVEN))),
+    "min without group by": ("SELECT id, min(a) AS m FROM t", (("id", True, UNPROVEN), ("m", True, UNPROVEN))),
+    "having without group by": (
+        "SELECT a, count(*) AS n FROM t HAVING n >= 0",
+        (("a", True, UNPROVEN), ("n", True, UNPROVEN)),
+    ),
+    "group by without aggregate": ("SELECT a FROM t GROUP BY a", (("a", False, NN),)),
+    "aggregate with group by": (
+        "SELECT a, count(*) AS n FROM t GROUP BY a",
+        (("a", False, NN), ("n", True, UNPROVEN)),
+    ),
+    "two argument max is scalar": ("SELECT max(a, 1) AS m, a FROM t", (("m", True, UNPROVEN), ("a", False, NN))),
+    "window function is not an aggregate": (
+        "SELECT a, count(*) OVER () AS n FROM t",
+        (("a", False, NN), ("n", True, UNPROVEN)),
+    ),
+    "without rowid primary key": ("SELECT k FROM w", (("k", False, NN),)),
+    "table constraint rowid alias": ("SELECT id FROM pk2", (("id", False, NN),)),
+    "insert select returning": (
+        "INSERT INTO t (a) SELECT a FROM t RETURNING id, a",
+        (("id", False, NN), ("a", False, NN)),
+    ),
+    "table valued function": ("SELECT value FROM json_each('[1]')", (("value", True, UNPROVEN),)),
     "insert returning": (
         "INSERT INTO t (a) VALUES (1) RETURNING id, a, b",
         (("id", False, NN), ("a", False, NN), ("b", True, NULLABLE)),
@@ -149,6 +178,8 @@ async def test_unproven_reasons_name_their_cause(checker: Connection) -> None:
         "SELECT a FROM t UNION ALL SELECT a FROM t": "compound select",
         "SELECT t.a FROM t LEFT JOIN s ON 1": "outer join",
         "SELECT a + 1 AS n FROM t": "expression",
+        "SELECT a, max(a) AS m FROM t": "aggregate",
+        "SELECT a, count(*) AS n FROM t HAVING n >= 0": "aggregate",
         "SELECT name FROM sqlite_master": "source sqlite_master is not a table",
         "SELECT value FROM json_each('[1]')": "source json_each is not a table",
     }
@@ -262,3 +293,30 @@ async def test_exactly_one_statement_is_described(checker: Connection, sql: str)
 async def test_a_trailing_semicolon_or_comment_is_not_a_second_statement(checker: Connection) -> None:
     for sql in ["SELECT a FROM t;", "SELECT a FROM t; -- done", "SELECT a FROM t /* done */"]:
         assert len((await describe(checker, sql)).columns) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_aggregate_without_group_by_returns_a_null_row_over_an_empty_table(dsn: str) -> None:
+    writer = await connect(ConnectOptions(path=dsn.removeprefix("sqlite:///"), mode="rw"))
+    try:
+        rows = await writer._impl._fetch("SELECT a, count(*) FROM t", [], None, False, False, 2, None)  # ruff: ignore[boolean-positional-value-in-call]
+        assert rows == [(None, 0)]
+    finally:
+        await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_primary_key_table_constraint_is_a_rowid_alias(dsn: str) -> None:
+    writer = await connect(ConnectOptions(path=dsn.removeprefix("sqlite:///"), mode="rw"))
+    try:
+        await writer._impl._execute("INSERT INTO pk2 (id, v) VALUES (NULL, 'x')", [])
+        rows = await writer._impl._fetch("SELECT id FROM pk2", [], None, True, False, None, None)  # ruff: ignore[boolean-positional-value-in-call]
+        assert rows == [1]
+    finally:
+        await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_construct_name_raises(checker: Connection) -> None:
+    with pytest.raises(ValueError, match="unknown construct"):
+        await describe_impl(checker, "SELECT a FROM t", [("t",)], constructs=["bogus"])  # ty: ignore[invalid-argument-type]
