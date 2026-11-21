@@ -111,6 +111,14 @@ impl<B> Hook<B> {
         Ok(())
     }
 
+    /// Whether the awaiting call was cancelled, so nobody will see the operation's result.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|operation| matches!(*operation, Operation::Cancelled))
+    }
+
     /// Releases a reservation or a completed operation. A cancelled task settles separately.
     pub fn finish(&self) {
         if let Ok(mut operation) = self.0.lock()

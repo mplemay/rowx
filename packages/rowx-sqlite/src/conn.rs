@@ -1,0 +1,456 @@
+use std::future::Future;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+use pyo3_async_runtimes::tokio::future_into_py;
+use rowx_core::cancel::Backend;
+use rowx_core::pool::Manage;
+use rowx_core::state::State;
+use rowx_py_core::errors::interface_error;
+use rowx_py_core::runtime;
+use rowx_py_core::time::seconds;
+use rowx_sqlite::cancel::{Cancel, SqliteBackend};
+use rowx_sqlite::conn::{ConnectOptions, Connection as SqliteConnection};
+use rowx_sqlite::dsn::{self, OpenMode, OpenOptions, Target};
+use rowx_sqlite::error::Error;
+use tokio::runtime::Handle;
+use tokio::sync::Mutex;
+
+use crate::errors::{Failure, SqliteError, to_py_err};
+use crate::exec::{self, Depth, FetchArgs};
+use crate::named::RowShape;
+use crate::stream::{RowStream, StreamArgs};
+
+/// The manager `Access` is typed over. A connection made by `connect` is never pooled, so none of this
+/// is reached; the pool binding brings a manager of its own.
+#[derive(Debug)]
+pub struct Standalone;
+
+impl Manage for Standalone {
+    type Conn = SqliteConnection;
+    type Error = Error;
+    type Backend = SqliteBackend;
+
+    fn connect(&self) -> impl Future<Output = Result<Self::Conn, Self::Error>> + Send {
+        std::future::ready(Err(Error::Interface(
+            "a standalone connection cannot be reconnected".to_owned(),
+        )))
+    }
+
+    fn state<'a>(&self, conn: &'a Self::Conn) -> &'a Arc<State> {
+        conn.state()
+    }
+
+    fn backend(&self, conn: &Self::Conn) -> Self::Backend {
+        conn.backend()
+    }
+
+    async fn ping(&self, conn: &Self::Conn) -> Result<(), Self::Error> {
+        conn.ping().await
+    }
+
+    async fn reset(&self, conn: &Self::Conn, rollback: bool) -> Result<(), Self::Error> {
+        conn.reset(rollback).await
+    }
+
+    fn is_broken(&self, conn: &Self::Conn) -> bool {
+        conn.is_broken()
+    }
+
+    async fn settled(&self, conn: &Self::Conn) -> bool {
+        conn.state().wait_settled().await.is_ok()
+    }
+
+    async fn forget_statements(&self, conn: &Self::Conn) {
+        // a connection that cannot answer has nothing to forget
+        let _ = conn.forget_statements().await;
+    }
+
+    async fn close(&self, mut conn: Self::Conn) {
+        conn.close().await;
+    }
+}
+
+/// How a call reaches its connection.
+pub type Access = rowx_py_core::exec::Access<Standalone>;
+
+/// What an operation, and a stream that outlives its call, share with the connection object.
+#[derive(Debug)]
+pub(crate) struct Core {
+    pub(crate) cancel: Cancel,
+    pub(crate) conn: Mutex<SqliteConnection>,
+    pub(crate) access: Access,
+    pub(crate) variable_limit: usize,
+    // a read-only connection cannot take the default `BEGIN IMMEDIATE`
+    pub(crate) read_only: bool,
+    // the transaction helper's depth as the caller sees it: SQLite ends a transaction on its own after an
+    // interrupt, which resets the shared state, so the difference between the two marks an aborted one
+    open: AtomicU32,
+    // what `PRAGMA query_only` was before a read-only transaction turned it on
+    restore: StdMutex<Option<bool>>,
+}
+
+impl Core {
+    #[must_use]
+    pub(crate) fn new(conn: SqliteConnection, handle: Handle, read_only: bool) -> Self {
+        Self {
+            cancel: Cancel {
+                state: Arc::clone(conn.state()),
+                backend: conn.backend(),
+                handle,
+            },
+            variable_limit: conn.variable_limit(),
+            read_only,
+            conn: Mutex::new(conn),
+            access: Access::default(),
+            open: AtomicU32::new(0),
+            restore: StdMutex::new(None),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn depth(&self) -> u32 {
+        self.open.load(Ordering::Acquire)
+    }
+
+    /// The caller has an open `transaction()` that SQLite already ended.
+    #[must_use]
+    pub(crate) fn aborted(&self) -> bool {
+        self.depth() > 0 && !self.cancel.state.maybe_in_txn()
+    }
+
+    /// A transaction or savepoint was opened; returns the new depth.
+    pub(crate) fn enter(&self) -> u32 {
+        self.cancel.state.enter_txn();
+        self.open.fetch_add(1, Ordering::AcqRel).saturating_add(1)
+    }
+
+    /// A savepoint was released; returns the new depth.
+    pub(crate) fn leave(&self) -> u32 {
+        self.cancel.state.leave_txn();
+        let mut current = self.open.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_sub(1);
+            match self.open.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return next,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// The outermost transaction ended.
+    pub(crate) fn clear(&self) {
+        self.cancel.state.clear_maybe_in_txn();
+        self.open.store(0, Ordering::Release);
+    }
+
+    // a value that is still pending is the original: the pragma now reads the state a transaction left
+    pub(crate) fn remember_query_only(&self, prior: bool) {
+        if let Ok(mut slot) = self.restore.lock() {
+            slot.get_or_insert(prior);
+        }
+    }
+
+    pub(crate) fn take_query_only(&self) -> Option<bool> {
+        self.restore.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// # Errors
+    /// `InterfaceError` when a statement has more parameters than SQLite allows.
+    pub(crate) fn check_params(&self, py: Python<'_>, count: usize) -> PyResult<()> {
+        if count > self.variable_limit {
+            return Err(interface_error(
+                py,
+                &format!(
+                    "the statement has {count} parameters but this SQLite connection allows at most {} (SQLITE_LIMIT_VARIABLE_NUMBER)",
+                    self.variable_limit
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[pyclass(frozen, module = "rowx_sqlite._core", name = "Connection")]
+#[derive(Debug)]
+pub struct Connection {
+    core: Arc<Core>,
+    #[pyo3(get)]
+    statement_cache_size: usize,
+}
+
+impl Connection {
+    #[must_use]
+    pub(crate) fn new(
+        conn: SqliteConnection,
+        handle: Handle,
+        statement_cache_size: usize,
+        read_only: bool,
+    ) -> Self {
+        Self {
+            core: Arc::new(Core::new(conn, handle, read_only)),
+            statement_cache_size,
+        }
+    }
+}
+
+#[pymethods]
+impl Connection {
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = Arc::clone(&self.core);
+        future_into_py(py, async move {
+            core.cancel.state.close();
+            // an operation that is still running holds the connection for its full length, so it is
+            // interrupted first; a failed request is fine because closing ends the statement anyway
+            let mut conn = if let Ok(conn) = core.conn.try_lock() {
+                conn
+            } else {
+                let _ = core.cancel.backend.send_cancel().await;
+                core.conn.lock().await
+            };
+            conn.close().await;
+            drop(conn);
+            Ok(())
+        })
+    }
+
+    // the argument list is fixed by Executor._fetch in packages/rowx-core/src/rowx_core/_executor.py
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(name = "_fetch")]
+    fn fetch<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: &Bound<'py, PyList>,
+        mask: Option<Vec<u8>>,
+        scalar: bool,
+        limit_one: bool,
+        arity: Option<usize>,
+        shape: Option<Py<RowShape>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let args = FetchArgs {
+            sql,
+            mask,
+            scalar,
+            limit_one,
+            arity,
+            shape,
+        };
+        exec::fetch(py, &self.core, params, args)
+    }
+
+    // the argument list is fixed by Executor._stream in packages/rowx-core/src/rowx_core/_executor.py
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(name = "_stream")]
+    fn stream(
+        &self,
+        py: Python<'_>,
+        sql: String,
+        params: &Bound<'_, PyList>,
+        mask: Option<Vec<u8>>,
+        scalar: bool,
+        arity: Option<usize>,
+        batch_size: usize,
+        shape: Option<Py<RowShape>>,
+    ) -> PyResult<RowStream> {
+        let args = StreamArgs {
+            sql,
+            mask,
+            scalar,
+            arity,
+            batch_size,
+            shape,
+        };
+        RowStream::new(py, &self.core, params, args)
+    }
+
+    #[pyo3(name = "_execute")]
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: &Bound<'py, PyList>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        exec::execute(py, &self.core, params, sql)
+    }
+
+    fn ping<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        exec::ping(py, &self.core)
+    }
+
+    // `mode` is deferred, immediate or exclusive; a read-only transaction is always deferred
+    #[pyo3(name = "_begin")]
+    fn begin<'py>(
+        &self,
+        py: Python<'py>,
+        mode: Option<&str>,
+        read_only: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if self.core.depth() > 0 {
+            return Err(interface_error(
+                py,
+                "the connection is already in a transaction; use Transaction.transaction() for a savepoint",
+            ));
+        }
+        let sql =
+            exec::begin_sql(mode, read_only, self.core.read_only).map_err(|e| to_py_err(py, &e))?;
+        exec::begin(py, &self.core, sql, read_only)
+    }
+
+    // resolves to the depth, which names the savepoint
+    #[pyo3(name = "_savepoint")]
+    fn savepoint<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let depth = self.core.depth();
+        if depth == 0 {
+            return Err(interface_error(py, "there is no open transaction"));
+        }
+        exec::txn_step(
+            py,
+            &self.core,
+            format!("SAVEPOINT rowx_sp_{}", depth.saturating_add(1)),
+            Depth::Enter,
+        )
+    }
+
+    #[pyo3(name = "_release_savepoint")]
+    fn release_savepoint<'py>(&self, py: Python<'py>, n: u32) -> PyResult<Bound<'py, PyAny>> {
+        exec::txn_step(
+            py,
+            &self.core,
+            format!("RELEASE SAVEPOINT rowx_sp_{n}"),
+            Depth::Leave,
+        )
+    }
+
+    #[pyo3(name = "_rollback_to_savepoint")]
+    fn rollback_to_savepoint<'py>(&self, py: Python<'py>, n: u32) -> PyResult<Bound<'py, PyAny>> {
+        exec::txn_step(
+            py,
+            &self.core,
+            format!("ROLLBACK TO SAVEPOINT rowx_sp_{n}"),
+            Depth::Keep,
+        )
+    }
+
+    #[pyo3(name = "_end_transaction")]
+    fn end_transaction<'py>(&self, py: Python<'py>, commit: bool) -> PyResult<Bound<'py, PyAny>> {
+        exec::end_transaction(py, &self.core, commit)
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        self.core.cancel.state.is_closed()
+    }
+
+    #[getter]
+    fn variable_limit(&self) -> usize {
+        self.core.variable_limit
+    }
+
+    // there is no pool yet, so a connection is never checked out of one
+    #[allow(clippy::unused_self)]
+    fn detach(&self, py: Python<'_>) -> PyResult<()> {
+        Err(interface_error(
+            py,
+            "the connection is not checked out of a pool",
+        ))
+    }
+}
+
+// reads a `rowx_sqlite.ConnectOptions`; the shared Python never imports this module
+pub(crate) fn options_from_py(py: Python<'_>, opts: &Bound<'_, PyAny>) -> PyResult<ConnectOptions> {
+    let path: Option<String> = opts.getattr("path")?.extract()?;
+    let memory: bool = opts.getattr("memory")?.extract()?;
+    let target = match (path, memory) {
+        (Some(path), false) if !path.is_empty() => Target::File(PathBuf::from(path)),
+        (Some(_), false) => {
+            return Err(interface_error(py, "the database path is empty"));
+        }
+        (None, true) => Target::Memory,
+        (Some(_), true) => {
+            return Err(interface_error(
+                py,
+                "path and memory are mutually exclusive",
+            ));
+        }
+        (None, false) => {
+            return Err(interface_error(
+                py,
+                "a database path is required (or memory=True)",
+            ));
+        }
+    };
+    let mode = match opts.getattr("mode")?.extract::<String>()?.as_str() {
+        "ro" => OpenMode::ReadOnly,
+        "rw" => OpenMode::ReadWrite,
+        "rwc" => OpenMode::ReadWriteCreate,
+        other => {
+            return Err(interface_error(
+                py,
+                &format!("mode must be \"ro\", \"rw\" or \"rwc\", not {other:?}"),
+            ));
+        }
+    };
+    let mut options = ConnectOptions::new(OpenOptions::new(target, mode));
+    let connect_timeout: Option<f64> = opts.getattr("connect_timeout")?.extract()?;
+    if let Some(secs) = connect_timeout {
+        options.busy_timeout = seconds("connect_timeout", secs)?;
+    }
+    let statement_timeout: Option<f64> = opts.getattr("statement_timeout")?.extract()?;
+    // like PostgreSQL's `statement_timeout`, zero means no limit
+    options.statement_timeout = statement_timeout
+        .map(|secs| seconds("statement_timeout", secs))
+        .transpose()?
+        .filter(|limit| *limit > Duration::ZERO);
+    options.statement_cache = opts.getattr("statement_cache_size")?.extract()?;
+    options.read_only = opts.getattr("read_only")?.extract()?;
+    Ok(options)
+}
+
+/// # Errors
+/// `InterfaceError` for a DSN that is not one of the SQLite forms.
+#[pyfunction]
+pub fn parse_dsn<'py>(py: Python<'py>, dsn: &str) -> PyResult<Bound<'py, PyDict>> {
+    let target = dsn::parse(dsn).map_err(|e| to_py_err(py, &Failure::from(Error::Dsn(e))))?;
+    let out = PyDict::new(py);
+    match target {
+        Target::Memory => {
+            out.set_item("path", py.None())?;
+            out.set_item("memory", true)?;
+        }
+        Target::File(path) => {
+            out.set_item("path", path.to_string_lossy())?;
+            out.set_item("memory", false)?;
+        }
+    }
+    Ok(out)
+}
+
+/// # Errors
+/// `InterfaceError` or `ValueError` for bad options; open failures surface when the future is awaited.
+#[pyfunction]
+pub fn connect<'py>(py: Python<'py>, options: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let options = options_from_py(py, options)?;
+    let handle = runtime::handle()?;
+    future_into_py(py, async move {
+        let conn = SqliteConnection::connect(&options)
+            .await
+            .map_err(SqliteError::from)?;
+        let read_only = options.read_only || options.open.mode == OpenMode::ReadOnly;
+        Ok(Connection::new(
+            conn,
+            handle,
+            options.statement_cache,
+            read_only,
+        ))
+    })
+}

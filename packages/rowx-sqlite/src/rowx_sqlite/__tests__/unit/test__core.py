@@ -18,5 +18,21 @@ def test_sqlite_version_is_the_bundled_release() -> None:
     assert sqlite_version() == "3.51.3"
 
 
-def test_core_exposes_nothing_else() -> None:
-    assert [name for name in dir(_core) if not name.startswith("_")] == ["sqlite_version"]
+def test_core_exposes_the_connection_bindings() -> None:
+    assert sorted(name for name in dir(_core) if not name.startswith("_")) == [
+        "Connection",
+        "RowShape",
+        "RowStream",
+        "ShapeIssue",
+        "TypeInfo",
+        "connect",
+        "map_columns",
+        "parse_dsn",
+        "sqlite_version",
+        "type_table",
+    ]
+
+
+def test_every_class_names_the_core_module() -> None:
+    for cls in (_core.Connection, _core.RowShape, _core.RowStream, _core.ShapeIssue, _core.TypeInfo):
+        assert cls.__module__ == "rowx_sqlite._core"

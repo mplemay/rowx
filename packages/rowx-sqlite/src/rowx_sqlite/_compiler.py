@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import TYPE_CHECKING, Final, Literal
 
 from rowx_core import Compiled, TemplatePlan, capture_template
@@ -170,10 +171,15 @@ def parameter_spans(sql: str) -> tuple[tuple[int, int], ...]:
     return tuple((t.start, t.end) for t in tokenize(sql).tokens if t.kind == "param")
 
 
-def _check_parameters(compiled: Compiled) -> Compiled:
-    sql = compiled.sql
+# the query objects compile on every execution, and re-lexing the finished SQL cost about 13% of a small query's
+# latency (bench: 7.7 of 58.7 us), so a statement that passed is remembered; a rejected one is never stored
+VERIFY_CACHE_SIZE: Final[int] = 1024
+
+
+@lru_cache(maxsize=VERIFY_CACHE_SIZE)
+def _verify_parameters(sql: str, placeholders: tuple[tuple[int, int], ...]) -> None:
     spans = parameter_spans(sql)
-    known = set(compiled.placeholders)
+    known = set(placeholders)
     for start, end in spans:
         if (start, end) not in known:
             msg = f"{sql[start:end]!r} in static SQL is a parameter in SQLite; use an interpolation ({{value}}) instead"
@@ -181,6 +187,10 @@ def _check_parameters(compiled: Compiled) -> Compiled:
     if len(spans) != len(known):
         msg = "an interpolation must not be inside a string literal, quoted identifier or comment"
         raise TypeError(msg)
+
+
+def _check_parameters(compiled: Compiled) -> Compiled:
+    _verify_parameters(compiled.sql, compiled.placeholders)
     return compiled
 
 
