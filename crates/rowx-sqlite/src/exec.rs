@@ -220,14 +220,19 @@ fn prepare_checked<'c, 's>(
     }
     drop(stmt);
     conn.flush_prepared_statement_cache();
-    // `prepare` reads the schema the connection has in memory, which another connection's DDL leaves
-    // stale until a statement starts a read transaction and notices the changed schema cookie
-    conn.prepare("SELECT 1 FROM sqlite_schema LIMIT 0")?
-        .query([])?
-        .next()?;
+    refresh_schema(conn)?;
     let stmt = conn.prepare_cached(sql)?;
     let reader = Reader::new(shape, &stmt, 0)?;
     Ok((stmt, reader))
+}
+
+// `prepare` reads the schema the connection has in memory, which another connection's DDL leaves
+// stale until a statement starts a read transaction and notices the changed schema cookie
+pub(crate) fn refresh_schema(conn: &rusqlite::Connection) -> Result<(), Error> {
+    conn.prepare("SELECT 1 FROM sqlite_schema LIMIT 0")?
+        .query([])?
+        .next()?;
+    Ok(())
 }
 
 fn with_query<R>(

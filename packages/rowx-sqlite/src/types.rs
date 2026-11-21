@@ -1,8 +1,10 @@
 use pyo3::prelude::*;
+use rowx_sqlite::types::Kind;
 
 // one row per `rowx_sqlite::types::Kind`: its key, the Python type a column of it reads as, the
 // zone rule of that type, the Python types whose natural binding is this kind, and the codec family
 struct Row {
+    kind: Kind,
     key: &'static str,
     py_result: &'static str,
     tz: &'static str,
@@ -12,6 +14,7 @@ struct Row {
 
 const TABLE: &[Row] = &[
     Row {
+        kind: Kind::Integer,
         key: "integer",
         py_result: "int",
         tz: "none",
@@ -19,6 +22,7 @@ const TABLE: &[Row] = &[
         codec: "integer",
     },
     Row {
+        kind: Kind::Real,
         key: "real",
         py_result: "float",
         tz: "none",
@@ -26,6 +30,7 @@ const TABLE: &[Row] = &[
         codec: "real",
     },
     Row {
+        kind: Kind::Text,
         key: "text",
         py_result: "str",
         tz: "none",
@@ -33,6 +38,7 @@ const TABLE: &[Row] = &[
         codec: "text",
     },
     Row {
+        kind: Kind::Blob,
         key: "blob",
         py_result: "bytes",
         tz: "none",
@@ -40,6 +46,7 @@ const TABLE: &[Row] = &[
         codec: "blob",
     },
     Row {
+        kind: Kind::Boolean,
         key: "boolean",
         py_result: "bool",
         tz: "none",
@@ -47,6 +54,7 @@ const TABLE: &[Row] = &[
         codec: "boolean",
     },
     Row {
+        kind: Kind::DateTime,
         key: "datetime",
         py_result: "datetime.datetime",
         tz: "naive",
@@ -54,6 +62,7 @@ const TABLE: &[Row] = &[
         codec: "temporal",
     },
     Row {
+        kind: Kind::DateTimeTz,
         key: "datetimetz",
         py_result: "datetime.datetime",
         tz: "aware",
@@ -61,6 +70,7 @@ const TABLE: &[Row] = &[
         codec: "temporal",
     },
     Row {
+        kind: Kind::Date,
         key: "date",
         py_result: "datetime.date",
         tz: "none",
@@ -68,6 +78,7 @@ const TABLE: &[Row] = &[
         codec: "temporal",
     },
     Row {
+        kind: Kind::Time,
         key: "time",
         py_result: "datetime.time",
         tz: "none",
@@ -75,6 +86,7 @@ const TABLE: &[Row] = &[
         codec: "temporal",
     },
     Row {
+        kind: Kind::Decimal,
         key: "decimal",
         py_result: "decimal.Decimal",
         tz: "none",
@@ -82,6 +94,7 @@ const TABLE: &[Row] = &[
         codec: "decimal",
     },
     Row {
+        kind: Kind::Uuid,
         key: "uuid",
         py_result: "uuid.UUID",
         tz: "none",
@@ -89,6 +102,7 @@ const TABLE: &[Row] = &[
         codec: "uuid",
     },
     Row {
+        kind: Kind::Json,
         key: "json",
         py_result: "object",
         tz: "none",
@@ -96,6 +110,7 @@ const TABLE: &[Row] = &[
         codec: "json",
     },
     Row {
+        kind: Kind::Any,
         key: "any",
         py_result: "int | float | str | bytes",
         tz: "none",
@@ -103,6 +118,12 @@ const TABLE: &[Row] = &[
         codec: "any",
     },
 ];
+
+/// The table key of a declared type's kind.
+#[must_use]
+pub(crate) fn key_of(kind: Kind) -> Option<&'static str> {
+    TABLE.iter().find(|row| row.kind == kind).map(|row| row.key)
+}
 
 #[pyclass(
     frozen,

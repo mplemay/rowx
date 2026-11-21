@@ -6,7 +6,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 use common::{TestResult, connect, failure, fetch, file, file_options, memory, path, pragma, run};
-use rowx_sqlite::dsn::OpenMode;
+use rowx_sqlite::conn::ConnectOptions;
+use rowx_sqlite::dsn::{OpenMode, Target};
 use rowx_sqlite::error::Error;
 use rusqlite::config::DbConfig;
 
@@ -279,5 +280,26 @@ async fn loading_extensions_stays_disabled() -> TestResult {
         matches!(&err, Error::Sqlite { message, .. } if message.contains("not authorized")),
         "{err:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_checker_options_open_a_read_only_untrusted_session() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let writer = connect(&file_options(&dir, "check.db", OpenMode::ReadWriteCreate)).await?;
+    run(&writer, "CREATE TABLE t (a INTEGER NOT NULL)").await?;
+    let limit = Duration::from_secs(3);
+    let options = ConnectOptions::checker(Target::File(path(&dir, "check.db")), Some(limit));
+    assert_eq!(options.open.mode, OpenMode::ReadOnly);
+    assert!(options.read_only && options.untrusted);
+    assert_eq!(options.statement_timeout, Some(limit));
+    let checker = connect(&options).await?;
+    let err = run(&checker, "INSERT INTO t VALUES (1)").await.err();
+    assert!(
+        matches!(&err, Some(Error::Sqlite { name, .. }) if name.starts_with("SQLITE_READONLY")),
+        "{err:?}"
+    );
+    assert_eq!(pragma(&checker, "query_only").await?, 1);
+    assert_eq!(pragma(&checker, "trusted_schema").await?, 0);
     Ok(())
 }

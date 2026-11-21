@@ -20,12 +20,17 @@ def test_sqlite_version_is_the_bundled_release() -> None:
 
 def test_core_exposes_the_connection_bindings() -> None:
     assert sorted(name for name in dir(_core) if not name.startswith("_")) == [
+        "ColumnInfo",
         "Connection",
+        "Describe",
+        "ParamInfo",
         "RowShape",
         "RowStream",
         "ShapeIssue",
         "TypeInfo",
         "connect",
+        "connect_checker",
+        "describe",
         "map_columns",
         "parse_dsn",
         "sqlite_version",

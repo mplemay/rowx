@@ -230,6 +230,8 @@ class StatementFacts:
     has_compound: bool
     # LEFT, RIGHT, FULL, OUTER and NATURAL joins
     has_outer_join: bool
+    # an aggregate call (or HAVING) in the outermost query with no GROUP BY: it returns one row even over an empty table
+    has_aggregate: bool
 
 
 JOIN_WORDS: Final[frozenset[str]] = frozenset({"natural", "left", "right", "full", "outer", "inner", "cross"})
@@ -239,6 +241,33 @@ FROM_ENDS: Final[frozenset[str]] = frozenset(
 )
 COMPOUND_WORDS: Final[frozenset[str]] = frozenset({"union", "intersect", "except"})
 SUBQUERY_STARTS: Final[frozenset[str]] = frozenset({"select", "with", "values"})
+AGGREGATE_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "count",
+        "sum",
+        "total",
+        "avg",
+        "min",
+        "max",
+        "group_concat",
+        "string_agg",
+        "json_group_array",
+        "json_group_object",
+        "jsonb_group_array",
+        "jsonb_group_object",
+        "median",
+        "percentile",
+        "percentile_cont",
+        "percentile_disc",
+    },
+)
+# with two or more arguments these are scalar functions
+SCALAR_WHEN_MANY: Final[frozenset[str]] = frozenset({"min", "max"})
+SCALAR_MIN_ARGS: Final[int] = 2
+# words that follow a select item instead of naming a window, so a preceding `over` is a column alias
+NOT_WINDOW_NAMES: Final[frozenset[str]] = FROM_ENDS | frozenset(
+    {"from", "as", "offset", "join", "on", "using", "natural", "left", "right", "inner", "cross", "full", "outer"},
+)
 NAME_KINDS: Final[frozenset[TokenKind]] = frozenset({"word", "quoted", "string"})
 CONFLICT_WORDS: Final[frozenset[str]] = frozenset({"rollback", "abort", "replace", "fail", "ignore"})
 # words that never name an UPDATE target: `UPDATE SET` is a column list, `UPDATE ON` a trigger, `update FROM` a column
@@ -262,6 +291,8 @@ class _Frame:
     # None, or where the WITH clause header is
     cte: CteState | None = None
     join_words: set[str] = field(default_factory=set)
+    # the frame of a subquery or CTE body; facts found inside one belong to an unproven statement already
+    sub: bool = False
 
 
 def _name_part(tok: Token) -> str:
@@ -298,6 +329,8 @@ class _Walker:
         self.subquery: bool = False
         self.compound: bool = False
         self.outer: bool = False
+        self.aggregate: bool = False
+        self.group_by: bool = False
 
     def run(self) -> StatementFacts:
         while self.i < len(self.tokens):
@@ -310,6 +343,7 @@ class _Walker:
             has_subquery=self.subquery,
             has_compound=self.compound,
             has_outer_join=self.outer,
+            has_aggregate=self.aggregate and not self.group_by,
         )
 
     def _step(self, tok: Token) -> None:
@@ -327,6 +361,10 @@ class _Walker:
             f.join_words.clear()
         elif _is_punct(tok, ";"):
             self.stack = [_Frame()]
+        elif tok.kind == "quoted":
+            f.join_words.clear()
+            if not any(fr.sub for fr in self.stack) and tok.value in AGGREGATE_NAMES:
+                self._aggregate_call(tok.value)
         elif tok.kind != "word":
             f.join_words.clear()
         else:
@@ -358,7 +396,7 @@ class _Walker:
             f.cte = "as"
         elif state == "as" and _is_punct(tok, "("):
             self.subquery = True
-            self.stack.append(_Frame(kind="cte_body"))
+            self.stack.append(_Frame(kind="cte_body", sub=True))
         else:
             return False
         return True
@@ -371,7 +409,7 @@ class _Walker:
         group = f.expect_table and not starts_query
         f.expect_table = False
         f.join_words.clear()
-        self.stack.append(_Frame(from_active=group, expect_table=group))
+        self.stack.append(_Frame(from_active=group, expect_table=group, sub=starts_query))
 
     def _at(self, index: int) -> Token | None:
         return self.tokens[index] if 0 <= index < len(self.tokens) else None
@@ -481,9 +519,105 @@ class _Walker:
         elif word == "update":
             self._update_target()
 
+    # the index of the `)` closing the `(` at `start`, or None when unbalanced
+    def _call_end(self, start: int) -> int | None:
+        depth = 0
+        for j in range(start, len(self.tokens)):
+            tok = self.tokens[j]
+            if _is_punct(tok, "("):
+                depth += 1
+            elif _is_punct(tok, ")"):
+                depth -= 1
+                if depth == 0:
+                    return j
+        return None
+
+    def _top_level_args(self, start: int, end: int) -> int:
+        depth, commas = 0, 0
+        for tok in self.tokens[start + 1 : end]:
+            if _is_punct(tok, "("):
+                depth += 1
+            elif _is_punct(tok, ")"):
+                depth -= 1
+            elif depth == 0 and _is_punct(tok, ","):
+                commas += 1
+        return commas + 1
+
+    # an ORDER BY at the top level of the call is the aggregate's own, so the call is not the scalar form
+    def _has_call_order_by(self, start: int, end: int) -> bool:
+        depth = 0
+        for j in range(start + 1, end):
+            tok = self.tokens[j]
+            if _is_punct(tok, "("):
+                depth += 1
+            elif _is_punct(tok, ")"):
+                depth -= 1
+            elif depth == 0 and tok.kind == "word" and tok.value == "order":
+                nxt = self._at(j + 1)
+                if nxt is not None and nxt.kind == "word" and nxt.value == "by":
+                    return True
+        return False
+
+    # `over` starts a window only when `(` or a window name follows; otherwise it is the column alias
+    def _window_follows(self, over: int) -> bool:
+        after = self._at(over + 1)
+        if after is None:
+            return False
+        if _is_punct(after, "("):
+            return True
+        if after.kind == "quoted":
+            return True
+        return after.kind == "word" and after.value not in NOT_WINDOW_NAMES
+
+    def _is_window(self, end: int) -> bool:
+        j = end + 1
+        nxt = self._at(j)
+        if nxt is not None and nxt.kind == "word" and nxt.value == "filter":
+            opener = self._at(j + 1)
+            if opener is None or not _is_punct(opener, "("):
+                return False
+            if (close := self._call_end(j + 1)) is None:
+                return False
+            j = close + 1
+            nxt = self._at(j)
+        return nxt is not None and nxt.kind == "word" and nxt.value == "over" and self._window_follows(j)
+
+    # a call that makes the outermost query aggregate; anything unclear counts as one
+    def _aggregate_call(self, word: str) -> None:
+        opener, prev = self._at(self.i), self._prev()
+        if opener is None or not _is_punct(opener, "(") or (prev is not None and _is_punct(prev, ".")):
+            return
+        end = self._call_end(self.i)
+        if end is None:
+            self.aggregate = True
+            return
+        if (
+            word in SCALAR_WHEN_MANY
+            and not self._has_call_order_by(self.i, end)
+            and self._top_level_args(self.i, end) >= SCALAR_MIN_ARGS
+        ):
+            return
+        if not self._is_window(end):
+            self.aggregate = True
+
+    def _query_words(self, word: str) -> None:
+        if any(fr.sub for fr in self.stack):
+            return
+        if word in AGGREGATE_NAMES:
+            self._aggregate_call(word)
+        elif word in {"having", "group"}:
+            prev, nxt = self._prev(), self._at(self.i)
+            if prev is not None and _is_punct(prev, "."):
+                return
+            if word == "having":
+                self.aggregate = True
+            elif nxt is not None and nxt.kind == "word" and nxt.value == "by":
+                self.group_by = True
+
     def _word(self, f: _Frame, word: str) -> None:
         if word in COMPOUND_WORDS:
             self.compound = True
+        self._query_words(word)
         if word == "join":
             self.outer = self.outer or bool(f.join_words & OUTER_WORDS)
             f.expect_table = True
