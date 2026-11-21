@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The Cargo config's default points to a Unix venv layout. setup-uv selects a
-# valid interpreter everywhere, including Windows where PyO3 needs python.lib.
+# Install the matrix interpreter before uv sync creates the virtual environment.
+# PyO3 needs the native interpreter path, including on Windows.
+uv python install "$CI_PYTHON_VERSION"
 export PYO3_PYTHON
 PYO3_PYTHON="$(uv python find "$CI_PYTHON_VERSION")"
 
