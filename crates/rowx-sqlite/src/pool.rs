@@ -173,16 +173,14 @@ impl Manage for SqliteManager {
     // have rolled it back already, and a `ROLLBACK` outside one is an error), so it is asked. The `query_only`
     // a read-only transaction turned on is put back as well.
     async fn reset(&self, conn: &SqliteConn, _rollback: bool) -> Result<(), Error> {
-        let writable = !self.options.is_read_only();
+        let query_only = self.options.query_only_at_connect();
         let guard = conn.conn.lock().await;
         guard
             .call(move |ctx| {
                 if !ctx.conn.is_autocommit() {
                     ctx.conn.execute_batch("ROLLBACK")?;
                 }
-                if writable {
-                    ctx.conn.pragma_update(None, "query_only", false)?;
-                }
+                ctx.conn.pragma_update(None, "query_only", query_only)?;
                 Ok(())
             })
             .await
@@ -313,8 +311,26 @@ mod tests {
         Ok(())
     }
 
+    async fn query_only_after_reset(
+        manager: &SqliteManager,
+        conn: &SqliteConn,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        conn.conn
+            .lock()
+            .await
+            .simple("PRAGMA query_only = ON")
+            .await?;
+        manager.reset(conn, false).await?;
+        Ok(conn
+            .conn
+            .lock()
+            .await
+            .run_raw(|raw| raw.pragma_query_value(None, "query_only", |row| row.get(0)))
+            .await??)
+    }
+
     #[tokio::test]
-    async fn reset_leaves_query_only_alone_on_a_read_only_open()
+    async fn reset_clears_query_only_on_a_mode_ro_open_without_read_only()
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = TempDir::new()?;
         // the file has to exist before it can be opened read-only
@@ -326,19 +342,25 @@ mod tests {
             OpenMode::ReadOnly,
         )));
         let conn = manager.connect().await?;
-        conn.conn
-            .lock()
-            .await
-            .simple("PRAGMA query_only = ON")
-            .await?;
-        manager.reset(&conn, false).await?;
-        let on: bool = conn
-            .conn
-            .lock()
-            .await
-            .run_raw(|raw| raw.pragma_query_value(None, "query_only", |row| row.get(0)))
-            .await??;
-        assert!(on);
+        assert!(!query_only_after_reset(&manager, &conn).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_keeps_query_only_on_a_read_only_connection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let seed = SqliteManager::new(file(&dir, "k.db"));
+        let first = seed.connect().await?;
+        seed.close(first).await;
+        let mut options = ConnectOptions::new(OpenOptions::new(
+            Target::File(dir.path().join("k.db")),
+            OpenMode::ReadWrite,
+        ));
+        options.read_only = true;
+        let manager = SqliteManager::new(options);
+        let conn = manager.connect().await?;
+        assert!(query_only_after_reset(&manager, &conn).await?);
         Ok(())
     }
 

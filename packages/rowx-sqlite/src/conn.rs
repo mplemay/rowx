@@ -498,7 +498,7 @@ pub fn connect<'py>(py: Python<'py>, options: &Bound<'py, PyAny>) -> PyResult<Bo
         let conn = SqliteConnection::connect(&options)
             .await
             .map_err(SqliteError::from)?;
-        let read_only = options.read_only || options.open.mode == OpenMode::ReadOnly;
+        let read_only = options.is_read_only();
         Ok(Connection::new(
             conn,
             handle,
