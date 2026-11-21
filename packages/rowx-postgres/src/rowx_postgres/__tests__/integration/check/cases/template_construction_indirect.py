@@ -48,7 +48,7 @@ rowx_module = private_module  # error: [template-construction]
 rowx_class = RowxTemplate  # error: [template-construction]
 
 # `Annotated[X, ...]` is callable at runtime and builds an `X`
-annotated_call = Annotated[Template, 1](text)  # error: [template-construction]  # ty: ignore[call-non-callable]
-annotated_attr = typing.Annotated[Template, 1](text)  # error: [template-construction]  # ty: ignore[call-non-callable]
+annotated_call = Annotated[Template, 1](text)  # error: [template-construction]  # ty: ignore[not-callable]
+annotated_attr = typing.Annotated[Template, 1](text)  # error: [template-construction]  # ty: ignore[not-callable]
 annotated_alias = Annotated[Template, 1]  # error: [template-construction]
 annotated_nested = Annotated[string.templatelib.Template, 1]  # error: [template-construction]

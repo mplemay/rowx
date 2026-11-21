@@ -299,7 +299,11 @@ def test_close_returns_with_the_directory_free(tmp_path: Path) -> None:
         await db.close()
         async with Database(path) as again:
             assert await number(again, 1) == 1
-        with pytest.raises(InterfaceError, match="closed"):
+        # a boot that sees close() raises "closed"; one still inside the engine at acquire_timeout times out
+        with pytest.raises(
+            InterfaceError,
+            match=r"the pool is closed|timed out waiting for the embedded database to start",
+        ):
             await opening
 
     run(main)
