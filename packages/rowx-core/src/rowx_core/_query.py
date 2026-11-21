@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Final, Self
+from typing import TYPE_CHECKING, ClassVar, Final, Self, cast
 
 from rowx_core._rowplan import NO_ROWS, RowPlan, row_plan
 from rowx_core._template import capture_template
@@ -26,7 +26,7 @@ class RowStream[T]:
         self._open_stream = open_stream
         self._connection_closed = connection_closed
         self._impl: StreamHandle | None = None
-        self._buffer: deque[object] = deque()
+        self._buffer: deque[T] = deque()
         self._done = False
         self.result: QueryResult | None = None
 
@@ -42,7 +42,7 @@ class RowStream[T]:
                 msg = "connection is closed"
                 raise InterfaceError(msg)
             if self._buffer:
-                return self._buffer.popleft()  # ty: ignore[invalid-return-type]
+                return self._buffer.popleft()
             if self._done:
                 raise StopAsyncIteration
             # the connection is claimed by the first _next, so ConnectionBusyError and the
@@ -50,7 +50,8 @@ class RowStream[T]:
             if self._impl is None:
                 self._impl = self._open_stream()
             if batch := await self._impl._next():  # ruff: ignore[private-member-access]
-                self._buffer.extend(batch)
+                # the executor is shared, so rows stay object until this query's plan has built them
+                self._buffer.extend(cast("list[T]", batch))
                 continue
             self._done = True
             if (rows_affected := self._impl.rows_affected) is not None:
@@ -93,10 +94,10 @@ class _BaseQuery[T]:
             raise InterfaceError(msg)
         return plan
 
-    async def _rows(self, conn: Executor, *, limit_one: bool) -> list[object]:
+    async def _rows(self, conn: Executor, *, limit_one: bool) -> list[T]:
         plan = self._row_plan()
         compiled, params = conn.compiler.compile(self._template)
-        return await conn._fetch(  # ruff: ignore[private-member-access]
+        rows = await conn._fetch(  # ruff: ignore[private-member-access]
             compiled.sql,
             params,
             None if plan.kind == "named" else plan.flags,
@@ -105,20 +106,22 @@ class _BaseQuery[T]:
             None if plan.kind == "named" else plan.arity,
             plan.shape,
         )
+        # the executor is shared, so rows stay object until this query's plan has built them
+        return cast("list[T]", rows)
 
     async def one(self, conn: Executor, /) -> T:
         rows = await self._rows(conn, limit_one=True)
         if not rows:
             msg = "query returned no rows"
             raise RowNotFound(msg)
-        return rows[0]  # ty: ignore[invalid-return-type]
+        return rows[0]
 
     async def optional(self, conn: Executor, /) -> T | None:
         rows = await self._rows(conn, limit_one=True)
-        return rows[0] if rows else None  # ty: ignore[invalid-return-type]
+        return rows[0] if rows else None
 
     async def all(self, conn: Executor, /) -> list[T]:
-        return await self._rows(conn, limit_one=False)  # ty: ignore[invalid-return-type]
+        return await self._rows(conn, limit_one=False)
 
     def fetch(self, conn: Executor, /, *, batch_size: int = DEFAULT_BATCH_SIZE) -> RowStream[T]:
         plan = self._row_plan()
