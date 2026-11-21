@@ -772,6 +772,16 @@ def test_attrs_class_comprehension_qualified_private_attribute(tmp_path: Path, *
         "(alias := attrs.field())\ntry:\n    alias = FIELD\n    raise ValueError()\n    (alias := attrs.field())\nexcept ValueError:\n    alias.default(lambda self: 1)",
         "(alias := attrs.field())\nmatch 1:\n    case 1 if (alias := FIELD) and False: pass\n    case _: alias.default(lambda self: 1)",
         "(alias := attrs.field())\nmatch 1:\n    case 1 if (alias := FIELD) and False: pass\nalias.default(lambda self: 1)",
+        "(FIELD,)[0].default(lambda self: 1)",
+        "for alias in ((FIELD,)[0],):\n    alias.default(lambda self: 1)",
+        "(alias := (False or FIELD))\nalias.default(lambda self: 1)",
+        "for _ in (0,):\n    (alias,) = iter((FIELD,))\n    alias.default(lambda self: 1)",
+        "(alias := FIELD)\nNone if True else (alias := attrs.field())\nalias.default(lambda self: 1)",
+        "for _ in (0,):\n    first, alias = (*(), attrs.field(), FIELD)\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    raise ExceptionGroup('mixed', [ValueError(), TypeError()])\nexcept* ValueError:\n    alias = FIELD\nexcept* TypeError:\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    ((alias := FIELD), int('bad'), (alias := attrs.field()))\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    print((alias := FIELD), int('bad'), (alias := attrs.field()))\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    print(((alias := FIELD), int('bad'), (alias := attrs.field())))\nexcept ValueError:\n    alias.default(lambda self: 1)",
     ],
 )
 def test_attrs_flow_paths_reject_dynamic_default(tmp_path: Path, body: str, *, shared: bool) -> None:
@@ -809,6 +819,62 @@ def test_attrs_failed_guard_without_registration_is_supported(tmp_path: Path, *,
         ).replace("\n", "\n    ")
         source += "del alias\n"
     path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "(1 if True else (alias := spec))",
+        "(True or (alias := spec))",
+        "(lambda: (alias := spec))",
+        "((alias := spec) for _ in ())",
+        "((alias := attrs.field()), int('bad'))",
+    ],
+)
+def test_attrs_try_eager_binding_fresh_controls(tmp_path: Path, expression: str) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\nalias = attrs.field()\n"
+        f"try:\n    {expression}\nexcept ValueError:\n    alias.default(lambda self: 1)\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected"),
+    [
+        ("", False),
+        ("def object(): return spec\n", True),
+        ("from helpers import object\n", True),
+        ("def unrelated():\n    object = 1\n", False),
+    ],
+)
+def test_attrs_builtin_object_shadow(tmp_path: Path, setup: str, *, expected: bool) -> None:
+    (tmp_path / "helpers.py").write_text("def object(): return None\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        f"{setup}for alias in (object(),):\n    alias.default(lambda self: 1)\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert (result.diagnostic is not None) == expected
+
+
+def test_attrs_ifexp_keeps_fresh_class_shadow(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\nalias = spec\n"
+        "class Helper:\n    alias = attrs.field()\n    1 if flag else 2\n    alias.default(lambda self: 1)\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
     [call] = discover_file(path).calls
     result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
     assert result.diagnostic is None
