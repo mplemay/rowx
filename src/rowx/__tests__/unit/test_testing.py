@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -138,6 +139,7 @@ def test_blocking_returns_the_result_of_the_work() -> None:
     assert blocking(work()) == 7
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires signal.pthread_kill")
 def test_an_interrupt_cancels_the_work_and_runs_its_cleanup_before_returning_control() -> None:
     running = threading.Event()
     outcome: list[str] = []

@@ -119,6 +119,8 @@ def test_materialize_rejects_native_case_collisions(
     repo.mkdir()
     revision(repo, "[tool.rowx.migrate]\n")
     oid = git(repo, "hash-object", "-w", "pyproject.toml")
+    # Store both spellings in the index even on a case-insensitive filesystem.
+    git(repo, "config", "core.ignorecase", "false")
     for name in names:
         git(repo, "update-index", "--add", "--cacheinfo", f"100644,{oid},{name}")
     git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "collisions")

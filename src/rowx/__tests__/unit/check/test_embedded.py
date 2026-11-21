@@ -556,6 +556,7 @@ def interrupt_in(seconds: float) -> threading.Timer:
 
 
 @pytest.mark.usefixtures("project")
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX SIGINT delivery")
 def test_the_first_ctrl_c_on_a_directory_says_it_is_waiting_and_exits_two_once_the_instance_closes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -577,6 +578,7 @@ def test_the_first_ctrl_c_on_a_directory_says_it_is_waiting_and_exits_two_once_t
 
 
 @pytest.mark.usefixtures("project")
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX SIGINT delivery")
 def test_the_second_ctrl_c_on_a_directory_stops_the_instance_without_waiting_for_the_close(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
