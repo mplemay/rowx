@@ -216,6 +216,14 @@ class Workspace:
 def workspace(tmp_path_factory: pytest.TempPathFactory) -> Workspace:
     root = tmp_path_factory.mktemp("typecheckers")
     sources: dict[str, str] = {}
+    sources["attrs_constructor.py"] = (
+        "import attrs\nfrom rowx import query\n"
+        "def convert(value: int) -> str: return str(value)\n"
+        "@attrs.define\nclass Row:\n    value: str = attrs.field(converter=convert)\n"
+        "good = Row(value=1)\n"
+        "bad = Row(value='bad')\n"
+        "reveal_type(query[Row](t'select 1'))\n"
+    )
     for index, (source, _, _) in enumerate(ROWS):
         sources[f"row_{index}.py"] = f"{PRELUDE}{source}\n{FOOTER}"
     for case in PACKAGE_CASES:
@@ -238,6 +246,15 @@ def _resolve(root: Path, name: str) -> RowType | str:
         return resolution.row_type
     assert resolution.diagnostic is not None
     return resolution.diagnostic.rule
+
+
+@pytest.mark.parametrize("checker", ["pyright", "mypy"])
+def test_attrs_converter_constructor_and_query_inference(workspace: Workspace, checker: str) -> None:
+    outcome = getattr(workspace, checker)
+    name = "attrs_constructor.py"
+    assert (name, 7) not in outcome.errors
+    assert (name, 8) in outcome.errors
+    assert outcome.reveals[name, 9] == "Row"
 
 
 @pytest.mark.parametrize("checker", ["pyright", "mypy"])

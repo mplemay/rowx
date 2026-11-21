@@ -1,7 +1,9 @@
 import ast
 import builtins
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from io import BytesIO
+from keyword import iskeyword
 from pathlib import Path
 from sys import stdlib_module_names
 from tokenize import detect_encoding
@@ -12,7 +14,7 @@ from rowx.check.model import Diagnostic, QueryCall, Rule, Span
 from rowx.check.walk import literal_prefix
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from rowx_core.backend import CheckerBackend
 
@@ -58,6 +60,8 @@ KNOWN_ROOTS: Final[frozenset[str]] = stdlib_module_names | {
     "rowx",
     "rowx_core",
     "pydantic",
+    "attrs",
+    "attr",
 }
 FIELD_QUALIFIERS: Final[frozenset[str]] = frozenset({"typing.Required", "typing.NotRequired", "typing.ReadOnly"})
 TYPED_DICT_KEYWORDS: Final[frozenset[str]] = frozenset({"total", "closed", "extra_items"})
@@ -117,7 +121,7 @@ type RowKind = Literal["none", "scalar", "tuple", "named"]
 type BindingKind = Literal["import", "from", "alias", "class", "call", "invalid", "other"]
 type RowForm = Literal["positional", "keyword", "dict", "validator"]
 type Matching = Literal["by_name", "positional"]
-type Form = Literal["dataclass", "namedtuple", "typeddict", "model", "pydantic_dataclass"]
+type Form = Literal["dataclass", "namedtuple", "typeddict", "model", "pydantic_dataclass", "attrs"]
 
 FORMS: Final[dict[Form, tuple[RowForm, Matching]]] = {
     "dataclass": ("keyword", "by_name"),
@@ -125,6 +129,7 @@ FORMS: Final[dict[Form, tuple[RowForm, Matching]]] = {
     "typeddict": ("dict", "by_name"),
     "model": ("validator", "by_name"),
     "pydantic_dataclass": ("validator", "by_name"),
+    "attrs": ("validator", "by_name"),
 }
 DIRECT_FORMS: Final[dict[str, Form]] = {"NamedTuple": "namedtuple", "TypedDict": "typeddict", "BaseModel": "model"}
 FUNCTIONAL_ARGS: Final[int] = 2
@@ -372,6 +377,9 @@ class _Source:
     default: bool = False
     total: bool = True
     pydantic: _PydField | None = None
+    attrs_alias: str | None = None
+    converter: ast.expr | None = None
+    converter_module: _Module | None = None
     # the class that declares the field, whose type parameters its annotation names
     owner: _Class | None = None
 
@@ -560,7 +568,7 @@ def _collect_definition(module: _Module, stmt: ast.stmt, *, tc: bool) -> None:
         case ast.ClassDef():
             module.bind(stmt.name, _Binding("class", name=stmt.name, node=stmt, site=site, tc=tc))
         case ast.FunctionDef() | ast.AsyncFunctionDef():
-            module.bind(stmt.name, _Binding("invalid", name=stmt.name, site=site, tc=tc))
+            module.bind(stmt.name, _Binding("invalid", name=stmt.name, node=stmt, site=site, tc=tc))
         case ast.Assign() | ast.AnnAssign() | ast.AugAssign():
             targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
             for target in targets:
@@ -840,12 +848,14 @@ class _Resolver:
         # set while an alias body is evaluated: a string there stays unsupported, but a `TYPE_CHECKING` name is still
         # rejected, because a `TypeAliasType` evaluates its value when the field is read
         self._in_alias = False
+        self._attrs_annotation = False
         # the type parameters in scope while a generic's body is evaluated, each bound to its argument
         self._env: dict[str, _Arg] = {}
         self._infos: dict[ClassKey, _Info] = {}
         self._free: set[tuple[Path, str]] = set()
         self._paths: dict[tuple[ClassKey, ClassKey], tuple[_Rebind, ...]] = {}
         self._mros: dict[ClassKey, list[_Class]] = {}
+        self._attrs_object_shadows: dict[tuple[Path, int], bool] = {}
 
     def _selected(self) -> CheckerBackend | None:
         if self._backend is not None:
@@ -1087,7 +1097,8 @@ class _Resolver:
                 if (leaf := LEAVES.get(normalized)) is not None:
                     return _Node((Elem(leaf, nullable=False),), none=False)
                 if normalized in NEUTRAL:
-                    return _Node((Elem("any", nullable=False),), none=False)
+                    leaf = normalized if self._attrs_annotation else "any"
+                    return _Node((Elem(leaf, nullable=False),), none=False)
                 if (selected := self._selected()) is not None and (
                     leaf := selected.value_leaves.get(normalized)
                 ) is not None:
@@ -1414,6 +1425,48 @@ class _Resolver:
         msg = f"{what} isn't a literal"
         raise _unresolved(msg)
 
+    @staticmethod
+    def _attrs_bool(keyword: ast.keyword, what: str) -> bool:
+        if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, bool):
+            return keyword.value.value
+        msg = f"{what} isn't a literal boolean"
+        raise _invalid(msg)
+
+    @staticmethod
+    def _attrs_decorator_option(keyword: ast.keyword, klass: _Class) -> None:
+        if keyword.arg == "collect_by_mro" and (
+            not isinstance(keyword.value, ast.Constant) or keyword.value.value is not True
+        ):
+            msg = f"the `collect_by_mro` option of `{klass.name}` is unsupported"
+            raise _invalid(msg)
+        if keyword.arg in {"these", "field_transformer", "auto_attribs"}:
+            if not isinstance(keyword.value, ast.Constant) or keyword.value.value is not None:
+                msg = f"the `{keyword.arg}` option of `{klass.name}` is unsupported"
+                raise _invalid(msg)
+        elif keyword.arg not in {
+            "init",
+            "kw_only",
+            "slots",
+            "frozen",
+            "repr",
+            "eq",
+            "order",
+            "hash",
+            "weakref_slot",
+            "auto_exc",
+            "getstate_setstate",
+            "on_setattr",
+            "collect_by_mro",
+            "match_args",
+            "unsafe_hash",
+            "force_kw_only",
+        }:
+            msg = f"the `{keyword.arg}` option of `{klass.name}` is unsupported"
+            raise _invalid(msg)
+        elif keyword.arg != "on_setattr" and not isinstance(keyword.value, ast.Constant):
+            msg = f"the `{keyword.arg}` option of `{klass.name}` is dynamic"
+            raise _invalid(msg)
+
     # None for a decorator that is ignored (`final`), else the form a dataclass decorator makes and its `init`
     def _decorator(self, decorator: ast.expr, klass: _Class) -> _Decor | None:
         call = decorator if isinstance(decorator, ast.Call) else None
@@ -1428,23 +1481,33 @@ class _Resolver:
         if name == "typing.final":
             return None
         kind: Form = "pydantic_dataclass" if name in PYDANTIC_DATACLASSES else "dataclass"
-        if name != "dataclasses.dataclass" and kind != "pydantic_dataclass":
+        if name in {"attrs.define", "attrs.frozen", "attr.define", "attr.frozen"}:
+            kind = "attrs"
+        if name != "dataclasses.dataclass" and kind not in {"pydantic_dataclass", "attrs"}:
             msg = f"the decorator `{ast.unparse(func)}` on `{klass.name}` is unknown, so its effect on the constructor is not checked"
             raise _invalid(msg, help_=DECORATOR_HELP)
+        if kind == "attrs" and call is not None and call.args:
+            msg = f"the attrs decorator on `{klass.name}` has unsupported positional arguments"
+            raise _invalid(msg)
+        init, config = self._decorator_options(call, klass, kind)
+        # pydantic's decorator only takes `init=False`, which keeps its own validating `__init__`
+        return _Decor(kind=kind, init=True if kind == "pydantic_dataclass" else init, config=config)
+
+    def _decorator_options(self, call: ast.Call | None, klass: _Class, kind: Form) -> tuple[bool, ast.expr | None]:
         init, config = True, None
         for keyword in call.keywords if call is not None else ():
             if keyword.arg is None:
                 msg = f"the dataclass decorator on `{klass.name}` takes `**` arguments"
-                raise _unresolved(msg)
+                raise _invalid(msg) if kind == "attrs" else _unresolved(msg)
             if keyword.arg == "config":
                 config = keyword.value
+            if kind == "attrs":
+                self._attrs_decorator_option(keyword, klass)
             if keyword.arg in {"init", "kw_only"}:
-                literal = self._literal_bool(
-                    keyword, f"the `{keyword.arg}` of the dataclass decorator on `{klass.name}`"
-                )
+                literal_bool = self._attrs_bool if kind == "attrs" else self._literal_bool
+                literal = literal_bool(keyword, f"the `{keyword.arg}` of the dataclass decorator on `{klass.name}`")
                 init = literal if keyword.arg == "init" else init
-        # pydantic's decorator only takes `init=False`, which keeps its own validating `__init__`
-        return _Decor(kind=kind, init=True if kind == "pydantic_dataclass" else init, config=config)
+        return init, config
 
     # the form of the dataclass decorator on the class, if there is one
     def _decorators(self, node: ast.ClassDef, klass: _Class) -> _Decor | None:
@@ -1514,10 +1577,14 @@ class _Resolver:
             self._check_keywords(node, known=TYPED_DICT_KEYWORDS if form == "typeddict" else frozenset())
         decorated = decor is not None
         info = _Info(form=form, decorated=decorated, init=decor.init if decor is not None else True)
+        if form == "attrs":
+            self._attrs_check_bases(klass, infos)
         raw = self._raw_attrs(node, klass)
         match form:
             case "dataclass" | "pydantic_dataclass":
                 self._dataclass_fields(info, node, klass, raw)
+            case "attrs":
+                self._attrs_fields(info, node, klass)
             case "model":
                 self._model_fields(info, node, klass, infos)
             case "namedtuple":
@@ -1877,6 +1944,1461 @@ class _Resolver:
                         if pydantic
                         else self._dataclass_field(stmt, key, klass, inherited)
                     )
+
+    def _attrs_fields(self, info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+        rest = [self._info(member, ()) for member in self._mro(klass)[1:]]
+        if any(
+            isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef) and stmt.name == "__init__" for stmt in node.body
+        ):
+            msg = f"`{klass.name}` defines a custom constructor"
+            raise _invalid(msg)
+        if not info.decorated:
+            if (first := next((base for base in rest if base.decorated), None)) is not None:
+                info.fields = dict(first.fields)
+                info.init = first.init
+            return
+        self._attrs_unannotated_fields(node, klass)
+        for base in reversed(rest):
+            for key, source in base.fields.items():
+                info.fields.pop(key, None)
+                info.fields[key] = source
+        for stmt, key in self._annotated(node):
+            info.fields.pop(key, None)
+            info.fields[key] = self._attrs_field(stmt, key, klass)
+        self._attrs_default_hooks(info, node, klass)
+
+    def _attrs_field_call(self, expr: ast.expr, module: _Module) -> tuple[ast.Call, _Module] | None:
+        field, modules = self._attrs_trace_field(expr, module)
+        if field is not None and not isinstance(expr, ast.Call):
+            for origin in modules:
+                if self._attrs_mutated_field(field, origin):
+                    msg = "an attrs shared field has unsupported post-construction default metadata"
+                    raise _invalid(msg)
+        return field
+
+    def _attrs_trace_field(
+        self, expr: ast.expr, module: _Module
+    ) -> tuple[tuple[ast.Call, _Module] | None, list[_Module]]:
+        seen: set[tuple[Path, str]] = set()
+        modules = [module]
+        value = expr
+        for _ in range(MAX_HOPS + 1):
+            if isinstance(value, ast.Call):
+                func, func_module = self._unalias(value.func, module)
+                if self._external_name(func, func_module) in {"attrs.field", "attr.field", "attr.ib", "attr.attrib"}:
+                    return (value, module), modules
+                break
+            next_value = self._attrs_field_binding(value, module, seen)
+            if next_value is None:
+                break
+            value, module = next_value
+            if all(item.path != module.path for item in modules):
+                modules.append(module)
+        return None, modules
+
+    def _attrs_mutated_field(self, field: tuple[ast.Call, _Module], module: _Module) -> bool:
+        if module.tree is None:
+            return False
+        globals_: dict[str, bool | _Module] = {}
+        return self._attrs_scan_body(module.tree.body, globals_, field, module, globals_)
+
+    def _attrs_is_shared(
+        self,
+        expr: ast.expr,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Tuple | ast.List):
+            return bool(self._attrs_subscript_value(expr, scope, field, module, globals_))
+        alternatives = self._attrs_expression_branches(expr)
+        if alternatives != [expr]:
+            return any(self._attrs_is_shared(value, scope, field, module, globals_) for value in alternatives)
+        if isinstance(expr, ast.Attribute):
+            class_name = next((key.removeprefix("\0private:") for key in globals_ if key.startswith("\0private:")), "")
+            if class_name:
+                expr = ast.Attribute(value=expr.value, attr=_mangle(class_name, expr.attr), ctx=expr.ctx)
+        if isinstance(expr, ast.Name):
+            if expr.id in scope:
+                return scope[expr.id] is True
+            if expr.id in globals_:
+                return globals_[expr.id] is True
+        if (
+            isinstance(expr, ast.Attribute)
+            and isinstance(expr.value, ast.Name)
+            and (expr.value.id in scope or expr.value.id in globals_)
+        ):
+            binding = scope.get(expr.value.id, globals_.get(expr.value.id, False))
+            if not isinstance(binding, _Module):
+                return binding
+            expr, module = ast.Name(id=expr.attr, ctx=ast.Load()), binding
+        target, _ = self._attrs_trace_field(expr, module)
+        return target is not None and target[0] is field[0] and target[1].path == field[1].path
+
+    @staticmethod
+    def _attrs_join_scope(target: dict[str, bool | _Module], source: dict[str, bool | _Module]) -> None:
+        for name, value in source.items():
+            if value:
+                prior = target.get(name, False)
+                target[name] = value if not prior or prior == value else True
+
+    def _attrs_scan_eager(
+        self,
+        node: ast.AST,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if isinstance(node, ast.GeneratorExp):
+            node = node.generators[0].iter
+        elif isinstance(node, ast.ListComp | ast.SetComp | ast.DictComp):
+            return self._attrs_scan_comprehension(node, scope, field, module, globals_)
+        if isinstance(node, ast.BoolOp | ast.IfExp):
+            return (
+                self._attrs_scan_bool(node, scope, field, module, globals_)
+                if isinstance(node, ast.BoolOp)
+                else self._attrs_scan_ifexp(node, scope, field, module, globals_)
+            )
+        if isinstance(node, ast.NamedExpr):
+            earlier = (
+                self._attrs_class_value(node.value, scope, field, module, globals_)
+                if isinstance(node.value, ast.Subscript)
+                else False
+            )
+            if self._attrs_scan_eager(node.value, scope, field, module, globals_):
+                return True
+            scope[node.target.id] = (
+                earlier
+                if isinstance(node.value, ast.Subscript)
+                else self._attrs_class_value(node.value, scope, field, module, globals_)
+            )
+            node = ast.Constant(value=None)
+        if isinstance(node, ast.ClassDef):
+            # Nested classes do not close over the enclosing class namespace.
+            header = [*node.decorator_list, *node.bases, *node.keywords]
+            return any(
+                self._attrs_scan_eager(item, scope, field, module, globals_) for item in header
+            ) or self._attrs_scan_body(
+                node.body, {"\0class": False}, field, module, self._attrs_class_globals(node, field, module, globals_)
+            )
+        if isinstance(node, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+            # Function decorators and defaults execute now; the body does not.
+            decorators = [] if isinstance(node, ast.Lambda) else node.decorator_list
+            header = [*decorators, *node.args.defaults, *node.args.kw_defaults]
+            return any(
+                self._attrs_scan_eager(item, scope, field, module, globals_) for item in header if item is not None
+            )
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == "default"
+            and self._attrs_is_shared(node.value, scope, field, module, globals_)
+        ) or any(self._attrs_scan_eager(item, scope, field, module, globals_) for item in ast.iter_child_nodes(node))
+
+    def _attrs_scan_ifexp(
+        self,
+        node: ast.IfExp,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if self._attrs_scan_eager(node.test, scope, field, module, globals_):
+            return True
+        states = []
+        for branch in self._attrs_expression_branches(node):
+            state = scope.copy()
+            branch_globals = state if scope is globals_ else globals_
+            if self._attrs_scan_eager(branch, state, field, module, branch_globals):
+                return True
+            states.append(state)
+        scope.clear()
+        scope.update(states[0])
+        for state in states[1:]:
+            self._attrs_join_scope(scope, state)
+        return False
+
+    def _attrs_scan_bool(
+        self,
+        node: ast.BoolOp,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        exits: list[dict[str, bool | _Module]] = []
+        for value in node.values:
+            if self._attrs_scan_eager(value, scope, field, module, globals_):
+                return True
+            if isinstance(value, ast.Constant):
+                if bool(value.value) == isinstance(node.op, ast.Or):
+                    break
+            else:
+                exits.append(scope.copy())
+        for earlier in exits:
+            self._attrs_join_scope(scope, earlier)
+        return False
+
+    def _attrs_class_globals(
+        self, node: ast.ClassDef, field: tuple[ast.Call, _Module], module: _Module, globals_: dict[str, bool | _Module]
+    ) -> dict[str, bool | _Module]:
+        result = {key: value for key, value in globals_.items() if not key.startswith("\0private:")}
+        result[f"\0private:{node.name}"] = False
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and (mangled := _mangle(node.name, child.id)) != child.id:
+                result[child.id] = self._attrs_class_value(
+                    ast.Name(id=mangled, ctx=ast.Load()), globals_, field, module, globals_
+                )
+        return result
+
+    def _attrs_scan_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        # A comprehension closes over a surrounding comprehension, but not a
+        # class namespace. Its first iterable still executes in that namespace.
+        local = {} if "\0class" in scope else scope.copy()
+        for index, generator in enumerate(node.generators):
+            current = scope if index == 0 else local
+            before = current.copy()
+            before_globals = before if current is globals_ else globals_
+            if self._attrs_scan_eager(generator.iter, current, field, module, globals_):
+                return True
+            targets = [target.id for target in ast.walk(generator.target) if isinstance(target, ast.Name)]
+            local.update(dict.fromkeys(targets, False))
+            literal = isinstance(generator.iter, ast.Tuple | ast.List | ast.Set)
+            values = generator.iter.elts if literal else []
+            expressions = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+            if (
+                not literal
+                or (
+                    isinstance(generator.target, ast.Tuple | ast.List)
+                    and any(not isinstance(value, ast.Tuple | ast.List) for value in values)
+                )
+            ) and self._attrs_loop_default([*expressions, *generator.ifs], set(targets)):
+                msg = "an attrs default registration has an indeterminate comprehension binding"
+                raise _invalid(msg)
+            for value in values:
+                bindings = before.copy()
+                self._attrs_bind_target((generator.target, value), bindings, field, module, globals_=before_globals)
+                for target in ast.walk(generator.target):
+                    if isinstance(target, ast.Name) and bool(bindings.get(target.id)):
+                        local[target.id] = bindings[target.id]
+                self._attrs_scan_eager(value, before, field, module, before_globals)
+            if any(self._attrs_scan_eager(test, local, field, module, globals_) for test in generator.ifs):
+                return True
+        values = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+        found = any(self._attrs_scan_eager(value, local, field, module, globals_) for value in values)
+        self._attrs_merge_walrus(node, scope, local)
+        return found
+
+    @staticmethod
+    def _attrs_merge_walrus(node: ast.AST, scope: dict[str, bool | _Module], local: dict[str, bool | _Module]) -> None:
+        # Assignment expressions in eager comprehensions bind outside their loop scope.
+        pending = [node]
+        while pending:
+            item = pending.pop()
+            if (
+                isinstance(item, ast.NamedExpr)
+                and (binding := local.get(item.target.id)) is not None
+                and binding is not False
+            ):
+                scope[item.target.id] = binding
+            if isinstance(item, ast.GeneratorExp):
+                pending.append(item.generators[0].iter)
+            elif not isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+                pending.extend(ast.iter_child_nodes(item))
+
+    def _attrs_scan_body(
+        self,
+        body: list[ast.stmt],
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        for node in body:
+            if isinstance(node, ast.If):
+                if self._attrs_scan_if(node, scope, field, module, globals_):
+                    return True
+            elif isinstance(
+                node, ast.For | ast.AsyncFor | ast.While | ast.With | ast.AsyncWith | ast.Try | ast.TryStar | ast.Match
+            ):
+                if self._attrs_scan_compound(node, scope, field, module, globals_):
+                    return True
+            elif self._attrs_scan_simple(node, scope, field, module, globals_):
+                return True
+        return False
+
+    def _attrs_scan_simple(
+        self,
+        node: ast.stmt,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        earlier = None
+        if isinstance(node, ast.Assign | ast.AnnAssign) and isinstance(node.value, ast.Subscript):
+            earlier = self._attrs_class_value(node.value, scope, field, module, globals_)
+        if self._attrs_scan_eager(node, scope, field, module, globals_):
+            return True
+        self._attrs_bind_class(node, scope, field, module, globals_)
+        if earlier is not None and isinstance(node, ast.Assign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    scope[target.id] = earlier
+        return False
+
+    def _attrs_scan_if(
+        self,
+        node: ast.If,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if self._attrs_scan_eager(node.test, scope, field, module, globals_):
+            return True
+        if isinstance(node.test, ast.Constant):
+            return self._attrs_scan_body(
+                node.body if bool(node.test.value) else node.orelse, scope, field, module, globals_
+            )
+        left, right = scope.copy(), scope.copy()
+        left_globals = left if scope is globals_ else globals_
+        right_globals = right if scope is globals_ else globals_
+        if self._attrs_scan_body(node.body, left, field, module, left_globals) or self._attrs_scan_body(
+            node.orelse, right, field, module, right_globals
+        ):
+            return True
+        for name in left.keys() | right.keys():
+            fallback = self._attrs_is_shared(ast.Name(id=name, ctx=ast.Load()), scope, field, module, globals_)
+            left_value, right_value = left.get(name, fallback), right.get(name, fallback)
+            scope[name] = left_value if left_value == right_value else bool(left_value or right_value)
+        return False
+
+    def _attrs_scan_compound(
+        self,
+        node: ast.stmt,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        # Compound statements may execute zero or multiple times. Keep all possibly
+        # shared bindings when control flow makes a class-local name uncertain.
+        if isinstance(node, ast.For | ast.AsyncFor | ast.While):
+            return self._attrs_scan_loop(node, scope, field, module, globals_)
+        if isinstance(node, ast.Match):
+            return self._attrs_scan_match(node, scope, field, module, globals_)
+        if isinstance(node, ast.With | ast.AsyncWith):
+            return self._attrs_scan_with(node, scope, field, module, globals_)
+        if isinstance(node, ast.Try | ast.TryStar):
+            return self._attrs_scan_try(node, scope, field, module, globals_)
+        return False
+
+    def _attrs_scan_try(
+        self,
+        node: ast.Try | ast.TryStar,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        main, possible = scope.copy(), scope.copy()
+        for statement in node.body:
+            current_globals = main if scope is globals_ else globals_
+            if self._attrs_scan_try_statement(statement, (main, possible), field, module, current_globals):
+                return True
+        current_globals = main if scope is globals_ else globals_
+        if self._attrs_scan_body(node.orelse, main, field, module, current_globals):
+            return True
+        branches = [main]
+        for handler in node.handlers:
+            branch = possible.copy()
+            current_globals = branch if scope is globals_ else globals_
+            if self._attrs_scan_handler(handler, branch, field, module, current_globals):
+                return True
+            branches.append(branch)
+            if isinstance(node, ast.TryStar):
+                self._attrs_join_scope(possible, branch)
+        for branch in [possible, *branches]:
+            current_globals = branch if scope is globals_ else globals_
+            if self._attrs_scan_body(node.finalbody, branch, field, module, current_globals):
+                return True
+            self._attrs_join_scope(scope, branch)
+        return False
+
+    def _attrs_scan_try_statement(
+        self,
+        statement: ast.stmt,
+        scopes: tuple[dict[str, bool | _Module], dict[str, bool | _Module]],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        main, possible = scopes
+        intermediate = main.copy()
+        for binding in self._attrs_eager_effects(statement):
+            binding_globals = intermediate if globals_ is main else globals_
+            found = (
+                self._attrs_scan_body([binding], intermediate, field, module, binding_globals)
+                if isinstance(binding, ast.stmt)
+                else self._attrs_scan_eager(binding, intermediate, field, module, binding_globals)
+            )
+            if found:
+                return True
+            self._attrs_join_scope(possible, intermediate)
+            self._attrs_join_scope(intermediate, possible)
+        if self._attrs_scan_body([statement], main, field, module, globals_):
+            return True
+        self._attrs_join_scope(possible, main)
+        return False
+
+    def _attrs_eager_bindings(self, item: ast.AST) -> Iterable[ast.NamedExpr]:
+        for child in self._attrs_eager_children(item):
+            yield from self._attrs_eager_bindings(child)
+        if isinstance(item, ast.NamedExpr):
+            yield item
+
+    def _attrs_eager_effects(self, item: ast.AST) -> Iterable[ast.NamedExpr | ast.Assign | ast.AnnAssign]:
+        for child in self._attrs_eager_children(item):
+            yield from self._attrs_eager_effects(child)
+        if isinstance(item, ast.NamedExpr | ast.Assign | ast.AnnAssign):
+            yield item
+
+    # Scope and short-circuit cases must each choose their own eager children.
+    def _attrs_eager_children(self, item: ast.AST) -> list[ast.AST]:  # ruff: ignore[complex-structure, too-many-return-statements]
+        if isinstance(item, ast.GeneratorExp):
+            return [item.generators[0].iter]
+        if isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+            header: list[ast.AST] = [
+                *item.args.defaults,
+                *(value for value in item.args.kw_defaults if value is not None),
+            ]
+            if not isinstance(item, ast.Lambda):
+                header.extend(item.decorator_list)
+            return header
+        if isinstance(item, ast.ClassDef):
+            return [*item.decorator_list, *item.bases, *item.keywords]
+        if isinstance(item, ast.IfExp):
+            return [item.test, *self._attrs_expression_branches(item)]
+        if isinstance(item, ast.BoolOp):
+            values: list[ast.AST] = []
+            for value in item.values:
+                values.append(value)
+                if isinstance(value, ast.Constant) and bool(value.value) == isinstance(item.op, ast.Or):
+                    break
+            return values
+        if isinstance(item, ast.If):
+            if isinstance(item.test, ast.Constant):
+                return [item.test, *(item.body if bool(item.test.value) else item.orelse)]
+            return [item.test, *item.body, *item.orelse]
+        if isinstance(item, ast.While) and isinstance(item.test, ast.Constant) and not bool(item.test.value):
+            return [item.test, *item.orelse]
+        return (
+            []
+            if isinstance(item, ast.stmt)
+            and not isinstance(
+                item,
+                ast.Expr
+                | ast.Assign
+                | ast.AnnAssign
+                | ast.For
+                | ast.AsyncFor
+                | ast.While
+                | ast.With
+                | ast.AsyncWith
+                | ast.Try
+                | ast.TryStar
+                | ast.Match,
+            )
+            else list(ast.iter_child_nodes(item))
+        )
+
+    def _attrs_scan_handler(
+        self,
+        handler: ast.ExceptHandler,
+        branch: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if handler.type is not None and self._attrs_scan_eager(handler.type, branch, field, module, globals_):
+            return True
+        if handler.name is not None:
+            branch[handler.name] = False
+        found = self._attrs_scan_body(handler.body, branch, field, module, globals_)
+        if handler.name is not None:
+            branch[handler.name] = False
+        return found
+
+    def _attrs_scan_loop(
+        self,
+        node: ast.For | ast.AsyncFor | ast.While,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        header = node.iter if isinstance(node, ast.For | ast.AsyncFor) else node.test
+        before = scope.copy()
+        loop_bindings = scope.copy()
+        if isinstance(node, ast.For | ast.AsyncFor):
+            before_globals = before if scope is globals_ else globals_
+            self._attrs_bind_loop(node, (before, loop_bindings), field, module, globals_=before_globals)
+        if self._attrs_scan_eager(header, scope, field, module, globals_):
+            return True
+        if isinstance(node, ast.While) and isinstance(node.test, ast.Constant) and not bool(node.test.value):
+            return self._attrs_scan_body(node.orelse, scope, field, module, globals_)
+        branch = scope.copy()
+        while True:
+            previous = branch.copy()
+            iteration = branch.copy()
+            branch_globals = iteration if scope is globals_ else globals_
+            if isinstance(node, ast.For | ast.AsyncFor):
+                iteration.update({
+                    target.id: loop_bindings[target.id]
+                    for target in ast.walk(node.target)
+                    if isinstance(target, ast.Name)
+                })
+            else:
+                if self._attrs_scan_eager(node.test, iteration, field, module, branch_globals):
+                    return True
+                self._attrs_join_scope(branch, iteration)
+            if self._attrs_scan_body(node.body, iteration, field, module, branch_globals):
+                return True
+            self._attrs_join_scope(branch, iteration)
+            if branch == previous:
+                break
+        branch_globals = branch if scope is globals_ else globals_
+        if self._attrs_scan_body(node.orelse, branch, field, module, branch_globals):
+            return True
+        self._attrs_join_scope(scope, branch)
+        return False
+
+    def _attrs_scan_match(
+        self,
+        node: ast.Match,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        if self._attrs_scan_eager(node.subject, scope, field, module, globals_):
+            return True
+        branches = []
+        failed = scope.copy()
+        for case in node.cases:
+            branch = failed.copy()
+            capture = not self._attrs_known_fresh(node.subject, module)
+            for pattern in ast.walk(case.pattern):
+                if isinstance(pattern, ast.MatchAs | ast.MatchStar) and pattern.name is not None:
+                    branch[pattern.name] = capture
+                elif isinstance(pattern, ast.MatchMapping) and pattern.rest is not None:
+                    branch[pattern.rest] = capture
+            branch_globals = branch if scope is globals_ else globals_
+            if case.guard is not None:
+                if self._attrs_scan_eager(case.guard, branch, field, module, branch_globals):
+                    return True
+                self._attrs_join_scope(failed, branch)
+            if self._attrs_scan_body(case.body, branch, field, module, branch_globals):
+                return True
+            branches.append(branch)
+        for branch in [failed, *branches]:
+            self._attrs_join_scope(scope, branch)
+        return False
+
+    def _attrs_scan_with(
+        self,
+        node: ast.With | ast.AsyncWith,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool:
+        for context in node.items:
+            if self._attrs_scan_eager(context.context_expr, scope, field, module, globals_):
+                return True
+            if context.optional_vars is not None:
+                for target in ast.walk(context.optional_vars):
+                    if isinstance(target, ast.Name):
+                        scope[target.id] = True
+        return self._attrs_scan_body(node.body, scope, field, module, globals_)
+
+    def _attrs_bind_loop(
+        self,
+        node: ast.For | ast.AsyncFor,
+        scopes: tuple[dict[str, bool | _Module], dict[str, bool | _Module]],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        *,
+        globals_: dict[str, bool | _Module],
+    ) -> None:
+        scope, branch_scope = scopes
+        literal = isinstance(node.iter, ast.List | ast.Tuple | ast.Set)
+        values = node.iter.elts if literal else [node.iter]
+        targets = {item.id for item in ast.walk(node.target) if isinstance(item, ast.Name)}
+        branch_scope.update(dict.fromkeys(targets, False))
+        if not literal or (
+            isinstance(node.target, ast.Tuple | ast.List)
+            and any(not isinstance(value, ast.Tuple | ast.List) for value in values)
+        ):
+            branch_scope.update(dict.fromkeys(targets, True))
+            return
+        for value in values:
+            bindings = scope.copy()
+            self._attrs_bind_target((node.target, value), bindings, field, module, globals_=globals_)
+            for target in ast.walk(node.target):
+                if isinstance(target, ast.Name) and bool(bindings.get(target.id)):
+                    branch_scope[target.id] = bindings[target.id]
+            self._attrs_scan_eager(value, scope, field, module, globals_)
+
+    @staticmethod
+    def _attrs_loop_default(body: Sequence[ast.AST], targets: set[str]) -> bool:
+        pending: list[ast.AST] = list(body)
+        while pending:
+            item = pending.pop()
+            if (
+                isinstance(item, ast.Attribute)
+                and item.attr == "default"
+                and isinstance(item.value, ast.Name)
+                and item.value.id in targets
+            ):
+                return True
+            if isinstance(item, ast.GeneratorExp):
+                pending.append(item.generators[0].iter)
+            elif isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+                pending.extend([] if isinstance(item, ast.Lambda) else item.decorator_list)
+                pending.extend(item.args.defaults)
+                pending.extend(value for value in item.args.kw_defaults if value is not None)
+            else:
+                pending.extend(ast.iter_child_nodes(item))
+        return False
+
+    def _attrs_class_value(
+        self,
+        expr: ast.expr,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool | _Module:
+        while isinstance(expr, ast.NamedExpr):
+            expr = expr.value
+        if isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Tuple | ast.List):
+            return self._attrs_subscript_value(expr, scope, field, module, globals_)
+        alternatives = self._attrs_expression_branches(expr)
+        if isinstance(expr, ast.Starred) or alternatives != [expr]:
+            return isinstance(expr, ast.Starred) or any(
+                self._attrs_class_value(value, scope, field, module, globals_) for value in alternatives
+            )
+        if isinstance(expr, ast.Name) and (expr.id in scope or expr.id in globals_):
+            return scope.get(expr.id, globals_.get(expr.id, False))
+        if self._attrs_is_shared(expr, scope, field, module, globals_) or (
+            isinstance(expr, ast.Call) and not self._attrs_known_fresh(expr, module)
+        ):
+            return True
+        try:
+            ref = self._ref(expr, module)
+        except RejectError:
+            return False
+        return ref.module if isinstance(ref, _ModuleRef) else False
+
+    def _attrs_subscript_value(
+        self,
+        expr: ast.Subscript,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> bool | _Module:
+        selected = self._attrs_literal_slot(expr)
+        if selected is None:
+            return True
+        values, index = selected
+        state = scope.copy()
+        state_globals = state if scope is globals_ else globals_
+        for value in values[:index]:
+            self._attrs_scan_eager(value, state, field, module, state_globals)
+        return self._attrs_class_value(values[index], state, field, module, state_globals)
+
+    def _attrs_bind_import(
+        self,
+        node: ast.Import | ast.ImportFrom,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+    ) -> None:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                scope[alias.asname or alias.name.split(".")[0]] = self._find(module, 0, alias.name) or False
+        else:
+            origin = self._find(module, node.level, node.module)
+            for alias in node.names:
+                name = alias.asname or alias.name
+                scope[name] = origin is not None and self._attrs_is_shared(
+                    ast.Name(id=alias.name, ctx=ast.Load()), {}, field, origin, {}
+                )
+                if origin is not None and not scope[name]:
+                    with suppress(RejectError):
+                        ref = self._ref(ast.Name(id=alias.name, ctx=ast.Load()), origin)
+                        if isinstance(ref, _ModuleRef):
+                            scope[name] = ref.module
+                    if alias.name not in origin.bindings:
+                        with suppress(RejectError):
+                            scope[name] = self._submodule(origin, alias.name).module
+
+    def _attrs_bind_class(
+        self,
+        node: ast.stmt,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> None:
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            self._attrs_bind_import(node, scope, field, module)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    scope.pop(target.id, None)
+        elif isinstance(node, ast.Assign):
+            self._attrs_bind_assignment(node, scope, field, module, globals_)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            scope[node.target.id] = self._attrs_class_value(node.value, scope, field, module, globals_)
+        elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            scope[node.name] = False
+
+    def _attrs_bind_assignment(
+        self,
+        node: ast.Assign,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> None:
+        sources = scope.copy()
+        for target in node.targets:
+            bindings = sources.copy()
+            self._attrs_bind_target((target, node.value), bindings, field, module, globals_=globals_)
+            for item in ast.walk(target):
+                if isinstance(item, ast.Name) and item.id in bindings:
+                    scope[item.id] = bindings[item.id]
+
+    @staticmethod
+    def _attrs_flatten_values(values: list[ast.expr]) -> list[ast.expr] | None:
+        flattened: list[ast.expr] = []
+        for value in values:
+            if isinstance(value, ast.Starred):
+                if not isinstance(value.value, ast.Tuple | ast.List):
+                    return None
+                nested = _Resolver._attrs_flatten_values(value.value.elts)
+                if nested is None:
+                    return None
+                flattened.extend(nested)
+            else:
+                flattened.append(value)
+        return flattened
+
+    @staticmethod
+    def _attrs_literal_slot(expr: ast.Subscript) -> tuple[list[ast.expr], int] | None:
+        if not isinstance(expr.value, ast.Tuple | ast.List):
+            return None
+        values = _Resolver._attrs_flatten_values(expr.value.elts)
+        try:
+            index = ast.literal_eval(expr.slice)
+        except ValueError, TypeError:
+            return None
+        if values is None or not isinstance(index, int) or not -len(values) <= index < len(values):
+            return None
+        return values, index % len(values)
+
+    @staticmethod
+    def _attrs_unpack_pairs(targets: list[ast.expr], values: list[ast.expr]) -> list[tuple[ast.expr, ast.expr]]:
+        flattened = _Resolver._attrs_flatten_values(values)
+        if flattened is None:
+            uncertain = ast.Starred(value=ast.Constant(value=None), ctx=ast.Load())
+            return [(target, uncertain) for target in targets]
+        values = flattened
+        star = next((index for index, item in enumerate(targets) if isinstance(item, ast.Starred)), None)
+        if star is None:
+            return list(zip(targets, values, strict=False))
+        suffix = len(targets) - star - 1
+        end = len(values) - suffix
+        return [
+            *zip(targets[:star], values[:star], strict=False),
+            *zip(targets[star + 1 :], values[end:], strict=False),
+        ]
+
+    def _attrs_bind_target(
+        self,
+        pair: tuple[ast.expr, ast.expr],
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        *,
+        globals_: dict[str, bool | _Module],
+    ) -> None:
+        target, value = pair
+        sources = scope.copy()
+        if isinstance(target, ast.Name):
+            scope[target.id] = self._attrs_class_value(value, sources, field, module, globals_)
+        elif isinstance(target, ast.Tuple | ast.List) and not isinstance(value, ast.Tuple | ast.List):
+            if not self._attrs_known_fresh(value, module):
+                scope.update({item.id: True for item in ast.walk(target) if isinstance(item, ast.Name)})
+        elif isinstance(target, ast.Tuple | ast.List) and isinstance(value, ast.Tuple | ast.List):
+            for item, source in self._attrs_unpack_pairs(target.elts, value.elts):
+                bindings = sources.copy()
+                self._attrs_bind_target((item, source), bindings, field, module, globals_=globals_)
+                for name in ast.walk(item):
+                    if isinstance(name, ast.Name) and name.id in bindings:
+                        scope[name.id] = bindings[name.id]
+
+    def _attrs_field_binding(
+        self, value: ast.expr, module: _Module, seen: set[tuple[Path, str]]
+    ) -> tuple[ast.expr, _Module] | None:
+        if isinstance(value, ast.Attribute):
+            try:
+                target = self._ref(value.value, module)
+            except RejectError:
+                return None
+            if not isinstance(target, _ModuleRef):
+                return None
+            module, value = target.module, ast.Name(id=value.attr, ctx=ast.Load())
+        if not isinstance(value, ast.Name):
+            return None
+        key = (module.path, value.id)
+        bindings = module.bindings.get(value.id, [])
+        if key in seen or len(bindings) != 1 or bindings[0].tc:
+            return None
+        seen.add(key)
+        binding = bindings[0]
+        result: tuple[ast.expr, _Module] | None = None
+        if binding.kind == "from":
+            target = self._find(module, binding.level, binding.module)
+            if target is not None:
+                result = ast.Name(id=binding.name, ctx=ast.Load()), target
+        elif binding.kind == "call" and isinstance(binding.node, ast.Call):
+            result = binding.node, module
+        elif binding.kind == "alias" and binding.expr is not None and not binding.type_stmt:
+            result = binding.expr, module
+        return result
+
+    def _attrs_unannotated_fields(self, node: ast.ClassDef, klass: _Class) -> None:
+        for stmt in _plain_statements(node.body):
+            if not isinstance(stmt, ast.Assign):
+                continue
+            field = self._attrs_field_call(stmt.value, klass.module)
+            if field is None:
+                try:
+                    ast.literal_eval(stmt.value)
+                except ValueError, TypeError, SyntaxError:
+                    msg = f"`{klass.name}` has an untraceable attrs collection declaration"
+                    raise _invalid(msg) from None
+                continue
+            call, _ = field
+            init = next((option for option in call.keywords if option.arg == "init"), None)
+            if init is not None and not self._attrs_bool(init, "unannotated field init"):
+                self._attrs_check_fallback(node, klass)
+                continue
+            msg = f"`{klass.name}` has an unannotated attrs field"
+            raise _invalid(msg)
+
+    def _attrs_check_fallback(self, node: ast.ClassDef, klass: _Class) -> None:
+        # An unannotated field switches attrs to explicit-field collection, even when init=False.
+        for stmt, _ in self._annotated(node):
+            if self._special(stmt.annotation, klass.module) == "ClassVar":
+                continue
+            if stmt.value is not None and self._attrs_field_call(stmt.value, klass.module) is not None:
+                continue
+            msg = f"`{klass.name}` has an attrs collection fallback with implicit fields"
+            raise _invalid(msg)
+
+    @staticmethod
+    def _attrs_check_bases(klass: _Class, bases: list[_Info]) -> None:
+        owners: dict[str, _Class | None] = {}
+        for base in bases:
+            for key, source in base.fields.items():
+                if source is None:
+                    continue
+                if key in owners and owners[key] is not source.owner:
+                    msg = f"`{klass.name}` inherits ambiguous attrs field `{key}`"
+                    raise _invalid(msg)
+                owners[key] = source.owner
+
+    def _attrs_field(self, stmt: ast.AnnAssign, key: str, klass: _Class) -> _Source | None:
+        if self._special(stmt.annotation, klass.module) == "ClassVar":
+            return None
+        source = self._source(stmt, key, klass)
+        source.attrs_alias = key.lstrip("_")
+        value = stmt.value
+        field = self._attrs_field_call(value, klass.module) if value is not None else None
+        if field is not None:
+            call, module = field
+            if call.args:
+                msg = f"field `{key}` has unsupported positional options"
+                raise _invalid(msg)
+            for option in call.keywords:
+                if not self._attrs_field_option(source, option, module):
+                    return None
+        elif value is not None:
+            source.default = self._attrs_default(value, klass.module)
+        return source
+
+    def _attrs_field_option(self, source: _Source, option: ast.keyword, module: _Module) -> bool:
+        key = source.key
+        if option.arg is None:
+            msg = f"field `{key}` uses dynamic options"
+            raise _invalid(msg)
+        if option.arg == "init":
+            return self._attrs_bool(option, f"field `{key}` init")
+        if option.arg == "default":
+            source.default |= self._attrs_default(option.value, module)
+        elif option.arg == "factory":
+            source.default |= self._attrs_factory(option.value, module)
+        elif option.arg == "alias":
+            if isinstance(option.value, ast.Constant) and option.value.value is None:
+                return True
+            if not isinstance(option.value, ast.Constant) or not isinstance(option.value.value, str):
+                msg = f"field `{key}` has a dynamic alias"
+                raise _invalid(msg)
+            source.attrs_alias = option.value.value
+        elif option.arg == "converter":
+            if not isinstance(option.value, ast.Constant) or option.value.value is not None:
+                source.converter = option.value
+                source.converter_module = module
+        else:
+            self._attrs_field_other_option(option, key)
+        return True
+
+    def _attrs_factory(self, expr: ast.expr, module: _Module) -> bool:
+        if isinstance(expr, ast.Constant) and expr.value is None:
+            return False
+        if isinstance(expr, ast.Lambda):
+            return True
+        if self._attrs_converter_node(expr, module) is not None:
+            return True
+        try:
+            target = self._ref(expr, module)
+        except RejectError:
+            target = None
+        if isinstance(target, _Class) and self._attrs_factory_class(target, set()):
+            return True
+        if (
+            isinstance(target, _External)
+            and target.qualname.startswith("builtins.")
+            and callable(getattr(builtins, target.qualname.removeprefix("builtins."), None))
+        ):
+            return True
+        msg = "an attrs field has an indeterminate factory"
+        raise _invalid(msg)
+
+    def _attrs_factory_class(self, klass: _Class, seen: set[ClassKey]) -> bool:
+        key = _class_key(klass)
+        if key in seen or not isinstance(klass.node, ast.ClassDef):
+            return False
+        node = klass.node
+        if node.decorator_list or node.keywords:
+            return False
+        seen.add(key)
+        for base in node.bases:
+            try:
+                target = self._ref(base, klass.module)
+            except RejectError:
+                return False
+            if isinstance(target, _Class):
+                if not self._attrs_factory_class(target, seen):
+                    return False
+            elif not isinstance(target, _External) or target.qualname != "builtins.object":
+                return False
+        seen.remove(key)
+        return True
+
+    @staticmethod
+    def _attrs_field_other_option(option: ast.keyword, key: str) -> None:
+        if option.arg not in {"validator", "repr", "hash", "metadata", "kw_only", "eq", "order", "on_setattr"}:
+            msg = f"field `{key}` has an unsupported option `{option.arg}`"
+            raise _invalid(msg)
+        if option.arg in {"kw_only", "repr", "hash", "eq", "order"} and not isinstance(option.value, ast.Constant):
+            msg = f"field `{key}` has a dynamic `{option.arg}` option"
+            raise _invalid(msg)
+
+    def _attrs_default_hooks(self, info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+        _Resolver._attrs_reject_nested_hooks(info, node, klass)
+        self._attrs_reject_local_loop_aliases(info, node, klass)
+        for stmt in node.body:
+            if not isinstance(stmt, ast.FunctionDef):
+                continue
+            for decorator in stmt.decorator_list:
+                if (
+                    isinstance(decorator, ast.Attribute)
+                    and decorator.attr == "default"
+                    and isinstance(decorator.value, ast.Name)
+                ):
+                    source = info.fields.get(_mangle(node.name, decorator.value.id))
+                    if source is None:
+                        msg = f"`{klass.name}` has an untraceable attrs default"
+                        raise _invalid(msg)
+                    info.fields[source.key] = replace(source, default=True)
+
+    @staticmethod
+    def _attrs_reject_nested_hooks(info: _Info, node: ast.ClassDef, klass: _Class) -> None:
+        pending: list[ast.AST] = []
+        for stmt in node.body:
+            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                pending.extend(
+                    decorator
+                    for decorator in stmt.decorator_list
+                    if not (
+                        isinstance(stmt, ast.FunctionDef)
+                        and isinstance(decorator, ast.Attribute)
+                        and decorator.attr == "default"
+                        and isinstance(decorator.value, ast.Name)
+                    )
+                )
+                pending.extend(stmt.args.defaults)
+                pending.extend(item for item in stmt.args.kw_defaults if item is not None)
+            else:
+                pending.append(stmt)
+        while pending:
+            item = pending.pop()
+            if (
+                isinstance(item, ast.Attribute)
+                and item.attr == "default"
+                and isinstance(item.value, ast.Name)
+                and _mangle(node.name, item.value.id) in info.fields
+            ):
+                msg = f"`{klass.name}` has an unsupported attrs default registration"
+                raise _invalid(msg)
+            if isinstance(item, ast.GeneratorExp):
+                pending.append(item.generators[0].iter)
+            elif isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+                decorators = [] if isinstance(item, ast.Lambda) else item.decorator_list
+                pending.extend(decorators)
+                pending.extend(item.args.defaults)
+                pending.extend(value for value in item.args.kw_defaults if value is not None)
+            elif isinstance(item, ast.ClassDef):
+                pending.extend([*item.decorator_list, *item.bases, *item.keywords])
+            else:
+                pending.extend(ast.iter_child_nodes(item))
+
+    def _attrs_known_fresh(self, expr: ast.expr, module: _Module) -> bool:
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id == "object":
+            return not self._attrs_object_shadowed(expr, module)
+        return isinstance(expr, ast.Call) and (
+            self._external_name(expr.func, module)
+            in {
+                "builtins.object",
+                "attrs.field",
+                "attr.field",
+                "attr.ib",
+                "attr.attrib",
+            }
+        )
+
+    def _attrs_object_shadowed(self, expr: ast.expr, module: _Module) -> bool:
+        key = (module.path, id(expr))
+        if key in self._attrs_object_shadows:
+            return self._attrs_object_shadows[key]
+        shadowed = "object" in module.bindings
+        if module.tree is not None and not shadowed:
+            shadowed = any(
+                binding.target.id == "object"
+                for statement in module.tree.body
+                for binding in self._attrs_eager_bindings(statement)
+            )
+        if module.tree is not None and not shadowed:
+            parents = {child: parent for parent in ast.walk(module.tree) for child in ast.iter_child_nodes(parent)}
+            current: ast.AST = expr
+            while current in parents:
+                current = parents[current]
+                if isinstance(current, ast.ClassDef):
+                    pending: list[ast.AST] = list(current.body)
+                    while pending and not shadowed:
+                        item = pending.pop()
+                        shadowed = (
+                            (isinstance(item, ast.Name) and item.id == "object" and isinstance(item.ctx, ast.Store))
+                            or (
+                                isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+                                and item.name == "object"
+                            )
+                            or (isinstance(item, ast.alias) and (item.asname or item.name.split(".")[0]) == "object")
+                        )
+                        if not isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+                            pending.extend(ast.iter_child_nodes(item))
+                    break
+        self._attrs_object_shadows[key] = shadowed
+        return shadowed
+
+    @staticmethod
+    # The expression forms have different static branch selection rules.
+    def _attrs_expression_branches(expr: ast.expr) -> list[ast.expr]:  # ruff: ignore[complex-structure, too-many-return-statements]
+        if isinstance(expr, ast.NamedExpr):
+            return [expr.value]
+        if isinstance(expr, ast.IfExp):
+            if isinstance(expr.test, ast.Constant):
+                return [expr.body if bool(expr.test.value) else expr.orelse]
+            return [expr.body, expr.orelse]
+        if isinstance(expr, ast.BoolOp):
+            values = []
+            for value in expr.values:
+                if not isinstance(value, ast.Constant) or bool(value.value) == isinstance(expr.op, ast.Or):
+                    values.append(value)
+                if isinstance(value, ast.Constant) and bool(value.value) == isinstance(expr.op, ast.Or):
+                    break
+            return values or [expr.values[-1]]
+        if isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Tuple | ast.List):
+            values = _Resolver._attrs_flatten_values(expr.value.elts)
+            try:
+                index = ast.literal_eval(expr.slice)
+            except ValueError, TypeError:
+                index = None
+            if values is not None and isinstance(index, int):
+                with suppress(IndexError):
+                    return [values[index]]
+            if values is None:
+                return [ast.Starred(value=expr.value, ctx=ast.Load())]
+        return [expr]
+
+    def _attrs_local_loop_bindings(
+        self, target: ast.expr, iterable: ast.expr, aliases: set[str], class_name: str, module: _Module
+    ) -> set[str]:
+        bound: set[str] = set()
+        if not isinstance(iterable, ast.Tuple | ast.List | ast.Set):
+            return {_mangle(class_name, item.id) for item in ast.walk(target) if isinstance(item, ast.Name)}
+        values = iterable.elts
+        pairs = [(target, value) for value in values]
+
+        def shared(source: ast.expr) -> bool:
+            alternatives = self._attrs_expression_branches(source)
+            if alternatives != [source]:
+                return any(shared(value) for value in alternatives)
+            if isinstance(source, ast.Starred):
+                return True
+            return (isinstance(source, ast.Name) and _mangle(class_name, source.id) in aliases) or (
+                isinstance(source, ast.Call) and not self._attrs_known_fresh(source, module)
+            )
+
+        while pairs:
+            dest, source = pairs.pop()
+            if isinstance(dest, ast.Name) and shared(source):
+                bound.add(_mangle(class_name, dest.id))
+            elif isinstance(dest, ast.Tuple | ast.List):
+                if isinstance(source, ast.Tuple | ast.List):
+                    pairs.extend(self._attrs_unpack_pairs(dest.elts, source.elts))
+                elif not self._attrs_known_fresh(source, module):
+                    bound.update(_mangle(class_name, item.id) for item in ast.walk(dest) if isinstance(item, ast.Name))
+        return bound
+
+    # These bounded cases share binding state and must be processed in evaluation order.
+    def _attrs_reject_local_loop_aliases(self, info: _Info, node: ast.ClassDef, klass: _Class) -> None:  # ruff: ignore[complex-structure, too-many-statements]
+        fields = set(info.fields)
+        class_name = node.name
+
+        def name(expr: ast.expr) -> str | None:
+            return _mangle(class_name, expr.id) if isinstance(expr, ast.Name) else None
+
+        def shared(expr: ast.expr, aliases: set[str]) -> bool:
+            if isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Tuple | ast.List):
+                selected = self._attrs_literal_slot(expr)
+                if selected is None:
+                    return True
+                values, index = selected
+                state = aliases.copy()
+                for value in values[:index]:
+                    scan(value, state)
+                return shared(values[index], state)
+            alternatives = self._attrs_expression_branches(expr)
+            if alternatives != [expr]:
+                return any(shared(value, aliases) for value in alternatives)
+            if isinstance(expr, ast.Starred):
+                return True
+            if isinstance(expr, ast.NamedExpr):
+                return shared(expr.value, aliases)
+            return name(expr) in aliases or (
+                isinstance(expr, ast.Call) and not self._attrs_known_fresh(expr, klass.module)
+            )
+
+        def bind(target: ast.expr, value: ast.expr, aliases: set[str], sources: set[str]) -> None:
+            if isinstance(target, ast.Name):
+                dest = _mangle(class_name, target.id)
+                is_shared = shared(value, sources)
+                aliases.discard(dest)
+                if is_shared:
+                    aliases.add(dest)
+            elif isinstance(target, ast.Tuple | ast.List) and isinstance(value, ast.Tuple | ast.List):
+                for dest, source in self._attrs_unpack_pairs(target.elts, value.elts):
+                    bind(dest, source, aliases, sources)
+            elif isinstance(target, ast.Tuple | ast.List) and not self._attrs_known_fresh(value, klass.module):
+                aliases.update(_mangle(class_name, item.id) for item in ast.walk(target) if isinstance(item, ast.Name))
+
+        def scan_ifexp(item: ast.IfExp, aliases: set[str]) -> None:
+            scan(item.test, aliases)
+            branches = []
+            for branch in self._attrs_expression_branches(item):
+                state = aliases.copy()
+                scan(branch, state)
+                branches.append(state)
+            aliases.clear()
+            aliases.update(*branches)
+
+        def scan_try_body(statements: list[ast.stmt], main: set[str], possible: set[str]) -> None:
+            for statement in statements:
+                intermediate = main.copy()
+                for binding in self._attrs_eager_effects(statement):
+                    scan(binding, intermediate)
+                    possible.update(intermediate)
+                    intermediate.update(possible)
+                scan(statement, main)
+                possible.update(main)
+
+        def loop_bindings(target: ast.expr, iterable: ast.expr, aliases: set[str]) -> set[str]:
+            before = aliases.copy()
+            if not isinstance(iterable, ast.Tuple | ast.List | ast.Set):
+                return self._attrs_local_loop_bindings(target, iterable, before, class_name, klass.module)
+            bound: set[str] = set()
+            for value in iterable.elts:
+                if isinstance(target, ast.Name):
+                    if shared(value, before):
+                        bound.add(_mangle(class_name, target.id))
+                else:
+                    one = ast.Tuple(elts=[value], ctx=ast.Load())
+                    bound.update(self._attrs_local_loop_bindings(target, one, before, class_name, klass.module))
+                scan(value, before)
+            return bound
+
+        def scan(item: ast.AST, aliases: set[str]) -> None:  # ruff: ignore[complex-structure, too-many-return-statements, too-many-branches, too-many-statements, too-many-locals]
+            if isinstance(item, ast.GeneratorExp):
+                scan(item.generators[0].iter, aliases)
+                return
+            if isinstance(item, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
+                header = [*item.args.defaults, *(value for value in item.args.kw_defaults if value is not None)]
+                if not isinstance(item, ast.Lambda):
+                    header.extend(item.decorator_list)
+                for child in header:
+                    scan(child, aliases)
+                return
+            if isinstance(item, ast.ClassDef):
+                for child in [*item.decorator_list, *item.bases, *item.keywords]:
+                    scan(child, aliases)
+                return
+            if isinstance(item, ast.BoolOp):
+                exits: list[set[str]] = []
+                for value in item.values:
+                    scan(value, aliases)
+                    if isinstance(value, ast.Constant):
+                        if bool(value.value) == isinstance(item.op, ast.Or):
+                            break
+                    else:
+                        exits.append(aliases.copy())
+                aliases.update(*exits)
+                return
+            if isinstance(item, ast.IfExp):
+                scan_ifexp(item, aliases)
+                return
+            if isinstance(item, ast.NamedExpr):
+                earlier = shared(item.value, aliases) if isinstance(item.value, ast.Subscript) else False
+                scan(item.value, aliases)
+                bind(item.target, item.value, aliases, aliases.copy())
+                if isinstance(item.value, ast.Subscript):
+                    aliases.discard(_mangle(class_name, item.target.id))
+                    if earlier:
+                        aliases.add(_mangle(class_name, item.target.id))
+                return
+            if (
+                isinstance(item, ast.Attribute)
+                and item.attr == "default"
+                and shared(item.value, aliases - fields if isinstance(item.value, ast.Name) else aliases)
+            ):
+                msg = f"`{klass.name}` has an unsupported attrs default registration"
+                raise _invalid(msg)
+            if isinstance(item, ast.ListComp | ast.SetComp | ast.DictComp):
+                local = aliases.copy()
+                for generator in item.generators:
+                    bound = loop_bindings(generator.target, generator.iter, local)
+                    scan(generator.iter, local)
+                    local.difference_update(
+                        _mangle(class_name, target.id)
+                        for target in ast.walk(generator.target)
+                        if isinstance(target, ast.Name)
+                    )
+                    local.update(bound)
+                    for test in generator.ifs:
+                        scan(test, local)
+                for child in [item.key, item.value] if isinstance(item, ast.DictComp) else [item.elt]:
+                    scan(child, local)
+                return
+            if isinstance(item, ast.For | ast.AsyncFor):
+                bound = loop_bindings(item.target, item.iter, aliases)
+                scan(item.iter, aliases)
+                local = aliases.copy()
+                while True:
+                    previous = local.copy()
+                    iteration = local.copy()
+                    iteration.difference_update(
+                        _mangle(class_name, target.id)
+                        for target in ast.walk(item.target)
+                        if isinstance(target, ast.Name)
+                    )
+                    iteration.update(bound)
+                    body(item.body, iteration)
+                    local.update(iteration)
+                    if local == previous:
+                        break
+                body(item.orelse, local)
+                aliases.update(local)
+                return
+            if isinstance(item, ast.While):
+                scan(item.test, aliases)
+                if isinstance(item.test, ast.Constant) and not bool(item.test.value):
+                    body(item.orelse, aliases)
+                    return
+                local = aliases.copy()
+                while True:
+                    previous = local.copy()
+                    iteration = local.copy()
+                    scan(item.test, iteration)
+                    local.update(iteration)
+                    body(item.body, iteration)
+                    local.update(iteration)
+                    if local == previous:
+                        break
+                body(item.orelse, local)
+                aliases.update(local)
+                return
+            if isinstance(item, ast.With | ast.AsyncWith):
+                for context in item.items:
+                    scan(context.context_expr, aliases)
+                    if context.optional_vars is not None:
+                        aliases.update(
+                            _mangle(class_name, target.id)
+                            for target in ast.walk(context.optional_vars)
+                            if isinstance(target, ast.Name)
+                        )
+                body(item.body, aliases)
+                return
+            if isinstance(item, ast.Match):
+                scan(item.subject, aliases)
+                failed = aliases.copy()
+                branches = []
+                for case in item.cases:
+                    branch = failed.copy()
+                    capture = not self._attrs_known_fresh(item.subject, klass.module)
+                    for pattern in ast.walk(case.pattern):
+                        if isinstance(pattern, ast.MatchAs | ast.MatchStar) and pattern.name is not None:
+                            key = _mangle(class_name, pattern.name)
+                            branch.discard(key)
+                            if capture:
+                                branch.add(key)
+                        elif isinstance(pattern, ast.MatchMapping) and pattern.rest is not None:
+                            key = _mangle(class_name, pattern.rest)
+                            branch.discard(key)
+                            if capture:
+                                branch.add(key)
+                    if case.guard is not None:
+                        scan(case.guard, branch)
+                        failed.update(branch)
+                    body(case.body, branch)
+                    branches.append(branch)
+                aliases.clear()
+                aliases.update(failed, *branches)
+                return
+            if isinstance(item, ast.If):
+                scan(item.test, aliases)
+                if isinstance(item.test, ast.Constant):
+                    body(item.body if bool(item.test.value) else item.orelse, aliases)
+                    return
+                left, right = aliases.copy(), aliases.copy()
+                body(item.body, left)
+                body(item.orelse, right)
+                aliases.clear()
+                aliases.update(left | right)
+                return
+            if isinstance(item, ast.Try | ast.TryStar):
+                main, possible = aliases.copy(), aliases.copy()
+                scan_try_body(item.body, main, possible)
+                body(item.orelse, main)
+                branches = [main, *(possible.copy() for _ in item.handlers)]
+                for handler, branch in zip(item.handlers, branches[1:], strict=True):
+                    if isinstance(item, ast.TryStar):
+                        branch.update(possible)
+                    if handler.type is not None:
+                        scan(handler.type, branch)
+                    if handler.name is not None:
+                        branch.discard(_mangle(class_name, handler.name))
+                    body(handler.body, branch)
+                    if handler.name is not None:
+                        branch.discard(_mangle(class_name, handler.name))
+                    if isinstance(item, ast.TryStar):
+                        possible.update(branch)
+                for branch in [possible, *branches]:
+                    body(item.finalbody, branch)
+                aliases.clear()
+                aliases.update(possible, *branches)
+                return
+            if isinstance(item, ast.Assign):
+                earlier = shared(item.value, aliases) if isinstance(item.value, ast.Subscript) else None
+                scan(item.value, aliases)
+                sources = aliases.copy()
+                for target in item.targets:
+                    bind(target, item.value, aliases, sources)
+                    if earlier is not None and isinstance(target, ast.Name):
+                        key = _mangle(class_name, target.id)
+                        aliases.discard(key)
+                        if earlier:
+                            aliases.add(key)
+                return
+            if isinstance(item, ast.AnnAssign):
+                if item.value is not None:
+                    earlier = shared(item.value, aliases) if isinstance(item.value, ast.Subscript) else None
+                    scan(item.value, aliases)
+                    if name(item.target) not in fields:
+                        bind(item.target, item.value, aliases, aliases.copy())
+                        if earlier is not None and (key := name(item.target)) is not None:
+                            aliases.discard(key)
+                            if earlier:
+                                aliases.add(key)
+                return
+            if isinstance(item, ast.Delete):
+                for target in item.targets:
+                    if (key := name(target)) is not None:
+                        aliases.discard(key)
+                return
+            for child in ast.iter_child_nodes(item):
+                scan(child, aliases)
+
+        def body(statements: list[ast.stmt], aliases: set[str]) -> None:
+            for stmt in statements:
+                scan(stmt, aliases)
+
+        body(node.body, fields.copy())
+
+    def _attrs_default(self, expr: ast.expr, module: _Module) -> bool:
+        if self._external_name(expr, module) in {"attrs.NOTHING", "attr.NOTHING"}:
+            return False
+        if isinstance(expr, ast.Call) and self._external_name(expr.func, module) in {"attrs.Factory", "attr.Factory"}:
+            if len(expr.args) != 1 or any(
+                item.arg != "takes_self"
+                or not isinstance(item.value, ast.Constant)
+                or not isinstance(item.value.value, bool)
+                for item in expr.keywords
+            ):
+                msg = "an attrs Factory has dynamic or unsupported options"
+                raise _invalid(msg)
+            return True
+        try:
+            ast.literal_eval(expr)
+        except ValueError, TypeError, SyntaxError:
+            msg = "an attrs field has a dynamic default"
+            raise _invalid(msg) from None
+        return True
 
     # a pydantic dataclass field reads its `Field(...)` like a model's, and takes a base's default the same way
     def _pydantic_dataclass_field(
@@ -2303,10 +3825,17 @@ class _Resolver:
         if info.form is None:
             msg = f"`{klass.name}` isn't a dataclass, NamedTuple or TypedDict"
             raise _invalid(msg)
-        if info.form == "dataclass" and not info.init:
+        if info.form in {"dataclass", "attrs"} and not info.init:
             msg = f"`{klass.name}` is a dataclass with init=False, which is not supported"
             raise _invalid(msg)
         sources = [source for source in info.fields.values() if source is not None]
+        if info.form == "attrs":
+            aliases = [source.attrs_alias for source in sources]
+            if any(alias is None or not alias.isidentifier() or iskeyword(alias) for alias in aliases) or len(
+                set(aliases)
+            ) != len(aliases):
+                msg = f"`{klass.name}` has invalid or duplicate constructor names"
+                raise _invalid(msg)
         if not sources:
             msg = f"`{klass.name}` has no fields"
             raise _invalid(msg)
@@ -2318,7 +3847,11 @@ class _Resolver:
             self._field(source, owner, names=names, reason=reason)
             for source in sources
             for names, reason in [
-                self._pydantic_names(info, source) if info.form in PYDANTIC_FORMS else ((source.key,), None)
+                self._pydantic_names(info, source)
+                if info.form in PYDANTIC_FORMS
+                else ((source.attrs_alias,), None)
+                if info.form == "attrs" and source.attrs_alias is not None
+                else ((source.key,), None)
             ]
         )
         form, matching = FORMS[info.form]
@@ -2353,6 +3886,90 @@ class _Resolver:
             env = self._bind(step.klass.name, self._params(step.klass), site)
         return env
 
+    @staticmethod
+    def _attrs_concrete(elem: Elem) -> bool:
+        return elem.leaf != "any" and (elem.item is None or _Resolver._attrs_concrete(elem.item))
+
+    def _attrs_converter_node(self, expr: ast.expr | None, module: _Module) -> tuple[ast.FunctionDef, _Module] | None:
+        seen: set[tuple[Path, str]] = set()
+        while isinstance(expr, ast.Name | ast.Attribute):
+            if isinstance(expr, ast.Attribute):
+                try:
+                    target = self._resolve_ref(expr.value, module, ())
+                except RejectError:
+                    target = None
+                if not isinstance(target, _ModuleRef):
+                    return None
+                module, expr = target.module, ast.Name(id=expr.attr, ctx=ast.Load())
+            key = (module.path, expr.id)
+            bindings = module.bindings.get(expr.id, [])
+            if key in seen or len(bindings) != 1 or bindings[0].tc:
+                return None
+            seen.add(key)
+            binding = bindings[0]
+            if binding.kind == "from":
+                target = self._find(module, binding.level, binding.module)
+                if target is None:
+                    return None
+                module, expr = target, ast.Name(id=binding.name, ctx=ast.Load())
+            elif binding.kind == "alias" and binding.expr is not None:
+                expr = binding.expr
+            elif isinstance(binding.node, ast.FunctionDef) and not binding.node.decorator_list:
+                return binding.node, module
+            else:
+                return None
+        return None
+
+    def _attrs_converter(self, source: _Source, output: _Node) -> Elem:
+        expr = source.converter
+        module = source.converter_module or source.module
+        if isinstance(expr, ast.Call) and self._external_name(expr.func, module) in {
+            "attrs.Converter",
+            "attr.Converter",
+        }:
+            if len(expr.args) != 1 or any(
+                option.arg not in {"takes_self", "takes_field"}
+                or not isinstance(option.value, ast.Constant)
+                or option.value.value is not False
+                for option in expr.keywords
+            ):
+                msg = f"field `{source.key}` has an unsupported converter"
+                raise _invalid(msg)
+            expr = expr.args[0]
+        found = self._attrs_converter_node(expr, module)
+        if found is not None:
+            node, module = found
+            args = node.args
+            positional = [*args.posonlyargs, *args.args]
+            if len(positional) == 1 and not (args.vararg or args.kwarg or args.kwonlyargs) and node.returns is not None:
+                annotation = positional[0].annotation
+                if annotation is not None:
+                    result = self._attrs_annotation_node(node.returns, module, {})
+                    input_ = _to_elem(self._scoped(annotation, module, (), {}), allow_none=True)
+                    if (
+                        result.none == output.none
+                        and frozenset(result.members) == frozenset(output.members)
+                        and self._attrs_concrete(input_)
+                    ):
+                        return input_
+        msg = f"field `{source.key}` has an unsupported converter signature"
+        raise _invalid(msg)
+
+    def _attrs_annotation_node(self, expr: ast.expr, module: _Module, env: dict[str, _Arg]) -> _Node:
+        self._attrs_annotation = True
+        try:
+            return self._scoped(expr, module, (), env)
+        finally:
+            self._attrs_annotation = False
+
+    def _field_elem(self, expr: ast.expr, source: _Source, owner: _Owner) -> Elem:
+        env = self._field_env(owner, source)
+        elem = _to_elem(self._scoped(expr, source.module, (), env), allow_none=True)
+        if source.converter is not None:
+            output = self._attrs_annotation_node(expr, source.module, env)
+            elem = self._attrs_converter(source, output)
+        return elem
+
     def _field(
         self, source: _Source, owner: _Owner, *, names: tuple[str, ...] | None, reason: str | None
     ) -> NamedField:
@@ -2360,7 +3977,7 @@ class _Resolver:
         self._in_field = True
         try:
             expr, override = self._strip_field(source.annotation, source.module)
-            elem = _to_elem(self._scoped(expr, source.module, (), self._field_env(owner, source)), allow_none=True)
+            elem = self._field_elem(expr, source, owner)
         except RejectError as reject:
             notes = [f"field defined at {source.module.path}:{span.line}:{span.col}"]
             if owner.generic is not None:
