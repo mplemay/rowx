@@ -42,7 +42,7 @@ pub(crate) enum Depth {
 }
 
 // a dead connection stays dead; every other error leaves the state to the claim's drop (Idle)
-fn fail(state: &State, failure: Failure) -> Failure {
+pub(crate) fn fail(state: &State, failure: Failure) -> Failure {
     // closing interrupts the statement that is running, which is not a database failure; a genuine
     // error that races with the close keeps its own report
     if state.is_closed()

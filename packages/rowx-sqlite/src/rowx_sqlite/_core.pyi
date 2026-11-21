@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 from rowx_sqlite._options import ConnectOptions, TransactionMode
@@ -29,6 +30,12 @@ type TypeKey = Literal[
     "json",
     "any",
 ]
+type MigrationState = Literal["applied", "pending", "modified", "missing", "dirty"]
+# (version, description, state, installed_on in microseconds since the epoch, execution_time in ns, checksum)
+type StatusRow = tuple[int, str, MigrationState, int | None, int | None, bytes | None]
+# (version, elapsed in ns); None for a dry run or a skip
+type ResultRow = tuple[int, int | None]
+type MigrationEntry = tuple[int, str, Literal["simple", "reversible"], Path, Path | None, bytes, bytes | None, bool]
 type NullReasonName = Literal["NotNullColumn", "NullableColumn", "Unproven", "OverrideBang", "OverrideQuestion"]
 
 def sqlite_version() -> str: ...
@@ -193,6 +200,41 @@ class Pool:
     def max_size(self) -> int: ...
     @property
     def closed(self) -> bool: ...
+
+class Migrator:
+    def __init__(
+        self,
+        path: Path,
+        table: str,
+        create_schemas: list[str],
+        ignore_missing: bool,
+        allow_out_of_order: bool,
+        /,
+    ) -> None: ...
+    @property
+    def migrations(self) -> list[MigrationEntry]: ...
+    @property
+    def table(self) -> tuple[str] | tuple[str, str]: ...
+    async def run(
+        self,
+        executor: Connection | Pool,
+        target: int | None = None,
+        dry_run: bool = False,
+    ) -> list[ResultRow]: ...
+    async def revert(
+        self,
+        executor: Connection | Pool,
+        target: int | None = None,
+        revert_all: bool = False,
+        dry_run: bool = False,
+    ) -> list[ResultRow]: ...
+    async def skip(
+        self,
+        executor: Connection | Pool,
+        target: int | None = None,
+        dry_run: bool = False,
+    ) -> list[ResultRow]: ...
+    async def info(self, executor: Connection | Pool) -> list[StatusRow]: ...
 
 async def connect(options: ConnectOptions, /) -> Connection: ...
 def parse_dsn(dsn: str, /) -> dict[str, Any]: ...
