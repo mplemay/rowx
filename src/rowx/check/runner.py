@@ -24,6 +24,7 @@ from rowx.check.compare import (
     compare,
     compare_param_result,
     expected_type,
+    is_array_key,
     shown_param,
 )
 from rowx.check.construction import template_reports
@@ -109,6 +110,10 @@ class ParameterCoverage:
     python_type: ParamType | None
     # None means the available evidence cannot establish a complete comparison.
     mismatch: bool | None
+    # the backend's name for the parameter (`$1`); None means the PostgreSQL form from the position
+    label: str | None = None
+    # the parameter has no type, so it is never compared
+    untyped: bool = False
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -118,6 +123,7 @@ class InspectedColumn:
     python_type: str | None
     nullable: bool
     reason: str
+    untyped: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -141,6 +147,8 @@ class InspectedParameter:
     sql_type: str
     python_type: str | None
     mismatch: bool | None
+    label: str | None = None
+    untyped: bool = False
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -383,16 +391,20 @@ def _sql_error(site: _Site, error: DatabaseError, backend: CheckerBackend) -> Re
         )
         if note is not None
     )
+    help_table = backend.sql_error_help
+    help_text = help_table.get(error.code) if error.code is not None else None
+    label = error.code if error.code is not None else f"SQLSTATE {error.sqlstate}"
     return Report(
         diagnostic=Diagnostic(
             rule="sql-error",
-            message=f"{error.message} (SQLSTATE {error.sqlstate})",
+            message=f"{error.message} ({label})",
             path=site.call.path,
             span=span,
             notes=notes,
         ),
-        help=backend.sql_error_help.get(error.sqlstate),
+        help=help_text or help_table.get(error.sqlstate),
         sqlstate=error.sqlstate,
+        code=error.code,
         sql=site.sourcemap.sql,
     )
 
@@ -433,17 +445,18 @@ def _param_reports(site: _Site, described: Describe, backend: CheckerBackend) ->
     holes = site.sourcemap.holes
     reports: list[Report] = []
     if (count := len(described.params)) != len(holes):
-        # the server references $1..$count, so the first interpolation past that is the stray one
+        # the described parameters are the first `count` placeholders, so the first interpolation past that is the stray one
         span = holes[count] if count < len(holes) else site.mapper.span(_template(site))
         message = (
-            f"the query has {_plural(len(holes), 'interpolation')} but the server expects {_plural(count, 'parameter')}"
+            f"the query has {_plural(len(holes), 'interpolation')} but {backend.describer} expects "
+            f"{_plural(count, 'parameter')}"
         )
         help_ = "an interpolation inside a string literal or comment is not a parameter"
         reports.append(_report(site, "param-count-mismatch", message, span, help=help_))
     for index, param in enumerate(described.params):
-        if param.type_key is None and index < len(holes):
-            message = f'parameter ${index + 1} has unsupported type "{param.type_name}"'
-            help_ = "cast the parameter to a supported type, such as `{x}::text`"
+        if param.type_key is None and index < len(holes) and not backend.untyped_params:
+            message = f'parameter {backend.placeholder(index + 1)} has unsupported type "{param.type_name}"'
+            help_ = f"cast the parameter to a supported type, such as `{backend.cast('{x}')}`"
             reports.append(_report(site, "unsupported-type", message, holes[index], help=help_))
     reports.extend(_param_type_reports(site, described, backend))
     return reports
@@ -476,6 +489,8 @@ def _param_type_reports(site: _Site, described: Describe, backend: CheckerBacken
                 sql_element_key=param.element_key,
                 python_type=found,
                 mismatch=(finding is not None) if complete else None,
+                label=backend.placeholder(index + 1),
+                untyped=backend.untyped_params and param.type_key is None,
             )
         )
         if finding is not None and span is not None:
@@ -613,7 +628,8 @@ def _inspection(
     columns: list[InspectedColumn] = []
     for column in outcome.columns:
         key = column.type_key
-        supported = key in backend.types and (key != "array" or column.element_key in backend.types)
+        is_array = is_array_key(key, backend)
+        supported = key in backend.types and (not is_array or column.element_key in backend.types)
         mapping = expected_type(_column_desc(column), backend) if supported else None
         reason = (
             "nullability unknown, assumed nullable"
@@ -627,6 +643,7 @@ def _inspection(
                 python_type=clean(mapping) if bool(mapping) else None,
                 nullable=column.nullable,
                 reason=clean(reason),
+                untyped=backend.untyped_columns and key is None,
             )
         )
     parameters = tuple(
@@ -634,6 +651,8 @@ def _inspection(
             sql_type=clean(param.sql_type),
             python_type=clean(shown_param(param.python_type)) if param.python_type is not None else None,
             mismatch=param.mismatch,
+            label=param.label,
+            untyped=param.untyped,
         )
         for param in site.coverage.parameters
     )
@@ -646,10 +665,10 @@ def _inspection(
 
 # an unchecked file is not described; the type table is vocabulary and opening it does not connect
 def _vocabulary_backend(dsn: str | None) -> CheckerBackend | None:
-    supplied = (dsn,) if dsn is not None and dsn.strip() else ()
-    for url in (*supplied, "postgres://"):
-        with suppress(BackendMissing, UnsupportedSchemeError, UnsupportedCapabilityError):
-            return backend_for(url).checker()
+    # a URL that is supplied names the vocabulary, so a backend that cannot load never falls back to another one
+    url = dsn if dsn is not None and dsn.strip() else "postgres://"
+    with suppress(BackendMissing, UnsupportedSchemeError, UnsupportedCapabilityError):
+        return backend_for(url).checker()
     return None
 
 

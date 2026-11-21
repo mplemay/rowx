@@ -132,7 +132,9 @@ validates every query against a live Postgres 18 database by preparing and descr
 | `just fmt` | Format rust, python, and shell through the prek hooks |
 | `just test-rust` | `cargo test` over the default members, which leave out `rowx-embedded` (DB tests run if `ROWX_TEST_DSN` is set) |
 | `just test-rust-embedded` | `cargo test -p rowx-embedded-host` (builds the Wasmer tree) |
-| `just test-py` | `uv run pytest` |
+| `just build-sqlite` | Build the SQLite extension with maturin |
+| `just test-py` | `just build-sqlite`, then `uv run pytest` |
+| `just test-sqlite` | `just build-sqlite`, then `uv run pytest` over `packages/rowx-sqlite/src/rowx_sqlite/__tests__` |
 | `just db-up` / `just db-down` | Start or stop `postgres:18` |
 | `just bench` | Release build plus `bench/fetch_100k.py` |
 
@@ -146,9 +148,9 @@ validates every query against a live Postgres 18 database by preparing and descr
 2. New tests are named in the PR description. Behaviour without a test is not done.
 3. Changes stay scoped to the feature. Small wiring edits (`mod` lines, `__init__` exports, `.pyi` additions) are
    fine and must be called out in the PR.
-4. Errors use `thiserror` in `rowx-core` and `rowx-postgres`. They are mapped to Python exceptions only in an
-   `errors.rs`: the shared exception-class registry is in `crates/rowx-py-core/src/errors.rs`, and each backend maps its
-   own enum (`packages/rowx-postgres/src/errors.rs`).
+4. Errors use `thiserror` in `rowx-core`, `rowx-postgres` and `rowx-sqlite`. They are mapped to Python exceptions only
+   in an `errors.rs`: the shared exception-class registry is in `crates/rowx-py-core/src/errors.rs`, and each backend
+   maps its own enum (`packages/rowx-postgres/src/errors.rs`).
 5. Public Python is fully typed, and the `_core` stubs are updated with any new binding.
 
 ## Architecture conventions

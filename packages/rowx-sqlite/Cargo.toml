@@ -1,0 +1,24 @@
+[package]
+name = "rowx-sqlite-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# the library name differs from rowx-postgres-py's `_core`, so the two cdylibs do not collide in `target/`; the
+# exported symbol stays `PyInit__core` through `#[pymodule(name = "_core")]`
+[lib]
+name = "rowx_sqlite_core"
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+pyo3.workspace = true
+pyo3-async-runtimes.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+rowx-core.workspace = true
+rowx-sqlite.workspace = true
+rowx-py-core.workspace = true
+
+[lints]
+workspace = true

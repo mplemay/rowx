@@ -16,7 +16,7 @@ from rowx_postgres._compiler import COMPILER
 
 from rowx._backend import LOADED, SCHEMES
 from rowx.check.cli import main
-from rowx.check.embedded import embedded_for, open_instance, scratch_session, socket_directory
+from rowx.check.embedded import embedded_for, in_memory_for, open_instance, scratch_session, socket_directory
 from rowx.check.runner import CheckError
 
 if TYPE_CHECKING:
@@ -419,7 +419,7 @@ def test_embedded_for_is_none_for_everything_that_is_not_an_embedded_url(monkeyp
     install(monkeypatch, persistent=True)
     assert embedded_for(None) is None
     assert embedded_for("  ") is None
-    assert embedded_for("sqlite://x") is None
+    assert embedded_for("mysql://x") is None
     assert embedded_for("fakedb-embedded:///var/db") is not None
 
 
@@ -597,3 +597,35 @@ def test_the_second_ctrl_c_on_a_directory_stops_the_instance_without_waiting_for
     assert world.embedded.swept >= 1
     assert "close" not in world.events
     assert capsys.readouterr().err.endswith("error: interrupted\n")
+
+
+def install_memory_backend(monkeypatch: pytest.MonkeyPatch, backend: Backend) -> None:
+    monkeypatch.setitem(sys.modules, "fake_memory_backend", SimpleNamespace(load=lambda: backend))
+    monkeypatch.setitem(SCHEMES, "fakemem", ("fake_memory_backend", "fake"))
+    monkeypatch.delitem(LOADED, "fake_memory_backend", raising=False)
+
+
+def memory_backend(**extra: object) -> Backend:
+    return Backend(memory_factory=lambda url: url == "fakemem://:memory:", **extra)  # ty: ignore[invalid-argument-type]
+
+
+def test_in_memory_for_follows_the_backend_and_leaves_the_rest_to_later_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_memory_backend(monkeypatch, memory_backend())
+    assert in_memory_for("fakemem://:memory:") is True
+    assert in_memory_for("fakemem:///var/db") is False
+    assert in_memory_for(None) is False
+    assert in_memory_for("  ") is False
+    assert in_memory_for("no-such-scheme://x") is False
+    monkeypatch.setitem(SCHEMES, "fakedb-missing", ("no_such_backend_module", "fake"))
+    assert in_memory_for("fakedb-missing://x") is False
+
+
+def test_in_memory_for_refuses_a_url_the_backend_rejects_without_quoting_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(url: str) -> bool:
+        msg = f"unparsable: {url}"
+        raise ValueError(msg)
+
+    install_memory_backend(monkeypatch, Backend(memory_factory=refuse))
+    with pytest.raises(CheckError) as caught:
+        in_memory_for("fakemem://user:hunter2secret@host")
+    assert str(caught.value) == "the database URL could not be parsed"

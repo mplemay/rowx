@@ -11,10 +11,15 @@ because an earlier one failed, re-run that skipped job after the failed one succ
 `rowx` already uses the `pypi` environment. The owner registers pending trusted publishers for
 `rowx-core` and `rowx-postgres`.
 
+`rowx-sqlite` is part of the lockstep version, and `just release X.Y.Z` bumps it with the others, but it does not
+publish yet: its wheels and publish job come with [#348](https://github.com/mplemay/rowx/issues/348), and no release is
+tagged until that merges.
+
 `just release X.Y.Z` bumps the lockstep version, regenerates `docs/changelog.md` with git-cliff, and opens the release
 pull request. After that pull request merges, a green CI push to main runs the tag release job. That job creates
 `vX.Y.Z` on the merge commit and dispatches `release.yml` on the tag. A tag push from `GITHUB_TOKEN` does not start
-`release.yml`.
+`release.yml`. The release tag creation ruleset exempts `github-actions[bot]` so `create-tag` can run, and the
+release tag integrity ruleset still blocks moving or deleting the tag.
 
 A `workflow_dispatch` whose ref is a branch builds, checks, and rebuilds the artifacts. It does not publish.
 Publishing runs when the ref is a `v*` tag, including a dispatch of that tag. If the tag exists and the dispatch

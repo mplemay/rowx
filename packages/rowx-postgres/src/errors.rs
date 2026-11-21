@@ -9,8 +9,6 @@ use rowx_postgres::error::Error;
 use rowx_postgres::migrate::MigrateError;
 use rowx_py_core::errors as shared;
 
-use rowx_py_core::shape::{render_null, render_shape};
-
 use crate::named::RowShape;
 
 // the only place a Postgres driver error becomes a Python exception
@@ -31,6 +29,7 @@ pub fn to_py_err(py: Python<'_>, err: &Error) -> PyErr {
             detail.as_deref(),
             hint.as_deref(),
             *position,
+            None,
         ),
         Error::Interface(_) | Error::Drift(_) => shared::interface_error(py, &err.to_string()),
         Error::Core(core) => shared::core_to_py_err(py, *core),
@@ -50,31 +49,15 @@ pub fn to_py_err(py: Python<'_>, err: &Error) -> PyErr {
 #[must_use]
 pub fn named_to_py_err(py: Python<'_>, err: &Error, shape: &RowShape) -> PyErr {
     match err {
-        Error::Shape { errors, columns } => shared::row_shape_error(
-            py,
-            &render_shape(
-                shape.data().type_name(),
-                shape.data().key_names(),
-                errors,
-                columns,
-            ),
-        ),
+        Error::Shape { errors, columns } => {
+            shared::named_shape_error(py, shape.data(), errors, columns)
+        }
         Error::NullField {
             column,
             field,
             row,
             name,
-        } => {
-            let key = shape
-                .data()
-                .key_names()
-                .get(*field)
-                .map_or("", String::as_str);
-            shared::row_shape_error(
-                py,
-                &render_null(shape.data().type_name(), key, *column, name, *row),
-            )
-        }
+        } => shared::named_null_error(py, shape.data(), *field, *column, name, *row),
         other => to_py_err(py, other),
     }
 }

@@ -20,6 +20,7 @@ VERSION_FILES: Final[tuple[str, ...]] = (
     "packages/rowx-core/pyproject.toml",
     "packages/rowx-postgres/pyproject.toml",
     "packages/rowx-embedded/pyproject.toml",
+    "packages/rowx-sqlite/pyproject.toml",
     "packages/rowx-embedded/Cargo.toml",
     "packages/rowx-embedded/crates/rowx-embedded-host/Cargo.toml",
 )
@@ -85,18 +86,44 @@ def test_push_without_tag_fails(monkeypatch: pytest.MonkeyPatch) -> None:
         _run(monkeypatch, "push")
 
 
-@pytest.mark.parametrize("name", ["rowx-postgres", "rowx-embedded"])
+@pytest.mark.parametrize("name", ["rowx-postgres", "rowx-embedded", "rowx-sqlite"])
 def test_mismatched_dev_pin_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str) -> None:
     _copy_version_files(tmp_path)
     project = tmp_path / "pyproject.toml"
     version = _release_version(tmp_path)
     text = project.read_text(encoding="utf-8")
     # the embedded extra repeats the rowx-postgres pin, so the dev group's line is found by its position after it
-    needle = f'dev = [\n    "rowx-postgres=={version}",\n    "rowx-embedded=={version}",\n'
+    needle = (
+        f'dev = [\n    "rowx-postgres=={version}",\n    "rowx-embedded=={version}",\n    "rowx-sqlite=={version}",\n'
+    )
     assert text.count(needle) == 1
     mismatched = needle.replace(f'"{name}=={version}"', f'"{name}=={MISMATCH_VERSION}"')
     project.write_text(text.replace(needle, mismatched, 1), encoding="utf-8")
     with pytest.raises(SystemExit, match=f"dev dependency group must pin {name}"):
+        _run(monkeypatch, "pull_request", root=tmp_path)
+
+
+def test_mismatched_sqlite_extra_pin_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _copy_version_files(tmp_path)
+    version = _release_version(tmp_path)
+    _replace_once(
+        tmp_path / "pyproject.toml",
+        f'sqlite = ["rowx-sqlite=={version}"]',
+        f'sqlite = ["rowx-sqlite=={MISMATCH_VERSION}"]',
+    )
+    with pytest.raises(SystemExit, match=r"rowx\[sqlite\] must be exactly"):
+        _run(monkeypatch, "pull_request", root=tmp_path)
+
+
+def test_sqlite_must_depend_only_on_matching_core(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _copy_version_files(tmp_path)
+    version = _release_version(tmp_path)
+    _replace_once(
+        tmp_path / "packages/rowx-sqlite/pyproject.toml",
+        f'dependencies = ["rowx-core=={version}"]',
+        f'dependencies = ["rowx-core=={MISMATCH_VERSION}"]',
+    )
+    with pytest.raises(SystemExit, match="rowx-sqlite must depend only on the matching rowx-core"):
         _run(monkeypatch, "pull_request", root=tmp_path)
 
 

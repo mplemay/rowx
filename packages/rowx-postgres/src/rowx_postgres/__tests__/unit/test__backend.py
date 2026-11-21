@@ -3,6 +3,9 @@ import sys
 from typing import TYPE_CHECKING, get_args
 
 import pytest
+from rowx_core.errors import DatabaseError
+from rowx_postgres._backend import load
+from rowx_postgres._services import PostgresAdmin
 from rowx_postgres._vocab import LeafName
 
 if TYPE_CHECKING:
@@ -61,3 +64,26 @@ def test_importing_never_imports_the_embedded_companion(statement: str) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_the_checker_states_its_vocabulary_explicitly() -> None:
+    checker = load().checker()
+    assert checker.json_keys == frozenset({"json", "jsonb"})
+    assert checker.array_key == "array"
+    assert (checker.placeholder(2), checker.describer, checker.cast("{x}")) == ("$2", "the server", "{x}::text")
+    assert (checker.untyped_params, checker.untyped_columns) == (False, False)
+
+
+def test_the_postgresql_backend_warns_about_shared_servers_and_has_no_memory_urls() -> None:
+    backend = load()
+    assert backend.compat_warning == (
+        "use a disposable PostgreSQL server; trusted migrations can affect shared cluster resources"
+    )
+    assert backend.in_memory("postgresql://h/db") is False
+    assert backend.scratch_factory is None
+
+
+def test_a_duplicate_database_is_sqlstate_42p04() -> None:
+    admin = PostgresAdmin("postgresql://u@h/app")
+    assert admin.duplicate(DatabaseError("42P04", "already exists")) is True
+    assert admin.duplicate(DatabaseError("42501", "denied")) is False

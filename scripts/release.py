@@ -26,24 +26,28 @@ VERSION_LINE_FILES: Final[tuple[str, ...]] = (
     "packages/rowx-core/pyproject.toml",
     "packages/rowx-postgres/pyproject.toml",
     "packages/rowx-embedded/pyproject.toml",
+    "packages/rowx-sqlite/pyproject.toml",
     "Cargo.toml",
     "packages/rowx-embedded/Cargo.toml",
     "packages/rowx-embedded/crates/rowx-embedded-host/Cargo.toml",
 )
 PIN_COUNTS: Final[dict[str, tuple[tuple[str, int], ...]]] = {
-    "pyproject.toml": (("rowx-core", 1), ("rowx-postgres", 3), ("rowx-embedded", 2)),
+    "pyproject.toml": (("rowx-core", 1), ("rowx-postgres", 3), ("rowx-embedded", 2), ("rowx-sqlite", 2)),
     "packages/rowx-postgres/pyproject.toml": (("rowx-core", 1),),
     "packages/rowx-embedded/pyproject.toml": (("rowx-core", 1), ("rowx-postgres", 1)),
+    "packages/rowx-sqlite/pyproject.toml": (("rowx-core", 1),),
 }
 CARGO_PACKAGES: Final[frozenset[str]] = frozenset({
     "rowx-core",
     "rowx-postgres",
     "rowx-postgres-py",
     "rowx-py-core",
+    "rowx-sqlite",
+    "rowx-sqlite-py",
     "rowx-embedded",
     "rowx-embedded-host",
 })
-UV_PACKAGES: Final[frozenset[str]] = frozenset({"rowx", "rowx-core", "rowx-postgres", "rowx-embedded"})
+UV_PACKAGES: Final[frozenset[str]] = frozenset({"rowx", "rowx-core", "rowx-postgres", "rowx-embedded", "rowx-sqlite"})
 FUZZ_PACKAGES: Final[frozenset[str]] = frozenset({"rowx-core", "rowx-postgres"})
 LOCK_FILES: Final[tuple[tuple[str, frozenset[str]], ...]] = (
     ("Cargo.lock", CARGO_PACKAGES),
@@ -59,7 +63,7 @@ RELEASE_PATHS: Final[tuple[str, ...]] = (
     "docs/packages.md",
 )
 PACKAGE_MARKER: Final[str] = "[[package]]\n"
-COMMIT_MESSAGE: Final[str] = "ci: release rowx, rowx-core, rowx-postgres and rowx-embedded as {version}"
+COMMIT_MESSAGE: Final[str] = "ci: release rowx, rowx-core, rowx-postgres, rowx-embedded and rowx-sqlite as {version}"
 
 type Version = tuple[int, int, int]
 type Action = Literal["skip", "tag"]

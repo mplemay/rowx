@@ -29,6 +29,7 @@ class Report:
     # the caret label, such as "element 3"
     label: str | None = None
     sqlstate: str | None = None
+    code: str | None = None
     sql: str | None = None
     column_index: int | None = None
     # the field key of a field-related rule on a named row
@@ -47,6 +48,7 @@ type _TemplateReason = Literal[
     "NotValidatedConstraint",
     "ForeignOrView",
     "ViewColumn",
+    "Unproven",
     "OuterJoin",
     "GroupingSets",
     "ScanBoundary",
@@ -81,6 +83,8 @@ def null_reason_note(reason: _TemplateReason, detail: str | None = None, *, colu
     match reason:
         case "Computed":
             return f'computed expression; add AS "{column or "col"}!"'
+        case "Unproven":
+            return "nullability not proven, assumed nullable"
         case "OuterJoin":
             return "nullable side of an outer join" + ("" if detail is None else f" ({detail})")
         case "ScanBoundary":
@@ -218,22 +222,23 @@ def render_json(reports: Iterable[Report], root: Path | None = None) -> str:
     for report in sort_reports(reports):
         diagnostic = report.diagnostic
         span = diagnostic.span
-        items.append(
-            {
-                "rule": diagnostic.rule,
-                "severity": report.severity,
-                "message": diagnostic.message,
-                "file": _relative(diagnostic.path, root),
-                "line": span.line,
-                "col": span.col,
-                "end_line": span.end_line,
-                "end_col": span.end_col,
-                "notes": list(diagnostic.notes),
-                "help": report.help,
-                "sqlstate": report.sqlstate,
-                "sql": report.sql,
-                "column_index": report.column_index,
-                "field": report.field,
-            },
-        )
+        item: dict[str, object] = {
+            "rule": diagnostic.rule,
+            "severity": report.severity,
+            "message": diagnostic.message,
+            "file": _relative(diagnostic.path, root),
+            "line": span.line,
+            "col": span.col,
+            "end_line": span.end_line,
+            "end_col": span.end_col,
+            "notes": list(diagnostic.notes),
+            "help": report.help,
+            "sqlstate": report.sqlstate,
+            # only a backend with a native error name adds it, so PostgreSQL output is unchanged
+            **({"code": report.code} if report.code is not None else {}),
+            "sql": report.sql,
+            "column_index": report.column_index,
+            "field": report.field,
+        }
+        items.append(item)
     return dumps(items, indent=2, ensure_ascii=False) + "\n"

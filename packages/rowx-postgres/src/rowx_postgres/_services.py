@@ -136,6 +136,10 @@ class PostgresAdmin:
     def with_database(self, name: str) -> str:
         return with_database(self._dsn, name)
 
+    @staticmethod
+    def duplicate(error: DatabaseError) -> bool:
+        return error.sqlstate == "42P04"
+
 
 class PostgresMigrationSession:
     def __init__(self, migrator: Migrator, connection: Connection, *, history_table: str | None = None) -> None:

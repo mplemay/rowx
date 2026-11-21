@@ -1,12 +1,15 @@
 from typing import Final
 
-from rowx_core.backend import Backend, CheckerBackend, TypeEntry
+from rowx_core.backend import Backend, CheckerBackend, TypeEntry, dollar_placeholder, text_cast
 
 from rowx_postgres._checker import SQL_ERROR_HELP, override_issues
 from rowx_postgres._compiler import COMPILER
 from rowx_postgres._core import map_columns, type_table
 from rowx_postgres._services import PostgresAdmin, PostgresMigrations, PostgresProvisioner, open_checker
 
+COMPAT_WARNING: Final[str] = (
+    "use a disposable PostgreSQL server; trusted migrations can affect shared cluster resources"
+)
 VALUE_LEAVES: Final[dict[str, str]] = {
     "rowx.postgres.Money": "rowx_postgres.Money",
     "rowx.postgres.Interval": "rowx_postgres.Interval",
@@ -78,6 +81,13 @@ def checker() -> CheckerBackend:
         value_classes=VALUE_CLASSES,
         sql_error_help=SQL_ERROR_HELP,
         override_issues=override_issues,
+        json_keys=frozenset({"json", "jsonb"}),
+        array_key="array",
+        placeholder=dollar_placeholder,
+        describer="the server",
+        cast=text_cast,
+        untyped_params=False,
+        untyped_columns=False,
     )
 
 
@@ -87,4 +97,5 @@ def load() -> Backend:
         admin_factory=PostgresAdmin,
         migration_factory=PostgresMigrations,
         testing_factory=PostgresProvisioner,
+        compat_warning=COMPAT_WARNING,
     )

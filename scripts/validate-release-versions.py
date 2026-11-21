@@ -8,7 +8,7 @@ from typing import Final
 ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 PUSH_EVENT: Final[str] = "push"
 PACKAGE_NAME: Final[str] = "rowx"
-PYTHON_PACKAGES: Final[tuple[str, ...]] = ("rowx", "rowx-core", "rowx-postgres", "rowx-embedded")
+PYTHON_PACKAGES: Final[tuple[str, ...]] = ("rowx", "rowx-core", "rowx-postgres", "rowx-embedded", "rowx-sqlite")
 EMBEDDED_DIR: Final[str] = "packages/rowx-embedded"
 EMBEDDED_MARKER: Final[str] = (
     "(sys_platform == 'darwin' and platform_machine == 'arm64') or "
@@ -19,6 +19,8 @@ WORKSPACE_PACKAGES: Final[frozenset[str]] = frozenset({
     "rowx-postgres",
     "rowx-postgres-py",
     "rowx-py-core",
+    "rowx-sqlite",
+    "rowx-sqlite-py",
     "rowx-embedded",
     "rowx-embedded-host",
 })
@@ -55,6 +57,7 @@ def main() -> int:
     if not isinstance(extras, dict) or extras.get("postgres") != [f"rowx-postgres=={version}"]:
         message = "rowx[postgres] must pin the matching rowx-postgres"
         raise SystemExit(message)
+    _check_sqlite(root, version, extras)
     expected_embedded = [f"rowx-postgres=={version}", f"rowx-embedded=={version}; {EMBEDDED_MARKER}"]
     if extras.get("embedded") != expected_embedded:
         message = f"rowx[embedded] must be exactly {expected_embedded}"
@@ -70,6 +73,16 @@ def main() -> int:
         with Path(output).open("a", encoding="utf-8") as handle:
             handle.write(f"version={version}\n")
     return 0
+
+
+def _check_sqlite(root: Path, version: str, extras: dict[str, object]) -> None:
+    sqlite_project = _read(root / "packages/rowx-sqlite/pyproject.toml")["project"]
+    if not isinstance(sqlite_project, dict) or sqlite_project.get("dependencies") != [f"rowx-core=={version}"]:
+        message = "rowx-sqlite must depend only on the matching rowx-core"
+        raise SystemExit(message)
+    if extras.get("sqlite") != [f"rowx-sqlite=={version}"]:
+        message = "rowx[sqlite] must be exactly the matching rowx-sqlite"
+        raise SystemExit(message)
 
 
 def _check_embedded(root: Path, version: str, versions: dict[str, str]) -> None:
@@ -88,7 +101,7 @@ def _check_embedded(root: Path, version: str, versions: dict[str, str]) -> None:
 def _require_dev_pins(project: dict[str, object], version: str) -> None:
     groups = project.get("dependency-groups")
     dev = groups.get("dev") if isinstance(groups, dict) else None
-    for name in ("rowx-postgres", "rowx-embedded"):
+    for name in ("rowx-postgres", "rowx-embedded", "rowx-sqlite"):
         if not isinstance(dev, list) or f"{name}=={version}" not in dev:
             message = f"dev dependency group must pin {name} to the release version"
             raise SystemExit(message)

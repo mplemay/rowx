@@ -1,6 +1,6 @@
 import importlib
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 if TYPE_CHECKING:
     from rowx_core.backend import Backend
@@ -23,6 +23,18 @@ SCHEMES: Final[dict[str, tuple[str, str]]] = {
     "postgres": ("rowx_postgres._backend", "postgres"),
     "postgresql": ("rowx_postgres._backend", "postgres"),
     "embedded": ("rowx_embedded._backend", "embedded"),
+    "sqlite": ("rowx_sqlite._backend", "sqlite"),
+}
+SQLITE_HINT: Final[str] = "use `sqlite:///relative.db`, `sqlite:////absolute/path.db` or `sqlite::memory:`"
+SQLITE_MEMORY: Final[str] = "sqlite::memory:"
+SQLITE_MEMORY_FILE: Final[str] = ":memory:"
+SQLITE_SUFFIXES: Final[tuple[str, ...]] = (".db", ".sqlite", ".sqlite3", ".db3")
+# query options that a SQLite URL may not carry, as name -> the values that are rejected (empty rejects any value)
+SQLITE_REJECTED_OPTIONS: Final[dict[str, frozenset[str]]] = {
+    "mode": frozenset({"memory"}),
+    "immutable": frozenset(),
+    "vfs": frozenset(),
+    "cache": frozenset({"shared"}),
 }
 LOADED: Final[dict[str, Backend]] = {}
 
@@ -45,6 +57,39 @@ def _parsed(token: str) -> str | None:
     return None
 
 
+def _sqlite_error(problem: str) -> UnsupportedSchemeError:
+    return UnsupportedSchemeError(f"{problem}; {SQLITE_HINT}")
+
+
+def _check_sqlite_url(token: str) -> None:
+    if token.lower() == SQLITE_MEMORY:
+        return
+    if not token.lower().startswith("sqlite://"):
+        msg = "a SQLite URL needs `//` after the scheme"
+        raise _sqlite_error(msg)
+    try:
+        parsed = urlparse(token)
+        options = parse_qsl(parsed.query, keep_blank_values=True)
+    except ValueError:
+        msg = "the SQLite URL is not valid"
+        raise _sqlite_error(msg) from None
+    if parsed.netloc:
+        msg = "a SQLite URL has no host"
+        raise _sqlite_error(msg)
+    if parsed.path in {"", "/"}:
+        msg = "the SQLite URL has an empty path"
+        raise _sqlite_error(msg)
+    # SQLite opens the filename `:memory:` as an in-memory database; strip only the one leading slash
+    if unquote(parsed.path).removeprefix("/").lower() == SQLITE_MEMORY_FILE:
+        msg = "an in-memory database is written `sqlite::memory:`"
+        raise _sqlite_error(msg)
+    for name, value in options:
+        rejected = SQLITE_REJECTED_OPTIONS.get(name.lower())
+        if rejected is not None and (not rejected or value.lower() in rejected):
+            msg = f"the SQLite URL option `{name}` is not supported"
+            raise _sqlite_error(msg)
+
+
 def _scheme(dsn: str) -> str | None:
     # the first token of a URL is `scheme://...`; urlparse lowercases it. A keyword DSN has no scheme.
     stripped = dsn.strip()
@@ -54,7 +99,19 @@ def _scheme(dsn: str) -> str | None:
     # the embedded grammar also accepts `embedded:` with no `//`, which urlparse would not report as a scheme
     if token.lower().startswith("embedded:") and not token.lower().startswith("embedded://"):
         return "embedded"
-    return _parsed(token)
+    lowered = token.lower()
+    if lowered.startswith("sqlite:"):
+        _check_sqlite_url(token)
+        return "sqlite"
+    if lowered.startswith("file:"):
+        msg = "a `file:` URI is not a SQLite target"
+        raise _sqlite_error(msg)
+    scheme = _parsed(token)
+    # a keyword DSN holds `=` or several words; a lone token that names a database file is a path, not a DSN
+    if scheme is None and stripped == token and "=" not in token and lowered.endswith(SQLITE_SUFFIXES):
+        msg = "a bare file path is not a SQLite target"
+        raise _sqlite_error(msg)
+    return scheme
 
 
 def _target(dsn: str) -> tuple[str, str]:
