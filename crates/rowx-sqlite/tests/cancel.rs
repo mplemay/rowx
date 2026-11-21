@@ -1,7 +1,10 @@
 // pub, so the shared helpers are reachable from the crate root and need no visibility waiver
 pub mod common;
 
-use std::sync::Arc;
+use std::future::{Future, poll_fn};
+use std::pin::pin;
+use std::sync::{Arc, mpsc};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use common::{
@@ -14,6 +17,8 @@ use rowx_core::state::Phase;
 use rowx_sqlite::cancel::{Hook, spawn};
 use rowx_sqlite::error::Error;
 use rowx_sqlite::exec::Param;
+use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 #[tokio::test]
 async fn interrupting_a_long_query_leaves_the_connection_usable_and_leaks_nothing() -> TestResult {
@@ -91,6 +96,42 @@ async fn an_interrupt_with_nothing_running_does_nothing() -> TestResult {
     conn.run_raw(|raw| raw.get_interrupt_handle().interrupt())
         .await?;
     assert_eq!(ints(&conn, "SELECT 3").await?, [3]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn closing_interrupts_a_statement_that_starts_after_the_first_interrupt() -> TestResult {
+    let mut conn = connect(&memory()).await?;
+    let (started, ready) = oneshot::channel();
+    let (release, proceed) = mpsc::channel();
+    let (reply, outcome) = oneshot::channel();
+
+    {
+        let work = conn.run_raw(move |raw| {
+            if started.send(()).is_ok() && proceed.recv_timeout(Duration::from_secs(5)).is_ok() {
+                let result = raw
+                    .query_row(LONG_QUERY, [], |_| Ok(()))
+                    .map_err(Error::from);
+                let _ = reply.send(result);
+            }
+        });
+        tokio::pin!(work);
+        tokio::select! {
+            result = ready => result?,
+            _ = &mut work => return Err("the worker finished before close".into()),
+        }
+    }
+
+    let mut close = pin!(conn.close());
+    // The first poll sends SQLite's interrupt and queues Close while the worker has no active statement.
+    poll_fn(|cx| {
+        assert!(close.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    release.send(())?;
+    timeout(Duration::from_secs(5), close).await?;
+    assert!(outcome.await?.is_err_and(|error| error.is_interrupt()));
     Ok(())
 }
 
