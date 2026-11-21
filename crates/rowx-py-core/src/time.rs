@@ -10,3 +10,9 @@ pub fn seconds(name: &str, secs: f64) -> PyResult<Duration> {
         PyValueError::new_err(format!("{name} must be a non-negative number of seconds"))
     })
 }
+
+/// # Errors
+/// `ValueError` when `secs` is set and negative, not finite or too large.
+pub fn optional_seconds(name: &str, secs: Option<f64>) -> PyResult<Option<Duration>> {
+    secs.map(|secs| seconds(name, secs)).transpose()
+}
