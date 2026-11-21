@@ -111,7 +111,7 @@ fn claim(py: Python<'_>, core: &Arc<Core>) -> PyResult<(Arc<Core>, Hook, Hook)> 
 // one operation on the worker: it owns the claim, and dropping the awaiting call cancels it. Whatever the
 // operation changes on the connection (the transaction depth) it changes itself, so an abandoned call
 // leaves nothing half done.
-fn run<'py, T, Fut>(
+pub(crate) fn run<'py, T, Fut>(
     py: Python<'py>,
     core: &Arc<Core>,
     make: impl FnOnce(Arc<Core>, Hook) -> Fut + Send + 'static,

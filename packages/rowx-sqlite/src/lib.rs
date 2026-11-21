@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod conn;
+pub mod describe;
 pub mod errors;
 pub mod exec;
 pub mod named;
@@ -25,6 +26,11 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<named::ShapeIssue>()?;
     module.add_class::<stream::RowStream>()?;
     module.add_class::<types::TypeInfo>()?;
+    module.add_class::<describe::ColumnInfo>()?;
+    module.add_class::<describe::Describe>()?;
+    module.add_class::<describe::ParamInfo>()?;
+    module.add_function(wrap_pyfunction!(describe::describe, module)?)?;
+    module.add_function(wrap_pyfunction!(describe::connect_checker, module)?)?;
     module.add_function(wrap_pyfunction!(named::map_columns_py, module)?)?;
     module.add_function(wrap_pyfunction!(types::type_table, module)?)?;
     module.add_function(wrap_pyfunction!(sqlite_version, module)?)?;

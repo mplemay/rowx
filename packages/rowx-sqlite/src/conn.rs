@@ -203,6 +203,12 @@ impl Connection {
     }
 }
 
+impl Connection {
+    pub(crate) const fn core(&self) -> &Arc<Core> {
+        &self.core
+    }
+}
+
 #[pymethods]
 impl Connection {
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
