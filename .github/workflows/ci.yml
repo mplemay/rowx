@@ -71,6 +71,7 @@ jobs:
   python:
     name: test (${{ matrix.platform }}/${{ matrix.python-version }}/${{ matrix.package }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -309,13 +310,14 @@ jobs:
         run: bash scripts/ci-embedded-licenses.sh
 
   python-embedded:
-    name: test (${{ matrix.platform }}/${{ matrix.python-version }}/embedded)
+    name: test (${{ matrix.platform }}/${{ matrix.python-version }}/embedded/${{ matrix.shard }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.14", "3.15"]
         platform: [Linux, macOS]
+        shard: [engine, postgres]
         include:
           - { platform: Linux, runner: ubuntu-latest }
           - { platform: macOS, runner: macos-15 }
@@ -348,9 +350,10 @@ jobs:
           name: ci-embedded-wheel-${{ runner.os }}
           path: dist-embedded
 
-      - name: Test the embedded wheel and engine
+      - name: Test the embedded shard
         env:
           CI_PACKAGE: embedded
+          CI_EMBEDDED_SHARD: ${{ matrix.shard }}
         run: bash scripts/ci-test-python.sh
 
   lint:

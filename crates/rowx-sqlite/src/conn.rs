@@ -583,12 +583,10 @@ impl Connection {
         };
         // `Job::Close` queues behind a running job, and a closed state never sends a cancel, so wake a
         // worker that is stepping or parked on a full stream channel before waiting for it
-        self.shared.request_cancel();
-        self.backend.interrupt();
         let (done, closed) = oneshot::channel();
         if jobs.send(Job::Close(done)).is_ok() {
             // a worker that already died answers by dropping the sender; the database is gone either way
-            let _ = closed.await;
+            let _ = self.backend.interrupt_until_closed(closed).await;
         }
         self.shared.mark_dead();
     }
