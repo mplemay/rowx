@@ -81,19 +81,20 @@ def _materialize(sha: str, root: Path) -> None:
             check=True,
         )
         output.seek(0)
-        directories: set[Path] = {root}
+        # Windows Path equality folds case, but Git tree entries keep their original spelling.
+        directories = {os.fspath(root)}
         for path, oid in blobs:
             _write_blob(output, path, oid, root, directories)
 
 
-def _write_blob(output: BinaryIO, path: Path, oid: bytes, root: Path, directories: set[Path]) -> None:
+def _write_blob(output: BinaryIO, path: Path, oid: bytes, root: Path, directories: set[str]) -> None:
     object_id, kind, size = output.readline().split(b" ")
     if object_id != oid or kind != b"blob":
         msg = "unexpected Git object"
         raise ValueError(msg)
     missing = []
     parent = path.parent
-    while parent not in directories:
+    while os.fspath(parent) not in directories:
         missing.append(parent)
         parent = parent.parent
     for directory in reversed(missing):
@@ -102,7 +103,7 @@ def _write_blob(output: BinaryIO, path: Path, oid: bytes, root: Path, directorie
         except FileExistsError:
             msg = f"filesystem collision: {directory.relative_to(root)}"
             raise CheckError(msg) from None
-        directories.add(directory)
+        directories.add(os.fspath(directory))
     try:
         target = path.open("xb")
     except FileExistsError:
