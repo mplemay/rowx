@@ -69,6 +69,13 @@ impl Error {
         matches!(self, Self::Sqlite { code, .. } if code & 0xff == ffi::SQLITE_INTERRUPT)
     }
 
+    /// `true` for a lock that could not be taken (`SQLITE_BUSY` or `SQLITE_LOCKED`, whatever the extended code).
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Sqlite { code, .. }
+            if matches!(code & 0xff, ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED))
+    }
+
     /// The SQLSTATE of a SQLite failure; other errors have none.
     #[must_use]
     pub const fn sqlstate(&self) -> Option<&'static str> {

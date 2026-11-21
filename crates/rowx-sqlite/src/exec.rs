@@ -4,13 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rowx_core::error::TaskStopped;
 pub use rowx_core::row_shape::Shape;
 use rowx_core::row_shape::{FieldSpec, Mapping, Matching, check_nulls, check_shape, column_mask};
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 pub use rusqlite::types::Value as Param;
 use rusqlite::types::ValueRef;
 use rusqlite::{Rows, Statement, ffi, params_from_iter};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cancel::{Shared, Unsent};
-use crate::conn::{Connection, Ctx};
+use crate::conn::{Connection, Ctx, authorize};
 use crate::error::Error;
 use crate::timeout::{Armed, Timer};
 use crate::types::{ColumnType, lookup};
@@ -656,6 +657,10 @@ impl Connection {
     /// (#300), so this is separate from `execute`. The statement timeout does not apply: a migration
     /// is expected to run long, and a cancel still interrupts it.
     ///
+    /// A script may not end or start a transaction of its own (`BEGIN`, `COMMIT`, `ROLLBACK`): the
+    /// migrator owns the transaction, or runs the file outside one. SQLite refuses those statements
+    /// before they run, with `SQLITE_AUTH`.
+    ///
     /// # Errors
     /// `Sqlite` for the first failing statement.
     pub async fn execute_migration_script(&self, sql: &str) -> Result<(), Error> {
@@ -664,7 +669,26 @@ impl Connection {
             if ctx.shared.is_cancelled() {
                 return Err(interrupted());
             }
-            ctx.conn.execute_batch(&sql)?;
+            let untrusted = ctx.untrusted;
+            ctx.conn.authorizer(Some(move |auth: AuthContext<'_>| {
+                if matches!(auth.action, AuthAction::Transaction { .. }) {
+                    Authorization::Deny
+                } else if untrusted {
+                    authorize(auth)
+                } else {
+                    Authorization::Allow
+                }
+            }))?;
+            let outcome = ctx.conn.execute_batch(&sql);
+            // back to what the connection was opened with
+            let restored = if untrusted {
+                ctx.conn.authorizer(Some(authorize))
+            } else {
+                ctx.conn
+                    .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            };
+            outcome?;
+            restored?;
             Ok(())
         })
         .await

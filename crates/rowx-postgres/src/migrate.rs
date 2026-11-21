@@ -2,10 +2,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use rowx_core::migrate::{
-    AppliedMigration, Migration, MigrationInfo, MigrationStatus, PlanError, PlanOptions,
-    RevertTarget, SchemaName, SourceError, TableName, migration_info, plan_revert, plan_run,
-    plan_skip,
+    AppliedMigration, Migration, MigrationStatus, PlanError, PlanOptions, RevertTarget, SchemaName,
+    SourceError, TableName, details, failed_message, plain, plan_revert, plan_run, plan_skip,
+    planned,
 };
+pub use rowx_core::migrate::{AppliedRecord, MigrationDetail};
 use thiserror::Error;
 
 use crate::conn::Connection;
@@ -66,17 +67,6 @@ impl MigrateError {
     }
 }
 
-fn failed_message(version: i64, ended_transaction: bool, source: &Error) -> String {
-    if ended_transaction {
-        format!(
-            "migration {version} failed: the file ended rowx's transaction (mark it \
-             `-- no-transaction`); whatever it committed stays committed but is not recorded"
-        )
-    } else {
-        format!("migration {version} failed: {source}")
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrateConfig {
     pub table: TableName,
@@ -93,24 +83,6 @@ impl MigrateConfig {
             locking: true,
         }
     }
-}
-
-// An applied row with the columns `info` reports
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppliedRecord {
-    pub migration: AppliedMigration,
-    pub installed_on_micros: i64,
-    pub execution_time: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationDetail {
-    pub info: MigrationInfo,
-    // `Some` for versions that have a history row
-    pub installed_on_micros: Option<i64>,
-    pub execution_time: Option<i64>,
-    // the checksum the history row holds
-    pub applied_checksum: Option<Vec<u8>>,
 }
 
 /// sqlx's advisory-lock key for a database name.
@@ -199,21 +171,6 @@ async fn list_records(conn: &Connection, quoted: &str) -> Result<Vec<AppliedReco
         .collect())
 }
 
-fn details(local: &[Migration], applied: &[AppliedRecord]) -> Vec<MigrationDetail> {
-    migration_info(local, &plain(applied))
-        .into_iter()
-        .map(|info| {
-            let record = applied.iter().find(|r| r.migration.version == info.version);
-            MigrationDetail {
-                installed_on_micros: record.map(|r| r.installed_on_micros),
-                execution_time: record.map(|r| r.execution_time),
-                applied_checksum: record.map(|r| r.migration.checksum.clone()),
-                info,
-            }
-        })
-        .collect()
-}
-
 // The status of each version the operation touched, in the order it touched them. It is read under
 // the same lock as the change, from the table resolved before the files ran.
 async fn touched(
@@ -227,10 +184,6 @@ async fn touched(
         .iter()
         .filter_map(|version| after.iter().find(|d| d.info.version == *version).cloned())
         .collect())
-}
-
-fn plain(records: &[AppliedRecord]) -> Vec<AppliedMigration> {
-    records.iter().map(|r| r.migration.clone()).collect()
 }
 
 fn nanos(started: Instant) -> i64 {
@@ -590,23 +543,6 @@ pub async fn revert(
         Ok(details)
     })
     .await
-}
-
-// The statuses a plan's steps would have afterwards, for a dry run
-fn planned(steps: &[Migration], status: MigrationStatus) -> Vec<MigrationDetail> {
-    steps
-        .iter()
-        .map(|step| MigrationDetail {
-            info: MigrationInfo {
-                version: step.version,
-                description: Some(step.description.clone()),
-                status,
-            },
-            installed_on_micros: None,
-            execution_time: None,
-            applied_checksum: None,
-        })
-        .collect()
 }
 
 /// The statuses [`run`] would return, from the same plan, without running anything or taking the

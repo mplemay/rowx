@@ -129,31 +129,18 @@ pub fn migrate_to_py_err(
             if !matches!(source, Error::Db { .. }) {
                 return cause;
             }
-            // a revert runs the `.down.sql` file, everything else the forward one
-            let path = migrations
-                .iter()
-                .find(|m| m.version == *version && m.kind.is_down() == reverting)
-                .map(|m| m.path.as_path());
-            let applied: Vec<(i64, Option<i64>)> = applied
-                .iter()
-                .map(|d| (d.info.version, d.execution_time))
-                .collect();
-            let error = cause.value(py).clone().into_any();
-            match shared::migration_failed_error(
+            shared::migration_file_failed(
                 py,
-                &err.to_string(),
-                *version,
-                path,
-                *dirty,
-                &applied,
-                error,
-            ) {
-                Ok(failed) => {
-                    failed.set_cause(py, Some(cause));
-                    failed
-                }
-                Err(e) => e,
-            }
+                &shared::FileFailure {
+                    message: &err.to_string(),
+                    version: *version,
+                    dirty: *dirty,
+                    applied,
+                    migrations,
+                    reverting,
+                },
+                cause,
+            )
         }
         MigrateError::Connection(e) => to_py_err(py, e),
         MigrateError::Cancelled => shared::interface_error(py, &err.to_string()),
