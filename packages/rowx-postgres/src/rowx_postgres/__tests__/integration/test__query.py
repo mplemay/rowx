@@ -1618,3 +1618,35 @@ def test_attrs_class_comprehension_global_default_omission_and_empty_results(sch
     result = run_on(schema, "connection", query[AttrsComprehensionRow](t"SELECT 7::int4 AS id").one)
     assert result == AttrsComprehensionRow(7, 42)
     assert run_on(schema, "connection", query[AttrsComprehensionRow](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_loop_carried_default_omission_and_empty_results(schema: str) -> None:
+    @attrs.define
+    class Row:
+        id: int
+        value: int = attrs.field()
+        _ = (alias := attrs.field())
+        for _unused in (0, 1):
+            alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+            alias = value
+        del _, alias, _unused
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(7, 42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_failed_guard_default_omission_and_empty_results(schema: str) -> None:
+    @attrs.define
+    class Row:
+        id: int
+        value: int = attrs.field()
+        _ = (alias := attrs.field())
+        match 1:
+            case 1 if (alias := value) and not schema:  # ty: ignore[redundant-condition-strict]
+                pass
+            case _:
+                alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        del _, alias
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(7, 42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []

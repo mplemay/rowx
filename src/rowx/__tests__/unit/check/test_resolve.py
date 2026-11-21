@@ -758,3 +758,133 @@ def test_attrs_class_comprehension_qualified_private_attribute(tmp_path: Path, *
     result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
     assert result.diagnostic is not None
     assert result.diagnostic.rule == "invalid-row-type"
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "(alias := attrs.field())\nfor _ in (0, 1):\n    alias.default(lambda self: 1)\n    alias = FIELD",
+        "(alias := attrs.field())\ni = 0\nwhile i < 2:\n    alias.default(lambda self: 1)\n    alias = FIELD\n    i += 1",
+        "for alias in (next(iter((FIELD,))),):\n    alias.default(lambda self: 1)",
+        "for alias in (next(iter((FIELD,))) if True else attrs.field(),):\n    copy = alias\n    copy.default(lambda self: 1)",
+        "for (alias,) in ((next(iter((FIELD,))),),):\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    alias = FIELD\n    raise ValueError()\n    (alias := attrs.field())\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\nmatch 1:\n    case 1 if (alias := FIELD) and False: pass\n    case _: alias.default(lambda self: 1)",
+        "(alias := attrs.field())\nmatch 1:\n    case 1 if (alias := FIELD) and False: pass\nalias.default(lambda self: 1)",
+    ],
+)
+def test_attrs_flow_paths_reject_dynamic_default(tmp_path: Path, body: str, *, shared: bool) -> None:
+    path = tmp_path / "case.py"
+    if shared:
+        source = (
+            "spec = attrs.field()\n"
+            + body.replace("FIELD", "spec")
+            + "\n@attrs.define\nclass Row:\n    value: int = spec\n"
+        )
+    else:
+        statements = body.replace("FIELD", "value").replace("\n", "\n    ")
+        source = f"@attrs.define\nclass Row:\n    value: int = attrs.field()\n    {statements}\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+    assert "default" in result.diagnostic.message
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_attrs_failed_guard_without_registration_is_supported(tmp_path: Path, *, shared: bool) -> None:
+    path = tmp_path / "case.py"
+    body = "(alias := attrs.field())\nmatch 1:\n    case 1 if (alias := FIELD) and False: pass\n    case _: pass\n"
+    if shared:
+        source = (
+            "spec = attrs.field()\n"
+            + body.replace("FIELD", "spec")
+            + "@attrs.define\nclass Row:\n    value: int = spec\n"
+        )
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    " + body.replace(
+            "FIELD", "value"
+        ).replace("\n", "\n    ")
+        source += "del alias\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "(alias := FIELD)\nflag and (alias := attrs.field())\nalias.default(lambda self: 1)",
+        "head, *middle, alias = (0, 1, FIELD)\nalias.default(lambda self: 1)",
+        "for head, *middle, alias in ((0, 1, FIELD),):\n    alias.default(lambda self: 1)",
+    ],
+)
+def test_attrs_short_circuit_and_starred_alias_reject_registration(tmp_path: Path, body: str, *, shared: bool) -> None:
+    path = tmp_path / "case.py"
+    if shared:
+        source = (
+            "spec = attrs.field()\n"
+            + body.replace("FIELD", "spec")
+            + "\n@attrs.define\nclass Row:\n    value: int = spec\n"
+        )
+    else:
+        statements = body.replace("FIELD", "value").replace("\n", "\n    ")
+        source = f"@attrs.define\nclass Row:\n    value: int = attrs.field()\n    {statements}\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert "default" in result.diagnostic.message or (
+        not shared and "untraceable attrs collection" in result.diagnostic.message
+    )
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_attrs_while_header_rechecks_loop_carried_alias(tmp_path: Path, *, shared: bool) -> None:
+    path = tmp_path / "case.py"
+    body = "(gate := attrs.field())\ni = 0\nwhile (alias := gate) and i < 2:\n    alias.default(lambda self: 42)\n    gate = FIELD\n    i += 1\n"
+    if shared:
+        source = (
+            "spec = attrs.field()\n"
+            + body.replace("FIELD", "spec")
+            + "@attrs.define\nclass Row:\n    value: int = spec\n"
+        )
+    else:
+        source = (
+            "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    "
+            + body.replace("FIELD", "value").replace("\n", "\n    ")
+            + "del gate, alias, i\n"
+        )
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert "default" in result.diagnostic.message
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_attrs_for_iterable_bindings_are_frozen(tmp_path: Path, *, shared: bool) -> None:
+    path = tmp_path / "case.py"
+    body = "(gate := attrs.field())\nfor alias in (gate,):\n    alias.default(lambda self: 42)\n    gate = FIELD\n"
+    if shared:
+        source = (
+            "spec = attrs.field()\n"
+            + body.replace("FIELD", "spec")
+            + "@attrs.define\nclass Row:\n    value: int = spec\n"
+        )
+    else:
+        source = (
+            "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    "
+            + body.replace("FIELD", "value").replace("\n", "\n    ")
+            + "del gate, alias\n"
+        )
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
