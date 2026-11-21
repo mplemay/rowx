@@ -6,6 +6,7 @@ use std::time::Duration;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_async_runtimes::tokio::future_into_py;
+use rowx_core::cancel::Backend;
 use rowx_core::error::CoreError;
 use rowx_py_core::errors::interface_error;
 use rowx_py_core::runtime;
