@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from rowx_core import Compiled, ShapeSpec, TemplatePlan
 
@@ -23,6 +23,8 @@ class FakeStream:
 
 
 class FakeNative:
+    EXECUTE_RESULT: Final[int] = 3
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         self.failure: BaseException | None = None
@@ -65,7 +67,7 @@ class FakeNative:
 
     async def _execute(self, sql: str, params: list[object]) -> int:
         self._record("execute", sql, params)
-        return 3
+        return self.EXECUTE_RESULT
 
     async def ping(self) -> None:
         self._record("ping")
