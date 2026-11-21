@@ -4,7 +4,8 @@ import pytest
 from rowx_core.errors import InterfaceError, PoolTimeoutError
 from rowx_postgres import Pool
 
-UNREACHABLE_DSN = "postgresql://rowx:rowx@127.0.0.1:1/rowx"
+# Socket connection failure must happen before the pool's acquisition deadline.
+UNREACHABLE_DSN = "postgresql://rowx:rowx@127.0.0.1:1/rowx?connect_timeout=0.1"
 
 
 def test_a_pool_timeout_carries_the_last_connect_error_as_its_cause() -> None:

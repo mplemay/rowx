@@ -348,7 +348,12 @@ mod tests {
             ("sqlite:///profile:a.db", "profile:a.db"),
         ] {
             let target = parse(dsn)?;
-            assert_eq!(target.open_path().to_str(), Some(expected), "{dsn}");
+            let expected = expected.replace('/', std::path::MAIN_SEPARATOR_STR);
+            assert_eq!(
+                target.open_path().to_str(),
+                Some(expected.as_str()),
+                "{dsn}"
+            );
         }
         Ok(())
     }

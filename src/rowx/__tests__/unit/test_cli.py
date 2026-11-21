@@ -2,7 +2,8 @@ from argparse import Namespace
 from asyncio import sleep
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
-from typing import TYPE_CHECKING, Final
+from pathlib import Path
+from typing import Final
 
 import pytest
 from rowx_core.errors import InterfaceError
@@ -11,9 +12,6 @@ from rowx.check import cli
 from rowx.check.cli import main
 from rowx.check.migrate import format_duration, run_guarded
 from rowx.check.runner import CheckError
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def test_check_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -58,7 +56,7 @@ def test_add_creates_the_directory_with_sqlx_placeholder_content(
     # without `[tool.rowx.migrate]`, a one-line tip goes to stderr and stdout is unchanged
     assert err.startswith("tip: ")
     assert err.count("\n") == 1
-    assert out == "Created migrations/20261029120000_create_users.sql\n"
+    assert out == f"Created {Path('migrations', '20261029120000_create_users.sql')}\n"
     created = project / "migrations" / "20261029120000_create_users.sql"
     assert created.read_text(encoding="utf-8") == "-- Add migration script here\n"
 
@@ -67,7 +65,7 @@ def test_add_prints_no_tip_when_the_migrate_table_is_configured(
     project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (project / "pyproject.toml").write_text("[tool.rowx.migrate]\n", encoding="utf-8")
-    assert _add(capsys, "create_users") == (0, "Created migrations/20261029120000_create_users.sql\n", "")
+    assert _add(capsys, "create_users") == (0, f"Created {Path('migrations', '20261029120000_create_users.sql')}\n", "")
 
 
 def test_add_replaces_spaces_in_the_description(project: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -135,7 +133,8 @@ def test_add_reversible_writes_a_pair(project: Path, capsys: pytest.CaptureFixtu
     code, out, _ = _add(capsys, "--reversible", "create users")
     assert code == 0
     assert out == (
-        "Created migrations/20261029120000_create_users.up.sql\nCreated migrations/20261029120000_create_users.down.sql\n"
+        f"Created {Path('migrations', '20261029120000_create_users.up.sql')}\n"
+        f"Created {Path('migrations', '20261029120000_create_users.down.sql')}\n"
     )
     directory = project / "migrations"
     assert (directory / "20261029120000_create_users.up.sql").read_text(encoding="utf-8") == (

@@ -14,7 +14,6 @@ import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
 from rowx_core.lifecycle import ORPHAN_AGE_SECONDS, make_tag
-from rowx_embedded._scratch import EmbeddedScratch
 from rowx_postgres import connect
 from rowx_postgres._core import create_database, drop_database, list_databases
 from rowx_postgres._services import PostgresAdmin, PostgresMigrations
@@ -196,6 +195,8 @@ def migrations_in(tmp_path: Path, migration: str) -> Path:
 def test_an_embedded_scratch_builds_one_independent_migrated_instance_per_worker_and_removes_them(
     workers: int, tmp_path: Path, private_tmp: Path
 ) -> None:
+    from rowx_embedded._scratch import EmbeddedScratch  # ruff: ignore[import-outside-top-level]
+
     migrations = migrations_in(tmp_path, "CREATE TABLE t (id int4);")
 
     scratch = EmbeddedScratch()
@@ -226,6 +227,8 @@ def test_an_embedded_scratch_builds_one_independent_migrated_instance_per_worker
 def test_cancelling_a_scratch_mid_migration_returns_at_once_and_removes_the_instance(
     tmp_path: Path, private_tmp: Path
 ) -> None:
+    from rowx_embedded._scratch import EmbeddedScratch  # ruff: ignore[import-outside-top-level]
+
     migrations = migrations_in(tmp_path, SLOW_EMBEDDED_MIGRATION)
 
     scratch = EmbeddedScratch()

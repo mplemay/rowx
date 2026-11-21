@@ -365,7 +365,11 @@ def resolver_reports(tmp_path: Path) -> tuple[list[Report], dict[Path, str]]:
 
 
 def relative(text: str, tmp_path: Path) -> str:
-    return text.replace(str(tmp_path.resolve()), "<root>").replace(str(tmp_path), "<root>")
+    for root in (tmp_path.resolve(), tmp_path):
+        prefix = f"{root}{os.sep}"
+        text = text.replace(prefix, "<root>/")
+        text = text.replace(json.dumps(prefix, ensure_ascii=False)[1:-1], "<root>/")
+    return text
 
 
 def test_named_row_resolver_text(tmp_path: Path) -> None:
