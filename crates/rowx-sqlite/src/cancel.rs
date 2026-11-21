@@ -209,8 +209,11 @@ pub type Hook = rowx_core::cancel::Hook<SqliteBackend>;
 mod tests {
     use std::sync::Arc;
     use std::thread;
+    use std::time::Duration;
 
     use tokio::sync::mpsc::channel;
+    use tokio::time::error::Elapsed;
+    use tokio::time::timeout;
 
     use super::{Shared, Unsent};
 
@@ -275,5 +278,39 @@ mod tests {
         assert_eq!(shared.send(&tx, 2), Err(Unsent::Cancelled));
         shared.clear_cancel();
         assert!(!shared.is_cancelled());
+    }
+
+    const GUARD: Duration = Duration::from_secs(5);
+    const SHORT: Duration = Duration::from_millis(50);
+
+    #[tokio::test]
+    async fn a_waiter_spawned_before_the_request_resolves_on_it() -> Result<(), Elapsed> {
+        let shared = Arc::new(Shared::default());
+        let waiter = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_cancelled().await })
+        };
+        tokio::task::yield_now().await;
+        shared.request_cancel();
+        let joined = timeout(GUARD, waiter).await?;
+        assert!(joined.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_wait_started_after_the_request_returns_at_once() -> Result<(), Elapsed> {
+        let shared = Shared::default();
+        shared.request_cancel();
+        timeout(GUARD, shared.wait_cancelled()).await
+    }
+
+    #[tokio::test]
+    async fn a_wait_after_clear_cancel_resolves_only_on_the_next_request() -> Result<(), Elapsed> {
+        let shared = Shared::default();
+        shared.request_cancel();
+        shared.clear_cancel();
+        assert!(timeout(SHORT, shared.wait_cancelled()).await.is_err());
+        shared.request_cancel();
+        timeout(GUARD, shared.wait_cancelled()).await
     }
 }

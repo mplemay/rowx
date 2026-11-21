@@ -388,7 +388,12 @@ impl Connection {
                 .map_err(SqliteError::from)?;
             // the settle may have sent cancels; take the flag so the hook's own work is not interrupted
             if !core.cancel.backend.is_alive().await {
-                return Err(SqliteError::from(CoreError::Closed).into());
+                let err = if core.cancel.state.is_closed() {
+                    CoreError::Closed
+                } else {
+                    CoreError::Broken
+                };
+                return Err(SqliteError::from(err).into());
             }
             Ok(())
         })
