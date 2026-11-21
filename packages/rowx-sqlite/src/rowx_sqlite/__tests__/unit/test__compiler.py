@@ -380,6 +380,13 @@ def test_facts_cte_names_including_shadowing() -> None:
         ("with c as (select count(*) from t) select * from c", False),
         ("select a from (select max(a) as a from t)", False),
         ("select count(*) from t where a in (select a from u group by a)", True),
+        ('SELECT a, "count"(*) FROM t', True),
+        ("SELECT a, `count`(*) FROM t", True),
+        ("SELECT a, [sum](a) FROM t", True),
+        ('SELECT a, "MIN"(a) FROM t', True),
+        ('SELECT "max"(a, b) FROM t', False),
+        ('SELECT "count" FROM t', False),
+        ('SELECT "count"(*) OVER () FROM t', False),
     ],
 )
 def test_facts_has_aggregate(sql: str, *, expected: bool) -> None:

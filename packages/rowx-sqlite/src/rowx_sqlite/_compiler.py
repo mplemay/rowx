@@ -357,6 +357,10 @@ class _Walker:
             f.join_words.clear()
         elif _is_punct(tok, ";"):
             self.stack = [_Frame()]
+        elif tok.kind == "quoted":
+            f.join_words.clear()
+            if not any(fr.sub for fr in self.stack) and tok.value in AGGREGATE_NAMES:
+                self._aggregate_call(tok.value)
         elif tok.kind != "word":
             f.join_words.clear()
         else:

@@ -113,6 +113,10 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
         (("a", True, UNPROVEN), ("m", True, UNPROVEN)),
     ),
     "count without group by": ("SELECT id, count(*) AS n FROM t", (("id", True, UNPROVEN), ("n", True, UNPROVEN))),
+    "quoted count without group by": (
+        'SELECT a, "count"(*) AS n FROM t',
+        (("a", True, UNPROVEN), ("n", True, UNPROVEN)),
+    ),
     "min without group by": ("SELECT id, min(a) AS m FROM t", (("id", True, UNPROVEN), ("m", True, UNPROVEN))),
     "having without group by": (
         "SELECT a, count(*) AS n FROM t HAVING n >= 0",
