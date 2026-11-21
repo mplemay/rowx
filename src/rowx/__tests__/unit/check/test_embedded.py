@@ -443,6 +443,7 @@ def test_an_unparsable_embedded_url_never_quotes_itself(monkeypatch: pytest.Monk
     assert str(caught.value) == "the database URL could not be parsed"
 
 
+@pytest.mark.embedded
 @pytest.mark.parametrize(
     ("url", "reason"),
     [
@@ -459,6 +460,7 @@ def test_an_embedded_url_the_backend_refuses_gives_the_reason_without_its_values
     assert "hunter2secret" not in str(caught.value)
 
 
+@pytest.mark.embedded
 def test_a_relative_embedded_directory_names_the_rule() -> None:
     with pytest.raises(CheckError, match="an embedded URL has no host"):
         embedded_for("embedded://rel/path")

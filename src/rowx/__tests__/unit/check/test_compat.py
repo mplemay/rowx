@@ -208,6 +208,7 @@ def test_snapshot_keeps_tracked_ignored_query_in_compatibility_verdict(
     assert "incompatible" in capsys.readouterr().out
 
 
+@pytest.mark.embedded
 def test_embedded_directory_url_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -222,6 +223,7 @@ def test_embedded_directory_url_is_refused(
 
 
 # never more instances than distinct statements, as in a plain check
+@pytest.mark.embedded
 @pytest.mark.parametrize(
     ("statements", "workers"),
     [(("select 1", "select 2"), 2), (("select 1",), 1), (("select 1", "select 2", "select 3"), 2)],

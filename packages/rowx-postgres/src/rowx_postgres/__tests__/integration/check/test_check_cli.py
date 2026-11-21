@@ -18,7 +18,6 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from rowx_core.errors import DatabaseError
-from rowx_embedded import Database
 from rowx_postgres import Connection, Migrator
 from rowx_postgres.__tests__.integration.check.harness import (
     CASES_DIR,
@@ -1346,6 +1345,8 @@ def test_migrate_run_info_revert_on_a_directory_match_the_docker_goldens(
 def test_a_directory_that_is_in_use_fails_at_once_instead_of_retrying(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    from rowx_embedded import Database  # ruff: ignore[import-outside-top-level]
+
     monkeypatch.chdir(tmp_path)
     _write_dirs(tmp_path, "pyproject.toml", "")
     _write_dirs(tmp_path / "migrations", "1_create_a.sql", "CREATE TABLE a (id int4);")
