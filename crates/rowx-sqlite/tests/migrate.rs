@@ -304,6 +304,33 @@ async fn a_failing_no_transaction_migration_is_dirty_and_blocks_the_next_run() -
     Ok(())
 }
 
+// An interrupt only reaches a statement that is running, so one sent between two statements is lost. It is
+// repeated until the task ends, which makes the outcome independent of when the statement starts.
+async fn interrupt_until_finished(
+    conn: &Connection,
+    task: tokio::task::JoinHandle<Result<(), MigrateError>>,
+) -> TestResult<Result<(), MigrateError>> {
+    let mut task = task;
+    within(async {
+        loop {
+            conn.interrupt_handle().interrupt();
+            tokio::select! {
+                done = &mut task => return Ok(done?),
+                () = tokio::time::sleep(Duration::from_millis(1)) => {}
+            }
+        }
+    })
+    .await?
+}
+
+// set by a progress handler that only a long statement reaches: while it is set, the file is running
+static LONG_RUNNING: AtomicBool = AtomicBool::new(false);
+
+fn long_running() -> bool {
+    LONG_RUNNING.store(true, Ordering::Release);
+    false
+}
+
 // the version is claimed by a committed row before the file runs, so a crash in the file leaves it
 #[tokio::test]
 async fn a_no_transaction_file_claims_its_version_before_it_runs() -> TestResult {
@@ -335,9 +362,8 @@ async fn a_no_transaction_file_claims_its_version_before_it_runs() -> TestResult
     // seen from another connection, the claim is committed and dirty
     assert_eq!(history(&observer).await?, [(1, false)]);
     // the file does not finish: stop it the way a crash would
-    migrator.interrupt_handle().interrupt();
-    let err = within(task)
-        .await??
+    let err = interrupt_until_finished(&migrator, task)
+        .await?
         .err()
         .ok_or("the interrupted file should fail")?;
     assert!(
@@ -345,6 +371,171 @@ async fn a_no_transaction_file_claims_its_version_before_it_runs() -> TestResult
         "{err:?}"
     );
     assert_eq!(history(&observer).await?, [(1, false)]);
+    Ok(())
+}
+
+// a failure of the last history write leaves the claim row as it was, so the version stays dirty
+#[tokio::test]
+async fn a_failing_final_history_write_is_a_dirty_failure() -> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    // the file drops the history table, so the `UPDATE` that follows it cannot succeed
+    let all = [simple(
+        1,
+        &format!("-- no-transaction\nCREATE TABLE t (i int);\nDROP TABLE {TABLE};"),
+    )];
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(
+        matches!(
+            err,
+            MigrateError::Failed {
+                version: 1,
+                dirty: true,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(table_exists(&conn, "t").await?);
+
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    let [up, down] = reversible(
+        1,
+        "CREATE TABLE a (i int)",
+        &format!("-- no-transaction\nDROP TABLE a;\nDROP TABLE {TABLE};"),
+    );
+    let all = [up, down];
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    let err = revert(&conn, &config(), &all, RevertTarget::Latest, false, &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(
+        matches!(
+            err,
+            MigrateError::Failed {
+                version: 1,
+                dirty: true,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(!table_exists(&conn, "a").await?);
+    Ok(())
+}
+
+// an unreleased SAVEPOINT starts a transaction in autocommit mode; it is rolled back and the file is dirty
+#[tokio::test]
+async fn a_no_transaction_file_that_leaves_a_transaction_open_is_rolled_back_and_dirty()
+-> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    let all = [simple(
+        1,
+        "-- no-transaction\nPRAGMA foreign_keys = OFF;\nSAVEPOINT s;\nCREATE TABLE t (i INTEGER);",
+    )];
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(
+        matches!(&err, MigrateError::Failed { version: 1, dirty: true, source: Error::Sqlite { message, .. }, .. }
+            if message.contains("must not leave a transaction open")),
+        "{err:?}"
+    );
+    assert!(conn.is_autocommit().await?);
+    assert!(!table_exists(&conn, "t").await?);
+    assert_eq!(pragma(&conn, "foreign_keys").await?, 1);
+    assert_eq!(history(&conn).await?, [(1, false)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_no_transaction_revert_that_leaves_a_transaction_open_is_rolled_back_and_dirty()
+-> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    let [up, down] = reversible(
+        1,
+        "CREATE TABLE t (i int)",
+        "-- no-transaction\nPRAGMA foreign_keys = OFF;\nSAVEPOINT s;\nDROP TABLE t;",
+    );
+    let all = [up, down];
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    let err = revert(&conn, &config(), &all, RevertTarget::Latest, false, &LIVE)
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert!(
+        matches!(&err, MigrateError::Failed { version: 1, dirty: true, source: Error::Sqlite { message, .. }, .. }
+            if message.contains("must not leave a transaction open")),
+        "{err:?}"
+    );
+    assert!(conn.is_autocommit().await?);
+    assert!(table_exists(&conn, "t").await?);
+    assert_eq!(pragma(&conn, "foreign_keys").await?, 1);
+    assert_eq!(history(&conn).await?, [(1, false)]);
+    Ok(())
+}
+
+// a transactional file that is cancelled mid-script leaves nothing behind and a usable connection
+#[tokio::test]
+async fn cancelling_a_transactional_migration_mid_script_rolls_it_back() -> TestResult {
+    let dir = TempDir::new()?;
+    let migrator = Arc::new(connect(&file(&dir)).await?);
+    let observer = connect(&file(&dir)).await?;
+    // a handler that only a long statement reaches tells the test the file is running
+    migrator
+        .run_raw(|raw| raw.progress_handler(100_000, Some(long_running)))
+        .await??;
+    let all = vec![simple(
+        1,
+        &format!("CREATE TABLE gate (i int);\n{LONG_QUERY};"),
+    )];
+    let task = {
+        let migrator = Arc::clone(&migrator);
+        tokio::spawn(async move {
+            run(&migrator, &config(), &all, PlanOptions::default(), &LIVE)
+                .await
+                .map(|_| ())
+        })
+    };
+    within(async {
+        while !LONG_RUNNING.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let err = interrupt_until_finished(&migrator, task)
+        .await?
+        .err()
+        .ok_or("the interrupted file should fail")?;
+    assert!(
+        matches!(
+            err,
+            MigrateError::Failed {
+                version: 1,
+                dirty: false,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(migrator.is_autocommit().await?);
+    assert_eq!(
+        count(&observer, &format!("SELECT count(*) FROM {TABLE}")).await?,
+        0
+    );
+    assert!(!table_exists(&observer, "gate").await?);
+    assert!(!table_exists(&migrator, "gate").await?);
+    // the authorizer that refuses transaction statements is gone
+    migrator.simple("BEGIN").await?;
+    migrator.simple("ROLLBACK").await?;
     Ok(())
 }
 

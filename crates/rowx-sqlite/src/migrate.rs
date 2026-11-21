@@ -22,6 +22,10 @@ const MAIN: &str = "main";
 
 const AUTH_MESSAGE: &str = "a migration must not contain BEGIN, COMMIT or ROLLBACK: rowx runs each file \
     in a transaction of its own, or in none when the file is marked `-- no-transaction`";
+const OPEN_TRANSACTION_MESSAGE: &str = "a `-- no-transaction` migration must not leave a transaction open (an \
+    unreleased SAVEPOINT); its work was rolled back";
+const FOREIGN_KEYS_MESSAGE: &str = "foreign key enforcement could not be turned back on after a \
+    `-- no-transaction` migration";
 const BUSY_MESSAGE: &str = "another migrator holds the database: the write lock was not released \
     within the busy timeout (`connect_timeout`)";
 
@@ -231,8 +235,42 @@ async fn script(conn: &Connection, sql: &str) -> Result<(), Error> {
 
 // `foreign_keys` is per connection and a `-- no-transaction` file may have turned it off to rebuild a table;
 // the driver turned it on at connect
-async fn restore_foreign_keys(conn: &Connection) {
-    let _ = conn.simple_uncancelled("PRAGMA foreign_keys = ON").await;
+async fn restore_foreign_keys(conn: &Connection) -> Result<(), Error> {
+    conn.simple_uncancelled("PRAGMA foreign_keys = ON").await?;
+    let on = conn
+        .call(|ctx| {
+            Ok(ctx
+                .conn
+                .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))?)
+        })
+        .await?;
+    if on == 1 {
+        return Ok(());
+    }
+    Err(Error::from_code(
+        rusqlite::ffi::SQLITE_ERROR,
+        FOREIGN_KEYS_MESSAGE,
+        None,
+    ))
+}
+
+// What a `-- no-transaction` file leaves behind. A file that left a transaction open (an unreleased
+// `SAVEPOINT` starts one in autocommit mode) has it rolled back, because the history write would otherwise
+// land in a transaction nobody commits and `PRAGMA foreign_keys` would silently do nothing inside it.
+async fn after_script(conn: &Connection, ran: Result<(), Error>) -> Result<(), Error> {
+    let mut outcome = ran;
+    if !conn.is_autocommit().await? {
+        conn.rollback_abandoned().await?;
+        if outcome.is_ok() {
+            outcome = Err(Error::from_code(
+                rusqlite::ffi::SQLITE_ERROR,
+                OPEN_TRANSACTION_MESSAGE,
+                None,
+            ));
+        }
+    }
+    let restored = restore_foreign_keys(conn).await;
+    outcome.and(restored)
 }
 
 fn failure(version: i64, dirty: bool, source: Error) -> MigrateError {
@@ -427,11 +465,12 @@ async fn apply_next(
             return Err(err);
         }
         let ran = script(conn, &step.sql).await;
-        restore_foreign_keys(conn).await;
-        ran.map_err(failed_dirty(version))?;
+        after_script(conn, ran)
+            .await
+            .map_err(failed_dirty(version))?;
         set_success(conn, &quoted, version, true, Some(nanos(started)))
             .await
-            .map_err(MigrateError::from)?;
+            .map_err(failed_dirty(version))?;
         return Ok(Some(version));
     }
     let applied = async {
@@ -491,11 +530,12 @@ async fn revert_one(
             return Err(err);
         }
         let ran = script(conn, &step.sql).await;
-        restore_foreign_keys(conn).await;
-        ran.map_err(failed_dirty(version))?;
+        after_script(conn, ran)
+            .await
+            .map_err(failed_dirty(version))?;
         delete_row(conn, &quoted, version)
             .await
-            .map_err(MigrateError::from)?;
+            .map_err(failed_dirty(version))?;
         return Ok(true);
     }
     let reverted = async {
