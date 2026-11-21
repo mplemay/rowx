@@ -387,6 +387,14 @@ def test_facts_cte_names_including_shadowing() -> None:
         ('SELECT "max"(a, b) FROM t', False),
         ('SELECT "count" FROM t', False),
         ('SELECT "count"(*) OVER () FROM t', False),
+        ("SELECT a, max(a ORDER BY a, a) FROM t", True),
+        ("SELECT a, min(a ORDER BY a) FROM t", True),
+        ("SELECT max(a, b ORDER BY a) FROM t", True),
+        ("SELECT a, count(*) over FROM t", True),
+        ("SELECT a, count(*) over, a FROM t", True),
+        ("SELECT a, count(*) OVER w FROM t WINDOW w AS ()", False),
+        ("SELECT a, count(*) OVER (ORDER BY a) FROM t", False),
+        ("SELECT a, count(*) FILTER (WHERE a > 0) over FROM t", True),
     ],
 )
 def test_facts_has_aggregate(sql: str, *, expected: bool) -> None:

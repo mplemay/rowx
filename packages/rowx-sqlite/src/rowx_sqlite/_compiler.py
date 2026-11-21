@@ -264,6 +264,10 @@ AGGREGATE_NAMES: Final[frozenset[str]] = frozenset(
 # with two or more arguments these are scalar functions
 SCALAR_WHEN_MANY: Final[frozenset[str]] = frozenset({"min", "max"})
 SCALAR_MIN_ARGS: Final[int] = 2
+# words that follow a select item instead of naming a window, so a preceding `over` is a column alias
+NOT_WINDOW_NAMES: Final[frozenset[str]] = FROM_ENDS | frozenset(
+    {"from", "as", "offset", "join", "on", "using", "natural", "left", "right", "inner", "cross", "full", "outer"},
+)
 NAME_KINDS: Final[frozenset[TokenKind]] = frozenset({"word", "quoted", "string"})
 CONFLICT_WORDS: Final[frozenset[str]] = frozenset({"rollback", "abort", "replace", "fail", "ignore"})
 # words that never name an UPDATE target: `UPDATE SET` is a column list, `UPDATE ON` a trigger, `update FROM` a column
@@ -539,16 +543,44 @@ class _Walker:
                 commas += 1
         return commas + 1
 
+    # an ORDER BY at the top level of the call is the aggregate's own, so the call is not the scalar form
+    def _has_call_order_by(self, start: int, end: int) -> bool:
+        depth = 0
+        for j in range(start + 1, end):
+            tok = self.tokens[j]
+            if _is_punct(tok, "("):
+                depth += 1
+            elif _is_punct(tok, ")"):
+                depth -= 1
+            elif depth == 0 and tok.kind == "word" and tok.value == "order":
+                nxt = self._at(j + 1)
+                if nxt is not None and nxt.kind == "word" and nxt.value == "by":
+                    return True
+        return False
+
+    # `over` starts a window only when `(` or a window name follows; otherwise it is the column alias
+    def _window_follows(self, over: int) -> bool:
+        after = self._at(over + 1)
+        if after is None:
+            return False
+        if _is_punct(after, "("):
+            return True
+        if after.kind == "quoted":
+            return True
+        return after.kind == "word" and after.value not in NOT_WINDOW_NAMES
+
     def _is_window(self, end: int) -> bool:
-        nxt = self._at(end + 1)
+        j = end + 1
+        nxt = self._at(j)
         if nxt is not None and nxt.kind == "word" and nxt.value == "filter":
-            opener = self._at(end + 2)
+            opener = self._at(j + 1)
             if opener is None or not _is_punct(opener, "("):
                 return False
-            if (close := self._call_end(end + 2)) is None:
+            if (close := self._call_end(j + 1)) is None:
                 return False
-            nxt = self._at(close + 1)
-        return nxt is not None and nxt.kind == "word" and nxt.value == "over"
+            j = close + 1
+            nxt = self._at(j)
+        return nxt is not None and nxt.kind == "word" and nxt.value == "over" and self._window_follows(j)
 
     # a call that makes the outermost query aggregate; anything unclear counts as one
     def _aggregate_call(self, word: str) -> None:
@@ -559,7 +591,11 @@ class _Walker:
         if end is None:
             self.aggregate = True
             return
-        if word in SCALAR_WHEN_MANY and self._top_level_args(self.i, end) >= SCALAR_MIN_ARGS:
+        if (
+            word in SCALAR_WHEN_MANY
+            and not self._has_call_order_by(self.i, end)
+            and self._top_level_args(self.i, end) >= SCALAR_MIN_ARGS
+        ):
             return
         if not self._is_window(end):
             self.aggregate = True

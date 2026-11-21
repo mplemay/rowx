@@ -132,6 +132,14 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
         "SELECT a, count(*) OVER () AS n FROM t",
         (("a", False, NN), ("n", True, UNPROVEN)),
     ),
+    "aggregate with its own order by terms": (
+        "SELECT a, max(a ORDER BY a, a) AS m FROM t",
+        (("a", True, UNPROVEN), ("m", True, UNPROVEN)),
+    ),
+    "over as a column alias": (
+        "SELECT a, count(*) over FROM t",
+        (("a", True, UNPROVEN), ("over", True, UNPROVEN)),
+    ),
     "without rowid primary key": ("SELECT k FROM w", (("k", False, NN),)),
     "table constraint rowid alias": ("SELECT id FROM pk2", (("id", False, NN),)),
     "insert select returning": (
