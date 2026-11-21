@@ -136,7 +136,7 @@ impl Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
     use std::thread;
 
     const NEVER: &dyn Fn() -> bool = &|| false;
@@ -215,16 +215,23 @@ mod tests {
     fn a_slot_whose_client_is_gone_is_waited_for_and_then_taken() {
         let slot = Arc::new(Slot::default());
         assert!(slot.acquire(Duration::ZERO, Duration::ZERO, NEVER));
+        let (waiting, wait_started) = mpsc::sync_channel(1);
         let releaser = {
             let slot = Arc::clone(&slot);
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(50));
+            thread::spawn(move || -> Result<(), mpsc::RecvTimeoutError> {
+                wait_started.recv_timeout(Duration::from_secs(5))?;
                 slot.begin_teardown();
                 slot.finish_teardown();
+                Ok(())
             })
         };
-        assert!(slot.acquire(Duration::ZERO, Duration::from_secs(5), &|| true));
-        assert!(releaser.join().is_ok());
+        assert!(
+            slot.acquire(Duration::from_secs(5), Duration::from_secs(5), &|| {
+                let _ = waiting.try_send(());
+                true
+            })
+        );
+        assert_eq!(releaser.join().ok(), Some(Ok(())));
     }
 
     #[test]

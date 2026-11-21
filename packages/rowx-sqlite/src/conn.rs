@@ -232,12 +232,14 @@ impl Connection {
         future_into_py(py, async move {
             core.cancel.state.close();
             // an operation that is still running holds the connection for its full length, so it is
-            // interrupted first; a failed request is fine because closing ends the statement anyway
+            // interrupted until it gives the connection back
             let mut conn = if let Ok(conn) = core.conn.try_lock() {
                 conn
             } else {
-                let _ = core.cancel.backend.send_cancel().await;
-                core.conn.lock().await
+                core.cancel
+                    .backend
+                    .interrupt_until_closed(core.conn.lock())
+                    .await
             };
             conn.close().await;
             drop(conn);

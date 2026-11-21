@@ -107,6 +107,8 @@ pub(crate) struct Ctx {
     pub(crate) shared: Arc<Shared>,
     pub(crate) state: Arc<State>,
     pub(crate) timer: Option<Timer>,
+    // the authorizer to put back after one that was installed for a single call
+    pub(crate) untrusted: bool,
 }
 
 impl Ctx {
@@ -184,7 +186,7 @@ const READ_ONLY_PRAGMAS: [&str; 10] = [
 
 // A pragma that sets a value takes effect while it is prepared, before any step, so describing one
 // would change the hardened session. The authorizer refuses those at prepare time.
-fn authorize(ctx: AuthContext<'_>) -> Authorization {
+pub(crate) fn authorize(ctx: AuthContext<'_>) -> Authorization {
     match ctx.action {
         AuthAction::Pragma {
             pragma_name,
@@ -263,6 +265,7 @@ fn open(
             shared,
             state,
             timer,
+            untrusted: options.untrusted,
         },
         Ready {
             interrupt,
@@ -583,12 +586,10 @@ impl Connection {
         };
         // `Job::Close` queues behind a running job, and a closed state never sends a cancel, so wake a
         // worker that is stepping or parked on a full stream channel before waiting for it
-        self.shared.request_cancel();
-        self.backend.interrupt();
         let (done, closed) = oneshot::channel();
         if jobs.send(Job::Close(done)).is_ok() {
             // a worker that already died answers by dropping the sender; the database is gone either way
-            let _ = closed.await;
+            let _ = self.backend.interrupt_until_closed(closed).await;
         }
         self.shared.mark_dead();
     }

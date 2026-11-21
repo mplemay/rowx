@@ -36,6 +36,12 @@ impl Pool {
     fn check_process(&self, py: Python<'_>) -> PyResult<()> {
         shared::ensure_same_process(py, self.pid)
     }
+
+    // the native pool, for a caller that runs its own operation on a checkout
+    pub(crate) fn checked(&self, py: Python<'_>) -> PyResult<&SqlitePool> {
+        self.check_process(py)?;
+        Ok(&self.inner)
+    }
 }
 
 #[pymethods]

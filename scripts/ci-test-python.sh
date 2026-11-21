@@ -28,32 +28,42 @@ case "$CI_PACKAGE" in
         ;;
     esac
     ;;
-  sqlite) uv run pytest "$sqlite_tests" ;;
+  sqlite) uv run pytest "$sqlite_tests" -o faulthandler_timeout=60 ;;
   cli) uv run pytest src/rowx/__tests__ -m 'not embedded' ;;
   embedded)
     uv pip install --no-deps dist-embedded/*.whl
-    # Wheels exclude tests. Make the checkout's support modules importable under
-    # the installed package while collecting tests from their original paths.
-    uv run python scripts/ci-install-embedded-test-support.py
-    uv run pytest "$embedded_tests" -n 2
-    uv run pytest -m embedded \
-      src/rowx/__tests__/unit/test_embedded.py \
-      src/rowx/__tests__/unit/check/test_compat.py \
-      src/rowx/__tests__/unit/check/test_embedded.py
-    ROWX_TEST_DSN=embedded:// ROWX_REQUIRE_DB=1 uv run pytest "$postgres_tests" -m '(db and not server) or embedded' -n 2
+    case "$CI_EMBEDDED_SHARD" in
+      engine)
+        # Wheels exclude tests. Make the checkout's support modules importable under
+        # the installed package while collecting tests from their original paths.
+        uv run python scripts/ci-install-embedded-test-support.py
+        uv run pytest "$embedded_tests" -n 2
+        uv run pytest -m embedded \
+          src/rowx/__tests__/unit/test_embedded.py \
+          src/rowx/__tests__/unit/check/test_compat.py \
+          src/rowx/__tests__/unit/check/test_embedded.py
 
-    if [[ "$(uv run python -c 'import sys; print(sys.version_info.minor)')" == 14 ]]; then
-      uv build --package rowx-core --wheel --out-dir dist-smoke
-      uv run maturin build --locked -m packages/rowx-postgres/Cargo.toml --out dist-smoke
-      cp dist-embedded/*.whl dist-smoke/
-      scripts/smoke-embedded-wheel.sh dist-smoke
+        if [[ "$(uv run python -c 'import sys; print(sys.version_info.minor)')" == 14 ]]; then
+          uv build --package rowx-core --wheel --out-dir dist-smoke
+          uv run maturin build --locked -m packages/rowx-postgres/Cargo.toml --out dist-smoke
+          cp dist-embedded/*.whl dist-smoke/
+          scripts/smoke-embedded-wheel.sh dist-smoke
 
-      uv run python examples/embedded/notes.py
-      cd examples/embedded
-      export DATABASE_URL=embedded://
-      uv run --project ../.. rowx check -j 4
-      uv run --project ../.. pytest -p no:cacheprovider -o rowx_require_database=true
-    fi
+          uv run python examples/embedded/notes.py
+          cd examples/embedded
+          export DATABASE_URL=embedded://
+          uv run --project ../.. rowx check -j 4
+          uv run --project ../.. pytest -p no:cacheprovider -o rowx_require_database=true
+        fi
+        ;;
+      postgres)
+        ROWX_TEST_DSN=embedded:// ROWX_REQUIRE_DB=1 uv run pytest "$postgres_tests" -m '(db and not server) or embedded' -n 2
+        ;;
+      *)
+        echo "Unknown embedded shard: $CI_EMBEDDED_SHARD" >&2
+        exit 2
+        ;;
+    esac
     ;;
   *)
     echo "Unknown Python package: $CI_PACKAGE" >&2

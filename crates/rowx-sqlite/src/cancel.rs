@@ -4,6 +4,7 @@ use std::future::Future;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use rowx_core::cancel::Backend;
 use rusqlite::InterruptHandle;
@@ -13,6 +14,8 @@ use tokio::sync::mpsc::{Sender, error::TrySendError};
 use crate::error::Error;
 
 pub use rowx_core::cancel::{spawn, spawn_stream};
+
+const CLOSE_INTERRUPT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What a connection shares with the worker thread, its cancel handle and its timer.
 #[derive(Debug)]
@@ -171,8 +174,19 @@ impl SqliteBackend {
         self.shared.wait_cancelled().await;
     }
 
-    pub(crate) fn interrupt(&self) {
-        self.interrupt.interrupt();
+    /// Wakes the worker and keeps interrupting it until closing can proceed. SQLite ignores an
+    /// interrupt sent between statements, including the gap just before the first step.
+    pub async fn interrupt_until_closed<F: Future>(&self, completion: F) -> F::Output {
+        self.shared.request_cancel();
+        tokio::pin!(completion);
+        loop {
+            self.interrupt.interrupt();
+            if let Ok(result) =
+                tokio::time::timeout(CLOSE_INTERRUPT_INTERVAL, &mut completion).await
+            {
+                return result;
+            }
+        }
     }
 
     #[cfg(feature = "test-support")]

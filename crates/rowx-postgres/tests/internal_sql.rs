@@ -578,7 +578,12 @@ fn crate_sources() -> TestResult<Vec<PathBuf>> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
     for entry in fs::read_dir(&crates)? {
-        let src = entry?.path().join("src");
+        let entry = entry?;
+        // SQLite's internal SQL is not Postgres SQL, so the catalog rules do not apply to it
+        if entry.file_name() == "rowx-sqlite" {
+            continue;
+        }
+        let src = entry.path().join("src");
         if src.is_dir() {
             rust_files(&src, &mut files)?;
         }
