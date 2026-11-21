@@ -6,13 +6,15 @@ from typing import Final
 
 import rowx_core
 import rowx_postgres
+import rowx_sqlite
 
 import rowx
 import rowx.postgres as postgres_facade
+import rowx.sqlite as sqlite_facade
 
 SCRIPT: Final[str] = (
     "import sys, rowx, rowx_core\n"
-    "loaded = [m for m in ('rowx_postgres', 'rowx_postgres._core') if m in sys.modules]\n"
+    "loaded = [m for m in ('rowx_postgres', 'rowx_postgres._core', 'rowx_sqlite', 'rowx_sqlite._core') if m in sys.modules]\n"
     "assert not loaded, loaded\n"
 )
 GUARDED_MODULES: Final[frozenset[str]] = frozenset({
@@ -42,6 +44,13 @@ def test_postgres_facade_reexports_the_driver() -> None:
     assert postgres_facade.connect is rowx_postgres.connect
     assert postgres_facade.Pool is rowx_postgres.Pool
     assert postgres_facade.RESET_QUERY is rowx_postgres.RESET_QUERY
+
+
+def test_sqlite_facade_reexports_the_driver() -> None:
+    assert sqlite_facade.__all__ == rowx_sqlite.__all__
+    assert sorted(sqlite_facade.__all__) == ["ConnectOptions", "Connection", "Transaction", "connect"]
+    for name in rowx_sqlite.__all__:
+        assert getattr(sqlite_facade, name) is getattr(rowx_sqlite, name)
 
 
 def _backend_import(source: str) -> str | None:

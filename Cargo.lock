@@ -2961,8 +2961,11 @@ version = "0.4.2"
 dependencies = [
  "libsqlite3-sys",
  "rowx-core",
+ "rowx-sqlite",
  "rusqlite",
+ "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2970,8 +2973,11 @@ name = "rowx-sqlite-py"
 version = "0.4.2"
 dependencies = [
  "pyo3",
+ "pyo3-async-runtimes",
+ "rowx-core",
  "rowx-py-core",
  "rowx-sqlite",
+ "tokio",
 ]
 
 [[package]]

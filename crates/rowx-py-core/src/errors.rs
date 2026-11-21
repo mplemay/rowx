@@ -6,6 +6,9 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyTuple, PyType};
 use rowx_core::error::CoreError;
 use rowx_core::migrate::{PlanError, SourceError};
+use rowx_core::row_shape::ShapeErrors;
+
+use crate::shape::{RowShapeData, render_null, render_shape};
 
 static INTERFACE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DATABASE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -108,6 +111,34 @@ pub fn pool_timeout_error_with_cause(py: Python<'_>, message: &str, cause: PyErr
 #[must_use]
 pub fn row_shape_error(py: Python<'_>, message: &str) -> PyErr {
     build(py, &ROW_SHAPE_ERROR, "RowShapeError", (message,))
+}
+
+/// The `RowShapeError` for a named row whose columns do not map onto its fields.
+#[must_use]
+pub fn named_shape_error(
+    py: Python<'_>,
+    data: &RowShapeData,
+    errors: &ShapeErrors,
+    columns: &[String],
+) -> PyErr {
+    row_shape_error(
+        py,
+        &render_shape(data.type_name(), data.key_names(), errors, columns),
+    )
+}
+
+/// The `RowShapeError` for a NULL in a mapped field that is not nullable.
+#[must_use]
+pub fn named_null_error(
+    py: Python<'_>,
+    data: &RowShapeData,
+    field: usize,
+    column: usize,
+    name: &str,
+    row: usize,
+) -> PyErr {
+    let key = data.key_names().get(field).map_or("", String::as_str);
+    row_shape_error(py, &render_null(data.type_name(), key, column, name, row))
 }
 
 #[must_use]

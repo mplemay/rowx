@@ -1,3 +1,4 @@
+use rowx_core::error::{CoreError, TaskStopped};
 use rowx_core::row_shape::{NullCheckError, NullError, ShapeCheckError, ShapeErrors};
 use rusqlite::ffi;
 use thiserror::Error;
@@ -43,6 +44,12 @@ pub enum Error {
     Decode(#[from] DecodeError),
     #[error(transparent)]
     Encode(#[from] EncodeError),
+    /// A shared connection or pool error; this driver produces `Closed`.
+    #[error(transparent)]
+    Core(#[from] CoreError),
+    /// The worker thread ended before it answered, so the connection is broken.
+    #[error(transparent)]
+    Stopped(#[from] TaskStopped),
 }
 
 impl Error {
@@ -54,6 +61,12 @@ impl Error {
             message: message.into(),
             offset,
         }
+    }
+
+    /// `true` for a statement that SQLite interrupted (`SQLITE_INTERRUPT`, whatever the extended code).
+    #[must_use]
+    pub fn is_interrupt(&self) -> bool {
+        matches!(self, Self::Sqlite { code, .. } if code & 0xff == ffi::SQLITE_INTERRUPT)
     }
 
     /// The SQLSTATE of a SQLite failure; other errors have none.
@@ -317,6 +330,14 @@ mod tests {
     use crate::value::{DecodeError, EncodeError};
     use rowx_core::row_shape::{NullCheckError, NullError, ShapeCheckError};
     use rusqlite::ffi;
+
+    #[test]
+    fn only_interrupt_class_codes_are_interrupts() {
+        assert!(Error::from_code(ffi::SQLITE_INTERRUPT, "interrupted", None).is_interrupt());
+        assert!(!Error::from_code(ffi::SQLITE_CONSTRAINT_UNIQUE, "unique", None).is_interrupt());
+        assert!(!Error::from_code(ffi::SQLITE_BUSY, "busy", None).is_interrupt());
+        assert!(!Error::Interface("x".into()).is_interrupt());
+    }
 
     #[test]
     fn sqlstate_table() {

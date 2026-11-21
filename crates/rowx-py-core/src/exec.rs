@@ -85,22 +85,30 @@ impl<M: Manage> Access<M> {
     }
 }
 
+/// Runs `f` when the Python future is cancelled.
+///
+/// # Errors
+/// Any Python error from registering the callback.
+pub fn on_cancel(future: &Bound<'_, PyAny>, f: impl Fn() + Send + 'static) -> PyResult<()> {
+    let callback = PyCFunction::new_closure(future.py(), None, None, move |args, _kwargs| {
+        if let Ok(done) = args.get_item(0)
+            && done.call_method0("cancelled")?.is_truthy()?
+        {
+            f();
+        }
+        PyResult::Ok(())
+    })?;
+    future.call_method1("add_done_callback", (callback,))?;
+    Ok(())
+}
+
 /// asyncio runs done callbacks before the awaiting task resumes, while the Rust future is only dropped
 /// later on another thread; settling here keeps `cancel(); await next()` from seeing Busy
 ///
 /// # Errors
 /// Any Python error from registering the callback.
 pub fn watch<B: Backend>(future: &Bound<'_, PyAny>, hook: Hook<B>) -> PyResult<()> {
-    let callback = PyCFunction::new_closure(future.py(), None, None, move |args, _kwargs| {
-        if let Ok(done) = args.get_item(0)
-            && done.call_method0("cancelled")?.is_truthy()?
-        {
-            hook.fire();
-        }
-        PyResult::Ok(())
-    })?;
-    future.call_method1("add_done_callback", (callback,))?;
-    Ok(())
+    on_cancel(future, move || hook.fire())
 }
 
 /// Sets `flag` when the Python future is cancelled. A pool checks it right after acquiring, because
@@ -109,14 +117,5 @@ pub fn watch<B: Backend>(future: &Bound<'_, PyAny>, hook: Hook<B>) -> PyResult<(
 /// # Errors
 /// Any Python error from registering the callback.
 pub fn watch_flag(future: &Bound<'_, PyAny>, flag: Arc<AtomicBool>) -> PyResult<()> {
-    let callback = PyCFunction::new_closure(future.py(), None, None, move |args, _kwargs| {
-        if let Ok(done) = args.get_item(0)
-            && done.call_method0("cancelled")?.is_truthy()?
-        {
-            flag.store(true, Ordering::Release);
-        }
-        PyResult::Ok(())
-    })?;
-    future.call_method1("add_done_callback", (callback,))?;
-    Ok(())
+    on_cancel(future, move || flag.store(true, Ordering::Release))
 }
