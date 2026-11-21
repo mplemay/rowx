@@ -352,6 +352,52 @@ async def test_the_next_lease_is_idle_after_an_interrupted_read_in_a_transaction
         await pool.close()
 
 
+@pytest.mark.parametrize("hooked", [False, True])
+@pytest.mark.asyncio
+async def test_a_stream_kept_past_its_lease_does_not_block_the_release(tmp_path: Path, *, hooked: bool) -> None:
+    pool = Pool(file_options(tmp_path), max_size=1, reset=noop if hooked else None)
+    try:
+        # few enough rows that the worker finishes while the batches are still unread
+        async with pool.acquire() as conn:
+            kept = query[int](
+                t"WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 20) SELECT n FROM c"
+            ).fetch(conn, batch_size=2)
+            assert await anext(kept) == 1
+
+        async def next_lease() -> int:
+            async with pool.acquire(timeout=5) as conn:
+                return await query[int](t"SELECT 1").one(conn)
+
+        assert await asyncio.wait_for(next_lease(), timeout=30) == 1
+        assert pool.size == 1
+        del kept
+    finally:
+        await asyncio.wait_for(pool.close(), timeout=30)
+
+
+@pytest.mark.parametrize("hooked", [False, True])
+@pytest.mark.asyncio
+async def test_a_query_still_running_at_release_does_not_interrupt_the_next_lease(
+    tmp_path: Path,
+    *,
+    hooked: bool,
+) -> None:
+    pool = Pool(file_options(tmp_path), max_size=1, reset=noop if hooked else None)
+    try:
+        async with pool.acquire() as conn:
+            running = asyncio.ensure_future(native_fetch(conn._impl, LONG_QUERY))
+            # the statement is claimed synchronously by the call, so the release has to end it
+            await asyncio.sleep(0)
+        with pytest.raises(DatabaseError, match="interrupt"):
+            await asyncio.wait_for(running, timeout=30)
+        await until(lambda: pool.idle == 1)
+        async with pool.acquire(timeout=10) as conn:
+            assert await query[int](t"SELECT 1").one(conn) == 1
+            assert await query[int](t"SELECT 2").all(conn) == [2]
+    finally:
+        await asyncio.wait_for(pool.close(), timeout=30)
+
+
 @pytest.mark.asyncio
 async def test_a_released_read_only_transaction_leaves_the_connection_writable(tmp_path: Path) -> None:
     pool = Pool(file_options(tmp_path), max_size=1)

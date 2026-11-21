@@ -503,6 +503,8 @@ async fn produce(
                 tokio::select! {
                     () = shared.released.notified() => {}
                     () = core.cancel.state.wait_closed() => {}
+                    // a pool release or a cancelled stream wants the connection back
+                    () = core.cancel.backend.cancel_requested() => {}
                 }
             }
         }

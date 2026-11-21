@@ -195,7 +195,11 @@ impl Manage for SqliteManager {
     }
 
     async fn settled(&self, conn: &SqliteConn) -> bool {
-        conn.state.wait_settled().await.is_ok()
+        if conn.state.wait_settled().await.is_err() {
+            return false;
+        }
+        // a cancel sent to end the operation is still pending; take it so the next lease starts clean
+        conn.backend.is_alive().await
     }
 
     async fn forget_statements(&self, conn: &SqliteConn) {
@@ -361,6 +365,19 @@ mod tests {
         let manager = SqliteManager::new(options);
         let conn = manager.connect().await?;
         assert!(query_only_after_reset(&manager, &conn).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_connection_settled_after_a_cancel_runs_its_next_operation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TempDir::new()?;
+        let manager = SqliteManager::new(file(&dir, "s.db"));
+        let conn = manager.connect().await?;
+        // what the release's settle loop does to an operation it has to end
+        conn.backend.send_cancel().await?;
+        assert!(manager.settled(&conn).await);
+        conn.conn.lock().await.simple("CREATE TABLE s (n)").await?;
         Ok(())
     }
 

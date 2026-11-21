@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use rowx_core::cancel::Backend;
 use rusqlite::InterruptHandle;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
 use crate::error::Error;
@@ -25,6 +26,8 @@ pub(crate) struct Shared {
     // pairs with `wake`: a worker parked on a full stream channel sleeps here
     gate: Mutex<()>,
     wake: Condvar,
+    // wakes async waiters of a cancel request, which the condition variable cannot reach
+    requested: Notify,
 }
 
 // the gate guards no data, so a poisoned lock is as good as a clean one
@@ -41,6 +44,7 @@ impl Default for Shared {
             stepped: AtomicU64::new(0),
             gate: Mutex::new(()),
             wake: Condvar::new(),
+            requested: Notify::new(),
         }
     }
 }
@@ -63,6 +67,20 @@ impl Shared {
     pub(crate) fn request_cancel(&self) {
         self.cancel.store(true, Ordering::Release);
         self.wake();
+        self.requested.notify_waiters();
+    }
+
+    // register, then check, so a request made before the wait began or while it started is not missed
+    pub(crate) async fn wait_cancelled(&self) {
+        loop {
+            let notified = self.requested.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Takes the cancel flag, so a late `send_cancel` cannot leak into the next operation.
@@ -145,6 +163,12 @@ impl fmt::Debug for SqliteBackend {
 impl SqliteBackend {
     pub(crate) const fn new(interrupt: Arc<InterruptHandle>, shared: Arc<Shared>) -> Self {
         Self { interrupt, shared }
+    }
+
+    /// Resolves once a cancel has been requested, including one made before the wait began. The flag stays
+    /// set until `is_alive` takes it, so this keeps resolving until then.
+    pub async fn cancel_requested(&self) {
+        self.shared.wait_cancelled().await;
     }
 
     pub(crate) fn interrupt(&self) {

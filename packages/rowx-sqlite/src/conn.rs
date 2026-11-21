@@ -386,6 +386,10 @@ impl Connection {
             rowx_py_core::exec::settle(&core.cancel.state, &core.cancel.backend)
                 .await
                 .map_err(SqliteError::from)?;
+            // the settle may have sent cancels; take the flag so the hook's own work is not interrupted
+            if !core.cancel.backend.is_alive().await {
+                return Err(SqliteError::from(CoreError::Closed).into());
+            }
             Ok(())
         })
     }
