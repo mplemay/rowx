@@ -168,11 +168,11 @@ def main() -> int:
 
     expected = render()
     if args.check:
-        if not TARGET.exists() or TARGET.read_text() != expected:
+        if not TARGET.exists() or TARGET.read_text(encoding="utf-8") != expected:
             print(f"{TARGET.relative_to(ROOT)} is out of date; run scripts/gen-types-doc.py", file=stderr)  # ruff: ignore[print]
             return 1
         return 0
-    TARGET.write_text(expected)
+    TARGET.write_text(expected, encoding="utf-8", newline="\n")
     return 0
 
 

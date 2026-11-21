@@ -9,7 +9,6 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
-from rowx_embedded._instance import parse_embedded_url, start_blocking
 from rowx_postgres.__tests__.support.engine import (
     ALLOWED_RUNTIME_SKIPS,
     EMBEDDED_DATABASE_KEY,
@@ -48,6 +47,8 @@ def pytest_configure(config: pytest.Config) -> None:
     dsn = os.environ.get("ROWX_TEST_DSN")
     if dsn is None or not is_embedded_url(dsn) or _is_xdist_controller(config):
         return
+    from rowx_embedded._instance import parse_embedded_url, start_blocking  # ruff: ignore[import-outside-top-level]
+
     target, _ = parse_embedded_url(dsn)
     database = start_blocking(target.directory)
     config.stash[EMBEDDED_DATABASE_KEY] = database
