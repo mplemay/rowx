@@ -23,7 +23,7 @@ const MAIN: &str = "main";
 const AUTH_MESSAGE: &str = "a migration must not contain BEGIN, COMMIT or ROLLBACK: rowx runs each file \
     in a transaction of its own, or in none when the file is marked `-- no-transaction`";
 const OPEN_TRANSACTION_MESSAGE: &str = "a `-- no-transaction` migration must not leave a transaction open (an \
-    unreleased SAVEPOINT); its work was rolled back";
+    unreleased SAVEPOINT); the work done since that SAVEPOINT was rolled back";
 const FOREIGN_KEYS_MESSAGE: &str = "foreign key enforcement could not be turned back on after a \
     `-- no-transaction` migration";
 const BUSY_MESSAGE: &str = "another migrator holds the database: the write lock was not released \

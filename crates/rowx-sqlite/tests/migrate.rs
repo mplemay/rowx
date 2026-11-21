@@ -437,7 +437,7 @@ async fn a_no_transaction_file_that_leaves_a_transaction_open_is_rolled_back_and
     let conn = connect(&file(&dir)).await?;
     let all = [simple(
         1,
-        "-- no-transaction\nPRAGMA foreign_keys = OFF;\nSAVEPOINT s;\nCREATE TABLE t (i INTEGER);",
+        "-- no-transaction\nPRAGMA foreign_keys = OFF;\nCREATE TABLE before_savepoint (i INTEGER);\nSAVEPOINT s;\nCREATE TABLE t (i INTEGER);",
     )];
     let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
         .await
@@ -449,6 +449,8 @@ async fn a_no_transaction_file_that_leaves_a_transaction_open_is_rolled_back_and
         "{err:?}"
     );
     assert!(conn.is_autocommit().await?);
+    // autocommit already committed the work before the SAVEPOINT; only the work since it is undone
+    assert!(table_exists(&conn, "before_savepoint").await?);
     assert!(!table_exists(&conn, "t").await?);
     assert_eq!(pragma(&conn, "foreign_keys").await?, 1);
     assert_eq!(history(&conn).await?, [(1, false)]);
@@ -483,9 +485,9 @@ async fn a_no_transaction_revert_that_leaves_a_transaction_open_is_rolled_back_a
     Ok(())
 }
 
-// a transactional file that is cancelled mid-script leaves nothing behind and a usable connection
+// a transactional file that is interrupted mid-script leaves nothing behind and a usable connection
 #[tokio::test]
-async fn cancelling_a_transactional_migration_mid_script_rolls_it_back() -> TestResult {
+async fn interrupting_a_transactional_migration_mid_script_rolls_it_back() -> TestResult {
     let dir = TempDir::new()?;
     let migrator = Arc::new(connect(&file(&dir)).await?);
     let observer = connect(&file(&dir)).await?;
