@@ -1,3 +1,4 @@
+import ast
 from typing import TYPE_CHECKING
 
 import pytest
@@ -7,6 +8,7 @@ from rowx.check.discover import discover_file
 from rowx.check.resolve import ModuleGraph, resolve_row_type, roots_for
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -791,6 +793,10 @@ def test_attrs_class_comprehension_qualified_private_attribute(tmp_path: Path, *
         "(gate := FIELD)\nfor alias in ((gate, (gate := attrs.field()))[0],):\n    alias.default(lambda self: 1)",
         "(alias := attrs.field())\ntry:\n    if True:\n        ((alias := FIELD), int('bad'), (alias := attrs.field()))\nexcept ValueError:\n    alias.default(lambda self: 1)",
         "(alias := attrs.field())\ntry:\n    if True:\n        alias = FIELD\n        int('bad')\n        alias = attrs.field()\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(gate := FIELD)\nalias, other = (gate, (gate := attrs.field()))\nalias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    for field_alias in (FIELD,):\n        alias = field_alias\n        int('bad')\n        alias = attrs.field()\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    for field_alias in (FIELD,):\n        alias = field_alias\n        int('bad')\n        alias = attrs.field()\nfinally:\n    alias.default(lambda self: 1)",
+        "(gate := FIELD)\n(alias := (gate, (gate := attrs.field()))[index])\nalias.default(lambda self: 1)",
     ],
 )
 def test_attrs_flow_paths_reject_dynamic_default(tmp_path: Path, body: str, *, shared: bool) -> None:
@@ -802,11 +808,11 @@ def test_attrs_flow_paths_reject_dynamic_default(tmp_path: Path, body: str, *, s
             + "\n@attrs.define\nclass Row:\n    value: int = spec\n"
         )
     else:
-        if body.startswith("first, alias =") or "\nalias = ((gate :=" in body:
+        if body.startswith("first, alias =") or "\nalias = ((gate :=" in body or "\nalias, other =" in body:
             body = "for _ in (0,):\n    " + body.replace("\n", "\n    ")
         statements = body.replace("FIELD", "value").replace("\n", "\n    ")
         source = f"@attrs.define\nclass Row:\n    value: int = attrs.field()\n    {statements}\n"
-    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    path.write_text(f'import attrs\nfrom rowx import query\nindex = 0\n{source}query[Row](t"select 1")\n')
     [call] = discover_file(path).calls
     result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
     assert result.diagnostic is not None
@@ -847,6 +853,11 @@ def test_attrs_failed_guard_without_registration_is_supported(tmp_path: Path, *,
         "(alias := attrs.field())\ntry:\n    if False:\n        (alias := FIELD)\n    int('bad')\nexcept ValueError:\n    alias.default(lambda self: 1)",
         "(alias := attrs.field())\ntry:\n    if True:\n        (lambda: (alias := FIELD))\n        int('bad')\nexcept ValueError:\n    alias.default(lambda self: 1)",
         "(alias := attrs.field())\ntry:\n    while False:\n        (alias := FIELD)\n    int('bad')\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(gate := FIELD)\n(alias := attrs.field())\ntry:\n    for gate in (attrs.field(),):\n        alias = gate\n        int('bad')\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(alias := FIELD)\ntry:\n    alias = attrs.field()\nfinally:\n    pass\nalias.default(lambda self: 1)",
+        "(alias := FIELD)\ntry:\n    pass\nfinally:\n    (alias := attrs.field())\nalias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    (alias := FIELD)\n    int('bad')\n    (alias := attrs.field())\nfinally:\n    def later():\n        alias = FIELD\nalias.default(lambda self: 1)",
+        "(alias := (attrs.field(), attrs.field())[int('0')])\nalias.default(lambda self: 1)",
     ],
 )
 def test_attrs_literal_selection_and_try_fresh_controls(tmp_path: Path, body: str, *, shared: bool) -> None:
@@ -999,3 +1010,35 @@ def test_attrs_for_iterable_bindings_are_frozen(tmp_path: Path, *, shared: bool)
     assert result.diagnostic is None
     assert result.row_type is not None
     assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_attrs_nested_finally_visits_bodies_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, shared: bool
+) -> None:
+    path = tmp_path / "case.py"
+    depth = 14
+    body = "".join(
+        "    " * i + "try:\n" + "    " * (i + 1) + "pass\n" + "    " * i + "finally:\n" for i in range(depth)
+    )
+    body += "    " * depth + "987654321\n"
+    if shared:
+        source = "spec = attrs.field()\n" + body + "@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    " + body.replace("\n", "\n    ")
+        source += "pass\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    visits = 0
+    original = ast.iter_child_nodes
+
+    def count(node: ast.AST) -> Iterator[ast.AST]:
+        nonlocal visits
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and node.value.value == 987654321:
+            visits += 1
+        return original(node)
+
+    monkeypatch.setattr(ast, "iter_child_nodes", count)
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert 0 < visits <= depth * 10

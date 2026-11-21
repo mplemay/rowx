@@ -1650,3 +1650,36 @@ def test_attrs_failed_guard_default_omission_and_empty_results(schema: str) -> N
 
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(7, 42)
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_captured_and_exception_loop_default_omission(schema: str) -> None:
+    spec = attrs.field()
+    gate = spec
+    alias, _other = (gate, (gate := attrs.field()))
+    alias.default(lambda _self: 42)
+
+    @attrs.define
+    class Captured:
+        id: int
+        value: int = spec
+
+    assert run_on(schema, "connection", query[Captured](t"SELECT 7::int4 AS id").one) == Captured(7, 42)
+    assert run_on(schema, "connection", query[Captured](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+    spec2 = attrs.field()
+    alias2 = attrs.field()
+    try:
+        for field_alias in (spec2,):
+            alias2 = field_alias
+            int("bad")
+            alias2 = attrs.field()
+    except ValueError:
+        alias2.default(lambda _self: 43)
+
+    @attrs.define
+    class Exceptional:
+        id: int
+        value: int = spec2
+
+    assert run_on(schema, "connection", query[Exceptional](t"SELECT 7::int4 AS id").one) == Exceptional(7, 43)
+    assert run_on(schema, "connection", query[Exceptional](t"SELECT 7::int4 AS id WHERE false").all) == []

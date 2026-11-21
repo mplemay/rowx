@@ -745,6 +745,16 @@ def test_parameter_comparison_coverage_for_array_leaves() -> None:
             "    if True:\n        @value.default\n        def make(self): return 42\n"
         ),
         "@attrs.define\nclass Row:\n    id: int\n    value: int = attrs.field()\n    value.default(lambda self: 42)\n",
+        (
+            "spec = attrs.field()\ngate = spec\nalias, other = (gate, (gate := attrs.field()))\n"
+            "alias.default(lambda self: 42)\n@attrs.define\nclass Row:\n    id: int\n    value: int = spec\n"
+        ),
+        (
+            "spec = attrs.field()\nalias = attrs.field()\ntry:\n    for field_alias in (spec,):\n"
+            "        alias = field_alias\n        int('bad')\n        alias = attrs.field()\n"
+            "except ValueError:\n    alias.default(lambda self: 42)\n"
+            "@attrs.define\nclass Row:\n    id: int\n    value: int = spec\n"
+        ),
     ],
 )
 def test_attrs_flow_default_rejected_before_empty_result_comparison(
