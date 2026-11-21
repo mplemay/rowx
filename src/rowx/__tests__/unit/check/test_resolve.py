@@ -782,6 +782,15 @@ def test_attrs_class_comprehension_qualified_private_attribute(tmp_path: Path, *
         "(alias := attrs.field())\ntry:\n    ((alias := FIELD), int('bad'), (alias := attrs.field()))\nexcept ValueError:\n    alias.default(lambda self: 1)",
         "(alias := attrs.field())\ntry:\n    print((alias := FIELD), int('bad'), (alias := attrs.field()))\nexcept ValueError:\n    alias.default(lambda self: 1)",
         "(alias := attrs.field())\ntry:\n    print(((alias := FIELD), int('bad'), (alias := attrs.field())))\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "first, alias = (*(*(), attrs.field()), FIELD)\nalias.default(lambda self: 1)",
+        "(*[FIELD, FIELD], attrs.field())[1].default(lambda self: 1)",
+        "(FIELD,)[-1].default(lambda self: 1)",
+        "(gate := FIELD)\n(alias := (gate, (gate := attrs.field()))[0])\nalias.default(lambda self: 1)",
+        "(gate := attrs.field())\nalias = ((gate := FIELD), gate, (gate := attrs.field()))[1]\nalias.default(lambda self: 1)",
+        "(gate := attrs.field())\n((gate := FIELD), gate, (gate := attrs.field()))[1].default(lambda self: 1)",
+        "(gate := FIELD)\nfor alias in ((gate, (gate := attrs.field()))[0],):\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    if True:\n        ((alias := FIELD), int('bad'), (alias := attrs.field()))\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    if True:\n        alias = FIELD\n        int('bad')\n        alias = attrs.field()\nexcept ValueError:\n    alias.default(lambda self: 1)",
     ],
 )
 def test_attrs_flow_paths_reject_dynamic_default(tmp_path: Path, body: str, *, shared: bool) -> None:
@@ -793,6 +802,8 @@ def test_attrs_flow_paths_reject_dynamic_default(tmp_path: Path, body: str, *, s
             + "\n@attrs.define\nclass Row:\n    value: int = spec\n"
         )
     else:
+        if body.startswith("first, alias =") or "\nalias = ((gate :=" in body:
+            body = "for _ in (0,):\n    " + body.replace("\n", "\n    ")
         statements = body.replace("FIELD", "value").replace("\n", "\n    ")
         source = f"@attrs.define\nclass Row:\n    value: int = attrs.field()\n    {statements}\n"
     path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
@@ -818,6 +829,39 @@ def test_attrs_failed_guard_without_registration_is_supported(tmp_path: Path, *,
             "FIELD", "value"
         ).replace("\n", "\n    ")
         source += "del alias\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "(gate := FIELD)\n(alias := ((gate := attrs.field()), gate)[1])\nalias.default(lambda self: 1)",
+        "(gate := FIELD)\nfor alias in (((gate := attrs.field()), gate)[1],):\n    alias.default(lambda self: 1)",
+        "(gate := FIELD)\nalias = ((gate := attrs.field()), gate)[1]\nalias.default(lambda self: 1)",
+        "(FIELD, attrs.field())[-1].default(lambda self: 1)",
+        "first, alias = (*(*(), FIELD), attrs.field())\nalias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    if False:\n        (alias := FIELD)\n    int('bad')\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    if True:\n        (lambda: (alias := FIELD))\n        int('bad')\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    while False:\n        (alias := FIELD)\n    int('bad')\nexcept ValueError:\n    alias.default(lambda self: 1)",
+    ],
+)
+def test_attrs_literal_selection_and_try_fresh_controls(tmp_path: Path, body: str, *, shared: bool) -> None:
+    path = tmp_path / "case.py"
+    if shared:
+        source = (
+            "spec = attrs.field()\n"
+            + body.replace("FIELD", "spec")
+            + "\n@attrs.define\nclass Row:\n    value: int = spec\n"
+        )
+    else:
+        if body.startswith("first, alias =") or "\nalias = ((gate :=" in body:
+            body = "for _ in (0,):\n    " + body.replace("\n", "\n    ")
+        statements = body.replace("FIELD", "value").replace("\n", "\n    ")
+        source = f"@attrs.define\nclass Row:\n    value: int = attrs.field()\n    {statements}\n"
     path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
     [call] = discover_file(path).calls
     result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
@@ -853,6 +897,7 @@ def test_attrs_try_eager_binding_fresh_controls(tmp_path: Path, expression: str)
         ("def object(): return spec\n", True),
         ("from helpers import object\n", True),
         ("def unrelated():\n    object = 1\n", False),
+        ("(object := lambda: spec)\n", True),
     ],
 )
 def test_attrs_builtin_object_shadow(tmp_path: Path, setup: str, *, expected: bool) -> None:
