@@ -247,6 +247,38 @@ async fn a_no_transaction_script_with_its_own_begin_is_rejected_and_stays_dirty(
 }
 
 #[tokio::test]
+async fn a_no_transaction_file_can_vacuum() -> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    let all = [
+        simple(
+            1,
+            "CREATE TABLE t (i int); INSERT INTO t VALUES (1), (2), (3);",
+        ),
+        simple(2, "-- no-transaction\nVACUUM;"),
+    ];
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    assert_eq!(history(&conn).await?, [(1, true), (2, true)]);
+    assert_eq!(ints(&conn, "SELECT count(*) FROM t").await?, [3]);
+    assert!(conn.is_autocommit().await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_no_transaction_file_can_change_the_journal_mode() -> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    let all = [simple(
+        1,
+        "-- no-transaction\nPRAGMA journal_mode = DELETE;\nPRAGMA journal_mode = WAL;",
+    )];
+    run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    assert_eq!(history(&conn).await?, [(1, true)]);
+    assert!(conn.is_autocommit().await?);
+    Ok(())
+}
+
+#[tokio::test]
 async fn triggers_and_savepoints_are_not_transaction_statements() -> TestResult {
     let dir = TempDir::new()?;
     let conn = connect(&file(&dir)).await?;

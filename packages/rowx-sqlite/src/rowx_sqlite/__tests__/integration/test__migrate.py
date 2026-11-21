@@ -321,6 +321,16 @@ async def test_a_failing_file_raises_with_its_version_path_and_cause(conn: Conne
 
 
 @pytest.mark.asyncio
+async def test_a_no_transaction_file_can_vacuum(conn: Connection, migrations: Path) -> None:
+    write(migrations, "1_t.sql", "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1), (2);")
+    write(migrations, "2_vacuum.sql", "-- no-transaction\nVACUUM;")
+
+    await Migrator(migrations).run(conn)
+
+    assert await history(conn) == [(1, True), (2, True)]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_no_transaction_file_leaves_a_dirty_row(conn: Connection, migrations: Path) -> None:
     write(
         migrations, "1_bad.sql", "-- no-transaction\nCREATE TABLE half (id INTEGER);\nINSERT INTO missing VALUES (1);"

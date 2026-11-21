@@ -4,10 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rowx_core::error::TaskStopped;
 pub use rowx_core::row_shape::Shape;
 use rowx_core::row_shape::{FieldSpec, Mapping, Matching, check_nulls, check_shape, column_mask};
+use rusqlite::fallible_iterator::FallibleIterator;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 pub use rusqlite::types::Value as Param;
 use rusqlite::types::ValueRef;
-use rusqlite::{Rows, Statement, ffi, params_from_iter};
+use rusqlite::{Batch as StatementBatch, Rows, Statement, ffi, params_from_iter};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cancel::{Shared, Unsent};
@@ -659,7 +660,8 @@ impl Connection {
     ///
     /// A script may not end or start a transaction of its own (`BEGIN`, `COMMIT`, `ROLLBACK`): the
     /// migrator owns the transaction, or runs the file outside one. SQLite refuses those statements
-    /// before they run, with `SQLITE_AUTH`.
+    /// when they are prepared, with `SQLITE_AUTH`. Statements SQLite runs internally while stepping
+    /// (`VACUUM` begins a transaction of its own) are allowed.
     ///
     /// # Errors
     /// `Sqlite` for the first failing statement.
@@ -670,8 +672,14 @@ impl Connection {
                 return Err(interrupted());
             }
             let untrusted = ctx.untrusted;
+            // the callbacks for a statement's own text fire while it is prepared; the ones for what
+            // SQLite does inside a running statement fire while it is stepped
+            let preparing = Arc::new(AtomicBool::new(false));
+            let gate = Arc::clone(&preparing);
             ctx.conn.authorizer(Some(move |auth: AuthContext<'_>| {
-                if matches!(auth.action, AuthAction::Transaction { .. }) {
+                if gate.load(Ordering::Relaxed)
+                    && matches!(auth.action, AuthAction::Transaction { .. })
+                {
                     Authorization::Deny
                 } else if untrusted {
                     authorize(auth)
@@ -679,7 +687,7 @@ impl Connection {
                     Authorization::Allow
                 }
             }))?;
-            let outcome = ctx.conn.execute_batch(&sql);
+            let outcome = run_script(&ctx.conn, &sql, &preparing);
             // back to what the connection was opened with
             let restored = if untrusted {
                 ctx.conn.authorizer(Some(authorize))
@@ -692,5 +700,24 @@ impl Connection {
             Ok(())
         })
         .await
+    }
+}
+
+fn run_script(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    preparing: &AtomicBool,
+) -> rusqlite::Result<()> {
+    let mut batch = StatementBatch::new(conn, sql);
+    loop {
+        preparing.store(true, Ordering::Relaxed);
+        let next = batch.next();
+        preparing.store(false, Ordering::Relaxed);
+        let Some(mut stmt) = next? else {
+            return Ok(());
+        };
+        // statements such as `PRAGMA journal_mode` return a row; step through and discard them
+        let mut rows = stmt.query([])?;
+        while rows.next()?.is_some() {}
     }
 }
