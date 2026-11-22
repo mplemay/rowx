@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection as Raw, OpenFlags};
@@ -17,11 +17,9 @@ const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 // What follows the database's name on the files SQLite keeps beside it; keep in step with `SIDECARS` in `_scratch.py`
 const SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
-// pages copied per backup step; the destination is private until the backup is done, so nothing contends
-const BACKUP_PAGES: i32 = 256;
 // the pause before a busy or locked template is tried again
 const BACKUP_PAUSE: Duration = Duration::from_millis(10);
-// how long a template may stay locked before the clone gives up; rusqlite's default busy timeout
+// the wall-clock time a clone waits for a lock on the template before it gives up, matching rusqlite's default busy timeout; it bounds only that wait, never the copy itself
 const BACKUP_BUDGET: Duration = Duration::from_secs(5);
 // the Win32 `ERROR_SHARING_VIOLATION` and `ERROR_LOCK_VIOLATION`
 const SHARING_VIOLATION: i32 = 32;
@@ -188,14 +186,14 @@ fn remove_files(path: &Path) {
     }
 }
 
-fn clone_into(template: &Path, path: &Path) -> Result<(), AdminError> {
+fn clone_into(template: &Path, path: &Path, budget: Duration) -> Result<(), AdminError> {
     if !exists_now(template)? {
         return Err(AdminError::TemplateMissing(template.display().to_string()));
     }
     let source = open(template, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     // the claim comes before the copy, so a name that is taken stops here
     drop(create_empty(path)?);
-    let copied = copy_pages(&source, path, template, BACKUP_BUDGET);
+    let copied = copy_pages(&source, path, template, budget);
     if copied.is_err() {
         // the file is ours: the claim above succeeded, so nothing else wrote it
         remove_files(path);
@@ -215,19 +213,18 @@ fn copy_pages(
     let mut target = open(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let backup = Backup::new(source, &mut target)?;
     // `run_to_completion` retries a busy or locked source without pausing or ending, so the steps are driven here
-    let mut waited = Duration::ZERO;
+    let deadline = Instant::now() + budget;
     loop {
-        match backup.step(BACKUP_PAGES)? {
+        // -1 copies every page in one step under the source's read lock, so no writer can restart the backup; only getting that lock can wait
+        match backup.step(-1)? {
             StepResult::Done => return Ok(()),
-            StepResult::More => {}
             StepResult::Busy | StepResult::Locked => {
-                if waited >= budget {
+                if Instant::now() >= deadline {
                     return Err(AdminError::TemplateBusy(template.display().to_string()));
                 }
                 thread::sleep(BACKUP_PAUSE);
-                waited += BACKUP_PAUSE;
             }
-            // `StepResult` is non-exhaustive; a result this code does not know is not worth waiting for
+            // `More` cannot happen when every page is copied in one step, and `StepResult` is non-exhaustive; a result this code does not expect is an error, not a reason to loop
             _ => {
                 return Err(AdminError::Sqlite(Error::Interface(
                     "the backup ended with a result this driver does not know".to_owned(),
@@ -244,7 +241,7 @@ fn copy_pages(
 ///
 /// # Errors
 /// `Exists` when the name is taken (nothing is overwritten), `TemplateMissing`, `TemplateBusy` when the template
-/// stays locked for longer than the budget, `NoDirectory` when the
+/// stays locked by another connection for longer than the budget, `NoDirectory` when the
 /// parent directory does not exist, `Sqlite` when the template cannot be read, `Io` otherwise. A copy that
 /// fails leaves no file behind.
 pub async fn create(name: &str, template: Option<&str>) -> Result<(), AdminError> {
@@ -253,7 +250,7 @@ pub async fn create(name: &str, template: Option<&str>) -> Result<(), AdminError
     on_thread(move || {
         template.map_or_else(
             || create_empty(&path).map(drop),
-            |template| clone_into(&template, &path),
+            |template| clone_into(&template, &path, BACKUP_BUDGET),
         )
     })
     .await
@@ -425,7 +422,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        AdminError, MAGIC, copy_pages, create, drop_database, exists, list, ready,
+        AdminError, MAGIC, clone_into, create, drop_database, exists, list, ready,
         sharing_violation,
     };
     use crate::error::Error;
@@ -575,14 +572,12 @@ mod tests {
     async fn dropping_a_missing_file_removes_its_orphaned_side_files() -> Outcome {
         let dir = tempdir()?;
         let path = dir.path().join("a.db");
-        let source = database(&path)?;
-        source.execute_batch("PRAGMA journal_mode = WAL; INSERT INTO t VALUES ('d');")?;
-        let wal = dir.path().join("a.db-wal");
-        assert!(wal.exists());
-        // the main file goes while the connection keeps the side files alive
-        fs::remove_file(&path)?;
-        fs::write(dir.path().join("a.db-journal"), b"x")?;
+        // no connection is open, so the files can go on every platform
+        for suffix in ["-wal", "-shm", "-journal"] {
+            fs::write(format!("{}{suffix}", path.display()), b"orphan")?;
+        }
         fs::write(dir.path().join("a.db.keep"), b"x")?;
+        assert!(!path.exists());
         drop_database(&path_str(&path)).await?;
         let left = fs::read_dir(dir.path())?
             .map(|entry| entry.map(|e| e.file_name()))
@@ -590,7 +585,6 @@ mod tests {
         assert_eq!(left, vec![OsString::from("a.db.keep")]);
         create(&path_str(&path), None).await?;
         assert_eq!(fs::metadata(&path)?.len(), 0);
-        drop(source);
         Ok(())
     }
 
@@ -723,19 +717,46 @@ mod tests {
         // an exclusive lock with a write in flight, so a reader cannot take even a shared lock
         holder.execute_batch("BEGIN EXCLUSIVE; INSERT INTO t VALUES ('b');")?;
         let target = dir.path().join("copy.db");
-        let source = Raw::open_with_flags(&template, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        super::create_empty(&target)?;
         let started = Instant::now();
-        let copied = copy_pages(&source, &target, &template, Duration::from_millis(50));
+        let copied = clone_into(&template, &target, Duration::from_millis(50));
         assert!(
             matches!(copied, Err(AdminError::TemplateBusy(_))),
             "{copied:?}"
         );
         assert!(started.elapsed() < Duration::from_secs(4));
-        // the same cleanup `clone_into` runs
-        super::remove_files(&target);
-        assert!(!target.exists());
+        for suffix in std::iter::once("").chain(super::SIDE_FILES) {
+            assert!(!super::side_path(&target, suffix).exists(), "{suffix}");
+        }
         holder.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_large_template_clones_even_with_a_zero_budget() -> Outcome {
+        let dir = tempdir()?;
+        let template = dir.path().join("big.db");
+        let big = Raw::open(&template)?;
+        big.execute_batch("CREATE TABLE t (v BLOB);")?;
+        {
+            let mut insert = big.prepare("INSERT INTO t VALUES (zeroblob(1024))")?;
+            for _ in 0..4000 {
+                insert.execute([])?;
+            }
+        }
+        let pages: i64 = big.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        assert!(pages > 256, "{pages}");
+        drop(big);
+        // the budget bounds only the wait for a lock, never the copy
+        let target = dir.path().join("big_copy.db");
+        clone_into(&template, &target, Duration::ZERO)?;
+        let ids = |path: &Path| -> Result<Vec<i64>, rusqlite::Error> {
+            let raw = Raw::open(path)?;
+            let mut statement = raw.prepare("SELECT rowid FROM t ORDER BY rowid")?;
+            statement.query_map([], |r| r.get(0))?.collect()
+        };
+        let copied = ids(&target)?;
+        assert_eq!(copied.len(), 4000);
+        assert_eq!(copied, ids(&template)?);
         Ok(())
     }
 
