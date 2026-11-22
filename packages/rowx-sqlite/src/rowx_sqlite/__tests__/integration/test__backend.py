@@ -8,6 +8,8 @@ from rowx_sqlite._backend import cast, checker, load, placeholder
 from rowx_sqlite._compiler import COMPILER
 from rowx_sqlite._core import type_table
 
+from rowx.check.resolve import LEAVES
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -70,6 +72,29 @@ def test_the_types_come_from_the_type_table() -> None:
     assert {key: types[key].py_result for key in results} == results
     assert types["any"].alternatives == {"int", "float", "str", "bytes"}
     assert types["integer"].accepted_params == ("int",)
+
+
+def test_the_checker_knows_every_type_the_type_table_names() -> None:
+    backend = checker()
+    assert {info.key for info in type_table()} <= set(backend.types)
+    # `json` decodes to any Python value, which no leaf names, so it is the one result that is `object`
+    leaves = set(LEAVES.values())
+    for key, entry in backend.types.items():
+        results = {entry.py_result, *entry.alternatives}
+        if key == "json":
+            assert entry.py_result == "object"
+            continue
+        if key == "any":
+            # a union of the four storage classes, each of which is a leaf
+            assert entry.py_result == "int | float | str | bytes"
+            assert entry.alternatives == {"int", "float", "str", "bytes"}
+            results = set(entry.alternatives)
+        assert results <= leaves, key
+    assert backend.array_key is None
+    assert backend.override_issues is None
+    assert (backend.untyped_params, backend.untyped_columns) == (True, True)
+    assert backend.placeholder(3) == "?3"
+    assert backend.json_keys == {"json"}
 
 
 def test_a_passing_project_exits_zero(project: CheckProject) -> None:
@@ -265,3 +290,55 @@ def test_other_queries_in_the_file_are_still_checked_after_a_static_parameter(pr
     found = reports(project, source)
     assert [item["line"] for item in found] == [3, 4]
     assert [item.get("code") for item in found] == [None, "SQLITE_ERROR"]
+
+
+SQL_ERROR_SOURCE = (
+    'query[tuple[int]](t"SELECT id FROM users; SELECT 1")\n'
+    'query[tuple[int]](t"")\n'
+    'query[tuple[int]](t"-- nothing")\n'
+    'query[tuple[int]](t"SELECT nam FROM users")\n'
+)
+
+
+def test_sql_that_is_not_one_statement_is_reported_and_the_run_goes_on(project: CheckProject) -> None:
+    write(project, SQL_ERROR_SOURCE)
+    code, out, err = project.check("--no-drift-check", "--output-format", "json")
+    assert "lost the database connection" not in out + err
+    assert code == 1
+    assert not err
+    found = json.loads(out)
+    assert [item["rule"] for item in found] == ["sql-error"] * 4
+    assert [item["line"] for item in found] == [3, 4, 5, 6]
+    assert found[0]["sqlstate"] == "HY000"
+    assert "code" not in found[0]
+    assert found[3]["code"] == "SQLITE_ERROR"
+
+
+def test_sql_that_is_not_one_statement_is_reported_in_text_output(project: CheckProject) -> None:
+    write(project, SQL_ERROR_SOURCE)
+    code, out, err = project.check("--no-drift-check")
+    assert code == 1
+    assert "lost the database connection" not in out + err
+    assert out.count("error[sql-error]") == 4
+
+
+def test_a_nested_template_in_query_unchecked_is_not_checked(project: CheckProject) -> None:
+    source = 'part = t"id"\nquery_unchecked[tuple[int]](t"SELECT {part} FROM nowhere")\n'
+    assert reports(project, source) == []
+
+
+def test_scratch_with_a_file_url_checks_the_migrated_scratch_and_leaves_no_file(
+    project: CheckProject, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scratch_dir = tmp_path / "scratch"
+    scratch_dir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch_dir))
+    # an empty file has no `users` table, so a pass can only come from the migrated scratch
+    empty = tmp_path / "empty.db"
+    empty.write_bytes(b"")
+    url = f"sqlite:///{empty}"
+    assert reports(project, 'query[tuple[int, str]](t"SELECT id, name FROM users")\n', "--scratch", url=url) == []
+    (error,) = reports(project, 'query[tuple[int]](t"SELECT nam FROM users")\n', "--scratch", url=url)
+    assert error["code"] == "SQLITE_ERROR"
+    assert list(scratch_dir.glob("rowx_check_*")) == []
+    assert empty.read_bytes() == b""

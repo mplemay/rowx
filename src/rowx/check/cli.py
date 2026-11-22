@@ -229,15 +229,13 @@ class _HookState:
 def _scratch_hook(config: Config, state: _HookState) -> Callable[[str, int], AbstractAsyncContextManager[ScratchBuild]]:
     def _open(url: str, workers: int) -> AbstractAsyncContextManager[ScratchBuild]:
         from rowx.check.migrate import load_migrator, resolve_target  # ruff: ignore[import-outside-top-level]
-        from rowx.check.scratch import backend_session, scratch_for  # ruff: ignore[import-outside-top-level]
+        from rowx.check.scratch import scratch_for  # ruff: ignore[import-outside-top-level]
 
         backend = backend_for(url)
         scratch = scratch_for(url, backend)
         # recorded before the session so an interrupted drop is still swept
         state.built = scratch
         migrator = load_migrator(resolve_target(config, None), url, backend)
-        if backend.scratch_factory is not None:
-            return backend_session(scratch, migrator, workers, url)
         return scratch.session(migrator, workers)
 
     return _open

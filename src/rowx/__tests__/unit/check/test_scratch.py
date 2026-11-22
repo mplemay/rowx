@@ -1,11 +1,17 @@
+import asyncio
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
-from rowx_core.backend import AdminService, Backend
-from rowx_core.errors import InterfaceError
+from rowx_core.backend import AdminService, Backend, MigrationService, ScratchBuild
+from rowx_core.errors import InterfaceError, MigrateError
 
 from rowx.check.runner import CheckError
-from rowx.check.scratch import Scratch, scratch_for
+from rowx.check.scratch import BackendScratch, Scratch, scratch_for
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 
 def test_scratch_names_fit_the_identifier_limit() -> None:
@@ -116,7 +122,9 @@ def test_a_backend_scratch_factory_is_used_without_the_admin_service() -> None:
         return made
 
     backend = Backend(scratch_factory=factory)
-    assert scratch_for("fake://db", backend, sweep_previous=False) is made
+    scratch = scratch_for("fake://db", backend, sweep_previous=False)
+    assert isinstance(scratch, BackendScratch)
+    assert scratch.inner is made
     assert seen == [("fake://db", False)]
 
 
@@ -126,3 +134,58 @@ def test_a_backend_without_a_scratch_factory_gets_the_admin_backed_scratch() -> 
     scratch = scratch_for("postgresql://u@h/app", backend, sweep_previous=False)
     assert isinstance(scratch, Scratch)
     assert (scratch.server_dsn, scratch.admin, scratch.sweep_previous) == ("postgresql://u@h/app", admin, False)
+
+
+class FailingScratch:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.swept = 0
+        self.opened: list[tuple[MigrationService, int]] = []
+
+    @asynccontextmanager
+    async def session(self, migrator: MigrationService, workers: int) -> AsyncGenerator[ScratchBuild]:
+        self.opened.append((migrator, workers))
+        raise self.error
+        yield ScratchBuild(urls=(), seconds=0.0)
+
+    def sweep(self) -> None:
+        self.swept += 1
+
+
+async def _open(scratch: BackendScratch) -> None:
+    async with scratch.session(Mock(), 1):
+        pass
+
+
+def test_a_backend_scratch_maps_a_migration_failure_with_its_cause() -> None:
+    error = MigrateError("1_init.sql failed")
+    error.__cause__ = ValueError("bad sql at fake://u:hunter2secret@h/db")
+    wrapped = BackendScratch(FailingScratch(error), "fake://u:hunter2secret@h/db")
+    with pytest.raises(CheckError) as caught:
+        asyncio.run(_open(wrapped))
+    message = str(caught.value)
+    assert message.startswith("the migrations failed on the scratch database: 1_init.sql failed: bad sql at ")
+    assert "hunter2secret" not in message
+
+
+def test_a_backend_scratch_maps_an_os_error() -> None:
+    wrapped = BackendScratch(
+        FailingScratch(OSError("no space on fake://u:hunter2secret@h/db")), "fake://u:hunter2secret@h/db"
+    )
+    with pytest.raises(CheckError) as caught:
+        asyncio.run(_open(wrapped))
+    message = str(caught.value)
+    assert message.startswith("could not create or migrate the scratch database: no space on ")
+    assert "hunter2secret" not in message
+
+
+def test_a_backend_scratch_delegates_the_sweep() -> None:
+    inner = FailingScratch(OSError("x"))
+    BackendScratch(inner, "fake://db").sweep()
+    assert inner.swept == 1
+
+
+def test_a_backend_scratch_reports_the_leak_of_what_it_wraps() -> None:
+    leaky = Mock(leaked=True)
+    assert BackendScratch(leaky, "fake://db").leaked is True
+    assert BackendScratch(FailingScratch(OSError("x")), "fake://db").leaked is False

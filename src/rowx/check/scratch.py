@@ -21,6 +21,11 @@ if TYPE_CHECKING:
 PREFIX: Final[str] = "rowx_check_"
 
 
+def migrate_failed(error: MigrateError) -> str:
+    cause = error.__cause__
+    return f"the migrations failed on the scratch database: {error}" + (f": {cause}" if cause else "")
+
+
 @dataclass(slots=True)
 class Scratch:
     server_dsn: str
@@ -94,9 +99,7 @@ class Scratch:
             # a normal (writable) connection that is closed before the checker session opens; nothing is printed
             await migrator.run_on(url)
         except MigrateError as error:
-            cause = error.__cause__
-            msg = f"the migrations failed on the scratch database: {error}" + (f": {cause}" if cause else "")
-            raise CheckError(redact(msg, self.server_dsn)) from None
+            raise CheckError(redact(migrate_failed(error), self.server_dsn)) from None
         except (DatabaseError, InterfaceError, OSError) as error:
             msg = f"could not migrate the scratch database: {error}"
             raise CheckError(redact(redact(msg, url), self.server_dsn)) from None
@@ -126,25 +129,37 @@ class Scratch:
             sys.stderr.write(f"warning: could not drop the scratch database {self.name!r}{reason}\n")
 
 
-# the messages of the server scratch, for a backend scratch whose errors are its own exceptions
-@asynccontextmanager
-async def backend_session(
-    scratch: ScratchService, migrator: MigrationService, workers: int, dsn: str
-) -> AsyncGenerator[ScratchBuild]:
-    try:
-        async with scratch.session(migrator, workers) as build:
-            yield build
-    except MigrateError as error:
-        cause = error.__cause__
-        msg = f"the migrations failed on the scratch database: {error}" + (f": {cause}" if cause else "")
-        raise CheckError(redact(msg, dsn)) from None
-    except (DatabaseError, InterfaceError, OSError) as error:
-        msg = f"could not create or migrate the scratch database: {error}"
-        raise CheckError(redact(msg, dsn)) from None
+# a backend scratch raises its own exceptions, so its session is given the messages of the server scratch
+@dataclass(slots=True)
+class BackendScratch:
+    inner: ScratchService
+    dsn: str
+
+    def session(self, migrator: MigrationService, workers: int) -> AbstractAsyncContextManager[ScratchBuild]:
+        return self._session(migrator, workers)
+
+    @asynccontextmanager
+    async def _session(self, migrator: MigrationService, workers: int) -> AsyncGenerator[ScratchBuild]:
+        try:
+            async with self.inner.session(migrator, workers) as build:
+                yield build
+        except MigrateError as error:
+            raise CheckError(redact(migrate_failed(error), self.dsn)) from None
+        except (DatabaseError, InterfaceError, OSError) as error:
+            msg = f"could not create or migrate the scratch database: {error}"
+            raise CheckError(redact(msg, self.dsn)) from None
+
+    # a backend scratch that reports a failed cleanup still does, through the wrapper
+    @property
+    def leaked(self) -> bool:
+        return bool(getattr(self.inner, "leaked", False))
+
+    def sweep(self) -> None:
+        self.inner.sweep()
 
 
 # a backend that makes its own scratch (a file database) is not given the server's admin service
 def scratch_for(dsn: str, backend: Backend, *, sweep_previous: bool = True) -> ScratchService:
     if backend.scratch_factory is not None:
-        return backend.scratch(dsn, sweep_previous=sweep_previous)
+        return BackendScratch(backend.scratch(dsn, sweep_previous=sweep_previous), dsn)
     return Scratch(dsn, backend.admin(dsn), sweep_previous=sweep_previous)

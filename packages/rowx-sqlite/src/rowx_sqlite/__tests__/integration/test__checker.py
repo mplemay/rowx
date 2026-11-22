@@ -54,7 +54,7 @@ def test_a_database_error_is_classified_by_its_sqlstate(
     assert session.classify(DatabaseError(sqlstate, "x", code="SQLITE_X")) == failure
 
 
-def test_an_interface_error_is_lost(session: SqliteCheckerSession) -> None:
+def test_an_interface_error_is_lost_for_a_closed_connection(session: SqliteCheckerSession) -> None:
     assert session.classify(InterfaceError("the connection is closed")) == "lost"
 
 
@@ -114,3 +114,24 @@ async def test_describe_reports_untyped_parameters(session: SqliteCheckerSession
 def test_the_help_is_keyed_by_native_result_names(code: str) -> None:
     assert code.startswith("SQLITE_")
     assert SQL_ERROR_HELP[code]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sql", ["SELECT id FROM users; SELECT 1", "", "-- nothing"])
+async def test_sql_that_is_not_one_statement_is_a_sql_error_not_a_lost_connection(
+    session: SqliteCheckerSession, sql: str
+) -> None:
+    with pytest.raises(DatabaseError) as raised:
+        await session.describe(sql)
+    error = raised.value
+    assert (error.sqlstate, error.code, error.position) == ("HY000", None, None)
+    assert isinstance(error.__cause__, InterfaceError)
+    assert session.classify(error) == "other"
+
+
+@pytest.mark.asyncio
+async def test_a_describe_after_close_is_still_lost_for_any_sql(session: SqliteCheckerSession) -> None:
+    await session.close()
+    with pytest.raises(InterfaceError) as raised:
+        await session.describe("SELECT id FROM users; SELECT 1")
+    assert session.classify(raised.value) == "lost"

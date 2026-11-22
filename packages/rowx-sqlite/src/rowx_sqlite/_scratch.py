@@ -30,6 +30,7 @@ FILE_MODE: Final[int] = 0o600
 
 # `sqlite:////abs/path` for a POSIX path and `sqlite:///C:/path` for a drive path
 def scratch_url(path: PurePath) -> str:
+    # not `urlunparse`, which drops the empty authority and would give `sqlite:/C:/x.db`, not the `sqlite:///` form
     return f"sqlite:///{quote(path.as_posix(), safe='/:')}"
 
 
@@ -59,11 +60,12 @@ class SqliteScratch:
     @asynccontextmanager
     async def _session(self, migrator: MigrationService) -> AsyncGenerator[ScratchBuild]:
         started = perf_counter()
+        if self._sweep_previous:
+            await asyncio.to_thread(self._sweep_orphans)
+        # outside the `try`: a name that is already taken is someone else's file, and it must not be removed
+        await asyncio.to_thread(self._create)
         self._pending = True
         try:
-            if self._sweep_previous:
-                await asyncio.to_thread(self._sweep_orphans)
-            await asyncio.to_thread(self._create)
             await migrator.run_on(self.url)
             # a writable connection leaves the file in WAL mode, which a `mode=ro` reader cannot open without a
             # writable `-shm`; the rollback journal has no such file
