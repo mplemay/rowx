@@ -179,6 +179,30 @@ def test_a_backend_scratch_maps_an_os_error() -> None:
     assert "hunter2secret" not in message
 
 
+class WorkingScratch:
+    def __init__(self) -> None:
+        self.opened: list[tuple[MigrationService, int]] = []
+
+    @asynccontextmanager
+    async def session(self, migrator: MigrationService, workers: int) -> AsyncGenerator[ScratchBuild]:
+        self.opened.append((migrator, workers))
+        yield ScratchBuild(urls=("fake://db",), seconds=0.0)
+
+    def sweep(self) -> None:
+        pass
+
+
+def test_an_error_from_the_body_of_a_backend_scratch_session_is_not_relabelled() -> None:
+    async def body() -> None:
+        async with BackendScratch(WorkingScratch(), "fake://db").session(Mock(), 1):
+            msg = "boom"
+            raise OSError(msg)
+
+    with pytest.raises(OSError, match="boom") as caught:
+        asyncio.run(body())
+    assert not isinstance(caught.value, CheckError)
+
+
 def test_a_backend_scratch_delegates_the_sweep() -> None:
     inner = FailingScratch(OSError("x"))
     BackendScratch(inner, "fake://db").sweep()

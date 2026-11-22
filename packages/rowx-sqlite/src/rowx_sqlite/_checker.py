@@ -18,8 +18,6 @@ SQL_ERROR_HELP: Final[dict[str, str]] = {
     "SQLITE_LOCKED": "another connection holds a lock on the database; retry once it is released",
 }
 INTERRUPTED: Final[str] = "57014"
-# plain SQL problems that carry no SQLite result code
-GENERAL_ERROR: Final[str] = "HY000"
 # BUSY and LOCKED, FULL, CANTOPEN, CORRUPT, NOTADB and READONLY: the environment, not the query, is at fault
 OPERATIONAL: Final[frozenset[str]] = frozenset({"55P03", "53100", "58030", "XX001", "XX002", "25006"})
 
@@ -30,13 +28,7 @@ class SqliteCheckerSession(CheckerSession):
 
     @override
     async def describe(self, sql: str) -> Describe:
-        try:
-            return await describe(self._connection, sql)
-        except InterfaceError as error:
-            # the describe raises this for SQL that is not one statement; only a closed connection is a lost one
-            if self._connection.closed:
-                raise
-            raise DatabaseError(GENERAL_ERROR, str(error)) from error
+        return await describe(self._connection, sql)
 
     @override
     async def close(self) -> None:

@@ -12,6 +12,10 @@ pub enum Error {
     Dsn(#[from] DsnError),
     #[error("{0}")]
     Interface(String),
+    /// SQL that `describe` cannot take: it holds no statement, or more than one. A problem with the
+    /// SQL, not with the connection.
+    #[error("{0}")]
+    NotOneStatement(String),
     /// A failure SQLite reported. `code` is the extended result code, `name` its constant
     /// (`SQLITE_CONSTRAINT_UNIQUE`), and `offset` the byte offset into the SQL that
     /// `sqlite3_error_offset` pointed at.

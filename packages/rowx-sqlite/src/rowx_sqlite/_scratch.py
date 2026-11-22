@@ -64,7 +64,6 @@ class SqliteScratch:
             await asyncio.to_thread(self._sweep_orphans)
         # outside the `try`: a name that is already taken is someone else's file, and it must not be removed
         await asyncio.to_thread(self._create)
-        self._pending = True
         try:
             await migrator.run_on(self.url)
             # a writable connection leaves the file in WAL mode, which a `mode=ro` reader cannot open without a
@@ -76,7 +75,10 @@ class SqliteScratch:
 
     def _create(self) -> None:
         # exclusive, so a name that is already taken is an error instead of someone else's database
-        os.close(os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, FILE_MODE))
+        descriptor = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, FILE_MODE)
+        # claimed by the creation itself, so a cancelled await still leaves a file that `sweep` owns
+        self._pending = True
+        os.close(descriptor)
 
     async def _rollback_journal(self) -> None:
         # the open itself switches a file to WAL, so the switch back comes after it; the connection is closed before

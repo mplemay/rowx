@@ -1,7 +1,7 @@
 import asyncio
 import secrets
 import sys
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from time import perf_counter, time
 from typing import TYPE_CHECKING, Final
@@ -140,9 +140,13 @@ class BackendScratch:
 
     @asynccontextmanager
     async def _session(self, migrator: MigrationService, workers: int) -> AsyncGenerator[ScratchBuild]:
+        # only entering the session (create and migrate) is mapped; an error from the caller's body is not ours
+        async with AsyncExitStack() as stack:
+            yield await self._enter(stack, migrator, workers)
+
+    async def _enter(self, stack: AsyncExitStack, migrator: MigrationService, workers: int) -> ScratchBuild:
         try:
-            async with self.inner.session(migrator, workers) as build:
-                yield build
+            return await stack.enter_async_context(self.inner.session(migrator, workers))
         except MigrateError as error:
             raise CheckError(redact(migrate_failed(error), self.dsn)) from None
         except (DatabaseError, InterfaceError, OSError) as error:

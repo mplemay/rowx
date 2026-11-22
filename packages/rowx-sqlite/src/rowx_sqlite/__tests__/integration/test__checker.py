@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import pytest_asyncio
-from rowx_core.errors import DatabaseError, InterfaceError
+from rowx_core.errors import ConnectionBusyError, DatabaseError, InterfaceError
 from rowx_sqlite._checker import SQL_ERROR_HELP, SqliteCheckerSession
 from rowx_sqlite._services import open_checker
 
@@ -56,6 +56,11 @@ def test_a_database_error_is_classified_by_its_sqlstate(
 
 def test_an_interface_error_is_lost_for_a_closed_connection(session: SqliteCheckerSession) -> None:
     assert session.classify(InterfaceError("the connection is closed")) == "lost"
+
+
+@pytest.mark.parametrize("error", [InterfaceError("connection is broken"), ConnectionBusyError("busy")])
+def test_a_broken_or_busy_connection_is_lost(session: SqliteCheckerSession, error: InterfaceError) -> None:
+    assert session.classify(error) == "lost"
 
 
 def test_any_other_exception_is_other(session: SqliteCheckerSession) -> None:
@@ -125,7 +130,6 @@ async def test_sql_that_is_not_one_statement_is_a_sql_error_not_a_lost_connectio
         await session.describe(sql)
     error = raised.value
     assert (error.sqlstate, error.code, error.position) == ("HY000", None, None)
-    assert isinstance(error.__cause__, InterfaceError)
     assert session.classify(error) == "other"
 
 

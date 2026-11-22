@@ -129,7 +129,7 @@ fn construct(name: &str) -> PyResult<Construct> {
 ///
 /// # Errors
 /// `ValueError` for an unknown construct name; `ConnectionBusyError`/`InterfaceError` when the connection
-/// cannot be claimed; `DatabaseError` (with `.position`) when SQLite rejects the SQL, `InterfaceError` for
+/// cannot be claimed; `DatabaseError` (with `.position`) when SQLite rejects the SQL, and `DatabaseError` (`HY000`) for
 /// no statement or more than one, raised when the future is awaited.
 #[pyfunction]
 #[pyo3(signature = (conn, sql, sources, *, constructs))]

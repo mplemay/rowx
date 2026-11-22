@@ -43,7 +43,10 @@ async def test_the_scratch_is_a_migrated_temporary_file_that_every_worker_shares
     scratch = SqliteScratch("sqlite::memory:")
     async with scratch.session(service, 4) as build:
         assert build.urls == (scratch.url,)
-        assert scratch.url.startswith("sqlite:////")
+        assert scratch.url == scratch_url(scratch.path)
+        parsed = ConnectOptions.from_dsn(scratch.url).path
+        assert parsed is not None
+        assert Path(parsed) == scratch.path
         assert scratch.path.parent == scratch_dir
         assert scratch.path.name.startswith(PREFIX)
         first = await open_checker(build.urls[0], 5.0)
@@ -141,3 +144,11 @@ async def test_a_name_that_is_already_taken_is_an_error_and_the_file_is_kept(
     scratch.sweep()
     assert scratch.path.exists()
     assert names(scratch_dir) == [scratch.path.name]
+
+
+def test_the_creation_itself_claims_the_file_for_the_sweep(scratch_dir: Path) -> None:
+    scratch = SqliteScratch("sqlite::memory:")
+    scratch._create()
+    assert names(scratch_dir) == [scratch.path.name]
+    scratch.sweep()
+    assert names(scratch_dir) == []

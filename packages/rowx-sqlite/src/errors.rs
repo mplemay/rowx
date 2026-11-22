@@ -102,6 +102,10 @@ pub fn to_py_err(py: Python<'_>, failure: &Failure) -> PyErr {
             position,
             Some(*name).filter(|name| !name.is_empty()),
         ),
+        // plain SQL problem (no statement, or several): HY000, nothing to locate and no SQLite code
+        Error::NotOneStatement(message) => {
+            shared::database_error(py, "HY000", message, None, None, None, None)
+        }
         Error::Dsn(_) | Error::Interface(_) | Error::Stopped(_) => {
             shared::interface_error(py, &error.to_string())
         }
