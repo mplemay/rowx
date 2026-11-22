@@ -5,10 +5,10 @@ import pytest
 
 from rowx.check.config import Config
 from rowx.check.discover import discover_file
-from rowx.check.resolve import ModuleGraph, resolve_row_type, roots_for
+from rowx.check.resolve import ModuleGraph, _Resolver, resolve_row_type, roots_for
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
     from pathlib import Path
 
 
@@ -1094,6 +1094,35 @@ def test_attrs_ifexp_keeps_fresh_class_shadow(tmp_path: Path) -> None:
             True,
         ),
         ("items = [FIELD, attrs.field()]\nitems.append(attrs.field())\nitems[1].default(lambda self: 1)", False),
+        (
+            "items = [FIELD]\nsource = [attrs.field(), FIELD]\nitems[:] = source\nitems[0].default(lambda self: 1)",
+            False,
+        ),
+        ("items = [FIELD]\nsource = [attrs.field(), FIELD]\nitems[:] = source\nitems[1].default(lambda self: 1)", True),
+        ("items = [FIELD]\nsource = [attrs.field()]\nitems[:] = [*source]\nitems[0].default(lambda self: 1)", False),
+        (
+            "items = [FIELD, attrs.field()]\nitems.__setitem__(slice(None), [attrs.field(), FIELD])\nitems[0].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "items = [FIELD, attrs.field()]\nitems.__setitem__(slice(None), [attrs.field(), FIELD])\nitems[1].default(lambda self: 1)",
+            True,
+        ),
+        ("*items, = (attrs.field(),)\na = items\nitems += [FIELD]\na[-1].default(lambda self: 1)", True),
+        ("items = [[FIELD, attrs.field()]]\nitems[0][0].default(lambda self: 1)", True),
+        ("items = [[FIELD, attrs.field()]]\nitems[0][1].default(lambda self: 1)", False),
+        (
+            "items = [[attrs.field(), attrs.field()]]\na = items[0]\na[0] = FIELD\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items = [FIELD]\nold = items\nold, old[0] = [attrs.field()], attrs.field()\nitems[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items = [attrs.field()]\nold = items\nold, old[0] = [attrs.field()], FIELD\nold[0].default(lambda self: 1)",
+            True,
+        ),
         ("items = [attrs.field()]\ncopy = items\ncopy.append(FIELD)\nitems[-1].default(lambda self: 1)", True),
         ("items = (*(), attrs.field(), FIELD)\nitems[1].default(lambda self: 1)", True),
         ("items = (*(), FIELD, attrs.field())\nitems[1].default(lambda self: 1)", False),
@@ -1254,6 +1283,75 @@ def test_attrs_while_header_rechecks_loop_carried_alias(tmp_path: Path, *, share
             + body.replace("FIELD", "value").replace("\n", "\n    ")
             + "del gate, alias, i\n"
         )
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert "default" in result.diagnostic.message
+
+
+@pytest.mark.parametrize(
+    ("shared_loop"),
+    [(shared, loop) for shared in (False, True) for loop in ("for _ in range(2)", "while gate")],
+)
+@pytest.mark.parametrize("operation", ["items.append(FIELD)", "items += [FIELD]", "items.append(attrs.field())"])
+@pytest.mark.parametrize(
+    "initial_registration",
+    [(initial, registration) for initial in ("FIELD", "attrs.field()") for registration in (False, True)],
+)
+def test_attrs_loop_carrier_growth_converges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shared_loop: tuple[bool, str],
+    operation: str,
+    initial_registration: tuple[str, bool],
+) -> None:
+    shared, loop = shared_loop
+    initial, registration = initial_registration
+    path = tmp_path / "case.py"
+    body = f"items = [{initial}]\ngate = True\n{loop}:\n    {operation}\n"
+    if registration:
+        index = 0 if initial == "FIELD" else -1
+        body += f"items[{index}].default(lambda self: 42)\n"
+    if shared:
+        source = "spec = attrs.field()\n" + body.replace("FIELD", "spec")
+        source += "@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    for outer in (0,):\n        "
+        source += body.replace("FIELD", "value").replace("\n", "\n        ") + "del items, gate\n    del outer\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    visits = 0
+    original = _Resolver._attrs_carrier_tracked
+
+    def count(carrier: str, scope: Collection[str]) -> bool:
+        nonlocal visits
+        visits += 1
+        assert visits < 100
+        return original(carrier, scope)
+
+    monkeypatch.setattr(_Resolver, "_attrs_carrier_tracked", staticmethod(count))
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    if registration and (initial == "FIELD" or "FIELD" in operation):
+        assert result.diagnostic is not None
+        assert "default" in result.diagnostic.message
+    else:
+        assert result.diagnostic is None
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_attrs_literal_receiver_survives_later_rebinding(tmp_path: Path, *, shared: bool) -> None:
+    path = tmp_path / "case.py"
+    body = (
+        "items = [attrs.field()]\nold = items\n"
+        "(items, (items := []))[0].append(FIELD)\nold[-1].default(lambda self: 42)\n"
+    )
+    if shared:
+        source = "spec = attrs.field()\n" + body.replace("FIELD", "spec")
+        source += "@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    for outer in (0,):\n        "
+        source += body.replace("FIELD", "value").replace("\n", "\n        ") + "del items, old\n    del outer\n"
     path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
     [call] = discover_file(path).calls
     result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
