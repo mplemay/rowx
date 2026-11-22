@@ -1065,6 +1065,35 @@ def test_attrs_ifexp_keeps_fresh_class_shadow(tmp_path: Path) -> None:
         ("items = (attrs.field(), FIELD)\nitems[-1].default(lambda self: 1)", True),
         ("items = [attrs.field()]\nitems[0] = FIELD\nitems[0].default(lambda self: 1)", True),
         ("items = [attrs.field()]\nitems.append(FIELD)\nitems[-1].default(lambda self: 1)", True),
+        ("items = [attrs.field()]\n(copy := items)\ncopy.append(FIELD)\nitems[-1].default(lambda self: 1)", True),
+        ("items = [attrs.field()]\ncopy, = (items,)\ncopy.append(FIELD)\nitems[-1].default(lambda self: 1)", True),
+        (
+            "items = [FIELD, attrs.field()]\ncopy = items\nitems[1] = attrs.field()\ncopy[-1].default(lambda self: 1)",
+            False,
+        ),
+        ("items = [FIELD]\nitems.clear()\nitems.append(attrs.field())\nitems[0].default(lambda self: 1)", False),
+        (
+            "items = [FIELD]\ncopy = items\nitems = [attrs.field()]\ncopy.append(FIELD)\nitems[0].default(lambda self: 1)",
+            False,
+        ),
+        ("items = [attrs.field()]\nitems += [FIELD]\nitems[-1].default(lambda self: 1)", True),
+        ("items = [attrs.field()]\n(items[0],) = (FIELD,)\nitems[0].default(lambda self: 1)", True),
+        ("items = [attrs.field()]\nitems.__setitem__(0, FIELD)\nitems[0].default(lambda self: 1)", True),
+        ("items = [attrs.field()]\nitems.extend([FIELD])\nitems[-1].default(lambda self: 1)", True),
+        ("items = [attrs.field()]\nitems[:] = [FIELD]\nitems[0].default(lambda self: 1)", True),
+        (
+            "items = [attrs.field()]\na = items\nb = items\nitems = []\na.append(FIELD)\nb[-1].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items = [attrs.field()]\nmid = items\nother = mid\nmid = []\nitems.append(FIELD)\nother[-1].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items = [attrs.field()]\ngate = FIELD\nitems[0] = (gate, (gate := attrs.field()))[0]\nitems[0].default(lambda self: 1)",
+            True,
+        ),
+        ("items = [FIELD, attrs.field()]\nitems.append(attrs.field())\nitems[1].default(lambda self: 1)", False),
         ("items = [attrs.field()]\ncopy = items\ncopy.append(FIELD)\nitems[-1].default(lambda self: 1)", True),
         ("items = (*(), attrs.field(), FIELD)\nitems[1].default(lambda self: 1)", True),
         ("items = (*(), FIELD, attrs.field())\nitems[1].default(lambda self: 1)", False),
@@ -1095,6 +1124,20 @@ def test_attrs_container_mutation_and_direct_receiver(
     if rejected:
         assert result.diagnostic is not None
         assert "default" in result.diagnostic.message or "untraceable attrs collection" in result.diagnostic.message
+
+
+def test_attrs_annotated_carrier_alias_mutation(tmp_path: Path) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        "items = [attrs.field()]\ncopy: list = items\ncopy.append(spec)\n"
+        "items[-1].default(lambda self: 1)\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert "default" in result.diagnostic.message
 
 
 def test_attrs_global_declaration_nested_in_class_branch(tmp_path: Path) -> None:
