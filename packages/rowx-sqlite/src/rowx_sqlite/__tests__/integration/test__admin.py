@@ -200,6 +200,15 @@ async def test_drop_refuses_a_file_that_is_not_a_database(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_ready_refuses_a_path_that_is_a_directory(tmp_path: Path) -> None:
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    with pytest.raises(DatabaseError) as error:
+        await SqliteAdmin(url_of(folder)).ready(1.0)
+    assert error.value.sqlstate == "XX002"
+
+
+@pytest.mark.asyncio
 async def test_ready_opens_an_existing_file_and_rejects_one_that_is_not_a_database(tmp_path: Path) -> None:
     good = tmp_path / "good.db"
     seed(good).close()

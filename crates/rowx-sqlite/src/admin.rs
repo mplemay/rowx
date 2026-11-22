@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use rusqlite::backup::Backup;
+use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection as Raw, OpenFlags};
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -12,13 +12,17 @@ use tokio::sync::oneshot;
 use crate::dsn::Target;
 use crate::error::Error;
 
-/// The first 16 bytes of every SQLite database file.
-pub const MAGIC: &[u8; 16] = b"SQLite format 3\0";
-/// What follows the database's name on the files SQLite keeps beside it.
-pub const SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
+// The first 16 bytes of every SQLite database file.
+const MAGIC: &[u8; 16] = b"SQLite format 3\0";
+// What follows the database's name on the files SQLite keeps beside it; keep in step with `SIDECARS` in `_scratch.py`
+const SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 // pages copied per backup step; the destination is private until the backup is done, so nothing contends
 const BACKUP_PAGES: i32 = 256;
+// the pause before a busy or locked template is tried again
+const BACKUP_PAUSE: Duration = Duration::from_millis(10);
+// how long a template may stay locked before the clone gives up; rusqlite's default busy timeout
+const BACKUP_BUDGET: Duration = Duration::from_secs(5);
 // the Win32 `ERROR_SHARING_VIOLATION` and `ERROR_LOCK_VIOLATION`
 const SHARING_VIOLATION: i32 = 32;
 const LOCK_VIOLATION: i32 = 33;
@@ -37,6 +41,8 @@ pub enum AdminError {
     InUse(String),
     #[error("the directory {0:?} does not exist")]
     NoDirectory(String),
+    #[error("the template database {0:?} is locked by another connection")]
+    TemplateBusy(String),
     #[error("{context}: {source}")]
     Io {
         context: String,
@@ -128,22 +134,28 @@ where
     })?
 }
 
-fn exists_now(path: &Path) -> Result<bool, AdminError> {
+// whether an error says the path leads nowhere: no entry, or a parent that is not a directory
+fn is_gone(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
+// what is at `path`; `None` when nothing is, which includes a parent that is not a directory
+fn stat(path: &Path) -> Result<Option<fs::Metadata>, AdminError> {
     match fs::metadata(path) {
-        Ok(found) => Ok(found.is_file()),
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            Ok(false)
-        }
+        Ok(found) => Ok(Some(found)),
+        Err(err) if is_gone(&err) => Ok(None),
         Err(err) => Err(io_error(
             format!("could not look at {}", path.display()),
             err,
         )),
     }
+}
+
+fn exists_now(path: &Path) -> Result<bool, AdminError> {
+    Ok(stat(path)?.is_some_and(|found| found.is_file()))
 }
 
 /// Whether a regular file is at `name`.
@@ -183,7 +195,7 @@ fn clone_into(template: &Path, path: &Path) -> Result<(), AdminError> {
     let source = open(template, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     // the claim comes before the copy, so a name that is taken stops here
     drop(create_empty(path)?);
-    let copied = copy_pages(&source, path);
+    let copied = copy_pages(&source, path, template, BACKUP_BUDGET);
     if copied.is_err() {
         // the file is ours: the claim above succeeded, so nothing else wrote it
         remove_files(path);
@@ -192,10 +204,37 @@ fn clone_into(template: &Path, path: &Path) -> Result<(), AdminError> {
 }
 
 // the backup API reads a consistent snapshot, side files included, and never renumbers rowids as `VACUUM INTO` can
-fn copy_pages(source: &Raw, path: &Path) -> Result<(), AdminError> {
+fn copy_pages(
+    source: &Raw,
+    path: &Path,
+    template: &Path,
+    budget: Duration,
+) -> Result<(), AdminError> {
+    // the source's own busy handler would wait out its default timeout inside each step; the loop below owns the wait
+    source.busy_timeout(Duration::ZERO)?;
     let mut target = open(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    Backup::new(source, &mut target)?.run_to_completion(BACKUP_PAGES, Duration::ZERO, None)?;
-    Ok(())
+    let backup = Backup::new(source, &mut target)?;
+    // `run_to_completion` retries a busy or locked source without pausing or ending, so the steps are driven here
+    let mut waited = Duration::ZERO;
+    loop {
+        match backup.step(BACKUP_PAGES)? {
+            StepResult::Done => return Ok(()),
+            StepResult::More => {}
+            StepResult::Busy | StepResult::Locked => {
+                if waited >= budget {
+                    return Err(AdminError::TemplateBusy(template.display().to_string()));
+                }
+                thread::sleep(BACKUP_PAUSE);
+                waited += BACKUP_PAUSE;
+            }
+            // `StepResult` is non-exhaustive; a result this code does not know is not worth waiting for
+            _ => {
+                return Err(AdminError::Sqlite(Error::Interface(
+                    "the backup ended with a result this driver does not know".to_owned(),
+                )));
+            }
+        }
+    }
 }
 
 /// Creates the database file at `name`, empty or as a copy of `template`.
@@ -204,7 +243,8 @@ fn copy_pages(source: &Raw, path: &Path) -> Result<(), AdminError> {
 /// half done, and `VACUUM INTO` may renumber the rowids of a table that has no `INTEGER PRIMARY KEY`.
 ///
 /// # Errors
-/// `Exists` when the name is taken (nothing is overwritten), `TemplateMissing`, `NoDirectory` when the
+/// `Exists` when the name is taken (nothing is overwritten), `TemplateMissing`, `TemplateBusy` when the template
+/// stays locked for longer than the budget, `NoDirectory` when the
 /// parent directory does not exist, `Sqlite` when the template cannot be read, `Io` otherwise. A copy that
 /// fails leaves no file behind.
 pub async fn create(name: &str, template: Option<&str>) -> Result<(), AdminError> {
@@ -240,7 +280,7 @@ fn is_sqlite_file(path: &Path) -> Result<bool, AdminError> {
 fn remove_one(path: &Path, windows: bool) -> Result<(), AdminError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) if is_gone(&err) => Ok(()),
         Err(err) if sharing_violation(windows, err.raw_os_error()) => {
             Err(AdminError::InUse(path.display().to_string()))
         }
@@ -259,23 +299,9 @@ fn remove_side_files(path: &Path) -> Result<(), AdminError> {
 }
 
 fn drop_now(path: &Path) -> Result<(), AdminError> {
-    let found = match fs::metadata(path) {
-        Ok(found) => found,
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            // orphans of a deleted file stay out of the way of a later `create`, which would replay them
-            return remove_side_files(path);
-        }
-        Err(err) => {
-            return Err(io_error(
-                format!("could not look at {}", path.display()),
-                err,
-            ));
-        }
+    let Some(found) = stat(path)? else {
+        // orphans of a deleted file stay out of the way of a later `create`, which would replay them
+        return remove_side_files(path);
     };
     if !found.is_file() {
         return Err(AdminError::NotSqlite(path.display().to_string()));
@@ -359,8 +385,12 @@ fn ready_now(path: &Path, seconds: f64) -> Result<(), AdminError> {
         return Err(AdminError::NoDirectory(directory.display().to_string()));
     }
     // a missing file is fine: `create` comes next
-    if !exists_now(path)? {
-        return Ok(());
+    match stat(path)? {
+        None => return Ok(()),
+        Some(found) if !found.is_file() => {
+            return Err(AdminError::NotSqlite(path.display().to_string()));
+        }
+        Some(_) => {}
     }
     let connection = open(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     if seconds.is_finite() && seconds > 0.0 {
@@ -375,7 +405,8 @@ fn ready_now(path: &Path, seconds: f64) -> Result<(), AdminError> {
 /// SQLite database. `seconds` bounds how long a lock is waited for.
 ///
 /// # Errors
-/// `NoDirectory`, or `Sqlite` (`SQLITE_NOTADB` for a file that is not a database).
+/// `NoDirectory`, `NotSqlite` for something that is not a regular file (a directory), or `Sqlite`
+/// (`SQLITE_NOTADB` for a file that is not a database).
 pub async fn ready(name: &str, seconds: f64) -> Result<(), AdminError> {
     let path = check_name(name)?.to_path_buf();
     on_thread(move || ready_now(&path, seconds)).await
@@ -391,7 +422,12 @@ mod tests {
     use rusqlite::{Connection as Raw, ffi};
     use tempfile::tempdir;
 
-    use super::{AdminError, MAGIC, create, drop_database, exists, list, ready, sharing_violation};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        AdminError, MAGIC, copy_pages, create, drop_database, exists, list, ready,
+        sharing_violation,
+    };
     use crate::error::Error;
 
     type Outcome = Result<(), Box<dyn StdError>>;
@@ -567,6 +603,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_path_below_a_regular_file_is_missing_for_every_call() -> Outcome {
+        let dir = tempdir()?;
+        let plain = dir.path().join("plain");
+        fs::write(&plain, b"x")?;
+        let name = path_str(&plain.join("x.db"));
+        assert!(!exists(&name).await?);
+        drop_database(&name).await?;
+        assert!(!exists(&name).await?);
+        assert_eq!(fs::read(&plain)?, b"x");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn drop_refuses_what_is_not_a_database() -> Outcome {
         let dir = tempdir()?;
         let text = dir.path().join("notes.txt");
@@ -648,6 +697,45 @@ mod tests {
             matches!(&err, Err(AdminError::Sqlite(Error::Sqlite { name, .. })) if *name == "SQLITE_NOTADB"),
             "{err:?}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ready_refuses_a_path_that_is_not_a_regular_file() -> Outcome {
+        let dir = tempdir()?;
+        let folder = dir.path().join("folder");
+        fs::create_dir(&folder)?;
+        assert!(matches!(
+            ready(&path_str(&folder), 1.0).await,
+            Err(AdminError::NotSqlite(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_template_that_stays_locked_ends_the_clone_and_leaves_no_file() -> Outcome {
+        let dir = tempdir()?;
+        let template = dir.path().join("template.db");
+        let holder = Raw::open(&template)?;
+        holder.execute_batch(
+            "PRAGMA journal_mode = DELETE; CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('a');",
+        )?;
+        // an exclusive lock with a write in flight, so a reader cannot take even a shared lock
+        holder.execute_batch("BEGIN EXCLUSIVE; INSERT INTO t VALUES ('b');")?;
+        let target = dir.path().join("copy.db");
+        let source = Raw::open_with_flags(&template, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        super::create_empty(&target)?;
+        let started = Instant::now();
+        let copied = copy_pages(&source, &target, &template, Duration::from_millis(50));
+        assert!(
+            matches!(copied, Err(AdminError::TemplateBusy(_))),
+            "{copied:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
+        // the same cleanup `clone_into` runs
+        super::remove_files(&target);
+        assert!(!target.exists());
+        holder.execute_batch("ROLLBACK")?;
         Ok(())
     }
 

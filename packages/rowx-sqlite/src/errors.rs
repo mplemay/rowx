@@ -253,6 +253,8 @@ pub fn admin_to_py_err(py: Python<'_>, err: &AdminError) -> PyErr {
         AdminError::TemplateMissing(_) => state("3D000"),
         // object_in_use
         AdminError::InUse(_) => state("55006"),
+        // lock_not_available, as for SQLITE_BUSY and SQLITE_LOCKED
+        AdminError::TemplateBusy(_) => state("55P03"),
         AdminError::NotSqlite(_) => state("XX002"),
         // the nearest to SQLITE_CANTOPEN and an IO failure
         AdminError::NoDirectory(_) | AdminError::Io { .. } => state("58030"),

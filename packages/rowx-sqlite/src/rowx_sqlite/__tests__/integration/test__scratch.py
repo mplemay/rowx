@@ -4,7 +4,7 @@ import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import tempfile
 import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from rowx_core.errors import MigrateError
@@ -17,6 +17,9 @@ from rowx.check.cli import main
 
 if TYPE_CHECKING:
     from rowx_sqlite.__tests__.conftest import CheckProject
+
+
+IS_ROOT: Final[bool] = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 def names(directory: Path) -> list[str]:
@@ -223,11 +226,14 @@ def test_an_interrupted_teardown_is_finished_by_the_sweep(
 ) -> None:
     write_queries(project, 3)
     removals: list[Path] = []
+    survived: list[bool] = []
     real_remove = SqliteScratch._remove
 
     # the first teardown never runs, as if the event loop had been torn down under it
     def interrupted(self: SqliteScratch) -> None:
         removals.append(self.path)
+        if len(removals) == 1:
+            survived.append(self.path.exists())
         if len(removals) > 1:
             real_remove(self)
 
@@ -238,19 +244,24 @@ def test_an_interrupted_teardown_is_finished_by_the_sweep(
     assert (code, found, err) == (0, [], "")
     # the sweep that the CLI runs from outside the loop is what removed the file
     assert len(removals) == 2
+    assert survived == [True]
+    assert not removals[0].exists()
     assert names(scratch_dir) == []
 
 
+@pytest.mark.skipif(IS_ROOT, reason="chmod does not restrict root")
 def test_the_drift_gate_reads_a_read_only_file_that_is_up_to_date(project: CheckProject) -> None:
     database = project.root / "app.db"
     database.chmod(0o444)
+    before = (database.read_bytes(), database.stat().st_mtime_ns)
     project.write(VALID_SOURCE)
     code, found, err = check_json(project)
     assert (code, found, err) == (0, [], "")
     # the checker never wrote to it
-    assert os.access(database, os.W_OK) is False or os.geteuid() == 0
+    assert (database.read_bytes(), database.stat().st_mtime_ns) == before
 
 
+@pytest.mark.skipif(IS_ROOT, reason="chmod does not restrict root")
 def test_the_drift_gate_reports_a_read_only_file_that_has_drifted(project: CheckProject) -> None:
     database = project.root / "app.db"
     before = database.read_bytes()
