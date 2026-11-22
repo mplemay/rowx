@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from rowx.check.config import Config
 
 MAX_HOPS: Final[int] = 16
+SETITEM_ARGS: Final[int] = 2
 INIT_FILE: Final[str] = "__init__.py"
 TYPING_MODULES: Final[frozenset[str]] = frozenset({"typing", "typing_extensions"})
 BUILTIN_NAMES: Final[frozenset[str]] = frozenset(dir(builtins))
@@ -2059,7 +2060,7 @@ class _Resolver:
         for key in list(scope):
             if (
                 key.startswith(f"\0slot:{name}:")
-                or key == f"\0carrier:{name}"
+                or key in {f"\0carrier:{name}", f"\0tuple:{name}"}
                 or (key.startswith("\0alias:") and any(item in related for item in key.split(":")[1:]))
             ):
                 del scope[key]
@@ -2140,12 +2141,17 @@ class _Resolver:
             return any(
                 self._attrs_scan_eager(item, scope, field, module, globals_) for item in header if item is not None
             )
-        self._attrs_scan_mutation_call(node, scope, field, module, globals_)
+        mutation = self._attrs_scan_mutation_call(node, scope, field, module, globals_)
         return (
-            isinstance(node, ast.Attribute)
-            and node.attr == "default"
-            and self._attrs_is_shared(node.value, scope, field, module, globals_)
-        ) or any(self._attrs_scan_eager(item, scope, field, module, globals_) for item in ast.iter_child_nodes(node))
+            mutation
+            if mutation is not None
+            else (
+                isinstance(node, ast.Attribute)
+                and node.attr == "default"
+                and self._attrs_is_shared(node.value, scope, field, module, globals_)
+            )
+            or any(self._attrs_scan_eager(item, scope, field, module, globals_) for item in ast.iter_child_nodes(node))
+        )
 
     @staticmethod
     def _attrs_carrier_tracked(carrier: str, scope: Collection[str]) -> bool:
@@ -2172,6 +2178,54 @@ class _Resolver:
         normalized = index % len(positive)
         return [f"{prefix}{normalized}", f"{prefix}{normalized - len(positive)}"]
 
+    @staticmethod
+    def _attrs_target_values(target: ast.expr, value: ast.expr) -> list[tuple[ast.expr, ast.expr]]:
+        if isinstance(target, ast.Tuple | ast.List) and isinstance(value, ast.Tuple | ast.List):
+            return [
+                pair
+                for child, source in _Resolver._attrs_unpack_pairs(target.elts, value.elts)
+                for pair in _Resolver._attrs_target_values(child, source)
+            ]
+        if isinstance(target, ast.Tuple | ast.List):
+            return [
+                (child, ast.Starred(value=value, ctx=ast.Load()))
+                for child in ast.walk(target)
+                if isinstance(child, ast.Subscript)
+            ]
+        return [(target, value)]
+
+    @staticmethod
+    def _attrs_updated_slots(
+        target: ast.Subscript, current: list[bool], values: list[bool] | None
+    ) -> list[bool] | None:
+        try:
+            if isinstance(target.slice, ast.Slice):
+                parts = [
+                    ast.literal_eval(part) if part is not None else None
+                    for part in (target.slice.lower, target.slice.upper, target.slice.step)
+                ]
+                index = slice(*parts)
+            else:
+                index = ast.literal_eval(target.slice)
+        except TypeError, ValueError:
+            return None
+        if isinstance(target.ctx, ast.Del):
+            try:
+                del current[index]
+            except TypeError, ValueError, IndexError:
+                return None
+            return current
+        try:
+            if values is not None and isinstance(index, slice):
+                current[index] = values
+            elif values is not None and isinstance(index, int) and len(values) == 1:
+                current[index] = values[0]
+            else:
+                return None
+        except TypeError, ValueError, IndexError:
+            return None
+        return current
+
     def _attrs_carried_value(
         self,
         expr: ast.expr,
@@ -2180,18 +2234,51 @@ class _Resolver:
         module: _Module,
         globals_: dict[str, bool | _Module],
     ) -> bool:
+        if isinstance(expr, ast.Subscript) and (selected := self._attrs_literal_slot(expr)) is not None:
+            values, index = selected
+            state = scope.copy()
+            state_globals = state if scope is globals_ else globals_
+            for value in values[:index]:
+                self._attrs_scan_eager(value, state, field, module, state_globals)
+            return self._attrs_carried_value(values[index], state, field, module, state_globals)
+        if isinstance(expr, ast.Dict):
+            return any(
+                self._attrs_carried_value(key if key is not None else value, scope, field, module, globals_)
+                for key, value in zip(expr.keys, expr.values, strict=True)
+            )
         if isinstance(expr, ast.Tuple | ast.List | ast.Set):
             return any(self._attrs_carried_value(item, scope, field, module, globals_) for item in expr.elts)
         return self._attrs_class_value(expr, scope, field, module, globals_) is True
 
-    def _attrs_scan_mutation_call(
+    # Receiver and argument evaluation must stay in the same ordered transfer.
+    def _attrs_scan_mutation_call(  # ruff: ignore[complex-structure, too-many-branches]
         self,
         node: ast.AST,
         scope: dict[str, bool | _Module],
         field: tuple[ast.Call, _Module],
         module: _Module,
         globals_: dict[str, bool | _Module],
-    ) -> None:
+    ) -> bool | None:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr
+            in {"append", "extend", "insert", "pop", "remove", "clear", "reverse", "sort", "__setitem__"}
+            and isinstance(node.func.value, ast.Subscript)
+        ):
+            selected = self._attrs_literal_slot(node.func.value)
+            if selected is not None:
+                values, index = selected
+                if isinstance(values[index], ast.Name) and index == len(values) - 1:
+                    for value in values[:index]:
+                        if self._attrs_scan_eager(value, scope, field, module, globals_):
+                            return True
+                    replacement = ast.Call(
+                        func=ast.Attribute(value=values[index], attr=node.func.attr, ctx=ast.Load()),
+                        args=node.args,
+                        keywords=node.keywords,
+                    )
+                    return self._attrs_scan_mutation_call(replacement, scope, field, module, globals_)
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -2201,7 +2288,46 @@ class _Resolver:
         ):
             carrier = node.func.value.id
             if self._attrs_carrier_tracked(carrier, scope):
-                possible = any(self._attrs_carried_value(arg, scope, field, module, globals_) for arg in node.args)
+                temporary = f"\0receiver{id(node)}"
+                self._attrs_copy_binding(
+                    temporary, node.func.value, scope, scope.copy(), {temporary: scope.get(carrier, False)}
+                )
+                possible = False
+                arguments: list[bool] = []
+                for arg in [*node.args, *(keyword.value for keyword in node.keywords)]:
+                    binding = self._attrs_carried_value(arg, scope, field, module, globals_)
+                    arguments.append(binding)
+                    possible |= binding
+                    if self._attrs_scan_eager(arg, scope, field, module, globals_):
+                        return True
+                carrier = temporary
+                prefix = f"\0slot:{carrier}:"
+                positions = sorted(
+                    int(key.removeprefix(prefix))
+                    for key in scope
+                    if key.startswith(prefix) and key.removeprefix(prefix).isdigit()
+                )
+                appended = (
+                    [scope[f"{prefix}{index}"] is True for index in positions] + [possible]
+                    if node.func.attr == "append"
+                    and positions
+                    and positions == list(range(len(positions)))
+                    and len(node.args) == 1
+                    else None
+                )
+                if (
+                    node.func.attr == "__setitem__"
+                    and len(node.args) == SETITEM_ARGS
+                    and not node.keywords
+                    and positions == list(range(len(positions)))
+                    and positions
+                ):
+                    target = ast.Subscript(
+                        value=ast.Name(id=carrier, ctx=ast.Load()), slice=node.args[0], ctx=ast.Store()
+                    )
+                    appended = self._attrs_updated_slots(
+                        target, [scope[f"{prefix}{index}"] is True for index in positions], [arguments[1]]
+                    )
                 preserved = {
                     key: value
                     for key, value in scope.items()
@@ -2215,6 +2341,16 @@ class _Resolver:
                 if node.func.attr == "clear" and not node.args and not node.keywords:
                     scope.update(dict.fromkeys(related, False))
                 scope.update(preserved)
+                if appended is not None:
+                    for name in related:
+                        scope[name] = any(appended)
+                        for index, binding in enumerate(appended):
+                            scope[f"\0slot:{name}:{index}"] = binding
+                            scope[f"\0slot:{name}:{index - len(appended)}"] = binding
+                self._attrs_forget_carrier(temporary, scope)
+                scope.pop(temporary, None)
+                return False
+        return None
 
     def _attrs_scan_nested_class(
         self,
@@ -2395,6 +2531,34 @@ class _Resolver:
             self._attrs_record_exception_state(scope)
         return False
 
+    def _attrs_capture_additions(
+        self,
+        node: ast.stmt,
+        scope: dict[str, bool | _Module],
+        field: tuple[ast.Call, _Module],
+        module: _Module,
+        globals_: dict[str, bool | _Module],
+    ) -> list[bool] | None:
+        additions = None
+        if (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.op, ast.Add)
+            and isinstance(node.value, ast.Tuple | ast.List)
+        ):
+            values = self._attrs_flatten_values(node.value.elts)
+            if values is not None:
+                state = scope.copy()
+                state_globals = state if scope is globals_ else globals_
+                additions = []
+                saved, self._attrs_exception_states = self._attrs_exception_states, []
+                try:
+                    for item in values:
+                        additions.append(self._attrs_carried_value(item, state, field, module, state_globals))
+                        self._attrs_scan_eager(item, state, field, module, state_globals)
+                finally:
+                    self._attrs_exception_states = saved
+        return additions
+
     def _attrs_scan_simple(
         self,
         node: ast.stmt,
@@ -2403,8 +2567,10 @@ class _Resolver:
         module: _Module,
         globals_: dict[str, bool | _Module],
     ) -> bool:
-        captured = (
-            self._attrs_capture_assignment(node, scope, field, module, globals_) if isinstance(node, ast.Assign) else {}
+        captured, writes = (
+            self._attrs_capture_assignment(node, scope, field, module, globals_)
+            if isinstance(node, ast.Assign)
+            else ({}, {})
         )
         write_value = (
             self._attrs_carried_value(node.value, scope, field, module, globals_)
@@ -2414,9 +2580,31 @@ class _Resolver:
         earlier = None
         if isinstance(node, ast.Assign | ast.AnnAssign) and isinstance(node.value, ast.Subscript):
             earlier = self._attrs_class_value(node.value, scope, field, module, globals_)
+        additions = self._attrs_capture_additions(node, scope, field, module, globals_)
+        receiver = None
+        if (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.target, ast.Name)
+            and self._attrs_carrier_tracked(node.target.id, scope)
+        ):
+            receiver = f"\0receiver{id(node)}"
+            self._attrs_copy_binding(
+                receiver, node.target, scope, scope.copy(), {receiver: scope.get(node.target.id, False)}
+            )
         if self._attrs_scan_eager(node, scope, field, module, globals_):
             return True
-        self._attrs_transfer_writes(node, scope, value=write_value)
+        if receiver is not None and isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            self._attrs_copy_binding(
+                node.target.id,
+                ast.Name(id=receiver, ctx=ast.Load()),
+                scope,
+                scope.copy(),
+                {node.target.id: scope.get(receiver, False)},
+            )
+        self._attrs_transfer_writes(node, scope, value=write_value, writes=writes, additions=additions)
+        if receiver is not None:
+            self._attrs_forget_carrier(receiver, scope)
+            scope.pop(receiver, None)
         self._attrs_bind_class(node, scope, field, module, globals_)
         scope.update(captured)
         if earlier is not None and isinstance(node, ast.Assign | ast.AnnAssign):
@@ -2437,11 +2625,47 @@ class _Resolver:
         )
         return [target for outer in targets for target in ast.walk(outer)]
 
-    def _attrs_transfer_writes(self, node: ast.stmt, scope: dict[str, bool | _Module], *, value: bool) -> None:
+    def _attrs_transfer_augmented(
+        self, target: ast.Name, scope: dict[str, bool | _Module], *, value: bool, additions: list[bool] | None
+    ) -> None:
+        if self._attrs_carrier_tracked(target.id, scope):
+            prefix = f"\0slot:{target.id}:"
+            positions = sorted(
+                int(key.removeprefix(prefix))
+                for key in scope
+                if key.startswith(prefix) and key.removeprefix(prefix).isdigit()
+            )
+            updated = (
+                [scope[f"{prefix}{index}"] is True for index in positions] + additions
+                if additions is not None and positions and positions == list(range(len(positions)))
+                else None
+            )
+            if f"\0tuple:{target.id}" in scope:
+                slots = {key: binding for key, binding in scope.items() if key.startswith(f"\0slot:{target.id}:")}
+                self._attrs_forget_carrier(target.id, scope)
+                scope.update(slots)
+                scope[f"\0carrier:{target.id}"] = True
+                scope[f"\0tuple:{target.id}"] = True
+            self._attrs_mutate_carrier(target.id, scope, value=value)
+            if updated is not None:
+                for carrier in self._attrs_carrier_related(target.id, scope):
+                    scope[carrier] = any(updated)
+                    for index, binding in enumerate(updated):
+                        scope[f"\0slot:{carrier}:{index}"] = binding
+                        scope[f"\0slot:{carrier}:{index - len(updated)}"] = binding
+
+    def _attrs_transfer_writes(
+        self,
+        node: ast.stmt,
+        scope: dict[str, bool | _Module],
+        *,
+        value: bool,
+        writes: dict[int, list[bool] | None],
+        additions: list[bool] | None,
+    ) -> None:
         for target in self._attrs_write_targets(node):
             if isinstance(target, ast.Name) and isinstance(node, ast.AugAssign):
-                if self._attrs_carrier_tracked(target.id, scope):
-                    self._attrs_mutate_carrier(target.id, scope, value=value)
+                self._attrs_transfer_augmented(target, scope, value=value, additions=additions)
             elif (
                 isinstance(target, ast.Subscript)
                 and isinstance(target.ctx, ast.Store | ast.Del)
@@ -2449,11 +2673,26 @@ class _Resolver:
                 and self._attrs_carrier_tracked(target.value.id, scope)
             ):
                 related = self._attrs_carrier_related(target.value.id, scope)
-                written = self._attrs_written_slots(target, scope) if isinstance(node, ast.Assign) else []
-                self._attrs_mutate_carrier(target.value.id, scope, value=value)
-                for slot in written:
+                prefix = f"\0slot:{target.value.id}:"
+                positions = sorted(
+                    int(key.removeprefix(prefix))
+                    for key in scope
+                    if key.startswith(prefix) and key.removeprefix(prefix).isdigit()
+                )
+                current = [scope[f"{prefix}{index}"] is True for index in positions]
+                stored = writes.get(id(target), [value])
+                updated = (
+                    self._attrs_updated_slots(target, current, stored)
+                    if positions and positions == list(range(len(positions)))
+                    else None
+                )
+                self._attrs_mutate_carrier(target.value.id, scope, value=value if stored is None else any(stored))
+                if updated is not None:
                     for carrier in related:
-                        scope[slot.replace(f"\0slot:{target.value.id}:", f"\0slot:{carrier}:", 1)] = value
+                        scope[carrier] = any(updated)
+                        for index, binding in enumerate(updated):
+                            scope[f"\0slot:{carrier}:{index}"] = binding
+                            scope[f"\0slot:{carrier}:{index - len(updated)}"] = binding
 
     def _attrs_capture_assignment(
         self,
@@ -2462,8 +2701,9 @@ class _Resolver:
         field: tuple[ast.Call, _Module],
         module: _Module,
         globals_: dict[str, bool | _Module],
-    ) -> dict[str, bool | _Module]:
+    ) -> tuple[dict[str, bool | _Module], dict[int, list[bool] | None]]:
         captured: dict[str, bool | _Module] = {}
+        writes: dict[int, list[bool] | None] = {}
         if isinstance(node.value, ast.Tuple | ast.List):
             state = scope.copy()
             state_globals = state if scope is globals_ else globals_
@@ -2486,6 +2726,21 @@ class _Resolver:
                 self._attrs_exception_states = saved
             sources = scope | values
             for target in node.targets:
+                for destination, source in self._attrs_target_values(target, value):
+                    if isinstance(destination, ast.Subscript):
+                        expressions = (
+                            self._attrs_flatten_values(source.elts)
+                            if isinstance(destination.slice, ast.Slice) and isinstance(source, ast.Tuple | ast.List)
+                            else [source]
+                        )
+                        writes[id(destination)] = (
+                            None
+                            if expressions is None
+                            else [
+                                self._attrs_carried_value(item, sources, field, module, globals_)
+                                for item in expressions
+                            ]
+                        )
                 bindings = sources.copy()
                 self._attrs_bind_target((target, value), bindings, field, module, globals_=globals_)
                 captured.update({
@@ -2500,7 +2755,7 @@ class _Resolver:
                             for key, value in bindings.items()
                             if key.startswith(f"\0slot:{item.id}:") or key == f"\0carrier:{item.id}"
                         })
-        return captured
+        return captured, writes
 
     def _attrs_scan_if(
         self,
@@ -3100,6 +3355,9 @@ class _Resolver:
         sources: dict[str, bool | _Module],
         bindings: dict[str, bool | _Module],
     ) -> None:
+        if isinstance(expression, ast.Name) and expression.id == dest:
+            scope[dest] = bindings[dest]
+            return
         _Resolver._attrs_forget_carrier(dest, scope)
         scope[dest] = bindings[dest]
         if isinstance(expression, ast.Name) and expression.id != dest:
@@ -3110,11 +3368,13 @@ class _Resolver:
             if any(key.startswith(f"\0slot:{source}:") for key in sources) or f"\0carrier:{source}" in sources:
                 scope[f"\0alias:{dest}:{source}"] = True
                 scope[f"\0carrier:{dest}"] = True
+            if f"\0tuple:{source}" in sources:
+                scope[f"\0tuple:{dest}"] = True
         scope.update({
             key: value
             for key, value in bindings.items()
             if key.startswith(f"\0slot:{dest}:")
-            or key == f"\0carrier:{dest}"
+            or key in {f"\0carrier:{dest}", f"\0tuple:{dest}"}
             or (key not in sources and key.startswith("\0alias:") and dest in key.split(":")[1:])
         })
 
@@ -3179,6 +3439,8 @@ class _Resolver:
         target, value = pair
         sources = scope.copy()
         if isinstance(target, ast.Name):
+            if isinstance(value, ast.Name) and value.id == target.id:
+                return
             self._attrs_bind_name((target, value), scope, field, module, globals_=globals_)
             if isinstance(value, ast.Name) and value.id != target.id:
                 self._attrs_copy_binding(target.id, value, scope, sources, scope.copy())
@@ -3211,6 +3473,7 @@ class _Resolver:
     ) -> None:
         target, value = pair
         sources = scope.copy()
+        scope.pop(f"\0tuple:{target.id}", None)
         for key in list(scope):
             if key.startswith(f"\0slot:{target.id}:"):
                 del scope[key]
@@ -3218,6 +3481,8 @@ class _Resolver:
             scope[target.id] = self._attrs_class_value(value, sources, field, module, globals_)
             return
         scope[f"\0carrier:{target.id}"] = True
+        if isinstance(value, ast.Tuple):
+            scope[f"\0tuple:{target.id}"] = True
         values = self._attrs_flatten_values(value.elts)
         scope[target.id] = values is None or any(
             self._attrs_class_value(item, sources, field, module, globals_) for item in values
@@ -3573,7 +3838,12 @@ class _Resolver:
             return _mangle(class_name, expr.id) if isinstance(expr, ast.Name) else None
 
         def shared(expr: ast.expr, aliases: set[str]) -> bool:  # ruff: ignore[complex-structure, too-many-return-statements]
-            if isinstance(expr, ast.Tuple | ast.List):
+            if isinstance(expr, ast.Dict):
+                return any(
+                    shared(key if key is not None else value, aliases)
+                    for key, value in zip(expr.keys, expr.values, strict=True)
+                )
+            if isinstance(expr, ast.Tuple | ast.List | ast.Set):
                 return any(shared(value, aliases) for value in expr.elts)
             if isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Name):
                 try:
@@ -3635,10 +3905,14 @@ class _Resolver:
                 if self._attrs_carrier_tracked(source, sources):
                     aliases.add(f"\0alias:{dest}:{source}")
                     aliases.add(f"\0carrier:{dest}")
+                if f"\0tuple:{source}" in sources:
+                    aliases.add(f"\0tuple:{dest}")
 
         def bind_slots(dest: str, value: ast.expr, aliases: set[str], sources: set[str]) -> None:
             if isinstance(value, ast.Tuple | ast.List):
                 aliases.add(f"\0carrier:{dest}")
+                if isinstance(value, ast.Tuple):
+                    aliases.add(f"\0tuple:{dest}")
                 values = self._attrs_flatten_values(value.elts)
                 if values is None:
                     aliases.add(dest)
@@ -3652,6 +3926,8 @@ class _Resolver:
         def bind(target: ast.expr, value: ast.expr, aliases: set[str], sources: set[str]) -> None:
             if isinstance(target, ast.Name):
                 dest = _mangle(class_name, target.id)
+                if isinstance(value, ast.Name) and name(value) == dest:
+                    return
                 is_shared = shared(value, sources)
                 aliases.difference_update(key for key in aliases.copy() if key.startswith(f"\0slot:{dest}:"))
                 related = self._attrs_carrier_related(dest, aliases)
@@ -3663,6 +3939,7 @@ class _Resolver:
                 aliases.update(self._attrs_reconnect_carriers(related - {dest}))
                 aliases.discard(dest)
                 aliases.discard(f"\0carrier:{dest}")
+                aliases.discard(f"\0tuple:{dest}")
                 copy_carrier(dest, value, aliases, sources)
                 if is_shared:
                     aliases.add(dest)
@@ -3673,11 +3950,53 @@ class _Resolver:
             elif isinstance(target, ast.Tuple | ast.List) and not self._attrs_known_fresh(value, klass.module):
                 aliases.update(_mangle(class_name, item.id) for item in ast.walk(target) if isinstance(item, ast.Name))
 
-        def transfer_writes(item: ast.stmt, aliases: set[str], *, value: bool) -> None:
+        def set_slots(related: set[str], aliases: set[str], values: list[bool]) -> None:
+            for current in related:
+                aliases.discard(current)
+                if any(values):
+                    aliases.add(current)
+                for index, binding in enumerate(values):
+                    for offset in (index, index - len(values)):
+                        key = f"\0slot:{current}:{offset}"
+                        aliases.add(f"{key}:known")
+                        if binding:
+                            aliases.add(key)
+
+        def transfer_writes(
+            item: ast.stmt,
+            aliases: set[str],
+            *,
+            value: bool,
+            writes: dict[int, list[bool] | None] | None = None,
+            additions: list[bool] | None = None,
+        ) -> None:
             for target in self._attrs_write_targets(item):
                 if isinstance(target, ast.Name) and isinstance(item, ast.AugAssign):
                     if (carrier := name(target)) is not None and self._attrs_carrier_tracked(carrier, aliases):
+                        prefix = f"\0slot:{carrier}:"
+                        positions = sorted(
+                            int(key.removeprefix(prefix).removesuffix(":known"))
+                            for key in aliases
+                            if key.startswith(prefix)
+                            and key.endswith(":known")
+                            and key.removeprefix(prefix).removesuffix(":known").isdigit()
+                        )
+                        updated = (
+                            [f"{prefix}{index}" in aliases for index in positions] + additions
+                            if additions is not None and positions and positions == list(range(len(positions)))
+                            else None
+                        )
+                        if f"\0tuple:{carrier}" in aliases:
+                            related = self._attrs_carrier_related(carrier, aliases)
+                            aliases.difference_update(
+                                key
+                                for key in aliases.copy()
+                                if key.startswith("\0alias:") and any(part in related for part in key.split(":")[1:])
+                            )
+                            aliases.update(self._attrs_reconnect_carriers(related - {carrier}))
                         mutate(carrier, aliases, value=value)
+                        if updated is not None:
+                            set_slots(self._attrs_carrier_related(carrier, aliases), aliases, updated)
                 elif (
                     isinstance(target, ast.Subscript)
                     and isinstance(target.ctx, ast.Store | ast.Del)
@@ -3688,14 +4007,24 @@ class _Resolver:
                         value=ast.Name(id=carrier, ctx=ast.Load()), slice=target.slice, ctx=target.ctx
                     )
                     related = self._attrs_carrier_related(carrier, aliases)
-                    written = self._attrs_written_slots(written_target, aliases) if isinstance(item, ast.Assign) else []
-                    mutate(carrier, aliases, value=value)
-                    for slot in written:
-                        for current in related:
-                            key = slot.replace(f"\0slot:{carrier}:", f"\0slot:{current}:", 1)
-                            aliases.add(f"{key}:known")
-                            if value:
-                                aliases.add(key)
+                    prefix = f"\0slot:{carrier}:"
+                    positions = sorted(
+                        int(key.removeprefix(prefix).removesuffix(":known"))
+                        for key in aliases
+                        if key.startswith(prefix)
+                        and key.endswith(":known")
+                        and key.removeprefix(prefix).removesuffix(":known").isdigit()
+                    )
+                    current_values = [f"{prefix}{index}" in aliases for index in positions]
+                    stored = (writes or {}).get(id(target), [value])
+                    updated = (
+                        self._attrs_updated_slots(written_target, current_values, stored)
+                        if positions and positions == list(range(len(positions)))
+                        else None
+                    )
+                    mutate(carrier, aliases, value=value if stored is None else any(stored))
+                    if updated is not None:
+                        set_slots(related, aliases, updated)
 
         def scan_ifexp(item: ast.IfExp, aliases: set[str]) -> None:
             scan(item.test, aliases)
@@ -3723,6 +4052,28 @@ class _Resolver:
             return bound
 
         def scan(item: ast.AST, aliases: set[str]) -> None:  # ruff: ignore[complex-structure, too-many-return-statements, too-many-branches, too-many-statements, too-many-locals]
+            if (
+                isinstance(item, ast.Call)
+                and isinstance(item.func, ast.Attribute)
+                and item.func.attr
+                in {"append", "extend", "insert", "pop", "remove", "clear", "reverse", "sort", "__setitem__"}
+                and isinstance(item.func.value, ast.Subscript)
+            ):
+                selected = self._attrs_literal_slot(item.func.value)
+                if selected is not None:
+                    values, index = selected
+                    if isinstance(values[index], ast.Name) and index == len(values) - 1:
+                        for value in values[:index]:
+                            scan(value, aliases)
+                        scan(
+                            ast.Call(
+                                func=ast.Attribute(value=values[index], attr=item.func.attr, ctx=ast.Load()),
+                                args=item.args,
+                                keywords=item.keywords,
+                            ),
+                            aliases,
+                        )
+                        return
             if isinstance(item, ast.GeneratorExp):
                 scan(item.generators[0].iter, aliases)
                 return
@@ -3941,7 +4292,47 @@ class _Resolver:
             ):
                 carrier = name(item.func.value)
                 if carrier is not None and self._attrs_carrier_tracked(carrier, aliases):
-                    possible = any(shared(arg, aliases) for arg in item.args)
+                    temporary = f"\0receiver{id(item)}"
+                    copy_carrier(temporary, item.func.value, aliases, aliases.copy())
+                    if carrier in aliases:
+                        aliases.add(temporary)
+                    possible = False
+                    arguments: list[bool] = []
+                    for arg in [*item.args, *(keyword.value for keyword in item.keywords)]:
+                        binding = shared(arg, aliases)
+                        arguments.append(binding)
+                        possible |= binding
+                        scan(arg, aliases)
+                    carrier = temporary
+                    prefix = f"\0slot:{carrier}:"
+                    positions = sorted(
+                        int(key.removeprefix(prefix).removesuffix(":known"))
+                        for key in aliases
+                        if key.startswith(prefix)
+                        and key.endswith(":known")
+                        and key.removeprefix(prefix).removesuffix(":known").isdigit()
+                    )
+                    appended = (
+                        [f"{prefix}{index}" in aliases for index in positions] + [possible]
+                        if item.func.attr == "append"
+                        and positions
+                        and positions == list(range(len(positions)))
+                        and len(item.args) == 1
+                        else None
+                    )
+                    if (
+                        item.func.attr == "__setitem__"
+                        and len(item.args) == SETITEM_ARGS
+                        and not item.keywords
+                        and positions == list(range(len(positions)))
+                        and positions
+                    ):
+                        target = ast.Subscript(
+                            value=ast.Name(id=carrier, ctx=ast.Load()), slice=item.args[0], ctx=ast.Store()
+                        )
+                        appended = self._attrs_updated_slots(
+                            target, [f"{prefix}{index}" in aliases for index in positions], [arguments[1]]
+                        )
                     related = self._attrs_carrier_related(carrier, aliases)
                     preserved = {
                         key
@@ -3955,7 +4346,59 @@ class _Resolver:
                     if item.func.attr == "clear" and not item.args and not item.keywords:
                         aliases.difference_update(related)
                     aliases.update(preserved)
-            if isinstance(item, ast.Assign | ast.AnnAssign | ast.AugAssign | ast.Delete):
+                    if appended is not None:
+                        set_slots(related, aliases, appended)
+                    related = self._attrs_carrier_related(temporary, aliases)
+                    aliases.difference_update(
+                        key
+                        for key in aliases.copy()
+                        if key.startswith(f"\0slot:{temporary}:")
+                        or key == f"\0carrier:{temporary}"
+                        or (key.startswith("\0alias:") and any(part in related for part in key.split(":")[1:]))
+                    )
+                    aliases.update(self._attrs_reconnect_carriers(related - {temporary}))
+                    aliases.discard(temporary)
+                    return
+            if isinstance(item, ast.AugAssign):
+                write_value = shared(item.value, aliases)
+                additions = None
+                if isinstance(item.op, ast.Add) and isinstance(item.value, ast.Tuple | ast.List):
+                    values = self._attrs_flatten_values(item.value.elts)
+                    if values is not None:
+                        state = aliases.copy()
+                        additions = []
+                        saved = exception_states[:]
+                        exception_states.clear()
+                        try:
+                            for value in values:
+                                additions.append(shared(value, state))
+                                scan(value, state)
+                        finally:
+                            exception_states.extend(saved)
+                receiver = None
+                carrier = name(item.target)
+                if carrier is not None and self._attrs_carrier_tracked(carrier, aliases):
+                    receiver = f"\0receiver{id(item)}"
+                    copy_carrier(receiver, item.target, aliases, aliases.copy())
+                    if carrier in aliases:
+                        aliases.add(receiver)
+                scan(item.value, aliases)
+                if receiver is not None:
+                    bind(item.target, ast.Name(id=receiver, ctx=ast.Load()), aliases, aliases.copy())
+                transfer_writes(item, aliases, value=write_value, additions=additions)
+                if receiver is not None:
+                    related = self._attrs_carrier_related(receiver, aliases)
+                    aliases.difference_update(
+                        key
+                        for key in aliases.copy()
+                        if key.startswith(f"\0slot:{receiver}:")
+                        or key in {f"\0carrier:{receiver}", f"\0tuple:{receiver}"}
+                        or (key.startswith("\0alias:") and any(part in related for part in key.split(":")[1:]))
+                    )
+                    aliases.update(self._attrs_reconnect_carriers(related - {receiver}))
+                    aliases.discard(receiver)
+                return
+            if isinstance(item, ast.AnnAssign | ast.Delete):
                 write_value = (
                     shared(item.value, aliases)
                     if isinstance(item, ast.Assign | ast.AnnAssign | ast.AugAssign) and item.value is not None
@@ -3963,6 +4406,7 @@ class _Resolver:
                 )
                 transfer_writes(item, aliases, value=write_value)
             if isinstance(item, ast.Assign):
+                write_value = shared(item.value, aliases)
                 earlier = shared(item.value, aliases) if isinstance(item.value, ast.Subscript) else None
                 captured: ast.expr = item.value
                 values: set[str] = set()
@@ -3992,6 +4436,25 @@ class _Resolver:
                         exception_states.extend(saved)
                 scan(item.value, aliases)
                 sources = aliases | values
+                writes: dict[int, list[bool] | None] = {}
+                for target in item.targets:
+                    for destination, source in self._attrs_target_values(target, captured):
+                        if isinstance(destination, ast.Subscript):
+                            expressions = (
+                                self._attrs_flatten_values(source.elts)
+                                if isinstance(destination.slice, ast.Slice) and isinstance(source, ast.Tuple | ast.List)
+                                else [source]
+                            )
+                            writes[id(destination)] = (
+                                None
+                                if expressions is None
+                                else (
+                                    [shared(expr, sources) for expr in expressions]
+                                    if isinstance(item.value, ast.Tuple | ast.List)
+                                    else [write_value]
+                                )
+                            )
+                transfer_writes(item, aliases, value=write_value, writes=writes)
                 aliases.update(key for key in values if key.startswith(("\0alias:", "\0carrier:", "\0slot:")))
                 for target in item.targets:
                     bind(target, captured, aliases, sources)
@@ -4015,14 +4478,17 @@ class _Resolver:
             if isinstance(item, ast.Delete):
                 for target in item.targets:
                     if (key := name(target)) is not None:
+                        related = self._attrs_carrier_related(key, aliases)
                         aliases.discard(key)
                         aliases.discard(f"\0carrier:{key}")
+                        aliases.discard(f"\0tuple:{key}")
                         aliases.difference_update(
                             item
                             for item in aliases.copy()
                             if item.startswith(f"\0slot:{key}:")
                             or (item.startswith("\0alias:") and key in item.split(":")[1:])
                         )
+                        aliases.update(self._attrs_reconnect_carriers(related - {key}))
                 return
             for child in ast.iter_child_nodes(item):
                 scan(child, aliases)

@@ -1100,6 +1100,61 @@ def test_attrs_ifexp_keeps_fresh_class_shadow(tmp_path: Path) -> None:
         ("items = [FIELD, attrs.field()]\nitems[1] = attrs.field()\nitems[1].default(lambda self: 1)", False),
         ("items = (FIELD, attrs.field())\nitems[-1].default(lambda self: 1)", False),
         ("items = [attrs.field()]\nitems[0] = attrs.field()\nitems[0].default(lambda self: 1)", False),
+        (
+            "items = [attrs.field()]\na = items\nb = a\nitems = items\na.append(FIELD)\nb[-1].default(lambda self: 1)",
+            True,
+        ),
+        ("items = [attrs.field()]\na = items\nb = a\ndel a\nb.append(FIELD)\nitems[-1].default(lambda self: 1)", True),
+        ("items = [FIELD, attrs.field()]\ndel items[0]\nitems[0].default(lambda self: 1)", False),
+        ("items = [attrs.field(), FIELD]\ndel items[0]\nitems[0].default(lambda self: 1)", True),
+        (
+            "items = [attrs.field()]\nold = items\nitems.append(((items := []), FIELD)[1])\nold[-1].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items = [FIELD]\nold = items\nitems.append(((items := []), attrs.field())[1])\nold[-1].default(lambda self: 1)",
+            False,
+        ),
+        ("items = (attrs.field(),)\na = items\nitems += (FIELD,)\na[0].default(lambda self: 1)", False),
+        (
+            "items = [attrs.field()]\nold = items\nitems += ((items := [attrs.field()]), [FIELD])[1]\nold[-1].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items = [FIELD]\nold = items\nitems += ((items := []), [attrs.field()])[1]\nitems[0].default(lambda self: 1)",
+            True,
+        ),
+        ("items = (FIELD,)\nitems += (attrs.field(),)\nitems[1].default(lambda self: 1)", False),
+        ("items = [FIELD]\nitems += [attrs.field()]\nitems[1].default(lambda self: 1)", False),
+        ("items = [FIELD, attrs.field()]\nitems.__setitem__(0, FIELD)\nitems[1].default(lambda self: 1)", False),
+        ("items = [attrs.field()]\nsource = [FIELD]\nitems[:] = [*source]\nitems[0].default(lambda self: 1)", True),
+        ("items = (attrs.field(),)\na = items\nitems += (FIELD,)\nitems[-1].default(lambda self: 1)", True),
+        (
+            "items = [FIELD, attrs.field()]\nitems.append(attrs.field())\nitems[-2] = attrs.field()\nitems[0].default(lambda self: 1)",
+            True,
+        ),
+        ("items = [attrs.field()]\nitems.extend({FIELD})\nitems[-1].default(lambda self: 1)", True),
+        ("items = [attrs.field()]\nitems.extend({FIELD: 1})\nitems[-1].default(lambda self: 1)", True),
+        ("items = [attrs.field()]\nitems.extend({attrs.field(): FIELD})\nitems[-1].default(lambda self: 1)", False),
+        ("items = [attrs.field()]\nitems.extend({**{FIELD: 1}})\nitems[-1].default(lambda self: 1)", True),
+        ("items = [attrs.field()]\nitems.append((items.clear(), FIELD)[1])\nitems[0].default(lambda self: 1)", True),
+        ("items = [FIELD]\n(items.clear(), items)[1].append(attrs.field())\nitems[0].default(lambda self: 1)", False),
+        (
+            "items = [attrs.field(), attrs.field()]\nitems[0], items[1] = FIELD, attrs.field()\nitems[1].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "items = [attrs.field(), attrs.field()]\n(items[0], (items[1],)) = (FIELD, (attrs.field(),))\nitems[1].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "items = [attrs.field(), attrs.field()]\nitems[:] = [attrs.field(), FIELD]\nitems[0].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "items = [attrs.field(), attrs.field()]\nitems[::-1] = [attrs.field(), FIELD]\nitems[0].default(lambda self: 1)",
+            True,
+        ),
     ],
 )
 def test_attrs_container_mutation_and_direct_receiver(
