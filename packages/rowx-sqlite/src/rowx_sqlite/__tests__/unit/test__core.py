@@ -22,6 +22,7 @@ def test_core_exposes_the_connection_bindings() -> None:
     assert sorted(name for name in dir(_core) if not name.startswith("_")) == [
         "ColumnInfo",
         "Connection",
+        "DatabaseInfo",
         "Describe",
         "Migrator",
         "ParamInfo",
@@ -32,7 +33,12 @@ def test_core_exposes_the_connection_bindings() -> None:
         "TypeInfo",
         "connect",
         "connect_checker",
+        "create_database",
+        "database_exists",
+        "database_ready",
         "describe",
+        "drop_database",
+        "list_databases",
         "map_columns",
         "parse_dsn",
         "sqlite_version",
@@ -43,6 +49,7 @@ def test_core_exposes_the_connection_bindings() -> None:
 def test_every_class_names_the_core_module() -> None:
     for cls in (
         _core.Connection,
+        _core.DatabaseInfo,
         _core.Migrator,
         _core.Pool,
         _core.RowShape,

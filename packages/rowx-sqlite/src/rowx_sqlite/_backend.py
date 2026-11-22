@@ -2,6 +2,7 @@ from typing import Final
 
 from rowx_core.backend import Backend, CheckerBackend, TypeEntry
 
+from rowx_sqlite._admin import SqliteAdmin
 from rowx_sqlite._checker import SQL_ERROR_HELP
 from rowx_sqlite._compiler import COMPILER
 from rowx_sqlite._core import map_columns, type_table
@@ -62,6 +63,7 @@ def checker() -> CheckerBackend:
 def load() -> Backend:
     return Backend(
         checker_factory=checker,
+        admin_factory=SqliteAdmin,
         migration_factory=SqliteMigrations,
         scratch_factory=SqliteScratch,
         memory_factory=in_memory,
