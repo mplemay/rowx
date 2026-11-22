@@ -797,6 +797,11 @@ def test_attrs_class_comprehension_qualified_private_attribute(tmp_path: Path, *
         "(alias := attrs.field())\ntry:\n    for field_alias in (FIELD,):\n        alias = field_alias\n        int('bad')\n        alias = attrs.field()\nexcept ValueError:\n    alias.default(lambda self: 1)",
         "(alias := attrs.field())\ntry:\n    for field_alias in (FIELD,):\n        alias = field_alias\n        int('bad')\n        alias = attrs.field()\nfinally:\n    alias.default(lambda self: 1)",
         "(gate := FIELD)\n(alias := (gate, (gate := attrs.field()))[index])\nalias.default(lambda self: 1)",
+        "first, *rest = (attrs.field(), FIELD)\nalias = rest[0]\nalias.default(lambda self: 1)",
+        "(gate := FIELD)\n(alias := attrs.field())\ntry:\n    ((alias := (gate, (gate := attrs.field()))[0]), int('bad'), (alias := attrs.field()))\nexcept ValueError:\n    alias.default(lambda self: 1)",
+        "(alias := FIELD)\ntry:\n    pass\nfinally:\n    [0, 0][alias is FIELD] = 1\nalias.default(lambda self: 1)",
+        "(alias := attrs.field())\ntry:\n    pass\nfinally:\n    other = (alias := FIELD)\nalias.default(lambda self: 1)",
+        "(alias := attrs.field())\nwith suppress(ValueError):\n    try:\n        (alias := FIELD)\n        int('bad')\n        (alias := attrs.field())\n    finally:\n        pass\nalias.default(lambda self: 1)",
     ],
 )
 def test_attrs_flow_paths_reject_dynamic_default(tmp_path: Path, body: str, *, shared: bool) -> None:
@@ -808,16 +813,131 @@ def test_attrs_flow_paths_reject_dynamic_default(tmp_path: Path, body: str, *, s
             + "\n@attrs.define\nclass Row:\n    value: int = spec\n"
         )
     else:
-        if body.startswith("first, alias =") or "\nalias = ((gate :=" in body or "\nalias, other =" in body:
+        if (
+            body.startswith(("first, alias =", "first, *rest ="))
+            or "\nalias = ((gate :=" in body
+            or "\nalias, other =" in body
+        ):
             body = "for _ in (0,):\n    " + body.replace("\n", "\n    ")
         statements = body.replace("FIELD", "value").replace("\n", "\n    ")
         source = f"@attrs.define\nclass Row:\n    value: int = attrs.field()\n    {statements}\n"
-    path.write_text(f'import attrs\nfrom rowx import query\nindex = 0\n{source}query[Row](t"select 1")\n')
+    path.write_text(
+        f'import attrs\nfrom contextlib import suppress\nfrom rowx import query\nindex = 0\n{source}query[Row](t"select 1")\n'
+    )
     [call] = discover_file(path).calls
     result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
     assert result.diagnostic is not None
     assert result.diagnostic.rule == "invalid-row-type"
     assert "default" in result.diagnostic.message
+
+
+@pytest.mark.parametrize(
+    ("body", "rejected"),
+    [
+        (
+            "alias = attrs.field()\ntry:\n    class Inner:\n        global alias\n        alias = spec\n        int('bad')\nexcept ValueError:\n    alias.default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias = attrs.field()\ntry:\n    class Inner:\n        alias = spec\n        int('bad')\nexcept ValueError:\n    alias.default(lambda self: 1)",
+            False,
+        ),
+        ("first, *rest = (attrs.field(), spec, attrs.field())\nalias = rest[-1]\nalias.default(lambda self: 1)", False),
+        (
+            "first, *rest = (attrs.field(), attrs.field())\nrest = list((spec,))\nalias = rest[0]\nalias.default(lambda self: 1)",
+            True,
+        ),
+        (
+            "first, *rest = (attrs.field(), attrs.field())\nif flag:\n    rest = list((spec,))\nalias = rest[0]\nalias.default(lambda self: 1)",
+            True,
+        ),
+        (
+            "(alias := spec)\nwith nullcontext():\n    try:\n        (alias := attrs.field())\n    finally:\n        pass\nalias.default(lambda self: 1)",
+            False,
+        ),
+        (
+            "(alias := spec)\ntry:\n    (alias := attrs.field())\nfinally:\n    if flag:\n        alias = alias\nalias.default(lambda self: 1)",
+            False,
+        ),
+    ],
+)
+def test_attrs_shared_cleanup_and_nested_class_flow(tmp_path: Path, body: str, *, rejected: bool) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom contextlib import nullcontext\nfrom rowx import query\n"
+        f"flag = True\nspec = attrs.field()\n{body}\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert (result.diagnostic is not None) == rejected
+    if rejected:
+        assert result.diagnostic is not None
+        assert result.diagnostic.rule == "invalid-row-type"
+        assert "default" in result.diagnostic.message
+
+
+def test_attrs_finally_import_binding(tmp_path: Path) -> None:
+    (tmp_path / "fields.py").write_text("import attrs\nspec = attrs.field()\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom fields import spec\nfrom rowx import query\n"
+        "alias = attrs.field()\ntry:\n    pass\nfinally:\n    from fields import spec as alias\n"
+        "alias.default(lambda self: 1)\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+    assert "default" in result.diagnostic.message
+
+
+def test_attrs_conditional_finally_import_binding(tmp_path: Path) -> None:
+    (tmp_path / "fields.py").write_text("import attrs\nspec = attrs.field()\n")
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom fields import spec\nfrom rowx import query\n"
+        "alias = attrs.field()\ntry:\n    pass\nfinally:\n    if True:\n        from fields import spec as alias\n"
+        "alias.default(lambda self: 1)\n"
+        '@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert result.diagnostic.rule == "invalid-row-type"
+    assert "default" in result.diagnostic.message
+
+
+def test_attrs_nested_finally_traversal_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = ast.iter_child_nodes
+    visits = 0
+
+    def counted(node: ast.AST) -> Iterator[ast.AST]:
+        nonlocal visits
+        visits += 1
+        yield from original(node)
+
+    monkeypatch.setattr(ast, "iter_child_nodes", counted)
+
+    def measure(depth: int) -> int:
+        nonlocal visits
+        body = "pass"
+        for _ in range(depth):
+            body = "try:\n    " + body.replace("\n", "\n    ") + "\nfinally:\n    alias = alias"
+        path = tmp_path / "case.py"
+        path.write_text(
+            "import attrs\nfrom rowx import query\nspec = attrs.field()\nalias = attrs.field()\n"
+            f'{body}\n@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t"select 1")\n'
+        )
+        [call] = discover_file(path).calls
+        visits = 0
+        result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+        assert result.diagnostic is None
+        return visits
+
+    shallow, deep = measure(6), measure(12)
+    assert deep < shallow * 5
 
 
 @pytest.mark.parametrize("shared", [False, True])
@@ -858,6 +978,7 @@ def test_attrs_failed_guard_without_registration_is_supported(tmp_path: Path, *,
         "(alias := FIELD)\ntry:\n    pass\nfinally:\n    (alias := attrs.field())\nalias.default(lambda self: 1)",
         "(alias := attrs.field())\ntry:\n    (alias := FIELD)\n    int('bad')\n    (alias := attrs.field())\nfinally:\n    def later():\n        alias = FIELD\nalias.default(lambda self: 1)",
         "(alias := (attrs.field(), attrs.field())[int('0')])\nalias.default(lambda self: 1)",
+        "(alias := FIELD)\ntry:\n    (alias := attrs.field())\nfinally:\n    alias = alias\nalias.default(lambda self: 1)",
     ],
 )
 def test_attrs_literal_selection_and_try_fresh_controls(tmp_path: Path, body: str, *, shared: bool) -> None:

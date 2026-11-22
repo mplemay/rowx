@@ -2,7 +2,7 @@ import asyncio
 import datetime as dt
 import gc
 import inspect
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -1360,7 +1360,7 @@ def test_attrs_local_conditional_default_omission_and_empty_results(schema: str)
         value: int = attrs.field()
         if True:
 
-            @value.default  # ty: ignore[call-non-callable]
+            @value.default  # ty: ignore[not-callable]
             def make(self) -> int:
                 return self.id + 35
 
@@ -1373,7 +1373,7 @@ def test_attrs_local_called_default_omission_and_empty_results(schema: str) -> N
     class Row:
         id: int
         value: int = attrs.field()
-        value.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        value.default(lambda _self: 42)  # ty: ignore[not-callable]
 
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
@@ -1413,7 +1413,7 @@ def test_attrs_nested_class_default_omission_and_empty_results(schema: str) -> N
         id: int
         value: object = attrs.field()
 
-        @value.default  # ty: ignore[call-non-callable]
+        @value.default  # ty: ignore[not-callable]
         class Maker:
             def __init__(self, row: object) -> None:
                 pass
@@ -1431,7 +1431,7 @@ def test_attrs_decorator_expression_default_omission_and_empty_results(schema: s
         id: int
         value: int = attrs.field()
 
-        @identity(value.default(lambda _self: 42))  # ty: ignore[call-non-callable]
+        @identity(value.default(lambda _self: 42))  # ty: ignore[not-callable]
         def method(self) -> None:
             pass
 
@@ -1460,7 +1460,7 @@ def test_attrs_local_loop_alias_default_omission_and_empty_results(schema: str) 
         id: int
         value: int = attrs.field()
         for alias in (value,):
-            alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+            alias.default(lambda _self: 42)  # ty: ignore[not-callable]
         del alias
 
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(id=7, value=42)
@@ -1492,7 +1492,7 @@ def test_attrs_private_loop_copy_default_omission_and_empty_results(schema: str)
         __value: int = attrs.field()
         for alias in (__value,):
             copy = alias
-            copy.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+            copy.default(lambda _self: 42)  # ty: ignore[not-callable]
         del alias, copy
 
     result = run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one)
@@ -1508,7 +1508,7 @@ def test_attrs_conditional_copy_and_local_walrus_omission_and_empty_results(sche
         for alias in (value,):
             if True:
                 copy = alias
-                copy.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+                copy.default(lambda _self: 42)  # ty: ignore[not-callable]
         del alias, copy
 
     @attrs.define
@@ -1516,7 +1516,7 @@ def test_attrs_conditional_copy_and_local_walrus_omission_and_empty_results(sche
         id: int
         value: int = attrs.field()
         _ = (alias := value)
-        alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        alias.default(lambda _self: 42)  # ty: ignore[not-callable]
         del _, alias
 
     assert run_on(schema, "connection", query[Conditional](t"SELECT 7::int4 AS id").one) == Conditional(7, 42)
@@ -1541,7 +1541,7 @@ def test_attrs_nested_walrus_and_simultaneous_assignment_omission(schema: str) -
         id: int
         value: int = attrs.field()
         _ = (alias := (other := value))
-        alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+        alias.default(lambda _self: 42)  # ty: ignore[not-callable]
         del _, alias, other
 
     assert run_on(schema, "connection", query[Shared](t"SELECT 7::int4 AS id").one) == Shared(7, 42)
@@ -1557,7 +1557,7 @@ def test_attrs_binding_path_defaults_omission_and_empty_results(schema: str) -> 
         value: int = attrs.field()
         for alias in iter((value,)):
             copy = alias
-            copy.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+            copy.default(lambda _self: 42)  # ty: ignore[not-callable]
         del alias, copy  # ty: ignore[possibly-unresolved-reference]
 
     @attrs.define
@@ -1565,7 +1565,7 @@ def test_attrs_binding_path_defaults_omission_and_empty_results(schema: str) -> 
         id: int
         value: int = attrs.field()
         with nullcontext(value) as alias:
-            alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+            alias.default(lambda _self: 42)  # ty: ignore[not-callable]
         del alias
 
     @attrs.define
@@ -1574,7 +1574,7 @@ def test_attrs_binding_path_defaults_omission_and_empty_results(schema: str) -> 
         value: int = attrs.field()
         match value:
             case alias:
-                alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+                alias.default(lambda _self: 42)  # ty: ignore[not-callable]
         del alias
 
     @attrs.define
@@ -1587,7 +1587,7 @@ def test_attrs_binding_path_defaults_omission_and_empty_results(schema: str) -> 
             if alias is None:
                 break
         else:
-            alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+            alias.default(lambda _self: 42)  # ty: ignore[not-callable]
         del _, alias
 
     assert run_on(schema, "connection", query[Loop](t"SELECT 7::int4 AS id").one) == Loop(7, 42)
@@ -1627,12 +1627,42 @@ def test_attrs_loop_carried_default_omission_and_empty_results(schema: str) -> N
         value: int = attrs.field()
         _ = (alias := attrs.field())
         for _unused in (0, 1):
-            alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+            alias.default(lambda _self: 42)  # ty: ignore[not-callable]
             alias = value
         del _, alias, _unused
 
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(7, 42)
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
+def test_attrs_starred_and_suppressed_default_omission(schema: str) -> None:
+    spec = attrs.field()
+    first, *rest = (attrs.field(), spec)
+    alias = rest[0]
+    alias.default(lambda _self: 42)
+
+    @attrs.define
+    class StarredRow:
+        id: int
+        value: int = spec
+
+    @attrs.define
+    class SuppressedRow:
+        id: int
+        value: int = attrs.field()
+        _ = (alias := attrs.field())
+        with suppress(ValueError):
+            _ = (alias := value)
+            int("bad")
+            _ = (alias := attrs.field())
+        alias.default(lambda _self: 42)  # ty: ignore[not-callable]
+        del _, alias
+
+    assert first is not spec
+    assert run_on(schema, "connection", query[StarredRow](t"SELECT 7::int4 AS id").one) == StarredRow(7, 42)
+    assert run_on(schema, "connection", query[StarredRow](t"SELECT 7::int4 AS id WHERE false").all) == []
+    assert run_on(schema, "connection", query[SuppressedRow](t"SELECT 7::int4 AS id").one) == SuppressedRow(7, 42)
+    assert run_on(schema, "connection", query[SuppressedRow](t"SELECT 7::int4 AS id WHERE false").all) == []
 
 
 def test_attrs_failed_guard_default_omission_and_empty_results(schema: str) -> None:
@@ -1645,7 +1675,7 @@ def test_attrs_failed_guard_default_omission_and_empty_results(schema: str) -> N
             case 1 if (alias := value) and not schema:  # ty: ignore[redundant-condition-strict]
                 pass
             case _:
-                alias.default(lambda _self: 42)  # ty: ignore[call-non-callable]
+                alias.default(lambda _self: 42)  # ty: ignore[not-callable]
         del _, alias
 
     assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(7, 42)
