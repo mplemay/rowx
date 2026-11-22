@@ -126,6 +126,23 @@ class Scratch:
             sys.stderr.write(f"warning: could not drop the scratch database {self.name!r}{reason}\n")
 
 
+# the messages of the server scratch, for a backend scratch whose errors are its own exceptions
+@asynccontextmanager
+async def backend_session(
+    scratch: ScratchService, migrator: MigrationService, workers: int, dsn: str
+) -> AsyncGenerator[ScratchBuild]:
+    try:
+        async with scratch.session(migrator, workers) as build:
+            yield build
+    except MigrateError as error:
+        cause = error.__cause__
+        msg = f"the migrations failed on the scratch database: {error}" + (f": {cause}" if cause else "")
+        raise CheckError(redact(msg, dsn)) from None
+    except (DatabaseError, InterfaceError, OSError) as error:
+        msg = f"could not create or migrate the scratch database: {error}"
+        raise CheckError(redact(msg, dsn)) from None
+
+
 # a backend that makes its own scratch (a file database) is not given the server's admin service
 def scratch_for(dsn: str, backend: Backend, *, sweep_previous: bool = True) -> ScratchService:
     if backend.scratch_factory is not None:

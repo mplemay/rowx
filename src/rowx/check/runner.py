@@ -695,11 +695,18 @@ def _file_sites(  # ruff: ignore[too-many-arguments, too-many-positional-argumen
             reports.append(Report(diagnostic=resolution.diagnostic, help=resolution.help))
         if call.template is None:
             continue
+        try:
+            sourcemap = mapper.build(call.template)
+        except TypeError as error:
+            # the backend's compiler refuses the template (a static parameter sigil, an interpolation in a string)
+            span = mapper.span(call.template)
+            reports.append(Report(diagnostic=Diagnostic(rule="sql-error", message=str(error), path=path, span=span)))
+            continue
         sites.append(
             _Site(
                 call=call,
                 mapper=mapper,
-                sourcemap=mapper.build(call.template),
+                sourcemap=sourcemap,
                 row_type=resolution.row_type,
                 inference=inference,
                 coverage=coverage[call.span],

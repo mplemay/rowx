@@ -1,5 +1,6 @@
 from typing import TYPE_CHECKING, Self
 
+from rowx_sqlite._checker import SqliteCheckerSession
 from rowx_sqlite._connection import Connection, connect
 from rowx_sqlite._core import connect_checker
 from rowx_sqlite._migrate import Migrator
@@ -91,3 +92,7 @@ class SqliteMigrations:
     async def run_on(self, dsn: str) -> tuple[MigrationResult, ...]:
         async with await connect(dsn) as connection:
             return await self._migrator.run(connection)
+
+
+async def open_checker(dsn: str, timeout_s: float) -> SqliteCheckerSession:
+    return SqliteCheckerSession(await connect_checker(dsn, timeout_s))
