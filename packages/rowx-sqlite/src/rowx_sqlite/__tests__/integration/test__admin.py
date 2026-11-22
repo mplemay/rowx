@@ -62,7 +62,9 @@ def test_the_admin_factory_is_registered() -> None:
 
 
 def test_the_database_is_the_path_of_the_url(tmp_path: Path) -> None:
-    assert SqliteAdmin(url_of(tmp_path / "a b.db")).database == str(tmp_path / "a b.db")
+    database = SqliteAdmin(url_of(tmp_path / "a b.db")).database
+    assert database is not None
+    assert Path(database) == tmp_path / "a b.db"
     assert SqliteAdmin("sqlite:///relative.db").database == "relative.db"
     assert SqliteAdmin("sqlite::memory:").database is None
 
@@ -231,7 +233,7 @@ async def test_list_names_files_with_the_prefix_beside_the_url_and_leaves_out_si
     (tmp_path / "other.db").write_bytes(b"")
     admin = SqliteAdmin(url_of(tmp_path / "app.db"))
     found = await admin.list("rowx_")
-    assert [info.name for info in found] == [str(tmp_path / "rowx_a.db"), str(tmp_path / "rowx_b.db")]
+    assert [Path(info.name) for info in found] == [tmp_path / "rowx_a.db", tmp_path / "rowx_b.db"]
     assert all(info.comment is None and info.sessions == 0 for info in found)
     # a listed name is accepted by with_database, so a caller can drop it
     assert ConnectOptions.from_dsn(admin.with_database(found[0].name)).path == found[0].name
