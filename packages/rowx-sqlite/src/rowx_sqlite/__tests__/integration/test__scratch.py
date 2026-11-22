@@ -165,8 +165,8 @@ def test_the_creation_itself_claims_the_file_for_the_sweep(scratch_dir: Path) ->
     assert names(scratch_dir) == []
 
 
-HEADER = "from rowx import query\n\n"
-UNUSED = "unused.db"
+HEADER: Final[str] = "from rowx import query\n\n"
+UNUSED: Final[str] = "unused.db"
 
 
 def check_json(project: CheckProject, *args: str, url: str | None = None) -> tuple[int, list[dict[str, Any]], str]:
@@ -175,12 +175,12 @@ def check_json(project: CheckProject, *args: str, url: str | None = None) -> tup
     return code, found, err
 
 
-VALID_SOURCE = """\
+VALID_SOURCE: Final[str] = """\
 from rowx import query
 
 query[tuple[int, str]](t"SELECT id, name FROM users")
 """
-BROKEN_SOURCE = """\
+BROKEN_SOURCE: Final[str] = """\
 from rowx import query
 
 query[tuple[int]](t"SELECT nam FROM users")
@@ -296,7 +296,7 @@ def commit(root: Path, source: str, migration: str) -> str:
     return git(root, "rev-parse", "HEAD")
 
 
-COMPAT_CASES = [
+COMPAT_CASES: Final[list[tuple[str, str, str, str, int, str]]] = [
     (
         "CREATE TABLE t (old INTEGER NOT NULL)",
         "CREATE TABLE t (new INTEGER NOT NULL)",
