@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 import pytest_asyncio
-from rowx_core.errors import DatabaseError, InterfaceError
+from rowx_core.errors import DatabaseError
 from rowx_sqlite import ConnectOptions, connect
 from rowx_sqlite._core import connect_checker, describe as describe_impl
 from rowx_sqlite._describe import describe
@@ -339,8 +339,9 @@ async def test_a_syntax_error_reports_a_position(checker: Connection) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sql", ["", "   ", "-- nothing", "SELECT 1; SELECT 2", "SELECT 1; DELETE FROM t"])
 async def test_exactly_one_statement_is_described(checker: Connection, sql: str) -> None:
-    with pytest.raises(InterfaceError):
+    with pytest.raises(DatabaseError) as raised:
         await describe(checker, sql)
+    assert (raised.value.sqlstate, raised.value.code, raised.value.position) == ("HY000", None, None)
 
 
 @pytest.mark.asyncio

@@ -251,14 +251,14 @@ fn is_rowid(key: &TableKey, column: &str, declared: Option<&str>) -> bool {
 /// parameters are read; nothing is stepped.
 ///
 /// # Errors
-/// `Sqlite` (with the error offset) when SQLite rejects the SQL, `Interface` for no statement or more
-/// than one.
+/// `Sqlite` (with the error offset) when SQLite rejects the SQL, `NotOneStatement` for no statement or
+/// more than one.
 pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe, Error> {
     refresh_schema(conn)?;
     let stmt = match conn.prepare(sql) {
         Ok(stmt) => stmt,
         Err(rusqlite::Error::MultipleStatement) => {
-            return Err(Error::Interface(
+            return Err(Error::NotOneStatement(
                 "describe takes exactly one statement, but the SQL has more".to_owned(),
             ));
         }
@@ -266,7 +266,9 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
     };
     // SQLite prepares nothing for text that holds only whitespace and comments
     if stmt.expanded_sql().is_none() {
-        return Err(Error::Interface("the SQL holds no statement".to_owned()));
+        return Err(Error::NotOneStatement(
+            "the SQL holds no statement".to_owned(),
+        ));
     }
     let params = (1..=stmt.parameter_count())
         .map(|index| ParamInfo {
@@ -345,7 +347,22 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
 
 #[cfg(test)]
 mod tests {
-    use super::{Construct, SourceKind, Structure, unproven_cause};
+    use super::{Construct, SourceKind, Structure, describe, unproven_cause};
+    use crate::error::Error;
+    use rusqlite::Connection;
+
+    #[test]
+    fn multiple_or_no_statements_are_not_one_statement() -> rusqlite::Result<()> {
+        let conn = Connection::open_in_memory()?;
+        for sql in ["select 1; select 2", "", "-- only a comment"] {
+            let err = describe(&conn, sql, &Structure::default());
+            assert!(
+                matches!(err, Err(Error::NotOneStatement(_))),
+                "{sql:?}: {err:?}"
+            );
+        }
+        Ok(())
+    }
 
     fn sources(names: &[&str]) -> Structure {
         Structure {

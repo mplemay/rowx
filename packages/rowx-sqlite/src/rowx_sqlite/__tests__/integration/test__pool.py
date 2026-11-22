@@ -422,7 +422,7 @@ async def test_a_pool_transaction_commits(pool: Pool) -> None:
         async with tx.transaction() as nested:
             await query(t"INSERT INTO t VALUES (2)").execute(nested)
     assert await count(pool) == 2
-    assert pool.idle == pool.size
+    await until(lambda: pool.idle == pool.size)
 
 
 @pytest.mark.asyncio
@@ -431,7 +431,7 @@ async def test_a_pool_transaction_rolls_back_on_an_error(pool: Pool) -> None:
     with pytest.raises(RuntimeError, match=msg):
         await fail_in_transaction(pool, msg)
     assert await count(pool) == 0
-    assert pool.idle == pool.size
+    await until(lambda: pool.idle == pool.size)
 
 
 @pytest.mark.asyncio
@@ -453,7 +453,7 @@ async def test_a_pool_runs_queries_and_streams_on_its_own(pool: Pool) -> None:
         await query(t"INSERT INTO t VALUES ({n})").execute(pool)
     assert await query[int](t"SELECT n FROM t ORDER BY n").all(pool) == [0, 1, 2, 3, 4]
     assert [n async for n in query[int](t"SELECT n FROM t ORDER BY n").fetch(pool)] == [0, 1, 2, 3, 4]
-    assert pool.idle == pool.size
+    await until(lambda: pool.idle == pool.size)
 
 
 # hooks

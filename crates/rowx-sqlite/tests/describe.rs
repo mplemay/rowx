@@ -517,7 +517,7 @@ async fn empty_sql_and_a_second_statement_are_rejected() -> TestResult {
     for sql in ["", "   ", "-- nothing", "/* nothing */ ;"] {
         let err = describe(&conn, sql, Structure::default()).await.err();
         assert!(
-            matches!(&err, Some(Error::Interface(text)) if text.contains("no statement")),
+            matches!(&err, Some(Error::NotOneStatement(text)) if text.contains("no statement")),
             "{sql:?}: {err:?}"
         );
     }
@@ -525,7 +525,7 @@ async fn empty_sql_and_a_second_statement_are_rejected() -> TestResult {
         .await
         .err();
     assert!(
-        matches!(&err, Some(Error::Interface(text)) if text.contains("exactly one")),
+        matches!(&err, Some(Error::NotOneStatement(text)) if text.contains("exactly one")),
         "{err:?}"
     );
     // a trailing semicolon and a trailing comment are not a second statement

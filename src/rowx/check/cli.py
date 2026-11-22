@@ -235,7 +235,8 @@ def _scratch_hook(config: Config, state: _HookState) -> Callable[[str, int], Abs
         scratch = scratch_for(url, backend)
         # recorded before the session so an interrupted drop is still swept
         state.built = scratch
-        return scratch.session(load_migrator(resolve_target(config, None), url, backend), workers)
+        migrator = load_migrator(resolve_target(config, None), url, backend)
+        return scratch.session(migrator, workers)
 
     return _open
 

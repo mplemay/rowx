@@ -461,8 +461,8 @@ impl Connection {
     /// its parameters. `structure` is what the caller read from the statement's text.
     ///
     /// # Errors
-    /// `Sqlite` (with the error offset) when SQLite rejects the SQL, `Interface` for no statement or more
-    /// than one, `Closed` after `close()`, `Stopped` when the worker died.
+    /// `Sqlite` (with the error offset) when SQLite rejects the SQL, `NotOneStatement` for no statement or
+    /// more than one, `Closed` after `close()`, `Stopped` when the worker died.
     pub async fn describe(&self, sql: &str, structure: Structure) -> Result<Describe, Error> {
         let sql = sql.to_owned();
         self.call(move |ctx| {
