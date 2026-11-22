@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The Cargo config's default points to a Unix venv layout. setup-uv selects a
-# valid interpreter everywhere, including Windows where PyO3 needs python.lib.
+# Install the matrix interpreter before uv sync creates the virtual environment.
+# PyO3 needs the native interpreter path, including on Windows.
+uv python install "$CI_PYTHON_VERSION"
 export PYO3_PYTHON
-PYO3_PYTHON="$(uv python find 3.14)"
+PYO3_PYTHON="$(uv python find "$CI_PYTHON_VERSION")"
 
 case "$CI_PACKAGE" in
   core) cargo test --locked -p rowx-core -p rowx-py-core ;;
@@ -13,7 +14,9 @@ case "$CI_PACKAGE" in
   embedded)
     cargo test --locked -p rowx-embedded-host
     # Use the same hooks as just check-embedded with the locked prek version.
-    uvx prek@0.5.10 run cargo-fmt cargo-clippy-embedded --hook-stage manual --all-files
+    if [[ "$CI_PYTHON_VERSION" == 3.14 ]]; then
+      uvx prek@0.5.10 run cargo-fmt cargo-clippy-embedded --hook-stage manual --all-files
+    fi
     ;;
   *)
     echo "Unknown Rust package: $CI_PACKAGE" >&2

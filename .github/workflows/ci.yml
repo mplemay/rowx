@@ -18,58 +18,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  rust:
-    name: test (${{ matrix.platform }}/rust/${{ matrix.package }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        package: [core, postgres, sqlite]
-        platform: [Linux, macOS, Windows]
-        include:
-          - { platform: Linux, runner: ubuntu-latest }
-          - { platform: macOS, runner: macos-15 }
-          - { platform: Windows, runner: windows-latest }
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          python-version: "3.14"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          save-cache: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Install the pinned Rust toolchain
-        run: bash scripts/ci-rust-toolchain.sh
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: . -> target
-          key: ${{ github.job }}-${{ matrix.package }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Start PostgreSQL for the Rust driver
-        if: runner.os == 'Linux' && matrix.package == 'postgres'
-        run: bash scripts/ci-start-postgres.sh
-
-      - name: Start TLS PostgreSQL
-        if: runner.os == 'Linux' && matrix.package == 'postgres'
-        run: bash scripts/ci-start-tls.sh
-
-      - name: Test Rust package
-        shell: bash
-        env:
-          CI_PACKAGE: ${{ matrix.package }}
-        run: bash scripts/ci-test-rust.sh
-
   python:
-    name: test (${{ matrix.platform }}/${{ matrix.python-version }}/${{ matrix.package }})
+    name: test/${{ matrix.package }} (${{ matrix.python-version }})(${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
@@ -96,85 +46,39 @@ jobs:
           cache-dependency-glob: uv.lock
           save-cache: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Set up Rust for native extensions
-        if: matrix.package != 'core'
-        run: bash scripts/ci-rust-toolchain.sh
-
-      - name: Cache Rust build artifacts
-        if: matrix.package != 'core'
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: ci-python-${{ matrix.package }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Test portable Python package
-        shell: bash
-        env:
-          CI_PACKAGE: ${{ matrix.package }}
-        run: bash scripts/ci-test-python.sh
-
-  python-postgres:
-    name: test (Linux/${{ matrix.python-version }}/postgres/${{ matrix.shard }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.14", "3.15"]
-        shard: [db, plugin]
-
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: rowx
-          POSTGRES_PASSWORD: rowx
-          POSTGRES_DB: rowx
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U rowx -d rowx"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    env:
-      ROWX_REQUIRE_DB: "1"
-      ROWX_TEST_DSN: postgresql://rowx:rowx@localhost:5432/rowx
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          python-version: ${{ matrix.python-version }}
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          save-cache: ${{ github.ref == 'refs/heads/main' }}
-
       - name: Install the pinned Rust toolchain
         run: bash scripts/ci-rust-toolchain.sh
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: . -> target
+          key: ci-python-${{ matrix.package }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Start PostgreSQL
+        if: runner.os == 'Linux' && matrix.package == 'postgres'
+        run: bash scripts/ci-start-postgres.sh
+
       - name: Start TLS PostgreSQL
-        if: matrix.shard == 'db'
+        if: runner.os == 'Linux' && matrix.package == 'postgres'
         run: bash scripts/ci-start-tls.sh
 
-      - name: Test PostgreSQL integration
+      - name: Test Rust
+        if: matrix.package != 'cli'
+        shell: bash
         env:
-          CI_PACKAGE: postgres
-          CI_POSTGRES_SHARD: ${{ matrix.shard }}
+          CI_PACKAGE: ${{ matrix.package }}
+          CI_PYTHON_VERSION: ${{ matrix.python-version }}
+        run: bash scripts/ci-test-rust.sh
+
+      - name: Test Python
+        shell: bash
+        env:
+          CI_PACKAGE: ${{ matrix.package }}
         run: bash scripts/ci-test-python.sh
 
   embedded-wheel:
-    name: wheel (Linux/3.14/embedded)
+    name: wheel/embedded (3.14)(Linux)
     runs-on: ubuntu-latest
 
     steps:
@@ -227,7 +131,7 @@ jobs:
           retention-days: 7
 
   embedded-wheel-macos:
-    name: wheel (macOS/3.14/embedded)
+    name: wheel/embedded (3.14)(macOS)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -264,60 +168,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  embedded-rust:
-    name: test (${{ matrix.platform }}/rust/embedded)
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [Linux, macOS]
-        include:
-          - { platform: Linux, runner: ubuntu-latest }
-          - { platform: macOS, runner: macos-15 }
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          python-version: "3.14"
-          enable-cache: false
-
-      - name: Install the pinned Rust toolchain
-        run: bash scripts/ci-rust-toolchain.sh
-
-      - name: Cache the Wasmer build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: . -> target
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Test and lint the engine host
-        env:
-          CI_PACKAGE: embedded
-        run: bash scripts/ci-test-rust.sh
-
-      - name: Check the embedded source archive
-        if: runner.os == 'Linux'
-        run: uv run --no-project --python 3.14 python scripts/validate-embedded-sdist.py
-
-      # the allowed licenses are in deny.toml; the tool is installed from crates.io at a fixed version
-      # (the Cargo cache keeps the binary)
-      - name: Check the licenses of the engine tree
-        if: runner.os == 'Linux'
-        run: bash scripts/ci-embedded-licenses.sh
-
   python-embedded:
-    name: test (${{ matrix.platform }}/${{ matrix.python-version }}/embedded/${{ matrix.shard }})
+    name: test/embedded (${{ matrix.python-version }})(${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.14", "3.15"]
         platform: [Linux, macOS]
-        shard: [engine, postgres]
         include:
           - { platform: Linux, runner: ubuntu-latest }
           - { platform: macOS, runner: macos-15 }
@@ -350,14 +208,27 @@ jobs:
           name: ci-embedded-wheel-${{ runner.os }}
           path: dist-embedded
 
-      - name: Test the embedded shard
+      - name: Test Rust
         env:
           CI_PACKAGE: embedded
-          CI_EMBEDDED_SHARD: ${{ matrix.shard }}
+          CI_PYTHON_VERSION: ${{ matrix.python-version }}
+        run: bash scripts/ci-test-rust.sh
+
+      - name: Check the embedded source archive
+        if: runner.os == 'Linux' && matrix.python-version == '3.14'
+        run: uv run --no-project --python 3.14 python scripts/validate-embedded-sdist.py
+
+      - name: Check the licenses of the engine tree
+        if: runner.os == 'Linux' && matrix.python-version == '3.14'
+        run: bash scripts/ci-embedded-licenses.sh
+
+      - name: Test Python
+        env:
+          CI_PACKAGE: embedded
         run: bash scripts/ci-test-python.sh
 
   lint:
-    name: lint (${{ matrix.platform }}/3.14/workspace)
+    name: lint/workspace (3.14)(${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -402,7 +273,7 @@ jobs:
         run: bash scripts/ci-lint.sh
 
   distributions:
-    name: check (Linux/3.14/distributions)
+    name: check/distributions (3.14)(Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -430,7 +301,7 @@ jobs:
         run: bash scripts/ci-distributions.sh
 
   examples:
-    name: test (Linux/3.14/examples)
+    name: test/examples (3.14)(Linux)
     runs-on: ubuntu-latest
 
     services:
@@ -538,12 +409,9 @@ jobs:
     name: Required
     runs-on: ubuntu-latest
     needs:
-      - rust
       - python
-      - python-postgres
       - embedded-wheel
       - embedded-wheel-macos
-      - embedded-rust
       - python-embedded
       - lint
       - distributions
