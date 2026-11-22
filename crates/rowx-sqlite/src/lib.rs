@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod cancel;
 pub mod conn;
 pub mod describe;
