@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyTuple, PyType};
 use rowx_core::error::CoreError;
-use rowx_core::migrate::{PlanError, SourceError};
+use rowx_core::migrate::{Migration, MigrationDetail, PlanError, SourceError};
 use rowx_core::row_shape::ShapeErrors;
 
 use crate::shape::{RowShapeData, render_null, render_shape};
@@ -223,6 +223,16 @@ pub fn core_to_py_err(py: Python<'_>, err: CoreError) -> PyErr {
     }
 }
 
+/// # Errors
+/// `InterfaceError` when the current process is not the one (`pid`) that created the pool.
+pub fn ensure_same_process(py: Python<'_>, pid: u32) -> PyResult<()> {
+    if std::process::id() == pid {
+        Ok(())
+    } else {
+        Err(core_to_py_err(py, CoreError::Forked))
+    }
+}
+
 /// A migration file that cannot be resolved; `version` is set when the error is about one version.
 #[must_use]
 pub fn source_error(py: Python<'_>, err: &SourceError) -> PyErr {
@@ -257,6 +267,52 @@ pub fn migration_failed_error<'py>(
         "MigrationFailedError",
         (message, version, path, dirty, applied, error),
     ))
+}
+
+/// What a migration file's failure is reported with, besides the backend's own error.
+#[derive(Debug, Clone, Copy)]
+pub struct FileFailure<'a> {
+    pub message: &'a str,
+    pub version: i64,
+    // the history row was left with `success = false`
+    pub dirty: bool,
+    // the status of each migration applied before this one failed
+    pub applied: &'a [MigrationDetail],
+    pub migrations: &'a [Migration],
+    // a revert runs the `.down.sql` file, everything else the forward one
+    pub reverting: bool,
+}
+
+/// The backend-neutral failure of a migration file: `cause` is the backend's `DatabaseError` for it,
+/// which becomes the `MigrationFailedError`'s cause.
+#[must_use]
+pub fn migration_file_failed(py: Python<'_>, failure: &FileFailure<'_>, cause: PyErr) -> PyErr {
+    let path = failure
+        .migrations
+        .iter()
+        .find(|m| m.version == failure.version && m.kind.is_down() == failure.reverting)
+        .map(|m| m.path.as_path());
+    let applied: Vec<(i64, Option<i64>)> = failure
+        .applied
+        .iter()
+        .map(|d| (d.info.version, d.execution_time))
+        .collect();
+    let error = cause.value(py).clone().into_any();
+    match migration_failed_error(
+        py,
+        failure.message,
+        failure.version,
+        path,
+        failure.dirty,
+        &applied,
+        error,
+    ) {
+        Ok(failed) => {
+            failed.set_cause(py, Some(cause));
+            failed
+        }
+        Err(e) => e,
+    }
 }
 
 // an unknown or too new target is a bad argument; a missing `.down.sql` is a problem with the files

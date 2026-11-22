@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
@@ -41,7 +42,7 @@ pub(crate) enum Depth {
 }
 
 // a dead connection stays dead; every other error leaves the state to the claim's drop (Idle)
-fn fail(state: &State, failure: Failure) -> Failure {
+pub(crate) fn fail(state: &State, failure: Failure) -> Failure {
     // closing interrupts the statement that is running, which is not a database failure; a genuine
     // error that races with the close keeps its own report
     if state.is_closed()
@@ -111,7 +112,7 @@ fn claim(py: Python<'_>, core: &Arc<Core>) -> PyResult<(Arc<Core>, Hook, Hook)> 
 // one operation on the worker: it owns the claim, and dropping the awaiting call cancels it. Whatever the
 // operation changes on the connection (the transaction depth) it changes itself, so an abandoned call
 // leaves nothing half done.
-fn run<'py, T, Fut>(
+pub(crate) fn run<'py, T, Fut>(
     py: Python<'py>,
     core: &Arc<Core>,
     make: impl FnOnce(Arc<Core>, Hook) -> Fut + Send + 'static,
@@ -121,22 +122,33 @@ where
     T: for<'a> IntoPyObject<'a> + Send + 'static,
 {
     let (core, hook, watched) = claim(py, core)?;
-    let future = future_into_py(py, async move {
-        core.access
-            .reserve(&core.cancel.state, &hook)
-            .await
-            .map_err(SqliteError::from)?;
-        let pending = cancel::spawn(&core.cancel, &hook, make(Arc::clone(&core), hook.clone()))
-            .map_err(SqliteError::from)?;
-        let out = pending
-            .wait()
-            .await
-            .map_err(SqliteError::from)?
-            .map_err(|failure| SqliteError(fail(&core.cancel.state, failure)))?;
-        Ok(out)
-    })?;
+    let future = future_into_py(py, async move { drive(core, hook, make).await })?;
     watch(&future, watched)?;
     Ok(future)
+}
+
+// the body of `run`, for a caller that claims later (a pool, which has no connection until it has acquired one)
+pub(crate) async fn drive<T, Fut>(
+    core: Arc<Core>,
+    hook: Hook,
+    make: impl FnOnce(Arc<Core>, Hook) -> Fut + Send + 'static,
+) -> PyResult<T>
+where
+    Fut: Future<Output = Result<T, Failure>> + Send + 'static,
+    T: Send + 'static,
+{
+    core.access
+        .reserve(&core.cancel.state, &hook)
+        .await
+        .map_err(SqliteError::from)?;
+    let pending = cancel::spawn(&core.cancel, &hook, make(Arc::clone(&core), hook.clone()))
+        .map_err(SqliteError::from)?;
+    let out = pending
+        .wait()
+        .await
+        .map_err(SqliteError::from)?
+        .map_err(|failure| SqliteError(fail(&core.cancel.state, failure)))?;
+    Ok(out)
 }
 
 /// # Errors
@@ -156,7 +168,7 @@ pub(crate) fn fetch<'py>(
     Ok(future)
 }
 
-async fn run_fetch(
+pub(crate) async fn run_fetch(
     core: Arc<Core>,
     hook: Hook,
     params: Vec<Param>,
@@ -268,14 +280,50 @@ pub(crate) fn execute<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let params = codec::extract_all(py, params)?;
     core.check_params(py, params.len())?;
-    run(py, core, move |core, _| async move {
-        if core.aborted() {
-            return Err(Failure::Aborted);
-        }
+    run(py, core, execute_work(sql, params))
+}
+
+/// The work of one `execute`, for a caller that drives it itself.
+pub(crate) async fn run_execute(
+    core: Arc<Core>,
+    hook: Hook,
+    params: Vec<Param>,
+    sql: String,
+) -> PyResult<u64> {
+    drive(core, hook, execute_work(sql, params)).await
+}
+
+type Executing = Pin<Box<dyn Future<Output = Result<u64, Failure>> + Send>>;
+
+fn execute_work(sql: String, params: Vec<Param>) -> impl FnOnce(Arc<Core>, Hook) -> Executing {
+    move |core, _| {
+        Box::pin(async move {
+            if core.aborted() {
+                return Err(Failure::Aborted);
+            }
+            let conn = core.conn.lock().await;
+            conn.execute(&sql, params)
+                .await
+                .map_err(|err| Failure::at(err, &sql))
+        })
+    }
+}
+
+/// Ends an open transaction and puts `query_only` back.
+///
+/// # Errors
+/// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed, or the statement's error.
+pub(crate) fn reset<'py>(py: Python<'py>, core: &Arc<Core>) -> PyResult<Bound<'py, PyAny>> {
+    run(py, core, |core, _| async move {
         let conn = core.conn.lock().await;
-        conn.execute(&sql, params)
-            .await
-            .map_err(|err| Failure::at(err, &sql))
+        let reset = conn.reset(true).await;
+        if reset.is_ok() {
+            restore_query_only(&core, &conn).await;
+        }
+        drop(conn);
+        reset.map_err(Failure::from)?;
+        core.clear();
+        Ok(())
     })
 }
 

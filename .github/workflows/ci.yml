@@ -18,32 +18,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  linux:
-    name: Linux (${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+  python:
+    name: test/${{ matrix.package }} (${{ matrix.python-version }})(${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
+        package: [core, postgres, sqlite, cli]
         python-version: ["3.14", "3.15"]
-
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: rowx
-          POSTGRES_PASSWORD: rowx
-          POSTGRES_DB: rowx
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U rowx -d rowx"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    env:
-      ROWX_REQUIRE_DB: "1"
-      ROWX_TEST_DSN: postgresql://rowx:rowx@localhost:5432/rowx
+        platform: [Linux, macOS, Windows]
+        include:
+          - { platform: Linux, runner: ubuntu-latest }
+          - { platform: macOS, runner: macos-15 }
+          - { platform: Windows, runner: windows-latest }
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,89 +47,38 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: bash scripts/ci-rust-toolchain.sh
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # one workspace: `uv sync` builds the engine (and Wasmer) into the same target directory
-          workspaces: . -> target
+          key: ci-python-${{ matrix.package }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install just
-        run: uv tool install rust-just
+      - name: Start PostgreSQL
+        if: runner.os == 'Linux' && matrix.package == 'postgres'
+        run: bash scripts/ci-start-postgres.sh
 
-      - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-sqlite
+      - name: Start TLS PostgreSQL
+        if: runner.os == 'Linux' && matrix.package == 'postgres'
+        run: bash scripts/ci-start-tls.sh
 
-      - name: Build the extension
-        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
-
-      - name: Build the SQLite extension
-        run: uv run maturin develop -m packages/rowx-sqlite/Cargo.toml
-
-      - name: Check
-        if: matrix.python-version == '3.14'
-        run: just check
-
-      - name: Validate lockstep versions
-        if: matrix.python-version == '3.14'
+      - name: Test Rust
+        if: matrix.package != 'cli'
+        shell: bash
         env:
-          EVENT_NAME: pull_request
-          GITHUB_OUTPUT: ${{ runner.temp }}/rowx-release-version.txt
-        run: |
-          uv run python scripts/validate-release-versions.py
-          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+          CI_PACKAGE: ${{ matrix.package }}
+          CI_PYTHON_VERSION: ${{ matrix.python-version }}
+        run: bash scripts/ci-test-rust.sh
 
-      # a service container can't mount certs or override the entrypoint, so the TLS postgres comes from scripts/pg.sh
-      - name: Start the TLS postgres
-        run: echo "ROWX_TEST_DSN_SSL=$(scripts/pg.sh up --ssl)" >> "$GITHUB_ENV"
+      - name: Test Python
+        shell: bash
+        env:
+          CI_PACKAGE: ${{ matrix.package }}
+        run: bash scripts/ci-test-python.sh
 
-      # rowx-embedded is a workspace member but not a default one: neither `just check` nor `cargo test` may build Wasmer
-      - name: Verify the default workspace members do not build Wasmer
-        if: matrix.python-version == '3.14'
-        run: |
-          # `! cmd` does not trip errexit, so the check is an explicit `if`; no `--workspace`, which selects every member
-          if cargo tree --locked --prefix none --edges all | grep -E '^(wasmer|liboliphaunt|oliphaunt)'; then
-            echo '::error::The default workspace members depend on Wasmer or engine crates.'
-            exit 1
-          fi
-          echo "no Wasmer or engine crate in the default workspace members"
-
-      - name: Test rust
-        if: matrix.python-version == '3.14'
-        run: just test-rust
-
-      - name: Test python
-        run: just test-py
-
-      - name: Build package wheels
-        if: matrix.python-version == '3.14'
-        # `uv build` takes one `--package`, and `--all-packages` would also build rowx-embedded, which has its own job
-        run: |
-          uv build --package rowx --wheel --out-dir dist
-          uv build --package rowx-core --wheel --out-dir dist
-          uv build --package rowx-postgres --wheel --out-dir dist
-
-      - name: Verify standalone package boundaries
-        if: matrix.python-version == '3.14'
-        run: |
-          uv run python scripts/validate-distributions.py --contents-only
-          bash scripts/smoke-package-boundaries.sh dist
-
-      - name: Type-check installed wheel interfaces
-        if: matrix.python-version == '3.14'
-        run: |
-          uv venv --python 3.14 "$RUNNER_TEMP/rowx-wheel-types"
-          rowx_wheels=(dist/rowx-*.whl)
-          uv pip install --refresh --python "$RUNNER_TEMP/rowx-wheel-types/bin/python" "${rowx_wheels[0]}[postgres]" dist/rowx_core-*.whl dist/rowx_postgres-*.whl
-          ROWX_TYPING_PYTHON="$RUNNER_TEMP/rowx-wheel-types/bin/python" uv run pytest packages/rowx-postgres/src/rowx_postgres/__tests__/unit/test__executor.py
-
-  # the companion wheel for the embedded lane: a manylinux x86_64 build (release.yml builds the same wheel for the
-  # other platforms). It builds the whole Wasmer tree, so the Cargo cache (keyed on Cargo.lock) is
-  # what keeps a pull request warm; the `embedded` job tests and smoke tests the artifact.
   embedded-wheel:
-    name: Embedded wheel (Linux x86_64)
+    name: wheel/embedded (3.14)(Linux)
     runs-on: ubuntu-latest
 
     steps:
@@ -156,7 +93,7 @@ jobs:
           enable-cache: false
 
       - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: bash scripts/ci-rust-toolchain.sh
 
       - name: Cache the Wasmer build
         id: cache
@@ -167,10 +104,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Record the cached Wasmer artifacts
-        run: |
-          mkdir -p target/release/deps
-          find target/release/deps -name 'libwasmer_vm-*.rlib' -exec stat -c '%Y %n' {} + | sort > "$RUNNER_TEMP/wasmer-before.txt"
-          echo "Wasmer artifacts restored from the cache: $(wc -l < "$RUNNER_TEMP/wasmer-before.txt")"
+        run: bash scripts/ci-embedded-cache.sh record
 
       # the manylinux2014 container (glibc 2.17) gives the wheel a manylinux_2_17 tag; it reads the pinned toolchain from
       # rust-toolchain.toml and mounts the checkout, so the cached target directory is reused
@@ -183,12 +117,7 @@ jobs:
 
       - name: Check that a warm cache did not rebuild Wasmer
         if: steps.cache.outputs.cache-hit == 'true'
-        run: |
-          find target/release/deps -name 'libwasmer_vm-*.rlib' -exec stat -c '%Y %n' {} + | sort > "$RUNNER_TEMP/wasmer-after.txt"
-          if ! diff "$RUNNER_TEMP/wasmer-before.txt" "$RUNNER_TEMP/wasmer-after.txt"; then
-            echo '::error::Wasmer was rebuilt although the Cargo cache was restored.'
-            exit 1
-          fi
+        run: bash scripts/ci-embedded-cache.sh verify
 
       - name: Check the wheel (tag, size budget, contents, licenses)
         run: uv run --no-project --python 3.14 python scripts/validate-embedded-wheels.py dist-embedded --platform _x86_64
@@ -196,67 +125,61 @@ jobs:
       - name: Upload the wheel
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: embedded-wheel
+          name: ci-embedded-wheel-Linux
           path: dist-embedded/*.whl
           if-no-files-found: error
           retention-days: 7
 
-  # the engine host's Rust gates: tests, fmt, clippy and the license check. packages/rowx-embedded builds the Wasmer tree
-  # and is not a default workspace member, so `just check` and `cargo test` in the `linux` job leave it out. A job
-  # of its own rather than steps of `embedded-wheel`: the wheel builds in a manylinux container with a release profile, so
-  # nothing of its target directory is shared with a debug build, and the two then run side by side
-  embedded-rust:
-    name: Embedded Rust (Linux)
-    runs-on: ubuntu-latest
-
+  embedded-wheel-macos:
+    name: wheel/embedded (3.14)(macOS)
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
-          enable-cache: false
 
       - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: bash scripts/ci-rust-toolchain.sh
 
-      - name: Cache the Wasmer build
+      - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: . -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Test the engine host
-        run: cargo test -p rowx-embedded-host --locked
+      - name: Build the wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: aarch64-apple-darwin
+          args: -m packages/rowx-embedded/Cargo.toml --release --locked --out dist-embedded --interpreter python3.14
 
-      - name: Check the embedded source archive
-        run: uv run --no-project --python 3.14 python scripts/validate-embedded-sdist.py
+      - name: Check the wheel (tag, size budget, contents, licenses)
+        run: python scripts/validate-embedded-wheels.py dist-embedded --platform macosx_
 
-      # the same hooks that `just check-embedded` runs, from the prek version that uv.lock pins
-      - name: Format and clippy
-        run: uvx prek@0.5.10 run cargo-fmt cargo-clippy-embedded --hook-stage manual --all-files
+      - name: Upload the wheel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-embedded-wheel-macOS
+          path: dist-embedded/*.whl
+          if-no-files-found: error
+          retention-days: 7
 
-      # the allowed licenses are in deny.toml; the tool is installed from crates.io at a fixed version
-      # (the Cargo cache keeps the binary)
-      - name: Check the licenses of the engine tree
-        run: |
-          command -v cargo-deny > /dev/null || cargo install --locked --version 0.20.2 cargo-deny
-          cargo deny --workspace check licenses
-
-  # the engine-neutral db tests and the `embedded` tests against the in-process engine; Docker (the `linux` job) stays the
-  # full-capability lane, and `server` tests (several sessions, cancel, TLS, CREATE DATABASE, ...) skip here
-  embedded:
-    name: Embedded (Linux x86_64)
-    runs-on: ubuntu-latest
-    needs: embedded-wheel
-
-    env:
-      ROWX_REQUIRE_DB: "1"
-      ROWX_TEST_DSN: embedded://
-
+  python-embedded:
+    name: test/embedded (${{ matrix.python-version }})(${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.14", "3.15"]
+        platform: [Linux, macOS]
+        include:
+          - { platform: Linux, runner: ubuntu-latest }
+          - { platform: macOS, runner: macos-15 }
+    needs: [embedded-wheel, embedded-wheel-macos]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -265,65 +188,56 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          python-version: "3.14"
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
           cache-dependency-glob: uv.lock
           save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: bash scripts/ci-rust-toolchain.sh
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # one workspace: `uv sync` builds the engine (and Wasmer) into the same target directory
           workspaces: . -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-sqlite
-
-      - name: Build the extension
-        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
-
-      - name: Build the SQLite extension
-        run: uv run maturin develop -m packages/rowx-sqlite/Cargo.toml
-
-      - name: Download the companion wheel
+      - name: Download the embedded wheel
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: embedded-wheel
+          name: ci-embedded-wheel-${{ runner.os }}
           path: dist-embedded
 
-      # the wheel in a clean venv with rowx-core and rowx-postgres only (no rowx CLI): start, connect over the raw socket
-      # DSN, SELECT 1
-      - name: Smoke test the wheel
-        run: |
-          uv build --package rowx-core --wheel --out-dir dist-smoke
-          uv run maturin build -m packages/rowx-postgres/Cargo.toml --out dist-smoke
-          cp dist-embedded/*.whl dist-smoke/
-          scripts/smoke-embedded-wheel.sh dist-smoke
-
-      - name: Test python against the embedded engine
-        run: uv run pytest -m "(db and not server) or embedded" -n auto
-
-      # examples/embedded needs no server: the script runs its migrations in memory, `rowx check` builds a scratch database
-      # for `embedded://`, and the plugin clones a snapshot per test
-      - name: Run the embedded example
-        run: uv run python examples/embedded/notes.py
-
-      - name: Check and test the embedded example
-        working-directory: examples/embedded
+      - name: Test Rust
         env:
-          DATABASE_URL: embedded://
-        run: |
-          uv run --project ../.. rowx check -j 4
-          uv run --project ../.. pytest -p no:cacheprovider -o rowx_require_database=true
+          CI_PACKAGE: embedded
+          CI_PYTHON_VERSION: ${{ matrix.python-version }}
+        run: bash scripts/ci-test-rust.sh
 
-  macos:
-    name: macOS
-    runs-on: macos-15
+      - name: Check the embedded source archive
+        if: runner.os == 'Linux' && matrix.python-version == '3.14'
+        run: uv run --no-project --python 3.14 python scripts/validate-embedded-sdist.py
 
+      - name: Check the licenses of the engine tree
+        if: runner.os == 'Linux' && matrix.python-version == '3.14'
+        run: bash scripts/ci-embedded-licenses.sh
+
+      - name: Test Python
+        env:
+          CI_PACKAGE: embedded
+        run: bash scripts/ci-test-python.sh
+
+  lint:
+    name: lint/workspace (3.14)(${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [Linux, macOS]
+        include:
+          - { platform: Linux, runner: ubuntu-latest }
+          - { platform: macOS, runner: macos-15 }
+    needs: [embedded-wheel, embedded-wheel-macos]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -332,37 +246,62 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
           save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: bash scripts/ci-rust-toolchain.sh
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # one workspace: `uv sync` builds the engine (and Wasmer) into the same target directory
           workspaces: . -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Download the embedded wheel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-embedded-wheel-${{ runner.os }}
+          path: dist-embedded
 
       - name: Install just
         run: uv tool install rust-just
 
-      - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-sqlite
+      - name: Install the workspace and run checks
+        run: bash scripts/ci-lint.sh
 
-      - name: Build the extension
-        run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
+  distributions:
+    name: check/distributions (3.14)(Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Build the SQLite extension
-        run: uv run maturin develop -m packages/rowx-sqlite/Cargo.toml
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Check
-        run: just check
+      - name: Install the pinned Rust toolchain
+        run: bash scripts/ci-rust-toolchain.sh
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: . -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Validate workspace versions and wheel interfaces
+        run: bash scripts/ci-distributions.sh
 
   examples:
-    name: Examples
+    name: test/examples (3.14)(Linux)
     runs-on: ubuntu-latest
 
     services:
@@ -391,12 +330,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
           save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: bash scripts/ci-rust-toolchain.sh
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -406,13 +346,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install the dependencies
-        run: uv sync --all-packages --all-groups --no-install-package rowx-postgres --no-install-package rowx-sqlite
+        run: uv sync --frozen --no-install-package rowx-postgres --no-install-package rowx-sqlite --no-install-package rowx-embedded
 
       - name: Build the extension
         run: uv run maturin develop -m packages/rowx-postgres/Cargo.toml
-
-      - name: Build the SQLite extension
-        run: uv run maturin develop -m packages/rowx-sqlite/Cargo.toml
 
       - name: Apply the example schema
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f examples/app/schema.sql
@@ -468,9 +405,28 @@ jobs:
       - name: Check the changelog
         run: scripts/check-changelog.sh
 
+  required:
+    name: Required
+    runs-on: ubuntu-latest
+    needs:
+      - python
+      - embedded-wheel
+      - embedded-wheel-macos
+      - python-embedded
+      - lint
+      - distributions
+      - examples
+      - changelog
+    if: always()
+    steps:
+      - name: Require all CI jobs to succeed
+        env:
+          ALL_SUCCEEDED: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
+        run: test "$ALL_SUCCEEDED" = true
+
   tag-release:
     name: Tag release
-    needs: [linux, embedded-wheel, embedded-rust, embedded, macos, examples, changelog]
+    needs: required
     if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -498,7 +454,7 @@ jobs:
 
       - name: Install the pinned Rust toolchain
         if: success() && steps.plan.outputs.action == 'tag'
-        run: rustup show active-toolchain || rustup toolchain install
+        run: bash scripts/ci-rust-toolchain.sh
 
       - name: Validate the tag
         if: success() && steps.plan.outputs.action == 'tag'

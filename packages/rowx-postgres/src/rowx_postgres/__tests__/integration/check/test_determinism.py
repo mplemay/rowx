@@ -4,6 +4,7 @@ from typing import Final
 
 import pytest
 from rowx_postgres.__tests__.integration.check.harness import CASES_DIR
+from rowx_postgres.__tests__.support.engine import EMBEDDED_DATABASE_KEY
 
 from rowx.check.cli import main
 
@@ -59,18 +60,21 @@ def test_app_output_is_identical_across_job_counts(
     assert serial[0] == 0
 
 
-@pytest.mark.parametrize(("target", "use_app"), [(CASES_DIR, False), (APP, True)], ids=["corpus", "app"])
+@pytest.mark.parametrize("target", [CASES_DIR, APP], ids=["corpus", "app"])
 def test_check_imports_no_user_module(
     capsys: pytest.CaptureFixture[str],
-    schema: str,
-    app_schema: str,
+    request: pytest.FixtureRequest,
     target: Path,
-    use_app: bool,  # ruff: ignore[boolean-type-hint-positional-argument]
 ) -> None:
-    dsn = app_schema if use_app else schema
-    # a first run settles rowx's own lazy imports, so that the snapshot only sees user code
-    _run(capsys, target, dsn, 1, "text")
+    use_app = target == APP
+    dsn = request.getfixturevalue("app_schema" if use_app else "schema")
+    assert isinstance(dsn, str)
+    expected_status = 0 if use_app else 1
+    # The first run settles rowx's own lazy imports. The embedded engine
+    # can only serve one connection for the second run.
+    assert _run(capsys, target, dsn, 1, "text")[0] == expected_status
     before = set(sys.modules)
-    _run(capsys, target, dsn, 8, "json")
+    jobs = 1 if EMBEDDED_DATABASE_KEY in request.config.stash else 8
+    assert _run(capsys, target, dsn, jobs, "json")[0] == expected_status
     assert set(sys.modules) - before == set()
     assert _user_modules(target) == []

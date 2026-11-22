@@ -7,11 +7,13 @@ use std::time::Duration;
 use rowx_core::error::{CoreError, TaskStopped};
 use rowx_core::state::{Phase, State};
 use rusqlite::config::DbConfig;
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::limits::Limit;
 use rusqlite::{InterruptHandle, OpenFlags};
 use tokio::sync::oneshot;
 
 use crate::cancel::{Shared, SqliteBackend};
+use crate::describe::{self, Describe, Structure};
 use crate::dsn::{OpenMode, OpenOptions, Target};
 use crate::error::Error;
 use crate::timeout::Timer;
@@ -47,6 +49,17 @@ impl ConnectOptions {
         }
     }
 
+    /// The session the checker describes through: read-only, `query_only`, untrusted schema, and the
+    /// statement timeout bounding each describe.
+    #[must_use]
+    pub const fn checker(target: Target, statement_timeout: Option<Duration>) -> Self {
+        let mut options = Self::new(OpenOptions::new(target, OpenMode::ReadOnly));
+        options.statement_timeout = statement_timeout;
+        options.read_only = true;
+        options.untrusted = true;
+        options
+    }
+
     // `read_only` wins over the mode the caller picked
     fn flags(&self) -> OpenFlags {
         if self.read_only {
@@ -57,8 +70,16 @@ impl ConnectOptions {
     }
 
     // a read-only handle never switches the journal mode; see `apply_pragmas`
-    fn is_read_only(&self) -> bool {
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
         self.read_only || self.open.mode == OpenMode::ReadOnly
+    }
+
+    // Distinct from `is_read_only`, which also covers `mode=ro`: a `mode=ro` open without `read_only` starts
+    // with `query_only` off, and a reset must put it back to what the connection had at connect.
+    #[must_use]
+    pub(crate) const fn query_only_at_connect(&self) -> bool {
+        self.read_only
     }
 }
 
@@ -86,6 +107,8 @@ pub(crate) struct Ctx {
     pub(crate) shared: Arc<Shared>,
     pub(crate) state: Arc<State>,
     pub(crate) timer: Option<Timer>,
+    // the authorizer to put back after one that was installed for a single call
+    pub(crate) untrusted: bool,
 }
 
 impl Ctx {
@@ -147,6 +170,37 @@ fn journal_error(found: &str) -> Error {
     )
 }
 
+// Pragmas that take an argument and only read, so describing them cannot change the session.
+const READ_ONLY_PRAGMAS: [&str; 10] = [
+    "table_info",
+    "table_xinfo",
+    "table_list",
+    "index_info",
+    "index_xinfo",
+    "index_list",
+    "foreign_key_list",
+    "foreign_key_check",
+    "integrity_check",
+    "quick_check",
+];
+
+// A pragma that sets a value takes effect while it is prepared, before any step, so describing one
+// would change the hardened session. The authorizer refuses those at prepare time.
+pub(crate) fn authorize(ctx: AuthContext<'_>) -> Authorization {
+    match ctx.action {
+        AuthAction::Pragma {
+            pragma_name,
+            pragma_value: Some(_),
+        } if !READ_ONLY_PRAGMAS
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(pragma_name)) =>
+        {
+            Authorization::Deny
+        }
+        _ => Authorization::Allow,
+    }
+}
+
 // Every pragma is set explicitly, because the bundled build changes SQLite's defaults
 // (`SQLITE_DEFAULT_FOREIGN_KEYS=1`).
 fn apply_pragmas(conn: &rusqlite::Connection, options: &ConnectOptions) -> Result<Box<str>, Error> {
@@ -172,7 +226,7 @@ fn apply_pragmas(conn: &rusqlite::Connection, options: &ConnectOptions) -> Resul
     if is_file && !options.is_read_only() {
         require_wal(&mode)?;
     }
-    if options.read_only {
+    if options.query_only_at_connect() {
         conn.pragma_update(None, "query_only", true)?;
     }
     Ok(mode.into())
@@ -186,6 +240,10 @@ fn open(
     let conn =
         rusqlite::Connection::open_with_flags(options.open.target.open_path(), options.flags())?;
     let journal_mode = apply_pragmas(&conn, options)?;
+    // after the pragmas above, which set values
+    if options.untrusted {
+        conn.authorizer(Some(authorize))?;
+    }
     conn.set_prepared_statement_cache_capacity(options.statement_cache);
     let variable_limit = usize::try_from(conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER)?)
         .map_err(|_| Error::Interface("SQLite reported a negative variable limit".to_owned()))?;
@@ -207,6 +265,7 @@ fn open(
             shared,
             state,
             timer,
+            untrusted: options.untrusted,
         },
         Ready {
             interrupt,
@@ -398,6 +457,25 @@ impl Connection {
         self.call(move |ctx| Ok(job(&mut ctx.conn))).await
     }
 
+    /// Describes one statement without running it: its result columns, their origins and nullability, and
+    /// its parameters. `structure` is what the caller read from the statement's text.
+    ///
+    /// # Errors
+    /// `Sqlite` (with the error offset) when SQLite rejects the SQL, `NotOneStatement` for no statement or
+    /// more than one, `Closed` after `close()`, `Stopped` when the worker died.
+    pub async fn describe(&self, sql: &str, structure: Structure) -> Result<Describe, Error> {
+        let sql = sql.to_owned();
+        self.call(move |ctx| {
+            if ctx.shared.is_cancelled() {
+                return Err(crate::exec::interrupted());
+            }
+            // the clock covers the prepare, the only step a describe runs
+            let _armed = ctx.timer.as_ref().map(Timer::arm);
+            describe::describe(&ctx.conn, &sql, &structure)
+        })
+        .await
+    }
+
     /// Runs one control statement that returns no rows (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...). It is not
     /// for scripts: a second statement is an error.
     ///
@@ -508,12 +586,10 @@ impl Connection {
         };
         // `Job::Close` queues behind a running job, and a closed state never sends a cancel, so wake a
         // worker that is stepping or parked on a full stream channel before waiting for it
-        self.shared.request_cancel();
-        self.backend.interrupt();
         let (done, closed) = oneshot::channel();
         if jobs.send(Job::Close(done)).is_ok() {
             // a worker that already died answers by dropping the sender; the database is gone either way
-            let _ = closed.await;
+            let _ = self.backend.interrupt_until_closed(closed).await;
         }
         self.shared.mark_dead();
     }

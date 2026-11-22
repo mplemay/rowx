@@ -48,7 +48,14 @@ def test_postgres_facade_reexports_the_driver() -> None:
 
 def test_sqlite_facade_reexports_the_driver() -> None:
     assert sqlite_facade.__all__ == rowx_sqlite.__all__
-    assert sorted(sqlite_facade.__all__) == ["ConnectOptions", "Connection", "Transaction", "connect"]
+    assert sorted(sqlite_facade.__all__) == [
+        "ConnectOptions",
+        "Connection",
+        "Migrator",
+        "Pool",
+        "Transaction",
+        "connect",
+    ]
     for name in rowx_sqlite.__all__:
         assert getattr(sqlite_facade, name) is getattr(rowx_sqlite, name)
 

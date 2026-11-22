@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -11,6 +12,7 @@ use rowx_py_core::exec::{on_cancel, watch};
 use rowx_py_core::row::{Layout, nullable_mask};
 use rowx_sqlite::cancel::{self, Hook};
 use rowx_sqlite::exec::{Batch, Param, RowBatches, StreamLimits, Streaming};
+use rowx_sqlite::pool::{Pool as SqlitePool, Pooled};
 use tokio::sync::{Notify, oneshot};
 
 use crate::codec;
@@ -31,6 +33,13 @@ pub(crate) struct StreamArgs {
     pub batch_size: usize,
     // a named row type; `mask`, `scalar` and `arity` are then unused
     pub shape: Option<Py<RowShape>>,
+}
+
+// how the first `_next` gets its connection
+#[derive(Debug)]
+enum Starting {
+    Claimed(Start),
+    Acquire(Start),
 }
 
 struct Start {
@@ -67,6 +76,9 @@ struct Shared {
     // the consumer side of the worker's channel; a `_next` takes it for the length of its wait. Dropping
     // it is what lets a worker that is parked on a full channel end.
     batches: Mutex<Option<RowBatches>>,
+    // a pool's checkout, held until the stream is over; dropping it releases the connection. Type-erased so the
+    // stream is not treated as holding a significant drop.
+    pooled: Mutex<Option<Box<dyn Any + Send>>>,
 }
 
 impl Shared {
@@ -78,6 +90,15 @@ impl Shared {
         self.hook.finish();
         let batches = self.batches.lock().ok().and_then(|mut slot| slot.take());
         drop(batches);
+        // after the claim, so the release finds the connection no longer claimed
+        let pooled = self.pooled.lock().ok().and_then(|mut slot| slot.take());
+        drop(pooled);
+    }
+
+    fn hold(&self, pooled: Pooled) {
+        if let Ok(mut slot) = self.pooled.lock() {
+            *slot = Some(Box::new(pooled));
+        }
     }
 
     // a stream that finished meanwhile does not keep its batches
@@ -102,7 +123,9 @@ impl Shared {
 #[pyclass(frozen, module = "rowx_sqlite._core", name = "RowStream")]
 #[derive(Debug)]
 pub struct RowStream {
-    core: Arc<Core>,
+    // known from the start for a connection; a pool's stream learns it at its first `_next`
+    target: Arc<OnceLock<Arc<Core>>>,
+    pool: Option<SqlitePool>,
     layout: Arc<Layout>,
     shape: Option<Py<RowShape>>,
     start: Mutex<Option<Start>>,
@@ -120,13 +143,46 @@ impl RowStream {
     ) -> PyResult<Self> {
         let params = codec::extract_all(py, params)?;
         core.check_params(py, params.len())?;
-        Ok(Self {
-            core: Arc::clone(core),
+        let target = Arc::new(OnceLock::new());
+        let _ = target.set(Arc::clone(core));
+        Ok(Self::build(py, target, None, params, args))
+    }
+
+    /// A stream on a pool: the connection is acquired by the first `_next`.
+    ///
+    /// # Errors
+    /// `EncodeError`/`InterfaceError` when a parameter cannot be extracted.
+    pub(crate) fn for_pool(
+        py: Python<'_>,
+        pool: SqlitePool,
+        params: &Bound<'_, PyList>,
+        args: StreamArgs,
+    ) -> PyResult<Self> {
+        let params = codec::extract_all(py, params)?;
+        Ok(Self::build(
+            py,
+            Arc::new(OnceLock::new()),
+            Some(pool),
+            params,
+            args,
+        ))
+    }
+
+    fn build(
+        py: Python<'_>,
+        target: Arc<OnceLock<Arc<Core>>>,
+        pool: Option<SqlitePool>,
+        params: Vec<Param>,
+        args: StreamArgs,
+    ) -> Self {
+        Self {
+            target,
+            pool,
             layout: Arc::new(Layout::new(args.scalar, args.mask.as_deref())),
             shape: args.shape.as_ref().map(|shape| shape.clone_ref(py)),
             start: Mutex::new(Some(Start { args, params })),
             shared: Arc::new(Shared::default()),
-        })
+        }
     }
 }
 
@@ -153,27 +209,56 @@ impl RowStream {
         }
         let first = self.start.lock().ok().and_then(|mut slot| slot.take());
         // claimed synchronously so a second call made before the first is awaited fails immediately
-        let starting = match first {
-            Some(start) => {
-                let state = &self.core.cancel.state;
-                match self.shared.hook.reserve(|| self.core.access.claim(state)) {
-                    Ok(_) => Some(start),
+        let known = self.target.get().cloned();
+        let starting = match (first, &known) {
+            (Some(start), Some(core)) => {
+                let state = &core.cancel.state;
+                match self.shared.hook.reserve(|| core.access.claim(state)) {
+                    Ok(_) => Some(Starting::Claimed(start)),
                     Err(e) => {
                         self.shared.finish();
                         return Err(to_py_err(py, &Failure::from(e)));
                     }
                 }
             }
-            None => None,
+            (Some(start), None) => Some(Starting::Acquire(start)),
+            (None, _) => None,
         };
-        let core = Arc::clone(&self.core);
+        // a later call made while a pool's first call is still acquiring finds no connection yet
+        if starting.is_none() && known.is_none() {
+            return Err(to_py_err(py, &Failure::from(CoreError::Busy)));
+        }
+        let target = Arc::clone(&self.target);
+        let pool = self.pool.clone();
         let shared = Arc::clone(&self.shared);
         let layout = Arc::clone(&self.layout);
         let shape = self.shape.as_ref().map(|shape| shape.clone_ref(py));
         let future = future_into_py(py, async move {
-            if let Some(start) = starting {
+            if let Some(starting) = starting {
+                let (start, core) = match starting {
+                    Starting::Claimed(start) => {
+                        let Some(core) = target.get().cloned() else {
+                            return Err(SqliteError::from(CoreError::Closed).into());
+                        };
+                        (start, core)
+                    }
+                    Starting::Acquire(start) => {
+                        let Some(pool) = pool else {
+                            return Err(SqliteError::from(CoreError::Closed).into());
+                        };
+                        let Some(core) = acquire(pool, &shared, &target).await? else {
+                            return Ok(empty());
+                        };
+                        Python::attach(|py| core.check_params(py, start.params.len()))
+                            .inspect_err(|_| shared.finish())?;
+                        (start, core)
+                    }
+                };
                 open(&core, &shared, start, shape.as_ref()).await?;
             }
+            let Some(core) = target.get().cloned() else {
+                return Err(SqliteError::from(CoreError::Closed).into());
+            };
             receive(&core, &shared, &layout, shape.as_ref()).await
         })
         .inspect_err(|_| self.shared.finish())?;
@@ -190,6 +275,37 @@ impl RowStream {
     fn close(&self) {
         self.shared.finish();
     }
+}
+
+// takes a connection from the pool for the first `_next` and keeps the checkout in `shared`, so the end of the
+// stream releases it; `None` when the stream was closed or cancelled while it waited
+async fn acquire(
+    pool: SqlitePool,
+    shared: &Shared,
+    target: &OnceLock<Arc<Core>>,
+) -> PyResult<Option<Arc<Core>>> {
+    match rowx_sqlite::pool::acquire(&pool).await {
+        Ok(pooled) => adopt(&pool, pooled, shared, target),
+        Err(e) => {
+            shared.finish();
+            Err(SqliteError::from(e).into())
+        }
+    }
+}
+
+fn adopt(
+    pool: &SqlitePool,
+    pooled: Pooled,
+    shared: &Shared,
+    target: &OnceLock<Arc<Core>>,
+) -> PyResult<Option<Arc<Core>>> {
+    if shared.is_finished() || shared.is_cancelled() {
+        return Ok(None);
+    }
+    let core = Arc::new(Core::pooled(pool, &pooled).map_err(SqliteError::from)?);
+    let _ = target.set(Arc::clone(&core));
+    shared.hold(pooled);
+    Ok(Some(core))
 }
 
 // starts the producer and waits for the stream to open, which is where a statement's first failure
@@ -387,6 +503,8 @@ async fn produce(
                 tokio::select! {
                     () = shared.released.notified() => {}
                     () = core.cancel.state.wait_closed() => {}
+                    // a pool release or a cancelled stream wants the connection back
+                    () = core.cancel.backend.cancel_requested() => {}
                 }
             }
         }

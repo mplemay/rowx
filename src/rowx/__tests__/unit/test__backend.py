@@ -296,10 +296,11 @@ def test_schemeless_strings_that_are_not_database_files_stay_postgres(dsn: str) 
     assert module_for(dsn) == "rowx_postgres._backend"
 
 
-def test_a_sqlite_backend_supports_no_capability_yet() -> None:
+def test_a_sqlite_backend_supports_checking_but_not_administration() -> None:
     backend = backend_for("sqlite:///x.db")
+    assert backend.checker().describer == "SQLite"
     with pytest.raises(UnsupportedCapabilityError):
-        backend.checker()
+        backend.admin("sqlite:///x.db")
 
 
 def test_a_sqlite_dsn_without_the_package_asks_for_the_sqlite_extra(monkeypatch: pytest.MonkeyPatch) -> None:

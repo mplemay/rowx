@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -100,13 +101,20 @@ class FixedSource:
 # computed with `template_name` as it is on main, before it took an identity: a server template keeps its name
 def test_a_template_name_without_an_identity_is_what_main_computes() -> None:
     source = FixedSource((FixedMigration(1, bytes.fromhex("aa" * 32)), FixedMigration(2, bytes.fromhex("bb" * 32))))
-    directory = Path("/nonexistent/rowx-golden/migrations")
-    assert template_name(source, directory=directory, rowx="1.0.0") == "rowx_tpl_5fe1e6ac_0fb702728f03be3c"
+    if sys.platform == "win32":
+        directory = Path("C:/nonexistent/rowx-golden/migrations")
+        prefix = "rowx_tpl_873db780_"
+        default, qualified, empty = "9ac9ab3efd1b85d7", "95b2d25c32b5792c", "30d2e4c2a810f6ef"
+    else:
+        directory = Path("/nonexistent/rowx-golden/migrations")
+        prefix = "rowx_tpl_5fe1e6ac_"
+        default, qualified, empty = "0fb702728f03be3c", "e26b99e4ded92686", "d24aa09b4c0bbd3d"
+    assert template_name(source, directory=directory, rowx="1.0.0") == prefix + default
     assert (
         template_name(source, directory=directory, rowx="1.0.0", table="app.history", create_schemas=["b", "a"])
-        == "rowx_tpl_5fe1e6ac_e26b99e4ded92686"
+        == prefix + qualified
     )
-    assert template_name(None, directory=directory, rowx="1.0.0") == "rowx_tpl_5fe1e6ac_d24aa09b4c0bbd3d"
+    assert template_name(None, directory=directory, rowx="1.0.0") == prefix + empty
     assert template_name(source, directory=directory, rowx="1.0.0", identity=()) == template_name(
         source, directory=directory, rowx="1.0.0"
     )
@@ -138,6 +146,7 @@ def test_blocking_returns_the_result_of_the_work() -> None:
     assert blocking(work()) == 7
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires signal.pthread_kill")
 def test_an_interrupt_cancels_the_work_and_runs_its_cleanup_before_returning_control() -> None:
     running = threading.Event()
     outcome: list[str] = []

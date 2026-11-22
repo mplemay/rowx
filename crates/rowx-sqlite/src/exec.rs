@@ -4,13 +4,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rowx_core::error::TaskStopped;
 pub use rowx_core::row_shape::Shape;
 use rowx_core::row_shape::{FieldSpec, Mapping, Matching, check_nulls, check_shape, column_mask};
+use rusqlite::fallible_iterator::FallibleIterator;
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 pub use rusqlite::types::Value as Param;
 use rusqlite::types::ValueRef;
-use rusqlite::{Rows, Statement, ffi, params_from_iter};
+use rusqlite::{Batch as StatementBatch, Rows, Statement, ffi, params_from_iter};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cancel::{Shared, Unsent};
-use crate::conn::{Connection, Ctx};
+use crate::conn::{Connection, Ctx, authorize};
 use crate::error::Error;
 use crate::timeout::{Armed, Timer};
 use crate::types::{ColumnType, lookup};
@@ -220,14 +222,19 @@ fn prepare_checked<'c, 's>(
     }
     drop(stmt);
     conn.flush_prepared_statement_cache();
-    // `prepare` reads the schema the connection has in memory, which another connection's DDL leaves
-    // stale until a statement starts a read transaction and notices the changed schema cookie
-    conn.prepare("SELECT 1 FROM sqlite_schema LIMIT 0")?
-        .query([])?
-        .next()?;
+    refresh_schema(conn)?;
     let stmt = conn.prepare_cached(sql)?;
     let reader = Reader::new(shape, &stmt, 0)?;
     Ok((stmt, reader))
+}
+
+// `prepare` reads the schema the connection has in memory, which another connection's DDL leaves
+// stale until a statement starts a read transaction and notices the changed schema cookie
+pub(crate) fn refresh_schema(conn: &rusqlite::Connection) -> Result<(), Error> {
+    conn.prepare("SELECT 1 FROM sqlite_schema LIMIT 0")?
+        .query([])?
+        .next()?;
+    Ok(())
 }
 
 fn with_query<R>(
@@ -651,6 +658,11 @@ impl Connection {
     /// (#300), so this is separate from `execute`. The statement timeout does not apply: a migration
     /// is expected to run long, and a cancel still interrupts it.
     ///
+    /// A script may not end or start a transaction of its own (`BEGIN`, `COMMIT`, `ROLLBACK`): the
+    /// migrator owns the transaction, or runs the file outside one. SQLite refuses those statements
+    /// when they are prepared, with `SQLITE_AUTH`. Statements SQLite runs internally while stepping
+    /// (`VACUUM` begins a transaction of its own) are allowed.
+    ///
     /// # Errors
     /// `Sqlite` for the first failing statement.
     pub async fn execute_migration_script(&self, sql: &str) -> Result<(), Error> {
@@ -659,9 +671,53 @@ impl Connection {
             if ctx.shared.is_cancelled() {
                 return Err(interrupted());
             }
-            ctx.conn.execute_batch(&sql)?;
+            let untrusted = ctx.untrusted;
+            // the callbacks for a statement's own text fire while it is prepared; the ones for what
+            // SQLite does inside a running statement fire while it is stepped
+            let preparing = Arc::new(AtomicBool::new(false));
+            let gate = Arc::clone(&preparing);
+            ctx.conn.authorizer(Some(move |auth: AuthContext<'_>| {
+                if gate.load(Ordering::Relaxed)
+                    && matches!(auth.action, AuthAction::Transaction { .. })
+                {
+                    Authorization::Deny
+                } else if untrusted {
+                    authorize(auth)
+                } else {
+                    Authorization::Allow
+                }
+            }))?;
+            let outcome = run_script(&ctx.conn, &sql, &preparing);
+            // back to what the connection was opened with
+            let restored = if untrusted {
+                ctx.conn.authorizer(Some(authorize))
+            } else {
+                ctx.conn
+                    .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            };
+            outcome?;
+            restored?;
             Ok(())
         })
         .await
+    }
+}
+
+fn run_script(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    preparing: &AtomicBool,
+) -> rusqlite::Result<()> {
+    let mut batch = StatementBatch::new(conn, sql);
+    loop {
+        preparing.store(true, Ordering::Relaxed);
+        let next = batch.next();
+        preparing.store(false, Ordering::Relaxed);
+        let Some(mut stmt) = next? else {
+            return Ok(());
+        };
+        // statements such as `PRAGMA journal_mode` return a row; step through and discard them
+        let mut rows = stmt.query([])?;
+        while rows.next()?.is_some() {}
     }
 }
