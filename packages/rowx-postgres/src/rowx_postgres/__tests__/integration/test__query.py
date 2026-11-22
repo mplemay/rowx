@@ -1665,6 +1665,22 @@ def test_attrs_starred_and_suppressed_default_omission(schema: str) -> None:
     assert run_on(schema, "connection", query[SuppressedRow](t"SELECT 7::int4 AS id WHERE false").all) == []
 
 
+def test_attrs_mutated_container_default_omission(schema: str) -> None:
+    spec = attrs.field()
+    items = [attrs.field()]
+    copy = items
+    copy.append(spec)
+    items[-1].default(lambda _self: 42)
+
+    @attrs.define
+    class Row:
+        id: int
+        value: int = spec
+
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id").one) == Row(7, 42)
+    assert run_on(schema, "connection", query[Row](t"SELECT 7::int4 AS id WHERE false").all) == []
+
+
 def test_attrs_failed_guard_default_omission_and_empty_results(schema: str) -> None:
     @attrs.define
     class Row:
