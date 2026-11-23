@@ -9,6 +9,9 @@ The native module is `rowx_postgres._core`. Pure Rust lives in `crates/rowx-post
 `cancel.rs` for cancellation plumbing, `row_shape.rs` for column-to-field mapping). The PyObject codecs and bindings
 live under `packages/rowx-postgres/src/`. `crates/rowx-postgres` and `crates/rowx-core` do not use PyO3.
 
+The driver rules for an embedded database (DSN resolution, one session, cancel and timeouts) are in
+[Embedded Postgres](embedded.md#driver).
+
 ## Connection and DSN
 
 ```python
