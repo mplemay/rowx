@@ -2277,14 +2277,23 @@ class _Resolver:
         return [(target, value)]
 
     @staticmethod
+    def _attrs_literal_index(expr: ast.expr) -> object:
+        while isinstance(expr, ast.NamedExpr):
+            expr = expr.value
+        selected = _Resolver._attrs_literal_slot(expr) if isinstance(expr, ast.Subscript) else None
+        if selected is not None:
+            return _Resolver._attrs_literal_index(selected[0][selected[1]])
+        try:
+            return ast.literal_eval(expr)
+        except ValueError, TypeError:
+            return None
+
+    @staticmethod
     def _attrs_sequence_mutation[T](method: str, args: list[ast.expr], slots: list[T], value: T) -> list[T] | None:
         if (method == "reverse" and not args) or (method == "append" and len(args) == 1):
             return list(reversed(slots)) if method == "reverse" else [*slots, value]
         if method == "insert" and len(args) == SETITEM_ARGS:
-            try:
-                index = ast.literal_eval(args[0])
-            except ValueError, TypeError:
-                return None
+            index = _Resolver._attrs_literal_index(args[0])
             if isinstance(index, int):
                 slots.insert(index, value)
                 return slots
@@ -2297,6 +2306,22 @@ class _Resolver:
             except ValueError, TypeError, IndexError:
                 return None
         return None
+
+    @staticmethod
+    def _attrs_unknown_insert(
+        values: list[bool], children: list[set[str]], child: set[str], *, value: bool
+    ) -> tuple[list[bool], list[set[str]]]:
+        possible_values = [False] * (len(values) + 1)
+        possible_children: list[set[str]] = [set() for _ in possible_values]
+        for index in range(len(possible_values)):
+            candidate_values = values.copy()
+            candidate_children = children.copy()
+            candidate_values.insert(index, value)
+            candidate_children.insert(index, child)
+            for offset, (binding, nested) in enumerate(zip(candidate_values, candidate_children, strict=True)):
+                possible_values[offset] |= binding
+                possible_children[offset].update(nested)
+        return possible_values, possible_children
 
     @staticmethod
     def _attrs_updated_slots[T](target: ast.Subscript, current: list[T], values: list[T] | None) -> list[T] | None:
@@ -2442,12 +2467,7 @@ class _Resolver:
                     if arg_index == len(node.args) - 1:
                         captured_child = children
                     if arg_index == 1 and node.func.attr == "__setitem__":
-                        slice_values = self._attrs_sequence_values(
-                            arg,
-                            scope,
-                            lambda part: part.id,
-                            lambda part: self._attrs_carried_value(part, scope, field, module, globals_),
-                        )
+                        slice_values, _ = self._attrs_captured_layout(children, scope)
                     if found:
                         return True
                 carrier = temporary
@@ -2527,33 +2547,24 @@ class _Resolver:
                 )
                 if appended is not None and extension_children is not None:
                     child_slots = self._attrs_child_slots(carrier, len(positions), scope) + extension_children
-                if (
-                    node.func.attr == "__setitem__"
-                    and appended is not None
-                    and target is not None
-                    and not any(isinstance(part, ast.NamedExpr) for part in ast.walk(node))
-                ):
-                    context = (lambda arg: arg.id, str(module.path).encode().hex())
-                    children = (
-                        self._attrs_child_values(
-                            node.args[1],
-                            scope,
-                            lambda part: self._attrs_carried_value(part, scope, field, module, globals_),
-                            context,
-                        )
-                        if isinstance(slice_, ast.Slice)
-                        else [
-                            self._attrs_capture_child(
-                                node.args[1],
-                                scope,
-                                lambda part: self._attrs_carried_value(part, scope, field, module, globals_),
-                                context[0],
-                                namespace=context[1],
-                            )
-                        ]
-                    )
+                if node.func.attr == "__setitem__" and appended is not None and target is not None:
+                    _, sequence_children = self._attrs_captured_layout(captured_child, scope)
+                    children = sequence_children if isinstance(slice_, ast.Slice) else [captured_child]
                     child_slots = self._attrs_updated_slots(
                         target, self._attrs_child_slots(carrier, len(positions), scope), children
+                    )
+                insert_layout = known_layout and f"\0wide:{carrier}" not in scope
+                if (
+                    node.func.attr == "insert"
+                    and appended is None
+                    and len(node.args) == SETITEM_ARGS
+                    and not node.keywords
+                    and insert_layout
+                ):
+                    old_values = [scope[f"{prefix}{index}"] is True for index in positions]
+                    old_children = self._attrs_child_slots(carrier, len(positions), scope)
+                    appended, child_slots = self._attrs_unknown_insert(
+                        old_values, old_children, captured_child, value=arguments[-1]
                     )
                 nested = (
                     {key: scope[key] for key in self._attrs_nested_keys(related, scope)}
@@ -2757,34 +2768,6 @@ class _Resolver:
             self._attrs_record_exception_state(scope)
         return False
 
-    def _attrs_capture_additions(
-        self,
-        node: ast.stmt,
-        scope: dict[str, bool | _Module],
-        field: tuple[ast.Call, _Module],
-        module: _Module,
-        globals_: dict[str, bool | _Module],
-    ) -> list[bool] | None:
-        additions = None
-        if (
-            isinstance(node, ast.AugAssign)
-            and isinstance(node.op, ast.Add)
-            and isinstance(node.value, ast.Tuple | ast.List)
-        ):
-            values = self._attrs_flatten_values(node.value.elts)
-            if values is not None:
-                state = scope.copy()
-                state_globals = state if scope is globals_ else globals_
-                additions = []
-                saved, self._attrs_exception_states = self._attrs_exception_states, []
-                try:
-                    for item in values:
-                        additions.append(self._attrs_carried_value(item, state, field, module, state_globals))
-                        self._attrs_scan_eager(item, state, field, module, state_globals)
-                finally:
-                    self._attrs_exception_states = saved
-        return additions
-
     def _attrs_scan_simple(  # ruff: ignore[complex-structure, too-many-branches, too-many-locals, too-many-statements]
         self,
         node: ast.stmt,
@@ -2833,7 +2816,8 @@ class _Resolver:
         earlier = None
         if isinstance(node, ast.Assign | ast.AnnAssign) and isinstance(node.value, ast.Subscript):
             earlier = self._attrs_class_value(node.value, scope, field, module, globals_)
-        additions = self._attrs_capture_additions(node, scope, field, module, globals_)
+        additions = None
+        augmented_children = None
         receiver = None
         if (
             isinstance(node, ast.AugAssign)
@@ -2863,7 +2847,20 @@ class _Resolver:
                     )
                 ]
                 scope.update({key: value for key, value in state.items() if "\0node" in key})
-        if self._attrs_scan_eager(node, scope, field, module, globals_):
+        if isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Add):
+            if self._attrs_scan_eager(node.target, scope, field, module, globals_):
+                return True
+            _, children, found = self._attrs_capture_ordered_child(
+                node.value,
+                scope,
+                lambda part: self._attrs_carried_value(part, scope, field, module, globals_),
+                lambda part: self._attrs_scan_eager(part, scope, field, module, globals_),
+                (lambda part: part.id, str(module.path).encode().hex()),
+            )
+            additions, augmented_children = self._attrs_captured_layout(children, scope)
+            if found:
+                return True
+        elif self._attrs_scan_eager(node, scope, field, module, globals_):
             return True
         if receiver is not None and isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
             self._attrs_copy_binding(
@@ -2905,7 +2902,7 @@ class _Resolver:
                 ),
                 writes=writes,
                 additions=additions,
-                captured_children=child_capture,
+                captured_children=augmented_children if isinstance(node, ast.AugAssign) else child_capture,
             )
         if receiver is not None:
             self._attrs_forget_carrier(receiver, scope)
@@ -3288,6 +3285,18 @@ class _Resolver:
         return binding, children, scan(expr)
 
     @staticmethod
+    def _attrs_captured_layout(
+        children: set[str], state: dict[str, bool | _Module] | set[str]
+    ) -> tuple[list[bool] | None, list[set[str]] | None]:
+        if len(children) != 1:
+            return None, None
+        source = ast.Name(id=next(iter(children)), ctx=ast.Load())
+        return (
+            _Resolver._attrs_sequence_values(source, state, lambda part: part.id, lambda _: False),
+            _Resolver._attrs_child_values(source, state, lambda _: False, (lambda part: part.id, "")),
+        )
+
+    @staticmethod
     def _attrs_captured_source(expr: ast.expr) -> ast.expr | None:
         if isinstance(expr, ast.NamedExpr):
             return expr.target
@@ -3437,7 +3446,6 @@ class _Resolver:
                 [scope[f"{prefix}{index}"] is True for index in positions] + additions
                 if additions is not None
                 and f"\0wide:{target.id}" not in scope
-                and positions
                 and positions == list(range(len(positions)))
                 else None
             )
@@ -3473,11 +3481,7 @@ class _Resolver:
         captured_children: list[set[str]] | None = None,
     ) -> None:
         value, namespace, value_of = write
-        children = (
-            self._attrs_child_values(node.value, scope, value_of, (lambda item: item.id, namespace))
-            if isinstance(node, ast.AugAssign) and additions is not None
-            else None
-        )
+        children = captured_children if isinstance(node, ast.AugAssign) else None
         for target in self._attrs_write_targets(node):
             self._attrs_widen_write(target, scope, lambda item: item.id, value=value)
             if (
@@ -4975,20 +4979,10 @@ class _Resolver:
                             [f"{prefix}{index}" in aliases for index in positions] + additions
                             if additions is not None
                             and f"\0wide:{carrier}" not in aliases
-                            and positions
                             and positions == list(range(len(positions)))
                             else None
                         )
-                        added_children = (
-                            self._attrs_child_values(
-                                item.value,
-                                aliases,
-                                lambda part: shared(part, aliases),
-                                (lambda part: _mangle(class_name, part.id), str(klass.module.path).encode().hex()),
-                            )
-                            if additions is not None
-                            else None
-                        )
+                        added_children = captured_children
                         child_slots = (
                             self._attrs_child_slots(carrier, len(positions), aliases) + added_children
                             if updated is not None and added_children is not None
@@ -5156,6 +5150,7 @@ class _Resolver:
                             receiver_id=id(item),
                         )
                         related = self._attrs_carrier_related(temporary, aliases)
+                        self._attrs_forget_nested(temporary, aliases)
                         aliases.difference_update(
                             key
                             for key in aliases.copy()
@@ -5415,12 +5410,7 @@ class _Resolver:
                         if arg_index == len(item.args) - 1:
                             captured_child = children
                         if arg_index == 1 and item.func.attr == "__setitem__":
-                            slice_values = self._attrs_sequence_values(
-                                arg,
-                                aliases,
-                                lambda part: _mangle(class_name, part.id),
-                                lambda part: shared(part, aliases),
-                            )
+                            slice_values, _ = self._attrs_captured_layout(children, aliases)
                     carrier = temporary
                     prefix = f"\0slot:{carrier}:"
                     positions = sorted(
@@ -5513,28 +5503,24 @@ class _Resolver:
                     )
                     if appended is not None and extension_children is not None:
                         child_slots = self._attrs_child_slots(carrier, len(positions), aliases) + extension_children
-                    if (
-                        item.func.attr == "__setitem__"
-                        and appended is not None
-                        and target is not None
-                        and not any(isinstance(part, ast.NamedExpr) for part in ast.walk(item))
-                    ):
-                        context = (lambda arg: _mangle(class_name, arg.id), str(klass.module.path).encode().hex())
-                        children = (
-                            self._attrs_child_values(item.args[1], aliases, lambda part: shared(part, aliases), context)
-                            if isinstance(slice_, ast.Slice)
-                            else [
-                                self._attrs_capture_child(
-                                    item.args[1],
-                                    aliases,
-                                    lambda part: shared(part, aliases),
-                                    context[0],
-                                    namespace=context[1],
-                                )
-                            ]
-                        )
+                    if item.func.attr == "__setitem__" and appended is not None and target is not None:
+                        _, sequence_children = self._attrs_captured_layout(captured_child, aliases)
+                        children = sequence_children if isinstance(slice_, ast.Slice) else [captured_child]
                         child_slots = self._attrs_updated_slots(
                             target, self._attrs_child_slots(carrier, len(positions), aliases), children
+                        )
+                    insert_layout = known_layout and f"\0wide:{carrier}" not in aliases
+                    if (
+                        item.func.attr == "insert"
+                        and appended is None
+                        and len(item.args) == SETITEM_ARGS
+                        and not item.keywords
+                        and insert_layout
+                    ):
+                        old_values = [f"{prefix}{index}" in aliases for index in positions]
+                        old_children = self._attrs_child_slots(carrier, len(positions), aliases)
+                        appended, child_slots = self._attrs_unknown_insert(
+                            old_values, old_children, captured_child, value=arguments[-1]
                         )
                     nested = (
                         self._attrs_nested_keys(related, aliases)
@@ -5565,19 +5551,7 @@ class _Resolver:
             if isinstance(item, ast.AugAssign):
                 write_value = shared(item.value, aliases)
                 additions = None
-                if isinstance(item.op, ast.Add) and isinstance(item.value, ast.Tuple | ast.List):
-                    values = self._attrs_flatten_values(item.value.elts)
-                    if values is not None:
-                        state = aliases.copy()
-                        additions = []
-                        saved = exception_states[:]
-                        exception_states.clear()
-                        try:
-                            for value in values:
-                                additions.append(shared(value, state))
-                                scan(value, state)
-                        finally:
-                            exception_states.extend(saved)
+                augmented_children = None
                 receiver = None
                 carrier = name(item.target)
                 if carrier is not None and self._attrs_carrier_tracked(carrier, aliases):
@@ -5585,10 +5559,27 @@ class _Resolver:
                     copy_carrier(receiver, item.target, aliases, aliases.copy())
                     if carrier in aliases:
                         aliases.add(receiver)
-                scan(item.value, aliases)
+                if isinstance(item.op, ast.Add):
+
+                    def scan_augmented(part: ast.expr) -> bool:
+                        scan(part, aliases)
+                        return False
+
+                    _, children, _ = self._attrs_capture_ordered_child(
+                        item.value,
+                        aliases,
+                        lambda part: shared(part, aliases),
+                        scan_augmented,
+                        (lambda part: _mangle(class_name, part.id), str(klass.module.path).encode().hex()),
+                    )
+                    additions, augmented_children = self._attrs_captured_layout(children, aliases)
+                else:
+                    scan(item.value, aliases)
                 if receiver is not None:
                     bind(item.target, ast.Name(id=receiver, ctx=ast.Load()), aliases, aliases.copy())
-                transfer_writes(item, aliases, value=write_value, additions=additions)
+                transfer_writes(
+                    item, aliases, value=write_value, additions=additions, captured_children=augmented_children
+                )
                 if receiver is not None:
                     related = self._attrs_carrier_related(receiver, aliases)
                     self._attrs_forget_nested(receiver, aliases)

@@ -1286,6 +1286,40 @@ def test_attrs_ifexp_keeps_fresh_class_shadow(tmp_path: Path) -> None:
             "child=[attrs.field()]\nitems=[[FIELD]]\nitems.__setitem__(slice(None),[child])\nchild[0]=FIELD\nitems[0][0].default(lambda self: 1)",
             True,
         ),
+        (
+            "items=[[attrs.field()]]\nitems.__setitem__(0, (alias := [FIELD]))\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items=[[FIELD]]\nitems.__setitem__(0, (alias := [attrs.field()]))\nitems[0][0].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "items=[[attrs.field()], [attrs.field()]]\nitems.__setitem__(slice(None), [(alias := [FIELD]), [attrs.field()]])\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=FIELD\nitems=[attrs.field(), attrs.field()]\nitems.__setitem__(slice(None), [alias, (alias := attrs.field())])\nitems[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=attrs.field()\nitems=[FIELD, FIELD]\nitems.__setitem__(slice(None), [alias, (alias := FIELD)])\nitems[0].default(lambda self: 1)",
+            False,
+        ),
+        ("items=[]\nitems += [(alias := [FIELD]), [attrs.field()]]\nitems[0][0].default(lambda self: 1)", True),
+        (
+            "items=([attrs.field()],)\nold=items\nitems += [(alias := [FIELD])]\nitems[1][0].default(lambda self: 1)",
+            True,
+        ),
+        ("items=[[attrs.field()]]\nold=items\nitems += [(alias := [FIELD])]\nold[1][0].default(lambda self: 1)", True),
+        (
+            "items=([attrs.field()],)\nold=items\nitems += [(alias := [FIELD])]\nold[0][0].default(lambda self: 1)",
+            False,
+        ),
+        ("items=[]\nitems += [(alias := [attrs.field()]), [FIELD]]\nitems[0][0].default(lambda self: 1)", False),
+        ("items=[]\nitems.insert((index := 0), [FIELD])\nitems[0][0].default(lambda self: 1)", True),
+        ("items=[[attrs.field()]]\nitems.insert((index := 0), [FIELD])\nitems[1][0].default(lambda self: 1)", False),
+        ("items=[[attrs.field()]]\nitems.insert(index, [FIELD])\nitems[1][0].default(lambda self: 1)", True),
         ("items=[[FIELD]]\nitems[0]=[FIELD, attrs.field()]\nitems[0][0].default(lambda self: 1)", True),
         ("items=[[FIELD]]\nitems[0]=[FIELD, attrs.field()]\nitems[0][1].default(lambda self: 1)", False),
         ("items=[[attrs.field()]]\nitems[0]=(child := [FIELD])\nitems[0][0].default(lambda self: 1)", True),
@@ -1781,3 +1815,28 @@ def test_attrs_starred_assignment_loop_state_is_bounded(tmp_path: Path, monkeypa
     [call] = discover_file(path).calls
     result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
     assert result.diagnostic is None
+
+
+def test_attrs_selected_receiver_does_not_retain_temporary_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = _Resolver._attrs_prune_nodes
+    counts: list[int] = []
+
+    def monitor(state: set[str]) -> None:
+        counts.append(sum(key.startswith("\0child:\0selected") for key in state))
+        original(state)
+
+    monkeypatch.setattr(_Resolver, "_attrs_prune_nodes", staticmethod(monitor))
+    path = tmp_path / "case.py"
+    calls = "        [items][0].reverse()\n" * 100
+    path.write_text(
+        "import attrs\nfrom rowx import query\n@attrs.define\nclass Row:\n"
+        "    value: int = attrs.field()\n    for _ in (0,):\n        items = [[value]]\n"
+        f"{calls}        del items\nquery[Row](t'select 1')\n"
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert counts
+    assert max(counts) == 0
