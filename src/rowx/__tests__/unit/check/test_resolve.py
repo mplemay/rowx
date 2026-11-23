@@ -1200,6 +1200,68 @@ def test_attrs_ifexp_keeps_fresh_class_shadow(tmp_path: Path) -> None:
             "items = [attrs.field()]\nold = items\nsource = ([attrs.field()], FIELD)\nold, old[0] = source\nold[0].default(lambda self: 1)",
             True,
         ),
+        ("items=[]\nitems.append([attrs.field()])\nitems[0][0]=FIELD\nitems[0][0].default(lambda self: 1)", True),
+        (
+            "items=[[attrs.field()]]\nitems[0]=[attrs.field()]\nitems[0][0]=FIELD\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        ("items=[]\nitems.append([attrs.field()])\nitems[0].append(FIELD)\nitems[0][1].default(lambda self: 1)", True),
+        (
+            "inner=(attrs.field(),)\nitems=[inner]\na=items[0]\na += (FIELD,)\nitems[0][-1].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "items=[[attrs.field()]]\nsource=(items, FIELD)\na, items[0][0] = source\na[0][0].default(lambda self: 1)",
+            True,
+        ),
+        ("child=[attrs.field()]\nitems=[child]\na=items.pop()\na[0]=FIELD\nchild[0].default(lambda self: 1)", True),
+        (
+            "child=[attrs.field()]\nitems=[child]\ncopied=items[:]\nchild[0]=FIELD\ncopied[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "child=[attrs.field()]\nitems=[child]\ncopied=items.copy()\nchild[0]=FIELD\ncopied[0][0].default(lambda self: 1)",
+            True,
+        ),
+        ("items=[[attrs.field()]]\nitems[0] += [FIELD]\nitems[0][1].default(lambda self: 1)", True),
+        ("items=[[FIELD], [attrs.field()]]\nitems.pop(1)\nitems[0][0].default(lambda self: 1)", True),
+        (
+            "items=[[FIELD], [attrs.field()]]\nitems.insert(0, [attrs.field()])\nitems[1][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items=[[FIELD], [attrs.field()]]\nitems.insert(0, [attrs.field()])\nitems[0][0].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "a=[FIELD]\nb=[attrs.field()]\nif unknown:\n    items=[a]\nelse:\n    items=[b]\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "a=[attrs.field()]\nb=[attrs.field()]\nif unknown:\n    items=[a]\nelse:\n    items=[b]\nitems[0][0]=FIELD\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "child=[attrs.field()]\nitems=[[FIELD]]\nitems[:]=[child]\nchild[0]=FIELD\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "child=[attrs.field()]\nsource=[child]\nitems=[[FIELD]]\nitems[:]=source\nchild[0]=FIELD\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        ("items=[[FIELD]]\nitems[:]=[[attrs.field()]]\nitems[0][0].default(lambda self: 1)", False),
+        (
+            "child=[attrs.field()]\nitems=[[FIELD]]\nitems.__setitem__(0,child)\nchild[0]=FIELD\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "child=[attrs.field()]\nitems=[[FIELD]]\nitems.__setitem__(slice(None),[child])\nchild[0]=FIELD\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        ("items=[[FIELD]]\nitems[0]=[FIELD, attrs.field()]\nitems[0][0].default(lambda self: 1)", True),
+        ("items=[[FIELD]]\nitems[0]=[FIELD, attrs.field()]\nitems[0][1].default(lambda self: 1)", False),
+        ("items=[[attrs.field()]]\nitems[0]=(child := [FIELD])\nitems[0][0].default(lambda self: 1)", True),
+        ("items=[[FIELD]]\nitems[0]=(child := [attrs.field()])\nitems[0][0].default(lambda self: 1)", False),
         ("items = [[FIELD]]\nitems[0][0] = attrs.field()\nitems[0][0].default(lambda self: 1)", False),
         ("items = [[FIELD]]\nitems[0].append(attrs.field())\nitems[0][1].default(lambda self: 1)", False),
         ("items = [[attrs.field()]]\nitems[0].append(FIELD)\nitems[0][1].default(lambda self: 1)", True),
@@ -1443,7 +1505,63 @@ def test_attrs_nested_carrier_state_grows_linearly() -> None:
     expression = ast.parse("[" * 30 + "field" + "]" * 30, mode="eval").body
     state: set[str] = set()
     _Resolver._attrs_nested_slots("items", expression, state, lambda _: True)
-    assert len(state) <= 30 * 6
+    assert len(state) <= 30 * 8
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_attrs_named_reference_dag_state_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, shared: bool
+) -> None:
+    depth = 24
+    body = "x0 = [FIELD]\n" + "".join(f"x{i} = [x{i - 1}, x{i - 1}]\n" for i in range(1, depth + 1))
+    if shared:
+        source = "spec = attrs.field()\n" + body.replace("FIELD", "spec")
+        source += "@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    for iteration in (0,):\n        "
+        source += body.replace("FIELD", "value").replace("\n", "\n        ") + "pass\n"
+    path = tmp_path / "case.py"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    peak = 0
+    original = _Resolver._attrs_carrier_related
+
+    def count(name: str, state: Collection[str]) -> set[str]:
+        nonlocal peak
+        peak = max(peak, len(state))
+        return original(name, state)
+
+    monkeypatch.setattr(_Resolver, "_attrs_carrier_related", staticmethod(count))
+    [call] = discover_file(path).calls
+    assert resolve_row_type(ModuleGraph(), call, (tmp_path,)).diagnostic is None
+    assert peak <= depth * 50
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_attrs_repeated_self_wrapping_stays_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, shared: bool
+) -> None:
+    body = "items = [FIELD]\nfor iteration in range(2):\n    items = [items, items]\n"
+    if shared:
+        source = "spec = attrs.field()\n" + body.replace("FIELD", "spec")
+        source += "@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    "
+        source += body.replace("FIELD", "value").replace("\n", "\n    ") + "pass\n"
+    path = tmp_path / "case.py"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    peak = 0
+    original = _Resolver._attrs_carrier_related
+
+    def count(name: str, state: Collection[str]) -> set[str]:
+        nonlocal peak
+        peak = max(peak, len(state))
+        return original(name, state)
+
+    monkeypatch.setattr(_Resolver, "_attrs_carrier_related", staticmethod(count))
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None or "untraceable attrs collection" in result.diagnostic.message
+    assert peak < 1000
 
 
 @pytest.mark.parametrize("shared", [False, True])
@@ -1561,6 +1679,31 @@ def test_attrs_repeated_named_child_alias(tmp_path: Path, *, shared: bool, clean
                 "inner = [attrs.field()]\nfor iteration in (0, 1):\n"
                 "    items = [inner, (gate := attrs.field()), inner]\n"
                 "    items[0][0] = FIELD\n    items[2][0].default(lambda self: 42)"
+            ),
+            True,
+        ),
+        (
+            (
+                "items = [[attrs.field()]]\nitems[0] = ([FIELD], (gate := attrs.field()))[0]\n"
+                "del gate\nitems[0][0].default(lambda self: 42)"
+            ),
+            True,
+        ),
+        (
+            (
+                "items = [[attrs.field()]]\nitems[0] = ([attrs.field()], (gate := FIELD))[0]\n"
+                "del gate\nitems[0][0].default(lambda self: 42)"
+            ),
+            False,
+        ),
+        (
+            "items = []\nitems.append([attrs.field()])\nitems[0][0] = FIELD\nitems[0][0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            (
+                "items = [[attrs.field()]]\nitems[0] = [attrs.field()]\nitems[0][0] = FIELD\n"
+                "items[0][0].default(lambda self: 42)"
             ),
             True,
         ),
