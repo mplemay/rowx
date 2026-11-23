@@ -1516,6 +1516,77 @@ def test_attrs_repeated_named_child_alias(tmp_path: Path, *, shared: bool, clean
     assert "default" in result.diagnostic.message
 
 
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize(
+    ("body", "reject"),
+    [
+        (
+            (
+                "inner = [attrs.field()]\nitems = [inner, (gate := attrs.field()), inner]\n"
+                "del gate\nitems[0][0] = FIELD\nitems[2][0].default(lambda self: 42)"
+            ),
+            True,
+        ),
+        (
+            "inner = [FIELD]\nitems = [inner, (inner := [attrs.field()]), inner]\nitems[0][0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "inner = [FIELD]\nitems = [inner, (inner := [attrs.field()]), inner]\nitems[2][0].default(lambda self: 42)",
+            False,
+        ),
+        (
+            (
+                "inner = [attrs.field()]\nitems = [inner, (inner := [attrs.field()]), inner]\n"
+                "items[0][0] = FIELD\nitems[2][0].default(lambda self: 42)"
+            ),
+            False,
+        ),
+        (
+            (
+                "inner = [attrs.field()]\nitems = [inner, (inner := [attrs.field()]), inner]\n"
+                "items[1][0] = FIELD\nitems[2][0].default(lambda self: 42)"
+            ),
+            True,
+        ),
+        (
+            (
+                "inner = [attrs.field()]\nold = inner\nitems = [inner, (inner := [attrs.field()]), inner]\n"
+                "old[0] = FIELD\nitems[0][0].default(lambda self: 42)"
+            ),
+            True,
+        ),
+        (
+            (
+                "inner = [attrs.field()]\nfor iteration in (0, 1):\n"
+                "    items = [inner, (gate := attrs.field()), inner]\n"
+                "    items[0][0] = FIELD\n    items[2][0].default(lambda self: 42)"
+            ),
+            True,
+        ),
+    ],
+)
+def test_attrs_captured_nested_carrier_identity(tmp_path: Path, body: str, *, shared: bool, reject: bool) -> None:
+    path = tmp_path / "case.py"
+    if shared:
+        source = "spec = attrs.field()\n" + body.replace("FIELD", "spec")
+        source += "\n@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    for outer in (0,):\n        "
+        source += body.replace("FIELD", "value").replace("\n", "\n        ")
+        source += "\n    del outer\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    if reject:
+        assert result.diagnostic is not None
+        assert "default" in result.diagnostic.message
+    else:
+        assert result.diagnostic is None
+        assert result.row_type is not None
+        assert result.row_type.fields[0].required
+
+
 def test_attrs_starred_assignment_loop_state_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "case.py"
     path.write_text(

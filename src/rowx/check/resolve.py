@@ -2203,13 +2203,14 @@ class _Resolver:
             )
             if self._attrs_scan_eager(node.value, scope, field, module, globals_):
                 return True
-            sources = scope.copy()
             binding = (
                 earlier
                 if isinstance(node.value, ast.Subscript)
                 else self._attrs_class_value(node.value, scope, field, module, globals_)
             )
-            self._attrs_copy_binding(node.target.id, node.value, scope, sources, {node.target.id: binding})
+            self._attrs_bind_target((node.target, node.value), scope, field, module, globals_=globals_)
+            if isinstance(node.value, ast.Subscript):
+                scope[node.target.id] = binding
             self._attrs_record_exception_state(scope)
             node = ast.Constant(value=None)
         if isinstance(node, ast.ClassDef):
@@ -2772,7 +2773,12 @@ class _Resolver:
             scope.pop(receiver, None)
         if not ordered:
             self._attrs_bind_class(node, scope, field, module, globals_)
-            scope.update({key: value for key, value in captured.items() if not key.startswith("\0alias:")})
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    for item in ast.walk(target):
+                        if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store) and item.id in captured:
+                            self._attrs_forget_carrier(item.id, scope)
+            scope.update(captured)
         if earlier is not None and isinstance(node, ast.Assign | ast.AnnAssign):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
@@ -2869,7 +2875,7 @@ class _Resolver:
         for index, item in enumerate(values):
             child_carrier = f"{carrier}@{index}"
             source = name(item) if isinstance(item, ast.Name) else None
-            if source is not None and not source.startswith("\0") and _Resolver._attrs_carrier_tracked(source, state):
+            if source is not None and _Resolver._attrs_carrier_tracked(source, state):
                 _Resolver._attrs_link_named_child(child_carrier, source, state, value=value(item))
                 continue
             if not isinstance(item, ast.Tuple | ast.List):
@@ -3114,17 +3120,26 @@ class _Resolver:
         if isinstance(value_expr, ast.Tuple | ast.List):
             state = scope.copy()
             state_globals = state if scope is globals_ else globals_
-            values: dict[str, bool | _Module] = {}
+            counter = 0
 
             def capture(expr: ast.expr) -> ast.expr:
+                nonlocal counter
                 if isinstance(expr, ast.Tuple | ast.List):
                     return type(expr)(elts=[capture(item) for item in expr.elts], ctx=expr.ctx)
                 if isinstance(expr, ast.Starred):
                     return ast.Starred(value=capture(expr.value), ctx=expr.ctx)
-                key = f"\0value{len(values)}"
+                key = f"\0value{counter}"
+                counter += 1
                 binding = self._attrs_class_value(expr, state, field, module, state_globals)
-                self._attrs_copy_binding(key, expr, values, state, {key: binding})
-                self._attrs_scan_eager(expr, state, field, module, state_globals)
+                if isinstance(expr, ast.NamedExpr):
+                    self._attrs_scan_eager(expr, state, field, module, state_globals)
+                    source = expr.target
+                    binding = state.get(source.id, False)
+                else:
+                    source = expr
+                self._attrs_copy_binding(key, source, state, state.copy(), {key: binding})
+                if not isinstance(expr, ast.NamedExpr):
+                    self._attrs_scan_eager(expr, state, field, module, state_globals)
                 return ast.Name(id=key, ctx=ast.Load())
 
             saved, self._attrs_exception_states = self._attrs_exception_states, []
@@ -3132,7 +3147,7 @@ class _Resolver:
                 value = capture(value_expr)
             finally:
                 self._attrs_exception_states = saved
-            sources = scope | values
+            sources = state
             for target in node.targets:
                 for destination, source in self._attrs_target_values(target, value):
                     if isinstance(destination, ast.Subscript):
@@ -3155,11 +3170,25 @@ class _Resolver:
                     bindings = sources.copy()
                     self._attrs_forget_carrier(destination.id, bindings)
                     self._attrs_bind_target((destination, source), bindings, field, module, globals_=globals_)
+                    for index in range(counter):
+                        temporary = f"\0value{index}"
+                        self._attrs_forget_carrier(temporary, bindings)
+                        bindings.pop(temporary, None)
                     captured[destination.id] = bindings[destination.id]
                     captured.update({
                         key: binding
                         for key, binding in bindings.items()
-                        if key.startswith(f"\0slot:{destination.id}:") or key == f"\0carrier:{destination.id}"
+                        if key.startswith((
+                            f"\0slot:{destination.id}:",
+                            f"\0slot:{destination.id}@",
+                            f"\0carrier:{destination.id}@",
+                            f"{destination.id}@",
+                        ))
+                        or key == f"\0carrier:{destination.id}"
+                        or (
+                            key.startswith("\0alias:")
+                            and any(part.startswith(f"{destination.id}@") for part in key.split(":")[1:])
+                        )
                     })
                     related = self._attrs_carrier_related(destination.id, bindings)
                     for other in related:
@@ -3863,6 +3892,7 @@ class _Resolver:
         if isinstance(target, ast.Name):
             if isinstance(value, ast.Name) and value.id == target.id:
                 return
+            self._attrs_forget_carrier(target.id, scope)
             self._attrs_bind_name((target, value), scope, field, module, globals_=globals_)
             if isinstance(value, ast.Name) and value.id != target.id:
                 self._attrs_copy_binding(target.id, value, scope, sources, scope.copy())
@@ -4939,9 +4969,9 @@ class _Resolver:
                 ):
                     captured = self._attrs_expand_sequence(captured, aliases, lambda expr: _mangle(class_name, expr.id))
                 values: set[str] = set()
+                counter = 0
                 if isinstance(captured, ast.Tuple | ast.List):
                     state = aliases.copy()
-                    counter = 0
 
                     def capture_value(expr: ast.expr) -> ast.expr:
                         nonlocal counter
@@ -4951,10 +4981,18 @@ class _Resolver:
                             return ast.Starred(value=capture_value(expr.value), ctx=expr.ctx)
                         key = f"\0value{counter}"
                         counter += 1
-                        if shared(expr, state):
-                            values.add(key)
-                        copy_carrier(key, expr, values, state)
-                        scan(expr, state)
+                        is_shared = shared(expr, state)
+                        if isinstance(expr, ast.NamedExpr):
+                            scan(expr, state)
+                            source = expr.target
+                            is_shared = name(source) in state
+                        else:
+                            source = expr
+                        if is_shared:
+                            state.add(key)
+                        copy_carrier(key, source, state, state.copy())
+                        if not isinstance(expr, ast.NamedExpr):
+                            scan(expr, state)
                         return ast.Name(id=key, ctx=ast.Load())
 
                     saved = exception_states[:]
@@ -4963,12 +5001,7 @@ class _Resolver:
                         captured = capture_value(captured)
                     finally:
                         exception_states.extend(saved)
-                    if (
-                        isinstance(item.value, ast.Tuple | ast.List)
-                        and all(isinstance(child, ast.Name) for child in item.value.elts)
-                        and all(isinstance(target, ast.Name) for target in item.targets)
-                    ):
-                        captured = item.value
+                    values = {key for key in state if "\0value" in key}
                 scan(item.value, aliases)
                 sources = aliases | values
                 writes: dict[int, list[bool] | None] = {}
@@ -5017,6 +5050,18 @@ class _Resolver:
                         aliases.discard(key)
                         if earlier:
                             aliases.add(key)
+                for index in range(counter):
+                    temporary = f"\0value{index}"
+                    self._attrs_forget_nested(temporary, aliases)
+                    related = self._attrs_carrier_related(temporary, aliases)
+                    aliases.difference_update(
+                        key
+                        for key in aliases.copy()
+                        if key.startswith(f"\0slot:{temporary}:")
+                        or key in {temporary, f"\0carrier:{temporary}", f"\0tuple:{temporary}", f"\0wide:{temporary}"}
+                        or (key.startswith("\0alias:") and temporary in key.split(":")[1:])
+                    )
+                    aliases.update(self._attrs_reconnect_carriers(related - {temporary}))
                 return
             if isinstance(item, ast.AnnAssign):
                 if item.value is not None:
