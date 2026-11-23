@@ -48,6 +48,8 @@ and `from rowx_postgres import connect` are the same object. `import rowx` loads
 A runtime-only install of `rowx-core` and `rowx-postgres` does not include the `rowx` package, so it imports
 `rowx_core` and `rowx_postgres`.
 
+The embedded database, `rowx.embedded.Database`, is described in [Embedded Postgres](embedded.md#api).
+
 `rowx` and `rowx_core` export `query`, `query_unchecked`, `QueryResult`, `RowStream`, the executor protocols
 `Executor`, `Connection`, `Pool` and `Transaction`, and the errors below. The protocols describe what a query can
 run on. They are not connections. Open a PostgreSQL connection with `rowx.postgres`.

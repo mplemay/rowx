@@ -11,6 +11,9 @@
 Invariant: **no untrusted input can change the parse tree of a statement, or the element and bound structure of an
 array or range parameter.**
 
+The trust model of an embedded database (a private socket directory, trust authentication, no TLS) is in
+[Embedded Postgres](embedded.md#security).
+
 ## Parameters and SQL text
 
 - Values are always bound as server-side parameters, never interpolated into SQL text. `query` rejects every dynamic

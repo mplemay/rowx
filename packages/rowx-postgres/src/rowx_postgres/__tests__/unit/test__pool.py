@@ -28,3 +28,9 @@ def test_a_pool_timeout_carries_the_last_connect_error_as_its_cause() -> None:
 def test_pool_bounds_are_checked_before_the_url_is_read() -> None:
     with pytest.raises(ValueError, match="max_size"):
         Pool("not a url at all :: ??", max_size=0)
+
+
+@pytest.mark.parametrize("dsn", ["embedded://", "embedded:///var/lib/db"])
+def test_a_pool_rejects_an_embedded_url_at_construction(dsn: str) -> None:
+    with pytest.raises(InterfaceError, match="invalid connection string"):
+        Pool(dsn)

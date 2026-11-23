@@ -14,7 +14,7 @@ except ImportError as error:
     msg = f"the embedded engine could not be loaded: {error}"
     raise ImportError(msg) from error
 
-# the PostgreSQL release the engine implements (the package version is `<ENGINE_VERSION>.<revision>`)
+# the PostgreSQL release the engine implements (an engine fact; the package version is the lockstep rowx version)
 ENGINE_VERSION: Final[str] = _engine.ENGINE_VERSION
 # the engine runtime and wasm module the snapshots are bound to
 RUNTIME_VERSION: Final[str] = _engine.RUNTIME_VERSION
