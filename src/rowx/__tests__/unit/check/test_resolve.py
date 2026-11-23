@@ -5,7 +5,7 @@ import pytest
 
 from rowx.check.config import Config
 from rowx.check.discover import discover_file
-from rowx.check.resolve import ModuleGraph, _Resolver, resolve_row_type, roots_for
+from rowx.check.resolve import ModuleGraph, _Module, _Resolver, resolve_row_type, roots_for
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator
@@ -1184,6 +1184,30 @@ def test_attrs_ifexp_keeps_fresh_class_shadow(tmp_path: Path) -> None:
             "items = [attrs.field(), attrs.field()]\nitems[::-1] = [attrs.field(), FIELD]\nitems[0].default(lambda self: 1)",
             True,
         ),
+        (
+            "items = [FIELD, attrs.field()]\ngate = attrs.field()\nitems[:] = [(gate := FIELD), gate]\nitems[1].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items = [attrs.field()]\nold = items\na, items[0] = old, FIELD\na[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items = [FIELD]\nold = items\nsource = ([attrs.field()], attrs.field())\nold, old[0] = source\nitems[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "items = [attrs.field()]\nold = items\nsource = ([attrs.field()], FIELD)\nold, old[0] = source\nold[0].default(lambda self: 1)",
+            True,
+        ),
+        ("items = [[FIELD]]\nitems[0][0] = attrs.field()\nitems[0][0].default(lambda self: 1)", False),
+        ("items = [[FIELD]]\nitems[0].append(attrs.field())\nitems[0][1].default(lambda self: 1)", False),
+        ("items = [[attrs.field()]]\nitems[0].append(FIELD)\nitems[0][1].default(lambda self: 1)", True),
+        ("items = [[FIELD]]\nitems.append([attrs.field()])\nitems[0][0].default(lambda self: 1)", True),
+        (
+            "items = [FIELD]\nold = items\nsource = ([attrs.field()], attrs.field())\nold, old[0] = source\nold[0].default(lambda self: 1)",
+            False,
+        ),
     ],
 )
 def test_attrs_container_mutation_and_direct_receiver(
@@ -1413,3 +1437,105 @@ def test_attrs_nested_finally_visits_bodies_once(
     result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
     assert result.diagnostic is None
     assert 0 < visits <= depth * 10
+
+
+def test_attrs_nested_carrier_state_grows_linearly() -> None:
+    expression = ast.parse("[" * 30 + "field" + "]" * 30, mode="eval").body
+    state: set[str] = set()
+    _Resolver._attrs_nested_slots("items", expression, state, lambda _: True)
+    assert len(state) <= 30 * 6
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("index", ["0", "-1"])
+def test_attrs_nested_signed_indices(tmp_path: Path, *, shared: bool, index: str) -> None:
+    path = tmp_path / "case.py"
+    body = f"items = [[[FIELD]]]\nitems[{index}][{index}][{index}].default(lambda self: 42)\n"
+    if shared:
+        source = "spec = attrs.field()\n" + body.replace("FIELD", "spec")
+        source += "@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    for outer in (0,):\n        "
+        source += body.replace("FIELD", "value").replace("\n", "\n        ") + "del items\n    del outer\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert "default" in result.diagnostic.message
+
+
+def test_attrs_known_empty_carrier_sequence() -> None:
+    states: list[dict[str, bool | _Module] | set[str]] = [{"\0carrier:items": True}, {"\0carrier:items"}]
+    for state in states:
+        result = _Resolver._attrs_sequence_values(
+            ast.Name(id="items", ctx=ast.Load()), state, lambda item: item.id, lambda _: True
+        )
+        assert result == []
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_attrs_empty_named_slice_replacement(tmp_path: Path, *, shared: bool) -> None:
+    path = tmp_path / "case.py"
+    body = (
+        "items = [FIELD]\nsource = []\nitems[:] = source\n"
+        "items.append(attrs.field())\nitems[0].default(lambda self: 42)\n"
+    )
+    if shared:
+        source = "spec = attrs.field()\n" + body.replace("FIELD", "spec")
+        source += "@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    for outer in (0,):\n        "
+        source += body.replace("FIELD", "value").replace("\n", "\n        ") + "del items, source\n    del outer\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert result.row_type is not None
+    assert result.row_type.fields[0].required
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_attrs_repeated_named_child_alias(tmp_path: Path, *, shared: bool, cleanup: bool) -> None:
+    path = tmp_path / "case.py"
+    body = (
+        "inner = [attrs.field()]\nitems = [inner, inner]\nitems[0][0] = FIELD\nitems[1][0].default(lambda self: 42)\n"
+    )
+    if shared:
+        source = "spec = attrs.field()\n" + body.replace("FIELD", "spec")
+        source += "@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    for outer in (0,):\n        "
+        source += body.replace("FIELD", "value").replace("\n", "\n        ")
+        source += "del inner, items\n        " if cleanup else ""
+        source += "pass\n    del outer\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert "default" in result.diagnostic.message
+
+
+def test_attrs_starred_assignment_loop_state_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\n@attrs.define\nclass Row:\n"
+        "    value: int = attrs.field()\n    for outer in (0,):\n"
+        "        items = [value]\n        source = [attrs.field()]\n"
+        "        items[:] = [*source]\n        items[0].default(lambda self: 42)\n"
+        '    del outer, items, source\nquery[Row](t"select 1")\n'
+    )
+    calls = 0
+    original = _Resolver._attrs_carrier_related
+
+    def related(carrier: str, state: Collection[str]) -> set[str]:
+        nonlocal calls
+        calls += 1
+        assert calls < 500
+        assert len(state) < 200
+        return original(carrier, state)
+
+    monkeypatch.setattr(_Resolver, "_attrs_carrier_related", staticmethod(related))
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
