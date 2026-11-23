@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use rowx_core::error::{CoreError, TaskStopped};
 use rowx_core::migrate::{Migration, NameError};
 use rowx_py_core::errors as shared;
+use rowx_sqlite::admin::AdminError;
 use rowx_sqlite::error::Error;
 use rowx_sqlite::migrate::{ConfigError, MigrateError};
 
@@ -234,5 +235,38 @@ pub struct MigrateFailure {
 impl From<MigrateFailure> for PyErr {
     fn from(err: MigrateFailure) -> Self {
         Python::attach(|py| migrate_to_py_err(py, &err.error, &err.migrations, err.reverting))
+    }
+}
+
+// the only place an administration error becomes a Python exception
+#[must_use]
+pub fn admin_to_py_err(py: Python<'_>, err: &AdminError) -> PyErr {
+    let message = err.to_string();
+    let state =
+        |sqlstate: &str| shared::database_error(py, sqlstate, &message, None, None, None, None);
+    match err {
+        AdminError::InvalidName(_) => shared::interface_error(py, &message),
+        AdminError::Sqlite(error) => to_py_err(py, &Failure::from(error.clone())),
+        // PostgreSQL's duplicate_database
+        AdminError::Exists(_) => state("42P04"),
+        // invalid_catalog_name, which is what a missing template database is on PostgreSQL
+        AdminError::TemplateMissing(_) => state("3D000"),
+        // object_in_use
+        AdminError::InUse(_) => state("55006"),
+        // lock_not_available, as for SQLITE_BUSY and SQLITE_LOCKED
+        AdminError::TemplateBusy(_) => state("55P03"),
+        AdminError::NotSqlite(_) => state("XX002"),
+        // the nearest to SQLITE_CANTOPEN and an IO failure
+        AdminError::NoDirectory(_) | AdminError::Io { .. } => state("58030"),
+    }
+}
+
+/// Carries an administration error across an `async` block, where the GIL is not held.
+#[derive(Debug)]
+pub struct AdminFailure(pub AdminError);
+
+impl From<AdminFailure> for PyErr {
+    fn from(err: AdminFailure) -> Self {
+        Python::attach(|py| admin_to_py_err(py, &err.0))
     }
 }

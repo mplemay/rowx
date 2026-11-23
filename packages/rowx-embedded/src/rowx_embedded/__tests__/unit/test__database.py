@@ -1,5 +1,11 @@
 import asyncio
+import json
+import re
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
+import sys
 import threading
+from pathlib import Path
+from typing import Final
 
 import pytest
 from rowx_core.errors import InterfaceError, PoolTimeoutError
@@ -14,6 +20,12 @@ from rowx_embedded.__tests__.support.fake_engine import (
 from rowx_embedded._database import Database
 from rowx_embedded._instance import with_socket
 from rowx_postgres import Connection, ConnectOptions, Pool
+
+CASES: Final[Path] = Path(__file__).resolve().parents[1] / "support" / "database_cases.py"
+REVEAL_COMMENT: Final[re.Pattern[str]] = re.compile(r"# reveal: (?P<type>.+)$")
+PYRIGHT_REVEAL: Final[re.Pattern[str]] = re.compile(r'^Type of ".*" is "(?P<type>.+)"$', re.DOTALL)
+MYPY_LINE: Final[re.Pattern[str]] = re.compile(r"^.+?:(?P<line>\d+):\d+: (?P<severity>note|error): (?P<message>.*)$")
+MYPY_REVEAL: Final[re.Pattern[str]] = re.compile(r'^Revealed type is "(?P<type>.+)"$')
 
 
 def test_a_database_starts_its_instance_on_first_use_once_and_closes_it(engine: FakeEngine) -> None:
@@ -409,3 +421,43 @@ def test_the_native_pool_is_built_from_the_options_on_the_socket(
     assert [(item.host, dict(item.server_settings)) for item in seen] == [
         ("/nonexistent/rowx-socket", {"search_path": "app"}),
     ]
+
+
+def test_a_database_is_a_pool_with_a_string_dsn_and_an_optional_directory() -> None:
+    expected = {
+        number: match["type"]
+        for number, line in enumerate(CASES.read_text().splitlines(), start=1)
+        if (match := REVEAL_COMMENT.search(line))
+    }
+    pyright = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [sys.executable, "-m", "pyright", "--outputjson", "--pythonversion", "3.14", str(CASES)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    mypy = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
+        [sys.executable, "-m", "mypy", "--python-version", "3.14", "--show-column-numbers", str(CASES)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    pyright_reveals: dict[int, str] = {}
+    pyright_errors: list[int] = []
+    for diagnostic in json.loads(pyright.stdout)["generalDiagnostics"]:
+        line = diagnostic["range"]["start"]["line"] + 1
+        if diagnostic["severity"] == "error":
+            pyright_errors.append(line)
+        elif found := PYRIGHT_REVEAL.match(diagnostic["message"]):
+            pyright_reveals[line] = found["type"]
+    mypy_reveals: dict[int, str] = {}
+    mypy_errors: list[int] = []
+    for raw in mypy.stdout.splitlines():
+        if not (found := MYPY_LINE.match(raw)):
+            continue
+        if found["severity"] == "error":
+            mypy_errors.append(int(found["line"]))
+        elif reveal := MYPY_REVEAL.match(found["message"]):
+            mypy_reveals[int(found["line"])] = reveal["type"]
+    assert expected
+    assert (pyright_reveals, pyright_errors) == (expected, [])
+    assert (mypy_reveals, mypy_errors) == (expected, [])

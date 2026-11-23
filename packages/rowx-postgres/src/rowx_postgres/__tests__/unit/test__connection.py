@@ -1,8 +1,11 @@
+import asyncio
 import re
 from pathlib import Path
 from typing import Final
 
-from rowx_postgres import RESET_QUERY
+import pytest
+from rowx_core.errors import InterfaceError
+from rowx_postgres import RESET_QUERY, connect
 
 POOL_RS: Final[Path] = (
     next(parent for parent in Path(__file__).resolve().parents if (parent / "Cargo.lock").is_file())
@@ -26,3 +29,9 @@ def test_the_reset_query_resets_authorization_first_and_qualifies_the_function()
         "CLOSE ALL; UNLISTEN *; DISCARD TEMP;"
     )
     assert "DEALLOCATE" not in RESET_QUERY
+
+
+@pytest.mark.parametrize("dsn", ["embedded://", "embedded:///var/lib/db"])
+def test_connect_rejects_an_embedded_url_before_any_io(dsn: str) -> None:
+    with pytest.raises(InterfaceError, match="invalid connection string"):
+        asyncio.run(connect(dsn))

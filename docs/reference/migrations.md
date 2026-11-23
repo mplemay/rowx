@@ -25,6 +25,8 @@ CREATE INDEX CONCURRENTLY users_email ON users (email);
 and has to be read to choose the next version. `run`, `revert`, `skip` and `info` need a backend. Only connection
 establishment is retried; a migration command itself runs once.
 
+Migrations against an embedded database follow [Embedded Postgres](embedded.md#migrations).
+
 ## Files
 
 - **Filename grammar.** `<VERSION>_<DESCRIPTION>.sql` is a simple migration. `<VERSION>_<DESCRIPTION>.up.sql` plus

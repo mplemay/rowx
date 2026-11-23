@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 PREFIX: Final[str] = "rowx_check_"
 SUFFIX: Final[str] = ".db"
+# keep in step with `SIDE_FILES` in crates/rowx-sqlite/src/admin.rs
 SIDECARS: Final[tuple[str, ...]] = ("", "-wal", "-shm", "-journal")
 FILE_MODE: Final[int] = 0o600
 

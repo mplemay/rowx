@@ -10,7 +10,7 @@ linked, and which checks run without a database.
 | `rowx-core` | `rowx_core` | none |
 | `rowx-postgres` | `rowx_postgres` | matching `rowx-core` only |
 | `rowx` | `rowx` | matching `rowx-core`; the `postgres` extra adds matching `rowx-postgres`, and the `embedded` extra adds matching `rowx-postgres` and `rowx-embedded` |
-| `rowx-embedded` | `rowx_embedded` | none; it is the optional embedded engine and does not depend on any other rowx distribution |
+| `rowx-embedded` | `rowx_embedded` | matching `rowx-core` and `rowx-postgres`; it is the optional embedded engine, and no other distribution depends on it except through the `embedded` extra |
 
 `from rowx import query` and `from rowx_core import query` are the same object. `import rowx` loads no backend.
 Connections are `from rowx_postgres import Pool, connect`. The `postgres` extra is what installs that package. The
@@ -94,8 +94,8 @@ opening a connection is retried. The migration command runs once.
 
 ## Embedded companion
 
-The embedded database (`rowx[embedded]`, [reference](../reference/embedded.md)) is a companion distribution, not a
-member of the workspace. This section says how it is built and linked.
+The embedded database (`rowx[embedded]`, [reference](../reference/embedded.md)) is a companion distribution and a
+workspace member outside the default members. This section says how it is built and linked.
 
 ### The companion distribution
 
