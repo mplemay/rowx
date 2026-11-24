@@ -68,6 +68,32 @@ if dsn := environ.get("ROWX_TEST_DSN"):
 assert find_spec("rowx") is None
 PY
 
+uv venv --python "${PYTHON:-3.14}" sqlite
+uv pip install --refresh --python sqlite/bin/python --no-index --find-links "$distributions" rowx-sqlite
+sqlite/bin/python - <<'PY'
+import asyncio
+from importlib.util import find_spec
+from rowx_core import query
+from rowx_sqlite import ConnectOptions, Migrator, connect
+from rowx_sqlite import _core
+from rowx_sqlite._compiler import COMPILER
+
+# rowx-sqlite installs alone with rowx-core: neither the CLI nor the PostgreSQL backend comes with it
+assert find_spec("rowx") is None
+assert find_spec("rowx_postgres") is None
+assert query[int](t"SELECT {1}") is not None
+assert COMPILER is not None and Migrator is not None and _core is not None
+assert ConnectOptions.from_dsn("sqlite:///relative.db").path == "relative.db"
+
+async def exercise():
+    async with await connect(ConnectOptions(memory=True)) as conn:
+        assert await query[int](t"SELECT {42}").one(conn) == 42
+
+asyncio.run(exercise())
+assert find_spec("rowx") is None
+assert find_spec("rowx_postgres") is None
+PY
+
 uv venv --python "${PYTHON:-3.14}" cli
 uv pip install --refresh --python cli/bin/python "$distributions"/rowx-*.whl "$distributions"/rowx_core-*.whl
 cli/bin/python - <<'PY'
@@ -87,10 +113,19 @@ except ImportError as error:
     assert error.__cause__.name == "rowx_postgres"
 else:
     raise AssertionError("rowx.postgres must require the optional backend")
+try:
+    from rowx.sqlite import connect as sqlite_connect
+except ImportError as error:
+    assert "rowx[sqlite]" in str(error)
+    assert isinstance(error.__cause__, ModuleNotFoundError)
+    assert error.__cause__.name == "rowx_sqlite"
+else:
+    raise AssertionError("rowx.sqlite must require the optional backend")
+assert "rowx_sqlite" not in modules
 Path("queries.py").write_text('from rowx_core import query\nquery[int](t"SELECT 1")\n')
 assert main(["check", "--database-url", "postgresql://localhost/example", "queries.py"]) == 2
 PY
-uv pip install --refresh --python cli/bin/python "${rowx_wheels[0]}[postgres]" "$distributions"/rowx_core-*.whl "$distributions"/rowx_postgres-*.whl
+uv pip install --refresh --python cli/bin/python "${rowx_wheels[0]}[postgres,sqlite]" "$distributions"/rowx_core-*.whl "$distributions"/rowx_postgres-*.whl "$distributions"/rowx_sqlite-*.whl
 cli/bin/python - <<'PY'
 import rowx_postgres
 from rowx import InterfaceError, postgres, query
@@ -101,4 +136,12 @@ assert InterfaceError is CoreInterfaceError
 assert set(postgres.__all__) == set(rowx_postgres.__all__)
 for name in postgres.__all__:
     assert getattr(postgres, name) is getattr(rowx_postgres, name), name
+PY
+cli/bin/python - <<'PY'
+import rowx_sqlite
+from rowx import sqlite
+
+assert set(sqlite.__all__) == set(rowx_sqlite.__all__)
+for name in sqlite.__all__:
+    assert getattr(sqlite, name) is getattr(rowx_sqlite, name), name
 PY

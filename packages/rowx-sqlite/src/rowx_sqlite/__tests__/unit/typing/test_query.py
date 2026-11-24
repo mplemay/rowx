@@ -2,7 +2,9 @@ import json
 import re
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
+from os import environ
 from pathlib import Path
+from shutil import copyfile
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -29,6 +31,15 @@ def _normalize(type_: str) -> str:
     return MODULE_PREFIX.sub("", type_)
 
 
+def _target(workdir: Path | None) -> tuple[Path, Path, list[str]]:
+    # with ROWX_TYPING_PYTHON the cases run from a scratch copy against that interpreter's installed wheels, so the
+    # checkout's src/ cannot shadow them
+    target_python = environ.get("ROWX_TYPING_PYTHON")
+    if target_python is None or workdir is None:
+        return CASES, ROOT_DIR, []
+    return copyfile(CASES, workdir / CASES.name), workdir, [target_python]
+
+
 def _expectations() -> tuple[dict[int, str], set[int]]:
     reveals: dict[int, str] = {}
     errors: set[int] = set()
@@ -40,13 +51,23 @@ def _expectations() -> tuple[dict[int, str], set[int]]:
     return reveals, errors
 
 
-def _run_pyright() -> tuple[dict[int, str], set[int]]:
+def _run_pyright(workdir: Path | None = None) -> tuple[dict[int, str], set[int]]:
+    source, cwd, python = _target(workdir)
     result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
-        [sys.executable, "-m", "pyright", "--outputjson", "--pythonversion", "3.14", str(CASES)],
+        [
+            sys.executable,
+            "-m",
+            "pyright",
+            "--outputjson",
+            "--pythonversion",
+            "3.14",
+            *(["--pythonpath", *python] if python else []),
+            str(source),
+        ],
         capture_output=True,
         text=True,
         check=False,
-        cwd=ROOT_DIR,
+        cwd=cwd,
     )
     reveals: dict[int, str] = {}
     errors: set[int] = set()
@@ -59,7 +80,8 @@ def _run_pyright() -> tuple[dict[int, str], set[int]]:
     return reveals, errors
 
 
-def _run_mypy() -> tuple[dict[int, str], set[int]]:
+def _run_mypy(workdir: Path | None = None) -> tuple[dict[int, str], set[int]]:
+    source, cwd, python = _target(workdir)
     result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         [
             sys.executable,
@@ -69,12 +91,13 @@ def _run_mypy() -> tuple[dict[int, str], set[int]]:
             "3.14",
             "--no-error-summary",
             "--show-column-numbers",
-            str(CASES),
+            *(["--python-executable", *python] if python else []),
+            str(source),
         ],
         capture_output=True,
         text=True,
         check=False,
-        cwd=ROOT_DIR,
+        cwd=cwd,
     )
     reveals: dict[int, str] = {}
     errors: set[int] = set()
@@ -93,11 +116,11 @@ type Diagnostics = tuple[dict[int, str], set[int]]
 
 
 @pytest.mark.parametrize("runner", [_run_pyright, _run_mypy], ids=["pyright", "mypy"])
-def test_cases(runner: Callable[[], Diagnostics]) -> None:
+def test_cases(runner: Callable[[Path | None], Diagnostics], tmp_path: Path) -> None:
     expected_reveals, expected_errors = _expectations()
     if not expected_reveals or not expected_errors:
         pytest.fail("cases.py has no reveal or error expectations")
-    reveals, errors = runner()
+    reveals, errors = runner(tmp_path)
     if reveals != expected_reveals:
         pytest.fail(f"reveal mismatch\nexpected: {expected_reveals}\nactual:   {reveals}")
     if errors != expected_errors:
