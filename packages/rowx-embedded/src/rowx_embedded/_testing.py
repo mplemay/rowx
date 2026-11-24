@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Final, override
 
 from rowx_core.backend import Provisioner
 from rowx_core.errors import InterfaceError
+from rowx_core.filelock import finish, lock, unlock
 from rowx_postgres import Connection, Pool, connect
 
 from rowx_embedded._api import ENGINE_VERSION, EXTENSIONS, RUNTIME_VERSION, SNAPSHOT_FORMAT, WASM_SHA256
@@ -44,7 +45,6 @@ TEST_PREFIX: Final[str] = "rowx_test_"
 POOL_ACQUIRE_TIMEOUT: Final[float] = 15.0
 POOL_MAX_SIZE: Final[int] = 1
 DIGEST_SIZE: Final[int] = hashlib.sha256().digest_size
-LOCK_POLL: Final[float] = 0.05
 
 
 # everything a snapshot is only valid for: the companion, the engine, the runtime and module that booted it, the
@@ -64,17 +64,6 @@ def identity() -> tuple[str, ...]:
     )
 
 
-# a thread call that a cancel (Ctrl-C) cannot leave half done: the cancel waits for it, so what the thread writes is
-# there for the cleanup that follows to remove
-async def finish[T](work: Awaitable[T]) -> T:
-    task = asyncio.ensure_future(work)
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await asyncio.wait([task])
-        raise
-
-
 def scratch_directory() -> Path:
     return Path(tempfile.mkdtemp(prefix="rowx-snapshots-"))
 
@@ -82,38 +71,6 @@ def scratch_directory() -> Path:
 def snapshot_path(directory: Path, project: str, name: str) -> Path:
     # a template name ends in its hash (hex, so no underscore): `<prefix><p>_<h>`
     return directory / f"{project}_{name.rpartition('_')[2]}{SNAPSHOT_SUFFIX}"
-
-
-# a non-blocking attempt at the one lock per project (never deleted), so that a build and a cleanup of the project's
-# files never overlap. `fcntl` is POSIX-only and the embedded engine ships for POSIX platforms only
-def try_lock(path: Path) -> int | None:
-    from fcntl import LOCK_EX, LOCK_NB, flock  # ruff: ignore[import-outside-top-level]
-
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        flock(descriptor, LOCK_EX | LOCK_NB)
-    except BlockingIOError:
-        os.close(descriptor)
-        return None
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return descriptor
-
-
-# polled on the loop rather than blocked on in a thread, so that a cancelled wait never leaves a descriptor that a
-# thread goes on to lock
-async def lock(path: Path) -> int:
-    # `flock` has nothing to await, so the lock is polled
-    while (descriptor := try_lock(path)) is None:  # ruff: ignore[async-busy-wait]
-        await asyncio.sleep(LOCK_POLL)
-    return descriptor
-
-
-def unlock(descriptor: int) -> None:
-    # closing the descriptor releases the lock, so a crashed process never leaves it held
-    with suppress(OSError):
-        os.close(descriptor)
 
 
 # a snapshot file is the snapshot followed by its SHA-256, so that one rename publishes both
