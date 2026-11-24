@@ -92,10 +92,13 @@ def test_a_cancel_waits_for_the_thread_to_finish() -> None:
         running = asyncio.create_task(finish(asyncio.to_thread(work)))
         await asyncio.to_thread(started.wait)
         running.cancel()
-        # the cancel is held until the thread is let go
-        await asyncio.sleep(0.1)
-        assert not running.done()
-        release.set()
+        try:
+            # the cancel is held until the thread is let go
+            await asyncio.sleep(0.1)
+            assert not running.done()
+        finally:
+            # a failed assertion must not leave the thread blocked, or the run would hang at shutdown
+            release.set()
         with pytest.raises(asyncio.CancelledError):
             await running
         assert done.is_set()

@@ -204,6 +204,7 @@ class EmbeddedProvisioner(Provisioner):
     async def _provide(self, template: Template, *, reuse: bool) -> bytes:
         directory, project = template.directory, template.project
         path = snapshot_path(directory, project, template.name)
+        # the one lock per project, never deleted, so that a build and a cleanup of the project's files never overlap
         descriptor = await lock(directory / f"{project}{LOCK_SUFFIX}")
         try:
             # a missing or damaged file is rebuilt; a snapshot that only the engine can refuse is handled at the boot
