@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 DIST: Final[Path] = ROOT / "dist"
-EXPECTED_FILE_COUNT: Final[int] = 10
+EXPECTED_FILE_COUNT: Final[int] = 16
 EXPECTED_WHEEL_COUNT: Final[int] = 5
 MATCH_COUNT: Final[int] = 1
 WHEEL_TAGS: Final[tuple[tuple[str, ...], ...]] = (
@@ -33,6 +33,7 @@ PAIR_LENGTH: Final[int] = 2
 ROWX: Final[str] = "rowx"
 ROWX_CORE: Final[str] = "rowx_core"
 ROWX_POSTGRES: Final[str] = "rowx_postgres"
+ROWX_SQLITE: Final[str] = "rowx_sqlite"
 CORE_DISTRIBUTION: Final[str] = "rowx-core"
 POSTGRES_DISTRIBUTION: Final[str] = "rowx-postgres"
 PYTEST_DISTRIBUTION: Final[str] = "pytest"
@@ -67,6 +68,9 @@ EXPECTED_CLASSIFIERS: Final[frozenset[str]] = frozenset({
     "Framework :: AsyncIO",
 })
 EXPECTED_KEYWORDS: Final[tuple[str, ...]] = ("sql", "postgresql", "postgres", "typed", "async", "t-string")
+SQLITE_KEYWORDS: Final[tuple[str, ...]] = ("sql", "sqlite", "typed", "async", "t-string")
+# the namespaces that ship a compiled extension: five platform wheels and a source distribution each
+NATIVE_NAMESPACES: Final[tuple[str, ...]] = (ROWX_POSTGRES, ROWX_SQLITE)
 EXPECTED_URLS: Final[dict[str, str]] = {
     "Documentation": "https://mplemay.github.io/rowx/",
     "Repository": "https://github.com/mplemay/rowx",
@@ -77,11 +81,19 @@ DISTRIBUTION_NAMES: Final[dict[str, str]] = {
     ROWX: ROWX,
     ROWX_CORE: CORE_DISTRIBUTION,
     ROWX_POSTGRES: POSTGRES_DISTRIBUTION,
+    ROWX_SQLITE: SQLITE_DISTRIBUTION,
 }
 LICENSE_SOURCES: Final[dict[str, Path]] = {
     ROWX: ROOT / "LICENSE",
     ROWX_CORE: ROOT / "packages" / "rowx-core" / "LICENSE",
     ROWX_POSTGRES: ROOT / "packages" / "rowx-postgres" / "LICENSE",
+    ROWX_SQLITE: ROOT / "packages" / "rowx-sqlite" / "LICENSE",
+}
+KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
+    ROWX: EXPECTED_KEYWORDS,
+    ROWX_CORE: EXPECTED_KEYWORDS,
+    ROWX_POSTGRES: EXPECTED_KEYWORDS,
+    ROWX_SQLITE: SQLITE_KEYWORDS,
 }
 NATIVE_SUFFIXES: Final[tuple[str, ...]] = (".so", ".pyd", ".dll", ".dylib")
 PURE_SDIST_PREFIXES: Final[tuple[str, ...]] = ("rowx-", "rowx_core-")
@@ -101,26 +113,33 @@ def main() -> int:
         for path in args.directory.glob("*.whl"):
             validate_wheel(path)
         return 0
-    version = _required("VERSION")
-    files = list(args.directory.iterdir())
-    wheels = [
-        path.name for path in files if path.name.startswith(f"rowx_postgres-{version}-") and path.suffix == ".whl"
-    ]
-    # each tag tuple must occur in exactly one wheel name
-    matched = all(sum(all(tag in name for tag in tags) for name in wheels) == MATCH_COUNT for tags in WHEEL_TAGS)
-    if len(files) != EXPECTED_FILE_COUNT or len(wheels) != EXPECTED_WHEEL_COUNT or not matched:
+    validate_release(args.directory, _required("VERSION"))
+    return 0
+
+
+def _has_platform_wheels(files: list[Path], namespace: str, version: str) -> bool:
+    wheels = [path.name for path in files if path.name.startswith(f"{namespace}-{version}-") and path.suffix == ".whl"]
+    # each tag tuple must occur in exactly one wheel name of the native distribution
+    return len(wheels) == EXPECTED_WHEEL_COUNT and all(
+        sum(all(tag in name for tag in tags) for name in wheels) == MATCH_COUNT for tags in WHEEL_TAGS
+    )
+
+
+def validate_release(directory: Path, version: str) -> None:
+    files = list(directory.iterdir())
+    matched = all(_has_platform_wheels(files, namespace, version) for namespace in NATIVE_NAMESPACES)
+    if len(files) != EXPECTED_FILE_COUNT or not matched:
         message = f"Unexpected distributions: {[path.name for path in files]}"
         raise SystemExit(message)
-    for name in ("rowx", "rowx_core", "rowx_postgres"):
-        if not (args.directory / f"{name}-{version}.tar.gz").is_file():
+    for name in (ROWX, ROWX_CORE, *NATIVE_NAMESPACES):
+        if not (directory / f"{name}-{version}.tar.gz").is_file():
             message = f"{name} source distribution is missing or has the wrong version"
             raise SystemExit(message)
-    for name in ("rowx", "rowx_core"):
-        if not (args.directory / f"{name}-{version}-py3-none-any.whl").is_file():
+    for name in (ROWX, ROWX_CORE):
+        if not (directory / f"{name}-{version}-py3-none-any.whl").is_file():
             message = f"{name} pure Python wheel is missing"
             raise SystemExit(message)
     _validate_archive_contents(files)
-    return 0
 
 
 def _validate_archive_contents(files: list[Path]) -> None:
@@ -155,7 +174,7 @@ def _reject_development_files(path: Path, namespace: str, names: list[str]) -> N
         if parts and parts[0] != namespace and not parts[0].endswith(".dist-info"):
             message = f"{path.name} owns an unexpected namespace: {name}"
             raise SystemExit(message)
-        if namespace != ROWX_POSTGRES and name.endswith(NATIVE_SUFFIXES):
+        if namespace not in NATIVE_NAMESPACES and name.endswith(NATIVE_SUFFIXES):
             message = f"{path.name} must be pure Python"
             raise SystemExit(message)
     if f"{namespace}/py.typed" not in names:
@@ -164,7 +183,7 @@ def _reject_development_files(path: Path, namespace: str, names: list[str]) -> N
 
 
 def _pure_sdist(path: Path) -> bool:
-    # rowx_postgres is absent from PURE_SDIST_PREFIXES; it stays a native source build
+    # the native namespaces are absent from PURE_SDIST_PREFIXES; they stay native source builds
     name = path.name
     return name.endswith(".tar.gz") and name.startswith(PURE_SDIST_PREFIXES)
 
@@ -183,7 +202,7 @@ def _validate_metadata(path: Path, namespace: str, metadata: Message, license_by
     _validate_license(path, metadata)
     _validate_license_file(path, namespace, metadata, license_bytes)
     _validate_classifiers(path, metadata)
-    _validate_keywords(path, metadata)
+    _validate_keywords(path, namespace, metadata)
     _validate_urls(path, metadata)
     _validate_requires(path, namespace, version, metadata)
 
@@ -262,11 +281,12 @@ def _validate_classifiers(path: Path, metadata: Message) -> None:
         raise SystemExit(message)
 
 
-def _validate_keywords(path: Path, metadata: Message) -> None:
+def _validate_keywords(path: Path, namespace: str, metadata: Message) -> None:
     raw = metadata.get("Keywords")
     keywords = tuple(part.strip() for part in raw.split(",")) if raw is not None else ()
-    if keywords != EXPECTED_KEYWORDS:
-        message = f"{path.name} keywords are {keywords}"
+    expected = KEYWORDS.get(namespace, EXPECTED_KEYWORDS)
+    if keywords != expected:
+        message = f"{path.name} keywords are {keywords}, expected {expected}"
         raise SystemExit(message)
 
 
@@ -291,8 +311,8 @@ def _validate_requires(path: Path, namespace: str, version: str, metadata: Messa
     if namespace == ROWX_CORE:
         _validate_core_requires(path, requirements)
         return
-    if namespace == ROWX_POSTGRES:
-        _validate_postgres_requires(path, version, requirements)
+    if namespace in {ROWX_POSTGRES, ROWX_SQLITE}:
+        _validate_backend_requires(path, version, requirements)
         return
     message = f"{path.name} has an unexpected distribution name"
     raise SystemExit(message)
@@ -508,7 +528,7 @@ def _validate_core_requires(path: Path, requirements: list[Requirement]) -> None
     raise SystemExit(message)
 
 
-def _validate_postgres_requires(path: Path, version: str, requirements: list[Requirement]) -> None:
+def _validate_backend_requires(path: Path, version: str, requirements: list[Requirement]) -> None:
     expected = f"{CORE_DISTRIBUTION}=={version}"
     found = [requirement if marker is None else f"{requirement}; {marker}" for requirement, marker in requirements]
     if found != [expected]:

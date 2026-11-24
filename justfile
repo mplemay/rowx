@@ -57,6 +57,12 @@ bench:
     uv run --no-sync python bench/fetch_100k.py
     uv run --no-sync python bench/pool_one.py
 
+# release build plus bench/fetch_100k_sqlite.py; rowx only, against a temporary SQLite file
+bench-sqlite:
+    uv sync --all-packages --group bench
+    uv run --no-sync maturin develop -m packages/rowx-sqlite/Cargo.toml --release
+    uv run --no-sync python bench/fetch_100k_sqlite.py
+
 # release build plus bench/fetch_drivers.py; needs ROWX_TEST_DSN
 bench-drivers:
     uv sync --all-packages --group bench-drivers
