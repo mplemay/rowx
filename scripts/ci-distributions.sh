@@ -16,6 +16,7 @@ fi
 uv build --package rowx --wheel --out-dir dist
 uv build --package rowx-core --wheel --out-dir dist
 uv build --package rowx-postgres --wheel --out-dir dist
+uv build --package rowx-sqlite --wheel --out-dir dist
 uv run python scripts/validate-distributions.py --contents-only
 bash scripts/smoke-package-boundaries.sh dist
 

@@ -97,6 +97,59 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  # rowx-sqlite ships the same five platform wheels as rowx-postgres, built from the bundled SQLite C source (MSVC on
+  # Windows). The artifacts are named `sqlite-wheel-*` so the `wheel-*` pattern of the rowx-postgres wheels never picks
+  # them up.
+  build-sqlite-wheels:
+    name: SQLite wheel (${{ matrix.name }})
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64
+            manylinux: "2014"
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: "2014"
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            interpreter: python
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Build the wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: -m packages/rowx-sqlite/Cargo.toml --release --locked --out dist-sqlite --interpreter ${{ matrix.interpreter || 'python3.14' }}
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sqlite-wheel-${{ matrix.name }}
+          path: dist-sqlite/*.whl
+          if-no-files-found: error
+
   build-pure:
     name: Pure Python distributions
     needs: validate
@@ -143,9 +196,32 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  build-sqlite-sdist:
+    name: SQLite sdist
+    needs: validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: -m packages/rowx-sqlite/Cargo.toml --out dist-sqlite
+
+      - name: Upload the sdist
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sqlite-sdist
+          path: dist-sqlite/*.tar.gz
+          if-no-files-found: error
+
   smoke-install:
     name: Install smoke test (${{ matrix.name }})
-    needs: [build-wheels, build-pure]
+    needs: [build-wheels, build-sqlite-wheels, build-pure]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -173,6 +249,11 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: sqlite-wheel-${{ matrix.name }}
+          path: dist/
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
           name: pure-distributions
           path: dist/
 
@@ -182,7 +263,7 @@ jobs:
 
   smoke:
     name: Smoke test (${{ matrix.name }}, ${{ matrix.python-version }})
-    needs: [build-wheels, build-pure]
+    needs: [build-wheels, build-sqlite-wheels, build-pure]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -215,6 +296,11 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wheel-${{ matrix.name }}
+          path: dist/
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sqlite-wheel-${{ matrix.name }}
           path: dist/
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -336,8 +422,10 @@ jobs:
       [
         validate,
         build-wheels,
+        build-sqlite-wheels,
         build-pure,
         build-sdist,
+        build-sqlite-sdist,
         build-embedded-wheels,
         smoke-embedded,
       ]
@@ -367,6 +455,17 @@ jobs:
           name: sdist
           path: dist/
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: sqlite-wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sqlite-sdist
+          path: dist/
+
       - name: Validate distributions
         env:
           VERSION: ${{ needs.validate.outputs.version }}
@@ -390,7 +489,7 @@ jobs:
 
   rebuild-sdists:
     name: Rebuild sdists offline
-    needs: [build-pure, build-sdist]
+    needs: [build-pure, build-sdist, build-sqlite-sdist]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -418,6 +517,11 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sdist
+          path: ${{ runner.temp }}/release-artifacts
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sqlite-sdist
           path: ${{ runner.temp }}/release-artifacts
 
       - name: Warm the uv build backend cache
@@ -469,6 +573,35 @@ jobs:
           export PYO3_PYTHON
           maturin build --offline --out "$RUNNER_TEMP/rebuilt-postgres"
 
+      - name: Fetch rowx-sqlite crates
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          stage="$RUNNER_TEMP/unpacked-sqlite"
+          mkdir -p "$stage"
+          tar -xzf "$RUNNER_TEMP/release-artifacts"/rowx_sqlite-*.tar.gz -C "$stage"
+          projects=( "$stage"/rowx_sqlite-*/ )
+          if (( ${#projects[@]} != 1 )); then
+            echo "expected one rowx-sqlite sdist" >&2
+            exit 1
+          fi
+          # rustup reads rust-toolchain.toml from the build directory; the sdist is outside the checkout
+          cp "$GITHUB_WORKSPACE/rust-toolchain.toml" "${projects[0]}/rust-toolchain.toml"
+          # no --locked: the sdist lock omits the unused wasmer-compiler patch, which cargo would otherwise record as a lock change
+          cargo fetch --manifest-path "${projects[0]}/Cargo.toml"
+
+      - name: Rebuild rowx-sqlite offline
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          projects=( "$RUNNER_TEMP/unpacked-sqlite"/rowx_sqlite-*/ )
+          cd "${projects[0]}"
+          PYO3_PYTHON="$(uv python find 3.14)"
+          export PYO3_PYTHON
+          maturin build --offline --out "$RUNNER_TEMP/rebuilt-sqlite"
+
   publish-core:
     name: Publish rowx-core
     if: startsWith(github.ref, 'refs/tags/v')
@@ -476,8 +609,10 @@ jobs:
       [
         validate,
         build-wheels,
+        build-sqlite-wheels,
         build-pure,
         build-sdist,
+        build-sqlite-sdist,
         smoke-install,
         smoke,
         check-distributions,
@@ -585,6 +720,70 @@ jobs:
       - name: Publish rowx-postgres
         run: uv publish --trusted-publishing always "dist/rowx-postgres/*"
 
+  publish-sqlite:
+    name: Publish rowx-sqlite
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.publish-core.result == 'success'
+    needs: publish-core
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rowx-sqlite
+    permissions:
+      id-token: write # PyPI trusted publishing (OIDC)
+
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: sqlite-wheel-*
+          path: dist/rowx-sqlite
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sqlite-sdist
+          path: dist/rowx-sqlite
+
+      - name: Select rowx-sqlite distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=( dist/rowx-sqlite/* )
+          wheels=( dist/rowx-sqlite/rowx_sqlite-*.whl )
+          sdists=( dist/rowx-sqlite/rowx_sqlite-*.tar.gz )
+          if (( ${#wheels[@]} == 0 || ${#sdists[@]} == 0 )); then
+            echo "rowx-sqlite wheels or sdist are missing" >&2
+            exit 1
+          fi
+          for path in "${files[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "unexpected release artifact: $path" >&2
+              exit 1
+            fi
+            name="$(basename "$path")"
+            case "$name" in
+              rowx_sqlite-*) ;;
+              *)
+                echo "unexpected release artifact: $name" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+
+      - name: Attest rowx-sqlite distributions
+        uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
+        with:
+          paths: dist/rowx-sqlite
+
+      - name: Publish rowx-sqlite
+        run: uv publish --trusted-publishing always "dist/rowx-sqlite/*"
+
   # the embedded wheels block the release: publish-rowx needs this job, and it needs rowx-postgres on PyPI first
   publish-embedded:
     name: Publish rowx-embedded
@@ -622,8 +821,9 @@ jobs:
     name: Publish rowx
     if: >-
       startsWith(github.ref, 'refs/tags/v') &&
-      needs.publish-postgres.result == 'success' && needs.publish-embedded.result == 'success'
-    needs: [publish-postgres, publish-embedded]
+      needs.publish-postgres.result == 'success' && needs.publish-embedded.result == 'success' &&
+      needs.publish-sqlite.result == 'success'
+    needs: [publish-postgres, publish-embedded, publish-sqlite]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -650,7 +850,7 @@ jobs:
             fi
             name="$(basename "$path")"
             case "$name" in
-              rowx_core-* | rowx_postgres-*) ;;
+              rowx_core-* | rowx_postgres-* | rowx_sqlite-*) ;;
               rowx-*)
                 cp "$path" dist/rowx/
                 copied=$((copied + 1))

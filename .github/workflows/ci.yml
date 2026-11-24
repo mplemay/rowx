@@ -300,6 +300,44 @@ jobs:
       - name: Validate workspace versions and wheel interfaces
         run: bash scripts/ci-distributions.sh
 
+  sqlite-wheel:
+    name: wheel/sqlite (3.14)(${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [Linux, macOS, Windows]
+        include:
+          - { platform: Linux, runner: ubuntu-latest }
+          - { platform: macOS, runner: macos-15 }
+          - { platform: Windows, runner: windows-latest }
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Install the pinned Rust toolchain
+        run: bash scripts/ci-rust-toolchain.sh
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ci-sqlite-wheel
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # builds the wheel, installs `rowx[sqlite]` in a clean environment, and runs a file-database query
+      - name: Build, install and smoke test the wheel
+        shell: bash
+        run: bash scripts/ci-sqlite-wheel.sh
+
   examples:
     name: test/examples (3.14)(Linux)
     runs-on: ubuntu-latest
@@ -415,6 +453,7 @@ jobs:
       - python-embedded
       - lint
       - distributions
+      - sqlite-wheel
       - examples
       - changelog
     if: always()

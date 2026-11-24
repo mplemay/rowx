@@ -137,6 +137,7 @@ validates every query against a live Postgres 18 database by preparing and descr
 | `just test-sqlite` | `just build-sqlite`, then `uv run pytest` over `packages/rowx-sqlite/src/rowx_sqlite/__tests__` |
 | `just db-up` / `just db-down` | Start or stop `postgres:18` |
 | `just bench` | Release build plus `bench/fetch_100k.py` |
+| `just bench-sqlite` | Release build of the SQLite extension plus `bench/fetch_100k_sqlite.py` (rowx only, a temporary file database) |
 
 - Never run a plain `cargo build` of the cdylib, because it doesn't link on macOS. Use `uv run ...` or
   `uv run maturin develop -m packages/rowx-postgres/Cargo.toml`, and add `--release` for benchmarks.

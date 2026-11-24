@@ -17,11 +17,21 @@ VERSION: Final[str] = "0.2.0"
 ROWX: Final[str] = "rowx"
 ROWX_CORE: Final[str] = "rowx_core"
 ROWX_POSTGRES: Final[str] = "rowx_postgres"
+ROWX_SQLITE: Final[str] = "rowx_sqlite"
 ROWX_WHEEL: Final[str] = "rowx-0.2.0-py3-none-any.whl"
 CORE_WHEEL: Final[str] = "rowx_core-0.2.0-py3-none-any.whl"
 POSTGRES_WHEEL: Final[str] = "rowx_postgres-0.2.0-py3-none-any.whl"
-WHEELS: Final[tuple[str, ...]] = (ROWX_WHEEL, CORE_WHEEL, POSTGRES_WHEEL)
+SQLITE_WHEEL: Final[str] = "rowx_sqlite-0.2.0-py3-none-any.whl"
+WHEELS: Final[tuple[str, ...]] = (ROWX_WHEEL, CORE_WHEEL, POSTGRES_WHEEL, SQLITE_WHEEL)
 KEYWORDS: Final[str] = "sql,postgresql,postgres,typed,async,t-string"
+SQLITE_KEYWORDS: Final[str] = "sql,sqlite,typed,async,t-string"
+NATIVE_PLATFORMS: Final[tuple[str, ...]] = (
+    "cp314-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64",
+    "cp314-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64",
+    "cp314-abi3-macosx_10_12_x86_64",
+    "cp314-abi3-macosx_11_0_arm64",
+    "cp314-abi3-win_amd64",
+)
 DOTTED_ROWX_POSTGRES: Final[str] = "rowx.postgres==0.2.0"
 REQUESTS_REQUIREMENT: Final[str] = "requests>=2"
 CORE_REQUIREMENT: Final[str] = f"rowx-core=={VERSION}"
@@ -54,15 +64,18 @@ DISTRIBUTION_NAMES: Final[dict[str, str]] = {
     ROWX: ROWX,
     ROWX_CORE: "rowx-core",
     ROWX_POSTGRES: "rowx-postgres",
+    ROWX_SQLITE: "rowx-sqlite",
 }
 LICENSE_PATHS: Final[dict[str, Path]] = {
     ROWX: REPO / "LICENSE",
     ROWX_CORE: REPO / "packages" / "rowx-core" / "LICENSE",
     ROWX_POSTGRES: REPO / "packages" / "rowx-postgres" / "LICENSE",
+    ROWX_SQLITE: REPO / "packages" / "rowx-sqlite" / "LICENSE",
 }
 
 type ValidateWheel = Callable[[Path], None]
 type ValidateSdist = Callable[[Path], None]
+type ValidateRelease = Callable[[Path, str], None]
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -76,9 +89,10 @@ class WheelBuild:
     license_header: str = "LICENSE"
     include_license: bool = True
     extras: tuple[tuple[str, bytes], ...] = ()
+    keywords: str | None = None
 
 
-def _load_checkers() -> tuple[ValidateWheel, ValidateSdist]:
+def _load_checkers() -> tuple[ValidateWheel, ValidateSdist, ValidateRelease]:
     spec = spec_from_file_location(CHECKER_MODULE, SCRIPT)
     assert spec is not None
     assert spec.loader is not None
@@ -88,12 +102,14 @@ def _load_checkers() -> tuple[ValidateWheel, ValidateSdist]:
     return (
         cast("ValidateWheel", module.__dict__["validate_wheel"]),
         cast("ValidateSdist", module.__dict__["validate_pure_sdist"]),
+        cast("ValidateRelease", module.__dict__["validate_release"]),
     )
 
 
-CHECKERS: Final[tuple[ValidateWheel, ValidateSdist]] = _load_checkers()
+CHECKERS: Final[tuple[ValidateWheel, ValidateSdist, ValidateRelease]] = _load_checkers()
 VALIDATE_WHEEL: Final[ValidateWheel] = CHECKERS[0]
 VALIDATE_PURE_SDIST: Final[ValidateSdist] = CHECKERS[1]
+VALIDATE_RELEASE: Final[ValidateRelease] = CHECKERS[2]
 
 
 def _embedded_requirement(*clauses: str, specifier: str = EMBEDDED_PIN) -> str:
@@ -117,7 +133,7 @@ def _default_requires(namespace: str) -> tuple[str, ...]:
     return (core,)
 
 
-def _metadata(name: str, version: str, requires: tuple[str, ...], license_header: str) -> str:
+def _metadata(name: str, version: str, requires: tuple[str, ...], license_header: str, keywords: str) -> str:
     lines = [
         "Metadata-Version: 2.4",
         f"Name: {name}",
@@ -126,7 +142,7 @@ def _metadata(name: str, version: str, requires: tuple[str, ...], license_header
         f"License-File: {license_header}",
     ]
     lines.extend(f"Classifier: {classifier}" for classifier in CLASSIFIERS)
-    lines.append(f"Keywords: {KEYWORDS}")
+    lines.append(f"Keywords: {keywords}")
     lines.extend(f"Project-URL: {label}, {url}" for label, url in PROJECT_URLS)
     lines.extend(f"Requires-Dist: {requirement}" for requirement in requires)
     return "\n".join(lines) + "\n"
@@ -138,12 +154,13 @@ def _write_wheel(directory: Path, build: WheelBuild) -> Path:
     name = DISTRIBUTION_NAMES[namespace] if build.metadata_name is None else build.metadata_name
     version = VERSION if build.metadata_version is None else build.metadata_version
     requires = _default_requires(namespace) if build.requires is None else build.requires
+    keywords = (SQLITE_KEYWORDS if namespace == ROWX_SQLITE else KEYWORDS) if build.keywords is None else build.keywords
     path = directory / build.filename
     with ZipFile(path, "w") as wheel:
         wheel.writestr(f"{namespace}/py.typed", b"")
         wheel.writestr(
             f"{dist_info}/METADATA",
-            _metadata(name, version, requires, build.license_header),
+            _metadata(name, version, requires, build.license_header, keywords),
         )
         if build.include_license:
             entry = f"{dist_info}/licenses/LICENSE" if build.license_entry is None else build.license_entry
@@ -470,3 +487,124 @@ def test_pure_sdist_rejects_native_extension(tmp_path: Path, filename: str, memb
 def test_pure_sdist_allows_python_sources(tmp_path: Path) -> None:
     path = _write_sdist(tmp_path, "rowx-0.2.0.tar.gz", (("rowx-0.2.0/rowx/__init__.py", b""),))
     VALIDATE_PURE_SDIST(path)
+
+
+def test_sqlite_wheel_with_native_extension_passes_contents_validation(tmp_path: Path) -> None:
+    path = _write_wheel(
+        tmp_path,
+        WheelBuild(filename=SQLITE_WHEEL, extras=((f"{ROWX_SQLITE}/_core.abi3.so", b"native"),)),
+    )
+    VALIDATE_WHEEL(path)
+
+
+def test_postgres_wheel_with_native_extension_still_passes(tmp_path: Path) -> None:
+    path = _write_wheel(
+        tmp_path,
+        WheelBuild(filename=POSTGRES_WHEEL, extras=((f"{ROWX_POSTGRES}/_core.abi3.so", b"native"),)),
+    )
+    VALIDATE_WHEEL(path)
+
+
+@pytest.mark.parametrize("filename", [ROWX_WHEEL, CORE_WHEEL])
+def test_pure_wheels_still_reject_native_extensions(tmp_path: Path, filename: str) -> None:
+    namespace = filename.split("-", maxsplit=1)[0]
+    path = _write_wheel(tmp_path, WheelBuild(filename=filename, extras=((f"{namespace}/_core.so", b"native"),)))
+    with pytest.raises(SystemExit, match="must be pure Python"):
+        VALIDATE_WHEEL(path)
+
+
+@pytest.mark.parametrize(
+    "requires",
+    [
+        pytest.param((), id="missing-core"),
+        pytest.param((f"rowx-core=={WRONG_VERSION}",), id="wrong-core-pin"),
+        pytest.param((CORE_REQUIREMENT, "pathspec<2,>=1.1.1"), id="extra-requirement"),
+        pytest.param((f"{CORE_REQUIREMENT} ; extra == 'sqlite'",), id="marker"),
+    ],
+)
+def test_sqlite_wheel_rejects_wrong_requires_dist(tmp_path: Path, requires: tuple[str, ...]) -> None:
+    path = _write_wheel(tmp_path, WheelBuild(filename=SQLITE_WHEEL, requires=requires))
+    with pytest.raises(SystemExit, match="requirements are"):
+        VALIDATE_WHEEL(path)
+
+
+def test_sqlite_wheel_rejects_postgres_keywords(tmp_path: Path) -> None:
+    path = _write_wheel(tmp_path, WheelBuild(filename=SQLITE_WHEEL, keywords=KEYWORDS))
+    with pytest.raises(SystemExit, match="keywords are"):
+        VALIDATE_WHEEL(path)
+
+
+def test_postgres_wheel_rejects_sqlite_keywords(tmp_path: Path) -> None:
+    path = _write_wheel(tmp_path, WheelBuild(filename=POSTGRES_WHEEL, keywords=SQLITE_KEYWORDS))
+    with pytest.raises(SystemExit, match="keywords are"):
+        VALIDATE_WHEEL(path)
+
+
+def test_sqlite_wheel_rejects_postgres_license_bytes(tmp_path: Path) -> None:
+    body = b"x" + LICENSE_PATHS[ROWX_SQLITE].read_bytes()
+    path = _write_wheel(tmp_path, WheelBuild(filename=SQLITE_WHEEL, license_body=body))
+    with pytest.raises(SystemExit, match=r"license bytes do not match packages/rowx-sqlite/LICENSE"):
+        VALIDATE_WHEEL(path)
+
+
+def test_sqlite_wheel_name_mismatch_fails(tmp_path: Path) -> None:
+    path = _write_wheel(tmp_path, WheelBuild(filename=SQLITE_WHEEL, metadata_name="rowx-postgres"))
+    with pytest.raises(SystemExit, match="Name is 'rowx-postgres'"):
+        VALIDATE_WHEEL(path)
+
+
+def _write_release(
+    directory: Path, *, omit: tuple[str, ...] = (), sqlite_requires: tuple[str, ...] | None = None
+) -> None:
+    for filename in (ROWX_WHEEL, CORE_WHEEL):
+        _write_wheel(directory, WheelBuild(filename=filename))
+    for namespace in (ROWX_POSTGRES, ROWX_SQLITE):
+        for platform in NATIVE_PLATFORMS:
+            filename = f"{namespace}-{VERSION}-{platform}.whl"
+            requires = sqlite_requires if namespace == ROWX_SQLITE else None
+            _write_wheel(
+                directory,
+                WheelBuild(filename=filename, requires=requires, extras=((f"{namespace}/_core.abi3.so", b"native"),)),
+            )
+    for namespace in (ROWX, ROWX_CORE, ROWX_POSTGRES, ROWX_SQLITE):
+        _write_sdist(directory, f"{namespace}-{VERSION}.tar.gz", ((f"{namespace}-{VERSION}/PKG-INFO", b""),))
+    for name in omit:
+        (directory / name).unlink()
+
+
+def test_full_release_of_sixteen_files_passes(tmp_path: Path) -> None:
+    _write_release(tmp_path)
+    assert len(list(tmp_path.iterdir())) == 16
+    VALIDATE_RELEASE(tmp_path, VERSION)
+
+
+def test_release_without_the_sqlite_sdist_fails(tmp_path: Path) -> None:
+    _write_release(tmp_path, omit=(f"{ROWX_SQLITE}-{VERSION}.tar.gz",))
+    with pytest.raises(SystemExit, match="Unexpected distributions"):
+        VALIDATE_RELEASE(tmp_path, VERSION)
+
+
+def test_release_with_a_wrong_version_sqlite_sdist_fails(tmp_path: Path) -> None:
+    _write_release(tmp_path, omit=(f"{ROWX_SQLITE}-{VERSION}.tar.gz",))
+    _write_sdist(tmp_path, f"{ROWX_SQLITE}-{WRONG_VERSION}.tar.gz", ())
+    with pytest.raises(SystemExit, match="rowx_sqlite source distribution is missing"):
+        VALIDATE_RELEASE(tmp_path, VERSION)
+
+
+@pytest.mark.parametrize("platform", NATIVE_PLATFORMS)
+def test_release_missing_one_sqlite_platform_wheel_fails(tmp_path: Path, platform: str) -> None:
+    _write_release(tmp_path, omit=(f"{ROWX_SQLITE}-{VERSION}-{platform}.whl",))
+    with pytest.raises(SystemExit, match="Unexpected distributions"):
+        VALIDATE_RELEASE(tmp_path, VERSION)
+
+
+def test_release_missing_one_postgres_platform_wheel_still_fails(tmp_path: Path) -> None:
+    _write_release(tmp_path, omit=(f"{ROWX_POSTGRES}-{VERSION}-{NATIVE_PLATFORMS[-1]}.whl",))
+    with pytest.raises(SystemExit, match="Unexpected distributions"):
+        VALIDATE_RELEASE(tmp_path, VERSION)
+
+
+def test_release_with_a_wrong_sqlite_requires_dist_fails(tmp_path: Path) -> None:
+    _write_release(tmp_path, sqlite_requires=(f"rowx-core=={WRONG_VERSION}",))
+    with pytest.raises(SystemExit, match="requirements are"):
+        VALIDATE_RELEASE(tmp_path, VERSION)
