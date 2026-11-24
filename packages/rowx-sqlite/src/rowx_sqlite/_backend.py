@@ -8,6 +8,7 @@ from rowx_sqlite._compiler import COMPILER
 from rowx_sqlite._core import map_columns, type_table
 from rowx_sqlite._scratch import SqliteScratch
 from rowx_sqlite._services import SqliteMigrations, in_memory, open_checker
+from rowx_sqlite._testing import provisioner
 
 # the type keys that take any Python value; `any` is not one, since it decodes to one of the four storage classes
 JSON_KEYS: Final[frozenset[str]] = frozenset({"json"})
@@ -66,5 +67,6 @@ def load() -> Backend:
         admin_factory=SqliteAdmin,
         migration_factory=SqliteMigrations,
         scratch_factory=SqliteScratch,
+        testing_factory=provisioner,
         memory_factory=in_memory,
     )

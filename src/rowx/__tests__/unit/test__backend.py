@@ -7,7 +7,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 import pytest
-from rowx_core.backend import UnsupportedCapabilityError
 
 from rowx._backend import LOADED, BackendMissing, UnsupportedSchemeError, backend_for, module_for
 
@@ -296,12 +295,11 @@ def test_schemeless_strings_that_are_not_database_files_stay_postgres(dsn: str) 
     assert module_for(dsn) == "rowx_postgres._backend"
 
 
-def test_a_sqlite_backend_supports_checking_and_file_administration_but_not_testing() -> None:
+def test_a_sqlite_backend_supports_checking_file_administration_and_testing() -> None:
     backend = backend_for("sqlite:///x.db")
     assert backend.checker().describer == "SQLite"
     assert backend.admin("sqlite:///x.db").database == "x.db"
-    with pytest.raises(UnsupportedCapabilityError):
-        backend.testing("sqlite:///x.db")
+    assert backend.testing("sqlite:///x.db").identity
 
 
 def test_a_sqlite_dsn_without_the_package_asks_for_the_sqlite_extra(monkeypatch: pytest.MonkeyPatch) -> None:
