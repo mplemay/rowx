@@ -117,19 +117,17 @@ def main() -> int:
     return 0
 
 
+def _has_platform_wheels(files: list[Path], namespace: str, version: str) -> bool:
+    wheels = [path.name for path in files if path.name.startswith(f"{namespace}-{version}-") and path.suffix == ".whl"]
+    # each tag tuple must occur in exactly one wheel name of the native distribution
+    return len(wheels) == EXPECTED_WHEEL_COUNT and all(
+        sum(all(tag in name for tag in tags) for name in wheels) == MATCH_COUNT for tags in WHEEL_TAGS
+    )
+
+
 def validate_release(directory: Path, version: str) -> None:
     files = list(directory.iterdir())
-    # each tag tuple must occur in exactly one wheel name of every native distribution
-    matched = True
-    for namespace in NATIVE_NAMESPACES:
-        wheels = [
-            path.name for path in files if path.name.startswith(f"{namespace}-{version}-") and path.suffix == ".whl"
-        ]
-        matched = (
-            matched
-            and len(wheels) == EXPECTED_WHEEL_COUNT
-            and all(sum(all(tag in name for tag in tags) for name in wheels) == MATCH_COUNT for tags in WHEEL_TAGS)
-        )
+    matched = all(_has_platform_wheels(files, namespace, version) for namespace in NATIVE_NAMESPACES)
     if len(files) != EXPECTED_FILE_COUNT or not matched:
         message = f"Unexpected distributions: {[path.name for path in files]}"
         raise SystemExit(message)

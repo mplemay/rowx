@@ -26,7 +26,6 @@ uv pip install --refresh --python "$venv/bin/python" "${rowx_wheels[0]}[postgres
 cd "$venv"
 "$venv/bin/python" -c "import rowx, rowx_postgres, rowx_postgres._core"
 "$venv/bin/python" -c "import importlib.resources as r; assert r.files('rowx_postgres').joinpath('_core.pyi').is_file()"
-"$venv/bin/python" -I -c "import rowx_sqlite, rowx_sqlite._core"
 "$venv/bin/python" -I "$root/scripts/smoke-sqlite-wheel.py"
 "$venv/bin/python" "$root/examples/app/main.py"
 "$venv/bin/rowx" check "$root/examples/app"

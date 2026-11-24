@@ -545,62 +545,20 @@ jobs:
           done
 
       - name: Fetch rowx-postgres crates
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          stage="$RUNNER_TEMP/unpacked-postgres"
-          mkdir -p "$stage"
-          tar -xzf "$RUNNER_TEMP/release-artifacts"/rowx_postgres-*.tar.gz -C "$stage"
-          projects=( "$stage"/rowx_postgres-*/ )
-          if (( ${#projects[@]} != 1 )); then
-            echo "expected one rowx-postgres sdist" >&2
-            exit 1
-          fi
-          # rustup reads rust-toolchain.toml from the build directory; the sdist is outside the checkout
-          cp "$GITHUB_WORKSPACE/rust-toolchain.toml" "${projects[0]}/rust-toolchain.toml"
-          # no --locked: the sdist lock omits the unused wasmer-compiler patch, which cargo would otherwise record as a lock change
-          cargo fetch --manifest-path "${projects[0]}/Cargo.toml"
+        run: bash scripts/rebuild-sdist-offline.sh fetch postgres
 
       - name: Rebuild rowx-postgres offline
         env:
           CARGO_NET_OFFLINE: "true"
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          projects=( "$RUNNER_TEMP/unpacked-postgres"/rowx_postgres-*/ )
-          cd "${projects[0]}"
-          PYO3_PYTHON="$(uv python find 3.14)"
-          export PYO3_PYTHON
-          maturin build --offline --out "$RUNNER_TEMP/rebuilt-postgres"
+        run: bash scripts/rebuild-sdist-offline.sh build postgres
 
       - name: Fetch rowx-sqlite crates
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          stage="$RUNNER_TEMP/unpacked-sqlite"
-          mkdir -p "$stage"
-          tar -xzf "$RUNNER_TEMP/release-artifacts"/rowx_sqlite-*.tar.gz -C "$stage"
-          projects=( "$stage"/rowx_sqlite-*/ )
-          if (( ${#projects[@]} != 1 )); then
-            echo "expected one rowx-sqlite sdist" >&2
-            exit 1
-          fi
-          # rustup reads rust-toolchain.toml from the build directory; the sdist is outside the checkout
-          cp "$GITHUB_WORKSPACE/rust-toolchain.toml" "${projects[0]}/rust-toolchain.toml"
-          # no --locked: the sdist lock omits the unused wasmer-compiler patch, which cargo would otherwise record as a lock change
-          cargo fetch --manifest-path "${projects[0]}/Cargo.toml"
+        run: bash scripts/rebuild-sdist-offline.sh fetch sqlite
 
       - name: Rebuild rowx-sqlite offline
         env:
           CARGO_NET_OFFLINE: "true"
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          projects=( "$RUNNER_TEMP/unpacked-sqlite"/rowx_sqlite-*/ )
-          cd "${projects[0]}"
-          PYO3_PYTHON="$(uv python find 3.14)"
-          export PYO3_PYTHON
-          maturin build --offline --out "$RUNNER_TEMP/rebuilt-sqlite"
+        run: bash scripts/rebuild-sdist-offline.sh build sqlite
 
   publish-core:
     name: Publish rowx-core
@@ -683,30 +641,7 @@ jobs:
 
       - name: Select rowx-postgres distributions
         shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=( dist/rowx-postgres/* )
-          wheels=( dist/rowx-postgres/rowx_postgres-*.whl )
-          sdists=( dist/rowx-postgres/rowx_postgres-*.tar.gz )
-          if (( ${#wheels[@]} == 0 || ${#sdists[@]} == 0 )); then
-            echo "rowx-postgres wheels or sdist are missing" >&2
-            exit 1
-          fi
-          for path in "${files[@]}"; do
-            if [[ ! -f "$path" ]]; then
-              echo "unexpected release artifact: $path" >&2
-              exit 1
-            fi
-            name="$(basename "$path")"
-            case "$name" in
-              rowx_postgres-*) ;;
-              *)
-                echo "unexpected release artifact: $name" >&2
-                exit 1
-                ;;
-            esac
-          done
+        run: bash scripts/select-release-distributions.sh dist/rowx-postgres rowx_postgres
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -747,30 +682,7 @@ jobs:
 
       - name: Select rowx-sqlite distributions
         shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=( dist/rowx-sqlite/* )
-          wheels=( dist/rowx-sqlite/rowx_sqlite-*.whl )
-          sdists=( dist/rowx-sqlite/rowx_sqlite-*.tar.gz )
-          if (( ${#wheels[@]} == 0 || ${#sdists[@]} == 0 )); then
-            echo "rowx-sqlite wheels or sdist are missing" >&2
-            exit 1
-          fi
-          for path in "${files[@]}"; do
-            if [[ ! -f "$path" ]]; then
-              echo "unexpected release artifact: $path" >&2
-              exit 1
-            fi
-            name="$(basename "$path")"
-            case "$name" in
-              rowx_sqlite-*) ;;
-              *)
-                echo "unexpected release artifact: $name" >&2
-                exit 1
-                ;;
-            esac
-          done
+        run: bash scripts/select-release-distributions.sh dist/rowx-sqlite rowx_sqlite
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:

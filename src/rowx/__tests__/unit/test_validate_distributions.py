@@ -25,6 +25,7 @@ SQLITE_WHEEL: Final[str] = "rowx_sqlite-0.2.0-py3-none-any.whl"
 WHEELS: Final[tuple[str, ...]] = (ROWX_WHEEL, CORE_WHEEL, POSTGRES_WHEEL, SQLITE_WHEEL)
 KEYWORDS: Final[str] = "sql,postgresql,postgres,typed,async,t-string"
 SQLITE_KEYWORDS: Final[str] = "sql,sqlite,typed,async,t-string"
+DEFAULT_KEYWORDS: Final[dict[str, str]] = {ROWX_SQLITE: SQLITE_KEYWORDS}
 NATIVE_PLATFORMS: Final[tuple[str, ...]] = (
     "cp314-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64",
     "cp314-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64",
@@ -154,7 +155,7 @@ def _write_wheel(directory: Path, build: WheelBuild) -> Path:
     name = DISTRIBUTION_NAMES[namespace] if build.metadata_name is None else build.metadata_name
     version = VERSION if build.metadata_version is None else build.metadata_version
     requires = _default_requires(namespace) if build.requires is None else build.requires
-    keywords = (SQLITE_KEYWORDS if namespace == ROWX_SQLITE else KEYWORDS) if build.keywords is None else build.keywords
+    keywords = DEFAULT_KEYWORDS.get(namespace, KEYWORDS) if build.keywords is None else build.keywords
     path = directory / build.filename
     with ZipFile(path, "w") as wheel:
         wheel.writestr(f"{namespace}/py.typed", b"")
@@ -540,7 +541,7 @@ def test_postgres_wheel_rejects_sqlite_keywords(tmp_path: Path) -> None:
         VALIDATE_WHEEL(path)
 
 
-def test_sqlite_wheel_rejects_postgres_license_bytes(tmp_path: Path) -> None:
+def test_sqlite_wheel_rejects_tampered_license_bytes(tmp_path: Path) -> None:
     body = b"x" + LICENSE_PATHS[ROWX_SQLITE].read_bytes()
     path = _write_wheel(tmp_path, WheelBuild(filename=SQLITE_WHEEL, license_body=body))
     with pytest.raises(SystemExit, match=r"license bytes do not match packages/rowx-sqlite/LICENSE"):
@@ -553,6 +554,14 @@ def test_sqlite_wheel_name_mismatch_fails(tmp_path: Path) -> None:
         VALIDATE_WHEEL(path)
 
 
+def _write_native_wheel(directory: Path, filename: str, requires: tuple[str, ...] | None = None) -> None:
+    namespace = filename.split("-", maxsplit=1)[0]
+    _write_wheel(
+        directory,
+        WheelBuild(filename=filename, requires=requires, extras=((f"{namespace}/_core.abi3.so", b"native"),)),
+    )
+
+
 def _write_release(
     directory: Path, *, omit: tuple[str, ...] = (), sqlite_requires: tuple[str, ...] | None = None
 ) -> None:
@@ -560,12 +569,8 @@ def _write_release(
         _write_wheel(directory, WheelBuild(filename=filename))
     for namespace in (ROWX_POSTGRES, ROWX_SQLITE):
         for platform in NATIVE_PLATFORMS:
-            filename = f"{namespace}-{VERSION}-{platform}.whl"
             requires = sqlite_requires if namespace == ROWX_SQLITE else None
-            _write_wheel(
-                directory,
-                WheelBuild(filename=filename, requires=requires, extras=((f"{namespace}/_core.abi3.so", b"native"),)),
-            )
+            _write_native_wheel(directory, f"{namespace}-{VERSION}-{platform}.whl", requires)
     for namespace in (ROWX, ROWX_CORE, ROWX_POSTGRES, ROWX_SQLITE):
         _write_sdist(directory, f"{namespace}-{VERSION}.tar.gz", ((f"{namespace}-{VERSION}/PKG-INFO", b""),))
     for name in omit:
@@ -591,15 +596,34 @@ def test_release_with_a_wrong_version_sqlite_sdist_fails(tmp_path: Path) -> None
         VALIDATE_RELEASE(tmp_path, VERSION)
 
 
-@pytest.mark.parametrize("platform", NATIVE_PLATFORMS)
-def test_release_missing_one_sqlite_platform_wheel_fails(tmp_path: Path, platform: str) -> None:
-    _write_release(tmp_path, omit=(f"{ROWX_SQLITE}-{VERSION}-{platform}.whl",))
+def _swap_for_duplicate_platform(directory: Path, namespace: str, index: int) -> None:
+    # the file count stays at sixteen, so only the per-platform tag matching can reject the release
+    (directory / f"{namespace}-{VERSION}-{NATIVE_PLATFORMS[index]}.whl").unlink()
+    other = NATIVE_PLATFORMS[(index + 1) % len(NATIVE_PLATFORMS)]
+    _write_native_wheel(directory, f"{namespace}-{VERSION}-1-{other}.whl")
+
+
+@pytest.mark.parametrize("index", range(len(NATIVE_PLATFORMS)))
+def test_release_missing_one_sqlite_platform_wheel_fails(tmp_path: Path, index: int) -> None:
+    _write_release(tmp_path)
+    _swap_for_duplicate_platform(tmp_path, ROWX_SQLITE, index)
+    assert len(list(tmp_path.iterdir())) == 16
     with pytest.raises(SystemExit, match="Unexpected distributions"):
         VALIDATE_RELEASE(tmp_path, VERSION)
 
 
 def test_release_missing_one_postgres_platform_wheel_still_fails(tmp_path: Path) -> None:
-    _write_release(tmp_path, omit=(f"{ROWX_POSTGRES}-{VERSION}-{NATIVE_PLATFORMS[-1]}.whl",))
+    _write_release(tmp_path)
+    _swap_for_duplicate_platform(tmp_path, ROWX_POSTGRES, len(NATIVE_PLATFORMS) - 1)
+    assert len(list(tmp_path.iterdir())) == 16
+    with pytest.raises(SystemExit, match="Unexpected distributions"):
+        VALIDATE_RELEASE(tmp_path, VERSION)
+
+
+def test_release_with_four_sqlite_wheels_and_an_extra_file_fails(tmp_path: Path) -> None:
+    _write_release(tmp_path, omit=(f"{ROWX_SQLITE}-{VERSION}-{NATIVE_PLATFORMS[-1]}.whl",))
+    (tmp_path / "unrelated.txt").write_bytes(b"")
+    assert len(list(tmp_path.iterdir())) == 16
     with pytest.raises(SystemExit, match="Unexpected distributions"):
         VALIDATE_RELEASE(tmp_path, VERSION)
 

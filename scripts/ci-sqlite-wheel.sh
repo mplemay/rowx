@@ -23,5 +23,8 @@ uv run --no-project --python 3.14 python "$root/scripts/validate-distributions.p
 rowx_wheels=("$wheels"/rowx-*.whl)
 core_wheels=("$wheels"/rowx_core-*.whl)
 sqlite_wheels=("$wheels"/rowx_sqlite-*.whl)
-cd "$work/empty"
-uv run --no-project --refresh --python 3.14 --with "${rowx_wheels[0]}[sqlite]" --with "${core_wheels[0]}" --with "${sqlite_wheels[0]}" python -I "$root/scripts/smoke-sqlite-wheel.py"
+# a subshell keeps this shell out of $work, so the EXIT trap can delete it (a shell's own cwd cannot be removed on Windows)
+(
+  cd "$work/empty"
+  uv run --no-project --refresh --python 3.14 --with "${rowx_wheels[0]}[sqlite]" --with "${core_wheels[0]}" --with "${sqlite_wheels[0]}" python -I "$root/scripts/smoke-sqlite-wheel.py"
+)

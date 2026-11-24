@@ -22,5 +22,6 @@ bash scripts/smoke-package-boundaries.sh dist
 
 uv venv --python 3.14 "$RUNNER_TEMP/rowx-wheel-types"
 rowx_wheels=(dist/rowx-*.whl)
-uv pip install --refresh --python "$RUNNER_TEMP/rowx-wheel-types/bin/python" "${rowx_wheels[0]}[postgres]" dist/rowx_core-*.whl dist/rowx_postgres-*.whl
+uv pip install --refresh --python "$RUNNER_TEMP/rowx-wheel-types/bin/python" "${rowx_wheels[0]}[postgres,sqlite]" dist/rowx_core-*.whl dist/rowx_postgres-*.whl dist/rowx_sqlite-*.whl
 ROWX_TYPING_PYTHON="$RUNNER_TEMP/rowx-wheel-types/bin/python" uv run pytest packages/rowx-postgres/src/rowx_postgres/__tests__/unit/test__executor.py
+ROWX_TYPING_PYTHON="$RUNNER_TEMP/rowx-wheel-types/bin/python" uv run pytest packages/rowx-sqlite/src/rowx_sqlite/__tests__/unit/typing

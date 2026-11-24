@@ -39,7 +39,8 @@ async def exercise(directory: Path) -> None:
         applied = await Migrator(migrations).run(conn)
         require(len(applied) == 1, f"the migrator applied {len(applied)} migrations, expected 1")
 
-    # the DSN grammar: a drive letter path is `sqlite:///C:/...` and a POSIX path is `sqlite:////tmp/...`
+    # the DSN grammar: the path follows `sqlite:///` and is percent-decoded, so quote() turns a drive letter path into
+    # `sqlite:///C%3A/...` and a POSIX path into `sqlite:////tmp/...`
     dsn = "sqlite:///" + quote(database.as_posix())
     async with await connect(dsn) as conn:
         items = await query[tuple[int, str]](t"SELECT id, name FROM items").all(conn)
