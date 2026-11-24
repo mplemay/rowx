@@ -6,10 +6,10 @@ import shutil
 import sys
 import tempfile
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, override
 
-from rowx_core import query_unchecked
 from rowx_core.backend import Provisioner
 from rowx_core.errors import DatabaseError, InterfaceError
 
@@ -17,7 +17,7 @@ from rowx_sqlite._connection import Connection, connect
 from rowx_sqlite._core import create_database, drop_database, sqlite_version
 from rowx_sqlite._options import ConnectOptions
 from rowx_sqlite._pool import Pool
-from rowx_sqlite._scratch import SIDECARS, scratch_url
+from rowx_sqlite._scratch import SIDECARS, scratch_url, use_rollback_journal
 
 if sys.platform == "win32":
     import msvcrt
@@ -25,7 +25,7 @@ else:
     from fcntl import LOCK_EX, LOCK_NB, flock
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Callable
 
     from rowx_core.backend import CacheDirectory, MigrationService
 
@@ -104,6 +104,12 @@ def project_base(name: str) -> str:
     return name.rpartition("_")[0]
 
 
+def check_project(name: str, project: str) -> None:
+    if not project_base(name).endswith(f"_{project}"):
+        msg = f"the template name {name} does not belong to the project {project}"
+        raise ValueError(msg)
+
+
 def temporary_path(final: Path) -> Path:
     return final.with_name(f"{final.stem}{TMP_MARKER}{os.getpid()}_{secrets.token_hex(4)}{DATABASE_SUFFIX}")
 
@@ -148,16 +154,6 @@ def release_hold(path: Path, descriptor: int) -> None:
         path.unlink()
 
 
-async def rollback_journal(path: Path) -> None:
-    # a writable connection leaves the file in WAL mode, whose `-wal` would hold content that a rename of the main
-    # file alone loses; the rollback journal keeps everything in the one file
-    async with await connect(ConnectOptions(path=str(path), mode="rw")) as connection:
-        mode = await query_unchecked[str](t"PRAGMA journal_mode = DELETE").one(connection)
-    if mode.lower() != "delete":
-        msg = f"could not switch the template database to the rollback journal; it stays in {mode} mode"
-        raise InterfaceError(msg)
-
-
 async def build(migrator: MigrationService | None, final: Path) -> None:
     temporary = temporary_path(final)
 
@@ -165,7 +161,7 @@ async def build(migrator: MigrationService | None, final: Path) -> None:
         await finish(create_database(str(temporary)))
         if migrator is not None:
             await migrator.run_on(scratch_url(temporary))
-        await rollback_journal(temporary)
+        await use_rollback_journal(temporary, "template database")
         await finish(asyncio.to_thread(os.replace, temporary, final))
 
     try:
@@ -182,16 +178,28 @@ async def drop_stale(stale: list[Path]) -> None:
             await finish(drop_database(str(found)))
 
 
+# `finish` alone would drop the hold that the thread took while the cancel waited for it, and nothing else knows it
+async def claim_hold(final: Path) -> tuple[Path, int]:
+    taking = asyncio.ensure_future(asyncio.to_thread(take_hold, final))
+    try:
+        return await asyncio.shield(taking)
+    except asyncio.CancelledError:
+        await asyncio.wait([taking])
+        if not taking.cancelled() and taking.exception() is None:
+            release_hold(*taking.result())
+        raise
+
+
 async def claim_template(
     migrator: MigrationService | None, directory: Path, final: Path, *, keep_stale: bool
 ) -> tuple[Path, int]:
     base = project_base(final.stem)
     await finish(asyncio.to_thread(sweep_temporaries, directory, base))
     stale = await finish(asyncio.to_thread(find_stale, directory, base, final))
-    if not await asyncio.to_thread(final.exists):
+    if not await finish(asyncio.to_thread(final.exists)):
         await build(migrator, final)
     # taken under the project lock, so no cleanup can drop the template between its lookup and the claim
-    hold = await asyncio.to_thread(take_hold, final)
+    hold = await claim_hold(final)
     try:
         if not keep_stale:
             await drop_stale(stale)
@@ -211,18 +219,12 @@ async def locked_template(
         unlock(descriptor)
 
 
+@dataclass(slots=True, kw_only=True, frozen=True)
 class SqliteHold:
-    def __init__(self, path: Path, descriptor: int, scratch: Path | None, provisioner: SqliteProvisioner) -> None:
-        self._path = path
-        self._descriptor = descriptor
-        self._scratch = scratch
-        self._provisioner = provisioner
+    release: Callable[[], Awaitable[None]]
 
     async def close(self) -> None:
-        await self._provisioner.release()
-        await asyncio.to_thread(release_hold, self._path, self._descriptor)
-        if self._scratch is not None:
-            await asyncio.to_thread(shutil.rmtree, self._scratch, ignore_errors=True)
+        await self.release()
 
 
 class SqliteProvisioner(Provisioner):
@@ -245,7 +247,7 @@ class SqliteProvisioner(Provisioner):
     async def ensure_template(
         self, migrator: MigrationService | None, name: str, *, keep_stale: bool, project: str
     ) -> SqliteHold:
-        del project
+        check_project(name, project)
         scratch: Path | None = None
         if self._cache is not None:
             directory = await asyncio.to_thread(self._cache, CACHE_NAME)
@@ -260,9 +262,17 @@ class SqliteProvisioner(Provisioner):
                 await asyncio.to_thread(shutil.rmtree, scratch, ignore_errors=True)
             raise
         self._template = (name, final)
-        return SqliteHold(*hold, scratch, self)
+        path, descriptor = hold
 
-    async def release(self) -> None:
+        async def release() -> None:
+            await self._release()
+            await asyncio.to_thread(release_hold, path, descriptor)
+            if scratch is not None:
+                await asyncio.to_thread(shutil.rmtree, scratch, ignore_errors=True)
+
+        return SqliteHold(release=release)
+
+    async def _release(self) -> None:
         self._template = None
         live, self._live = list(self._live.values()), {}
         clones, self._clones = self._clones, None

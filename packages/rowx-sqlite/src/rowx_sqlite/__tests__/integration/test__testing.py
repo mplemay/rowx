@@ -1,12 +1,13 @@
 import asyncio
 import os
 import secrets
+import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, override
 
 import pytest
 from rowx_core.errors import InterfaceError
-from rowx_sqlite import ConnectOptions, Migrator
+from rowx_sqlite import ConnectOptions, Migrator, _testing
 from rowx_sqlite._core import sqlite_version
 from rowx_sqlite._services import SqliteMigrations
 from rowx_sqlite._testing import (
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from rowx_core.backend import Provisioner
+    from rowx_core.migrations import MigrationResult
 
 pytest_plugins = ["pytester"]
 
@@ -119,6 +121,28 @@ def test_empty(rowx_connection):
 """
 
 
+POOL_INNER: Final[str] = """
+import asyncio
+
+from rowx import query_unchecked
+
+
+def test_pool(rowx_pool):
+    asyncio.run(query_unchecked[tuple[()]](t"INSERT INTO items (id) VALUES (1)").execute(rowx_pool))
+    (found,) = asyncio.run(query_unchecked[tuple[int]](t"SELECT count(*) FROM items").one(rowx_pool))
+    assert found == 1
+"""
+
+
+class CountingMigrations(SqliteMigrations):
+    runs = 0
+
+    @override
+    async def run_on(self, dsn: str) -> tuple[MigrationResult, ...]:
+        self.runs += 1
+        return await super().run_on(dsn)
+
+
 class Project:
     def __init__(self, pytester: pytest.Pytester) -> None:
         self.pytester = pytester
@@ -202,6 +226,12 @@ def test_each_test_gets_its_own_database(project: Project) -> None:
     assert project.leftovers() == []
     # the URL only selected the backend
     assert not (project.pytester.path / "selector.db").exists()
+    # the template is left in the rollback journal: one file, no WAL side files
+    template = project.cache / project.templates()[0]
+    header = template.read_bytes()[:20]
+    assert header[18:20] == bytes([1, 1])
+    assert not Path(f"{template}-wal").exists()
+    assert not Path(f"{template}-shm").exists()
 
 
 def test_the_template_is_reused_across_sessions(project: Project) -> None:
@@ -309,6 +339,18 @@ def test_an_invalid_url_fails_the_session_with_a_message(project: Project, monke
     result.stdout.fnmatch_lines(["*rowx: *SQLite URL*"])
 
 
+def test_the_memory_selector_is_accepted(project: Project, monkeypatch: pytest.MonkeyPatch) -> None:
+    provisioner("sqlite::memory:")
+    monkeypatch.setenv("DATABASE_URL", "sqlite::memory:")
+    project.run().assert_outcomes(passed=2)
+    assert project.leftovers() == []
+
+
+def test_the_pool_fixture_runs_queries(project: Project) -> None:
+    project.pytester.makepyfile(test_inner=POOL_INNER)
+    project.run().assert_outcomes(passed=1)
+
+
 def test_the_provisioner_rejects_an_invalid_url() -> None:
     with pytest.raises((ValueError, InterfaceError)):
         SqliteProvisioner("sqlite://host/x.db")
@@ -364,3 +406,56 @@ def test_a_hold_is_exclusive_while_it_is_taken(tmp_path: Path) -> None:
     again = try_lock(path)
     assert again is not None
     unlock(again)
+
+
+def test_a_mismatched_project_is_rejected_before_touching_the_filesystem(tmp_path: Path) -> None:
+    owner = provisioner(f"sqlite:///{tmp_path / 'x.db'}", cache=directory_in(tmp_path / "cache"))
+    name = f"{TEMPLATE_PREFIX}{'a' * 8}_{'b' * HEX_LENGTH}"
+    with pytest.raises(ValueError, match="does not belong"):
+        asyncio.run(owner.ensure_template(None, name, keep_stale=False, project="c" * 8))
+    assert not (tmp_path / "cache").exists()
+
+
+def test_concurrent_provisioners_build_the_template_once(project: Project) -> None:
+    service = CountingMigrations(project.url, project.migrations)
+    name = project.template()
+
+    async def scenario() -> None:
+        first, second = project.provisioner(), project.provisioner()
+        holds = await asyncio.gather(
+            first.ensure_template(service, name, keep_stale=False, project=project.prefix),
+            second.ensure_template(service, name, keep_stale=False, project=project.prefix),
+        )
+        assert project.templates() == [f"{name}.db"]
+        assert not [path for path in project.cache.iterdir() if TMP_MARKER in path.name]
+        for hold in holds:
+            await hold.close()
+
+    asyncio.run(scenario())
+    assert service.runs == 1
+    assert project.leftovers() == []
+
+
+def test_a_cancel_while_the_hold_is_taken_leaves_no_hold_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    started, proceed = threading.Event(), threading.Event()
+    real = _testing.take_hold
+
+    def blocked(final: Path) -> tuple[Path, int]:
+        started.set()
+        proceed.wait()
+        return real(final)
+
+    monkeypatch.setattr(_testing, "take_hold", blocked)
+    owner = provisioner(f"sqlite:///{tmp_path / 'x.db'}", cache=directory_in(tmp_path))
+    name = f"{TEMPLATE_PREFIX}{'a' * 8}_{'b' * HEX_LENGTH}"
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(owner.ensure_template(None, name, keep_stale=False, project="a" * 8))
+        await asyncio.to_thread(started.wait)
+        task.cancel()
+        proceed.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert not list((tmp_path / CACHE_NAME).glob(f"*{HOLD_SUFFIX}"))

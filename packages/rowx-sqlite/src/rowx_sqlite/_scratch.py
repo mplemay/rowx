@@ -35,6 +35,16 @@ def scratch_url(path: PurePath) -> str:
     return f"sqlite:///{quote(path.as_posix(), safe='/:')}"
 
 
+# the open itself switches a file to WAL, so the switch back comes after it; the connection is closed before anything
+# else opens the file
+async def use_rollback_journal(path: Path, what: str) -> None:
+    async with await connect(ConnectOptions(path=str(path), mode="rw")) as connection:
+        mode = await query_unchecked[str](t"PRAGMA journal_mode = DELETE").one(connection)
+    if mode.lower() != "delete":
+        msg = f"could not switch the {what} to the rollback journal; it stays in {mode} mode"
+        raise InterfaceError(msg)
+
+
 # an in-memory database is invisible to every other connection, so the scratch is one temporary file that all the
 # describe workers share
 class SqliteScratch:
@@ -69,7 +79,7 @@ class SqliteScratch:
             await migrator.run_on(self.url)
             # a writable connection leaves the file in WAL mode, which a `mode=ro` reader cannot open without a
             # writable `-shm`; the rollback journal has no such file
-            await self._rollback_journal()
+            await use_rollback_journal(self._path, "scratch database")
             yield ScratchBuild(urls=(self.url,), seconds=perf_counter() - started)
         finally:
             await asyncio.to_thread(self._remove)
@@ -80,15 +90,6 @@ class SqliteScratch:
         # claimed by the creation itself, so a cancelled await still leaves a file that `sweep` owns
         self._pending = True
         os.close(descriptor)
-
-    async def _rollback_journal(self) -> None:
-        # the open itself switches a file to WAL, so the switch back comes after it; the connection is closed before
-        # any worker opens the file
-        async with await connect(ConnectOptions(path=str(self._path), mode="rw")) as connection:
-            mode = await query_unchecked[str](t"PRAGMA journal_mode = DELETE").one(connection)
-        if mode.lower() != "delete":
-            msg = f"could not switch the scratch database to the rollback journal; it stays in {mode} mode"
-            raise InterfaceError(msg)
 
     def _remove(self) -> None:
         for suffix in SIDECARS:
