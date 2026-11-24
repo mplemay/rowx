@@ -639,9 +639,33 @@ jobs:
           name: sdist
           path: dist/rowx-postgres
 
+      # Inline because publish jobs run no checkout (no repository scripts are available).
       - name: Select rowx-postgres distributions
         shell: bash
-        run: bash scripts/select-release-distributions.sh dist/rowx-postgres rowx_postgres
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=( dist/rowx-postgres/* )
+          wheels=( dist/rowx-postgres/rowx_postgres-*.whl )
+          sdists=( dist/rowx-postgres/rowx_postgres-*.tar.gz )
+          if (( ${#wheels[@]} == 0 || ${#sdists[@]} == 0 )); then
+            echo "rowx-postgres wheels or sdist are missing" >&2
+            exit 1
+          fi
+          for path in "${files[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "unexpected release artifact: $path" >&2
+              exit 1
+            fi
+            name="$(basename "$path")"
+            case "$name" in
+              rowx_postgres-*) ;;
+              *)
+                echo "unexpected release artifact: $name" >&2
+                exit 1
+                ;;
+            esac
+          done
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -680,9 +704,33 @@ jobs:
           name: sqlite-sdist
           path: dist/rowx-sqlite
 
+      # Inline because publish jobs run no checkout (no repository scripts are available).
       - name: Select rowx-sqlite distributions
         shell: bash
-        run: bash scripts/select-release-distributions.sh dist/rowx-sqlite rowx_sqlite
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=( dist/rowx-sqlite/* )
+          wheels=( dist/rowx-sqlite/rowx_sqlite-*.whl )
+          sdists=( dist/rowx-sqlite/rowx_sqlite-*.tar.gz )
+          if (( ${#wheels[@]} == 0 || ${#sdists[@]} == 0 )); then
+            echo "rowx-sqlite wheels or sdist are missing" >&2
+            exit 1
+          fi
+          for path in "${files[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "unexpected release artifact: $path" >&2
+              exit 1
+            fi
+            name="$(basename "$path")"
+            case "$name" in
+              rowx_sqlite-*) ;;
+              *)
+                echo "unexpected release artifact: $name" >&2
+                exit 1
+                ;;
+            esac
+          done
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
