@@ -3,6 +3,7 @@ set -euo pipefail
 
 uv sync --frozen --no-install-package rowx-postgres --no-install-package rowx-sqlite --no-install-package rowx-embedded
 uv run maturin develop --locked -m packages/rowx-postgres/Cargo.toml
+uv run maturin develop --locked -m packages/rowx-sqlite/Cargo.toml
 
 EVENT_NAME=pull_request GITHUB_OUTPUT="$RUNNER_TEMP/rowx-release-version.txt" uv run python scripts/validate-release-versions.py
 cargo metadata --locked --format-version 1 --no-deps >/dev/null

@@ -1,3 +1,4 @@
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -544,7 +545,9 @@ def test_postgres_wheel_rejects_sqlite_keywords(tmp_path: Path) -> None:
 def test_sqlite_wheel_rejects_tampered_license_bytes(tmp_path: Path) -> None:
     body = b"x" + LICENSE_PATHS[ROWX_SQLITE].read_bytes()
     path = _write_wheel(tmp_path, WheelBuild(filename=SQLITE_WHEEL, license_body=body))
-    with pytest.raises(SystemExit, match=r"license bytes do not match packages/rowx-sqlite/LICENSE"):
+    with pytest.raises(
+        SystemExit, match=re.escape(f"license bytes do not match {Path('packages', 'rowx-sqlite', 'LICENSE')}")
+    ):
         VALIDATE_WHEEL(path)
 
 
