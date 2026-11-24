@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -10,17 +9,15 @@ from rowx_embedded import _testing as module
 from rowx_embedded._instance import SnapshotRejectedError
 from rowx_embedded._testing import (
     EmbeddedProvisioner,
-    lock,
     publish_blocking,
     read_verified,
     remove_stale_blocking,
     snapshot_path,
-    try_lock,
-    unlock,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
 PROJECT: Final[str] = "0a1b2c3d"
 NAME: Final[str] = f"rowx_tpl_{PROJECT}_00112233445566ff"
@@ -84,60 +81,8 @@ def test_stale_cleanup_removes_only_this_projects_other_snapshots(tmp_path: Path
     ])
 
 
-def test_the_lock_is_exclusive_until_released(tmp_path: Path) -> None:
-    path = tmp_path / "p.lock"
-    first = try_lock(path)
-    assert first is not None
-    assert try_lock(path) is None
-    unlock(first)
-    second = try_lock(path)
-    assert second is not None
-    unlock(second)
-
-
 def entries(path: Path) -> int:
     return sum(1 for _ in path.iterdir())
-
-
-def open_descriptors() -> int:
-    return sum(1 for _ in Path("/dev/fd").iterdir())
-
-
-def test_a_cancelled_wait_for_the_lock_leaks_no_descriptor(tmp_path: Path) -> None:
-    path = tmp_path / "p.lock"
-    held = try_lock(path)
-    assert held is not None
-
-    async def scenario() -> None:
-        before = open_descriptors()
-        waiting = asyncio.create_task(lock(path))
-        await asyncio.sleep(0.2)
-        waiting.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await waiting
-        assert open_descriptors() == before
-
-    asyncio.run(scenario())
-    unlock(held)
-    # the lock was never taken by the cancelled waiter
-    again = try_lock(path)
-    assert again is not None
-    unlock(again)
-
-
-def test_a_waiting_lock_is_taken_once_released(tmp_path: Path) -> None:
-    path = tmp_path / "p.lock"
-    held = try_lock(path)
-    assert held is not None
-
-    async def scenario() -> int:
-        waiting = asyncio.create_task(lock(path))
-        await asyncio.sleep(0.1)
-        assert not waiting.done()
-        unlock(held)
-        return await waiting
-
-    unlock(asyncio.run(scenario()))
 
 
 @dataclass(slots=True)

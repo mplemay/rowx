@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Final, override
 
 import pytest
 from rowx_core.errors import InterfaceError
+from rowx_core.filelock import try_lock, unlock
 from rowx_sqlite import ConnectOptions, Migrator, _testing
 from rowx_sqlite._core import sqlite_version
 from rowx_sqlite._services import SqliteMigrations
@@ -18,8 +19,6 @@ from rowx_sqlite._testing import (
     provisioner,
     release_hold,
     take_hold,
-    try_lock,
-    unlock,
 )
 
 from rowx.testing import TEMPLATE_PREFIX, TEST_PREFIX, project_prefix, template_name
