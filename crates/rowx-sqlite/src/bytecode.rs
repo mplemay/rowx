@@ -615,9 +615,9 @@ fn scalar(name: &str, args: &[Val]) -> Val {
 fn aggregate(name: &str, count: usize) -> Val {
     match (name.to_ascii_lowercase().as_str(), count) {
         ("count", _) => Val::of(INT),
-        ("total", 1) => Val::of(REAL),
+        // a total of +inf and -inf is NaN, which is NULL
+        ("total" | "avg", 1) => Val::maybe(REAL, true),
         ("sum", 1) => Val::maybe(INT | REAL, true),
-        ("avg", 1) => Val::maybe(REAL, true),
         ("group_concat" | "string_agg", _) => Val::maybe(TEXT, true),
         // min and max of no rows are NULL, and otherwise one of the values
         _ => Val::unknown(),
@@ -1034,9 +1034,19 @@ impl Machine<'_> {
         let (p1, p2, p3) = (insn.p1, insn.p2, insn.p3);
         match op {
             // a division or remainder by zero is NULL, so those two are always nullable
-            Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Remainder => {
-                let null =
-                    st.get(p1).null || st.get(p2).null || matches!(op, Op::Divide | Op::Remainder);
+            Op::Divide | Op::Remainder => st.set(p3, Val::maybe(INT | REAL, true)),
+            // A floating-point NaN is NULL. An infinity plus or minus a finite integer is infinite, and an
+            // integer overflow is a finite real, but two reals may cancel to NaN; `0 * inf` is NaN too, so a
+            // product needs both operands to be integers.
+            Op::Add | Op::Subtract | Op::Multiply => {
+                let (left, right) = (st.get(p1), st.get(p2));
+                let certain = |val: &Val| val.classes == INT && !val.wild;
+                let never_nan = if matches!(op, Op::Multiply) {
+                    certain(&left) && certain(&right)
+                } else {
+                    certain(&left) || certain(&right)
+                };
+                let null = left.null || right.null || !never_nan;
                 st.set(p3, Val::maybe(INT | REAL, null));
             }
             Op::Concat => {

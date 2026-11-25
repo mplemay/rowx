@@ -167,9 +167,9 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
     "implicit rowid": ("SELECT rowid FROM r", (("rowid", False, NN),)),
     "count star": ("SELECT count(*) AS n FROM s", (("n", False, COMPUTED),)),
     "count star over an empty group": ("SELECT count(*) AS n FROM t WHERE 0", (("n", False, COMPUTED),)),
-    "total is never null, sum is": (
+    "total may be NaN, which is null, and sum may be null": (
         "SELECT total(a) AS t, sum(a) AS s FROM t",
-        (("t", False, COMPUTED), ("s", True, UNPROVEN)),
+        (("t", True, UNPROVEN), ("s", True, UNPROVEN)),
     ),
     "avg max and min are not proven": (
         "SELECT avg(a) AS v, max(a) AS x, min(a) AS n FROM t",

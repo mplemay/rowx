@@ -113,13 +113,18 @@ async def test_describe_proves_a_plain_table_column_and_leaves_a_left_join_view_
 @pytest.mark.asyncio
 async def test_describe_proves_a_computed_column_from_the_bytecode(session: SqliteCheckerSession) -> None:
     described = await session.describe(
-        "SELECT count(*) AS n, total(id) AS t, coalesce(name, 'x') AS c, 'x' AS s FROM users"
+        "SELECT count(*) AS n, typeof(id) AS t, coalesce(name, 'x') AS c, 'x' AS s FROM users"
     )
     assert [(c.name, c.type_key, c.type_name, c.nullable, c.reason) for c in described.columns] == [
         ("n", "integer", "INTEGER", False, "ComputedExpr"),
-        ("t", "real", "REAL", False, "ComputedExpr"),
+        ("t", "text", "TEXT", False, "ComputedExpr"),
         ("c", None, "", False, "ComputedExpr"),
         ("s", "text", "TEXT", False, "ComputedExpr"),
+    ]
+    # a total of +inf and -inf is NaN, which SQLite returns as NULL
+    total = await session.describe("SELECT total(id) AS t FROM users")
+    assert [(c.name, c.type_key, c.nullable, c.reason) for c in total.columns] == [
+        ("t", "real", True, "Unproven"),
     ]
     casts = await session.describe("SELECT CAST(id AS TEXT) AS k, upper(name) AS u FROM users")
     assert [(c.name, c.type_key, c.type_name, c.nullable, c.reason) for c in casts.columns] == [

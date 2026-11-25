@@ -1,9 +1,10 @@
+use std::cell::Cell;
 use std::collections::BTreeSet;
 
 use rusqlite::Connection;
 
 use super::{Class, MODELED_OPCODES, Op, REVIEWED_SQLITE_VERSION, Silent, analyze, read_program};
-use crate::describe::{Construct, Structure, describe};
+use crate::describe::{ANALYSES, Construct, Structure, describe};
 use crate::types::Kind;
 
 const SCHEMA: &str = "
@@ -12,6 +13,7 @@ const SCHEMA: &str = "
     CREATE TABLE s (id INTEGER PRIMARY KEY, x TEXT NOT NULL, y TEXT, r REAL NOT NULL, n INTEGER) STRICT;
     CREATE TABLE w (k INTEGER PRIMARY KEY, v TEXT) WITHOUT ROWID;
     CREATE TABLE log (m TEXT);
+    CREATE TABLE nr (r REAL NOT NULL, r2 REAL NOT NULL, i INTEGER NOT NULL, j INTEGER NOT NULL) STRICT;
     CREATE TABLE big (a INTEGER NOT NULL, b INTEGER, c TEXT);
     CREATE INDEX big_ab ON big (a, b);
     CREATE INDEX big_c ON big (c);
@@ -76,9 +78,9 @@ const CASES: &[Case] = &[
         Cols(&[(I, true, false)]),
     ),
     case(
-        "count and total over an empty table",
+        "count is never NULL, total may be NaN",
         "SELECT count(b), total(a) FROM t",
-        Cols(&[(I, true, false), (R, true, false)]),
+        Cols(&[(I, true, false), (R, false, false)]),
     ),
     case(
         "sum, max, min are nullable and untyped, avg is a nullable real",
@@ -94,7 +96,7 @@ const CASES: &[Case] = &[
         "strict aggregates",
         "SELECT total(r), sum(r), avg(n), count(n) FROM s",
         Cols(&[
-            (R, true, false),
+            (R, false, false),
             (U, false, false),
             (R, false, false),
             (I, true, false),
@@ -187,6 +189,33 @@ const CASES: &[Case] = &[
             (U, false, false),
             (U, true, false),
         ]),
+    ),
+    case(
+        "a real sum, difference or product may be NaN, which is NULL",
+        "SELECT r + r2, r - r2, r * r2, r * 0, r * i, r + i, i - r, i + j, i - j, i * j, i * 2 FROM nr",
+        Cols(&[
+            (U, false, false),
+            (U, false, false),
+            (U, false, false),
+            (U, false, false),
+            (U, false, false),
+            (U, true, false),
+            (U, true, false),
+            (U, true, false),
+            (U, true, false),
+            (U, true, false),
+            (U, true, false),
+        ]),
+    ),
+    case(
+        "an integer primary key plus a literal is never NULL",
+        "SELECT id + 1, id - 1, 1 + id FROM s",
+        Cols(&[(U, true, false), (U, true, false), (U, true, false)]),
+    ),
+    case(
+        "total may be NaN even over a real column",
+        "SELECT total(r) FROM nr",
+        Cols(&[(R, false, false)]),
     ),
     case(
         "bit operators are integers",
@@ -426,7 +455,8 @@ const CASES: &[Case] = &[
         "SELECT 9223372036854775000, a * 2, a | 1, a >> 1 FROM big",
         Cols(&[
             (I, true, false),
-            (U, true, false),
+            // the column is not certainly an integer, so the product may be NaN
+            (U, false, false),
             (I, true, false),
             (I, true, false),
         ]),
@@ -828,6 +858,43 @@ fn the_function_model_matches_sqlite() -> TestResult {
     Ok(())
 }
 
+// A floating-point NaN is stored as NULL, so only the arithmetic that cannot produce one may be non-null.
+#[test]
+fn a_nan_result_is_null_in_sqlite() -> TestResult {
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch(
+        "CREATE TABLE f (p REAL NOT NULL, q REAL NOT NULL, z INTEGER NOT NULL);
+         INSERT INTO f VALUES (9e999, -9e999, 0), (9e999, 9e999, 0);
+         CREATE TABLE g (v REAL NOT NULL);
+         INSERT INTO g VALUES (9e999), (-9e999);",
+    )?;
+    for (expression, expected) in [
+        // computed from stored values, so SQLite cannot fold them
+        ("(SELECT p + q FROM f LIMIT 1)", "null"),
+        ("(SELECT p - p FROM f LIMIT 1)", "null"),
+        ("(SELECT p * z FROM f LIMIT 1)", "null"),
+        ("(SELECT p + z FROM f LIMIT 1)", "real"),
+        ("(SELECT p - z FROM f LIMIT 1)", "real"),
+        ("(SELECT total(v) FROM g)", "null"),
+        ("(SELECT abs(p) FROM f LIMIT 1)", "real"),
+        ("(SELECT round(p) FROM f LIMIT 1)", "real"),
+        ("(SELECT round(p, 2) FROM f LIMIT 1)", "real"),
+        ("(SELECT CAST(p AS REAL) FROM f LIMIT 1)", "real"),
+        ("(SELECT CAST(p AS NUMERIC) FROM f LIMIT 1)", "real"),
+        ("(SELECT sum(v) FROM g WHERE v > 0)", "real"),
+        ("(SELECT avg(v) FROM g WHERE v > 0)", "real"),
+        ("9e999 + -9e999", "null"),
+        ("9e999 - 9e999", "null"),
+        ("0 * 9e999", "null"),
+    ] {
+        let got: String = conn.query_row(&format!("SELECT typeof({expression})"), [], |row| {
+            row.get(0)
+        })?;
+        assert_eq!(got, expected, "{expression}");
+    }
+    Ok(())
+}
+
 fn from(tables: &[&str]) -> Structure {
     Structure {
         sources: tables.iter().map(|name| vec![(*name).to_owned()]).collect(),
@@ -875,11 +942,11 @@ fn expression_describe_cases() -> Vec<DescribeCase> {
             ],
         ),
         (
-            "total is a non-null real and avg a nullable real",
+            "total and avg are nullable reals",
             "SELECT total(a) AS t, avg(a) AS m FROM t",
             with(Construct::Aggregate, &["t"]),
             vec![
-                (REAL_KIND, "REAL", false, "ComputedExpr", None),
+                (REAL_KIND, "REAL", true, "Unproven", Some("aggregate")),
                 (REAL_KIND, "REAL", true, "Unproven", Some("aggregate")),
             ],
         ),
@@ -950,6 +1017,15 @@ fn origin_describe_cases() -> Vec<DescribeCase> {
             "SELECT a FROM t UNION ALL SELECT a FROM big",
             with(Construct::CompoundSelect, &["t", "big"]),
             vec![(INT_KIND, "INTEGER", false, "ComputedExpr", None)],
+        ),
+        (
+            "a unary plus keeps the read but SQLite names no origin, so it is computed",
+            "SELECT +t.a, t.a FROM t LEFT JOIN s ON 1",
+            with(Construct::OuterJoin, &["t", "s"]),
+            vec![
+                (None, "", false, "ComputedExpr", None),
+                (INT_KIND, "INTEGER", false, "NotNullColumn", None),
+            ],
         ),
         (
             "a union all of the same column stays a column",
@@ -1106,6 +1182,28 @@ fn describe_applies_the_bytecode_only_to_unproven_columns() -> TestResult {
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    Ok(())
+}
+
+fn analyses_run(sql: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let conn = database()?;
+    let before = ANALYSES.with(Cell::get);
+    describe(&conn, sql, &from(&["t"]))?;
+    Ok(ANALYSES.with(Cell::get) - before)
+}
+
+#[test]
+fn the_bytecode_is_analysed_only_for_a_column_that_needs_it() -> TestResult {
+    // proven by the existing rule and typed by its declaration
+    assert_eq!(analyses_run("SELECT id, a, b FROM t")?, 0);
+    // an override decides the nullability and the declaration the type
+    assert_eq!(analyses_run("SELECT a AS \"x!\", b AS \"y?\" FROM t")?, 0);
+    // a parameter-only statement has no column
+    assert_eq!(analyses_run("INSERT INTO log (m) VALUES ('x')")?, 0);
+    // an unproven expression needs it, once however many columns do
+    assert_eq!(analyses_run("SELECT a + 1, a * 2 FROM t")?, 1);
+    // so does an untyped column the existing rule proves, for its class
+    assert_eq!(analyses_run("SELECT c FROM t")?, 1);
     Ok(())
 }
 

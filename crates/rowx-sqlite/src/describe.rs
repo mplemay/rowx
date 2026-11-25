@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::OnceCell;
 use std::collections::HashMap;
 
@@ -131,6 +133,12 @@ fn schemas(parts: &[String]) -> Vec<&str> {
         [schema, _] => vec![schema.as_str()],
         _ => Vec::new(),
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    // how many times a describe has run the bytecode analysis on this thread
+    pub(crate) static ANALYSES: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn quote(name: &str) -> String {
@@ -292,6 +300,8 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
     let fact = |index: usize| {
         facts
             .get_or_init(|| {
+                #[cfg(test)]
+                ANALYSES.with(|count| count.set(count.get() + 1));
                 (stmt.is_explain() == 0)
                     .then(|| analyze(conn, sql).ok())
                     .flatten()
@@ -341,8 +351,14 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
                 Ok(not_null || rowid)
             }
         };
-        let found = fact(index);
-        let (nullable, reason) = verdict(over, proven, found);
+        // the bytecode answers a nullability the existing rule left unproven and a class the declaration lacks
+        let untyped = declared.is_none_or(|name| name.trim().is_empty());
+        let found = if (over.is_none() && proven.is_err()) || untyped {
+            fact(index)
+        } else {
+            None
+        };
+        let (nullable, reason) = verdict(over, proven, found, origin.is_some());
         let (kind, type_name) = column_type(declared, found);
         columns.push(ColumnInfo {
             name,
@@ -362,6 +378,7 @@ fn verdict(
     over: Option<Override>,
     proven: Result<bool, String>,
     found: Option<Fact>,
+    has_origin: bool,
 ) -> (bool, NullReason) {
     match over {
         Some(Override::Bang) => (false, NullReason::OverrideBang),
@@ -372,7 +389,8 @@ fn verdict(
             Err(cause) => match found {
                 Some(fact) if fact.non_null => (
                     false,
-                    if fact.pass_through {
+                    // SQLite names no origin for a read it does not report as a column, such as `+a`
+                    if fact.pass_through && has_origin {
                         NullReason::NotNullColumn
                     } else {
                         NullReason::ComputedExpr

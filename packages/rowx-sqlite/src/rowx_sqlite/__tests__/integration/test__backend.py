@@ -130,7 +130,6 @@ def test_a_left_join_view_column_is_unproven(project: CheckProject) -> None:
     [
         'query[tuple[int]](t"SELECT count(*) FROM users")\n',
         'query[tuple[int]](t"SELECT count(email) FROM users")\n',
-        'query[tuple[float]](t"SELECT total(age) FROM users")\n',
         'query[tuple[int, int]](t"SELECT count(*), 1 FROM users")\n',
         "query[tuple[str, str]](t\"SELECT 'x', CAST(age AS TEXT) FROM users\")\n",
         "query[tuple[str]](t\"SELECT coalesce(email, 'none') FROM users\")\n",
@@ -152,6 +151,7 @@ def test_a_computed_column_passes_without_an_override(project: CheckProject, sou
         'query[tuple[int]](t"SELECT sum(age) FROM users")\n',
         'query[tuple[int]](t"SELECT max(age) FROM users")\n',
         'query[tuple[float]](t"SELECT avg(age) FROM users")\n',
+        'query[tuple[float]](t"SELECT total(age) FROM users")\n',
         'query[tuple[int]](t"SELECT age / 1 FROM users")\n',
         "query[tuple[str]](t\"SELECT email || 'x' FROM users\")\n",
         'query[tuple[int]](t"SELECT nullif(age, 1) FROM users")\n',
