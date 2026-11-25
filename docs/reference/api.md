@@ -41,9 +41,10 @@ The block is an illustration. It is not a runnable snippet.
 
 ## Public surface
 
-The `rowx` distribution's public imports are `rowx`, `rowx.core`, `rowx.errors`, and `rowx.postgres`.
-`from rowx import query` and `from rowx_core import query` are the same object. `from rowx.postgres import connect`
-and `from rowx_postgres import connect` are the same object. `import rowx` loads no database backend.
+The `rowx` distribution's public imports are `rowx`, `rowx.core`, `rowx.errors`, `rowx.postgres` and `rowx.sqlite`.
+`from rowx import query` and `from rowx_core import query` are the same object. `from rowx.postgres import connect` and
+`from rowx_postgres import connect` are the same object, and so are `rowx.sqlite` and `rowx_sqlite`. `import rowx` loads
+no database backend.
 
 A runtime-only install of `rowx-core` and `rowx-postgres` does not include the `rowx` package, so it imports
 `rowx_core` and `rowx_postgres`.
@@ -67,10 +68,12 @@ The template surface is `Compiled`, `Compiler`, `TemplatePlan`, `Parameter`, `Id
 | `rowx`, also `rowx_core` | `query`, `query_unchecked`, `QueryResult`, `RowStream`, `Executor`, `Connection`, `Pool`, `Transaction`, and the errors |
 | `rowx.core`, also `rowx_core` | `Acquire`, `Compiled`, `Compiler`, `FieldPlan`, `Identifier`, `Parameter`, `ShapeSpec`, `StreamHandle`, `TemplatePlan`, `ValueClass`, `capture_template`, `iter_parts` |
 | `rowx.postgres`, also `rowx_postgres` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `RESET_QUERY`, `Range`, `Interval`, `Money`, `Cube`, `Point`, `Line`, `LineSegment`, `Box`, `Path`, `Polygon`, `Circle`, `Migrator`, `Migration`, `MigrationStatus`, `MigrationResult` |
+| `rowx.sqlite`, also `rowx_sqlite` | `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction`, `Migrator` |
 | `rowx.errors` | the same error classes, defined in `rowx_core.errors` |
 | `rowx.testing` | opt-in pytest plugin ([Test plugin](../contributing/testing.md#test-plugin)) |
 
-Application code uses `query` from `rowx` and the driver from `rowx.postgres`.
+Application code uses `query` from `rowx` and the driver from `rowx.postgres` or `rowx.sqlite`. Nothing SQLite-specific
+is in the top-level `rowx` namespace.
 
 `query` and `query_unchecked` are siblings. Neither subclasses the other, and user code must not subclass either.
 The checker reports `indirect-query` if it does. `query` and `query_unchecked` set no `__slots__`, so each instance
@@ -128,7 +131,20 @@ DSN with `options=-c search_path=…` **MUST** round-trip. Keys and values are v
 runs `RESET_QUERY`. `transaction` starts a transaction. `detach` removes a pooled connection from the pool. One
 operation at a time; a second raises `ConnectionBusyError`.
 
-`Pool` does no IO in the constructor. `async with` calls `open` and `close`. Semantics are in
+### `rowx.sqlite`
+
+```python
+from rowx.sqlite import ConnectOptions, Connection, Migrator, Pool, Transaction, connect
+```
+
+The `rowx-sqlite` distribution imports the same objects from `rowx_sqlite`. The query methods above are unchanged, with
+one difference: `execute` is `InterfaceError` for a statement that returns rows, and a string of several statements is
+`InterfaceError`. `ConnectOptions` has `path`, `memory`, `mode`, `connect_timeout`, `statement_timeout`,
+`statement_cache_size` and `read_only` ([SQLite URLs](driver.md#sqlite-urls)). `transaction(mode=None, read_only=False)`
+is in [SQLite transactions](driver.md#sqlite-transactions), `Pool` in [SQLite pool](driver.md#sqlite-pool), and
+`Migrator` in [Migrations](migrations.md#sqlite). A standalone `Connection` has no `detach`.
+
+`Pool` (PostgreSQL) does no IO in the constructor. `async with` calls `open` and `close`. Semantics are in
 [Pool](driver.md#pool). Waiting past `acquire_timeout` raises `PoolTimeoutError`. A closed pool raises
 `InterfaceError`. Pool operations never raise `ConnectionBusyError`.
 
@@ -446,10 +462,10 @@ subclasses are not provided.
 `DatabaseError.sqlstate` keeps its 5-character contract for every backend. `DatabaseError.code` is an optional
 `str | None` carrying the backend's native error name; for PostgreSQL it is `None`.
 
-Planned ([#334](https://github.com/mplemay/rowx/issues/334)): for SQLite, `code` is always the extended result code
-name, such as `SQLITE_CONSTRAINT_UNIQUE`. For SQLite, `.position` is derived from `sqlite3_error_offset` (a 0-based
-UTF-8 byte offset) and converted to the same 1-based character index; it is `None` when SQLite reports no offset.
-SQLite codes map to a SQLSTATE as follows, with the `SQLITE_` prefix omitted:
+For SQLite, `code` is always the extended result code name, such as `SQLITE_CONSTRAINT_UNIQUE`. `.position` is derived
+from `sqlite3_error_offset` (a 0-based UTF-8 byte offset) and converted to the same 1-based character index. It is
+`None` when SQLite reports no offset, as for a missing table. `rows_affected` is `0` for DDL. A SQLite code maps to a
+SQLSTATE as follows, with the `SQLITE_` prefix omitted:
 
 | SQLite code | `sqlstate` |
 |---|---|
@@ -469,3 +485,9 @@ SQLite codes map to a SQLSTATE as follows, with the `SQLITE_` prefix omitted:
 | `CORRUPT` | `XX001` |
 | `NOTADB` | `XX002` |
 | Every other code, including plain `SQLITE_ERROR` (syntax error, missing table, missing column) | `HY000` |
+
+The table is first match. The admin operations add `42P04`, `3D000`, `55006`, `55P03` and `XX002`
+([SQLite administration](migrations.md#sqlite-administration)), and the failed-WAL-switch and aborted-transaction cases
+are in [SQLite pragmas](driver.md#sqlite-pragmas) and [SQLite cancellation](driver.md#sqlite-cancellation). A SQL that
+is not exactly one statement, in the checker, is `HY000` with no `code`. Other errors are the shared classes: a bad
+value is `EncodeError` or `DecodeError`, and a parameter count above the connection's limit is `InterfaceError`.

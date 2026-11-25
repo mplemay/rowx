@@ -1,12 +1,13 @@
 # Checker
 
 `rowx check` finds every `query[T]` and `query_unchecked[T]` built from `rowx` or `rowx_core`, prepares
-each checked statement against a live Postgres 18 database, describes it, and compares the result with `T`. It never
-imports or executes application code. A query is checked at its construction site, including a declaration nothing
-calls. Runtime compilation uses the executor you pass. The checker does not infer that flow.
+each checked statement against a live database, describes it, and compares the result with `T`. The database is
+PostgreSQL 18 or SQLite, and the URL selects which. It never imports or executes application code. A query is checked
+at its construction site, including a declaration nothing calls. Runtime compilation uses the executor you pass. The
+checker does not infer that flow.
 
-Planned ([#334](https://github.com/mplemay/rowx/issues/334)): it can also check against a SQLite database (see the
-SQLite URL note under [Config](#config)).
+Everything on this page is PostgreSQL unless it says otherwise. What SQLite changes is [SQLite](#sqlite): it proves
+less, its parameters and some columns are untyped, and its errors carry a `code`.
 
 The checked import roots are `from rowx import query` and `from rowx_core import query`.
 
@@ -55,7 +56,8 @@ does not apply `.gitignore` or `.ignore`. The loading-revision and building-sche
 before the 0/1/2 return. The URL is `--database-url` or `ROWX_DATABASE_URL`. It does not read `database_url_env`.
 An `embedded://` URL builds each revision's schema in memory, with one instance per describe worker, instead of a
 scratch database on a server, and prints no disposable-server warning; an embedded directory URL is a `CheckError`
-(exit 2). See [Embedded Postgres](embedded.md#checker).
+(exit 2). See [Embedded Postgres](embedded.md#checker). A `sqlite:` URL builds each revision's schema in its own
+temporary file, never reads or writes the file the URL names, and prints no warning ([SQLite](#sqlite)).
 
 ## Config
 
@@ -101,16 +103,9 @@ the database URL already sets. Unknown keys are a config error (exit 2), with a 
 URL precedence is `--database-url`, then the configured environment variable. The implementation is
 `src/rowx/check/config.py`.
 
-Planned ([#334](https://github.com/mplemay/rowx/issues/334)): `--database-url` accepts a SQLite target. SQLite needs
-the `rowx[sqlite]` extra.
-
-- Accepted forms are `sqlite:///relative.db`, `sqlite:////abs/path.db` and `sqlite::memory:`. The path is
-  percent-decoded. A Windows drive letter is written `sqlite:///C:/x.db`. An empty path is rejected.
-- Rejected, with a hint showing the `sqlite:///` form: `sqlite:path`, a bare file path such as `app.db`,
-  `sqlite://host/...`, `file:` URIs, and the query options `mode=memory`, `immutable`, `vfs` and `cache=shared`.
-- A bare string without a scheme stays a PostgreSQL keyword DSN.
-- The checker opens a file read-only (`mode=ro`).
-- `sqlite::memory:` implies `--scratch` and skips the drift gate. `rowx database` and `rowx migrate` reject it.
+The URL scheme selects the backend. `postgres://`, `postgresql://`, `embedded://` and a keyword DSN
+(`host=… dbname=…`) are PostgreSQL. A `sqlite:` URL is SQLite, needs the `rowx[sqlite]` extra, and has its own grammar
+([SQLite](#sqlite)).
 
 The config file is the nearest `pyproject.toml` walking up from the working directory, or `--config`. Patterns are
 relative to its directory (the project root); without a config file the working directory is the root. `src` matches
@@ -178,7 +173,8 @@ The runtime behaviour is in
 
 `src/rowx/check/sourcemap.py` turns a server `position` into a span in the user's file. A server position is a
 1-based character index into the SQL the PostgreSQL compiler would send. The same compiler emits that SQL for
-runtime execution and for this map.
+runtime execution and for this map. The SQLite compiler does the same with `?n` placeholders
+([SQLite](#sqlite)).
 
 `t"SELECT {a}, {b} FROM t"` compiles to `SELECT $1, $2 FROM t`. The characters of `SELECT`, including the space
 after it, correspond. `$1` occupies
@@ -231,7 +227,7 @@ from its parameters. A string annotation inside a class is parsed. A string as `
 | `template-construction` | A hand-built `Template`, or a non-literal format spec, in a discovered file. |
 | `unresolved-row-type` | A name in `T` could not be resolved. This includes a `query_unchecked` row type. |
 | `invalid-row-type` | `T` resolved but is not in the grammar. This includes a `query_unchecked` row type. |
-| `sql-error` | Postgres rejected the statement. The span is the mapped server position. |
+| `sql-error` | The database rejected the statement. The span is the mapped error position. For SQLite it is also a template that SQLite cannot take: a parameter sigil in static SQL, an interpolation inside a string, quoted name or comment, SQL that is not exactly one statement, and a value-setting `PRAGMA`. |
 | `param-count-mismatch` | The number of described parameters differs from the number of interpolations. |
 | `missing-row-type` | Columns remain after `void` columns are dropped, and the row type is `None`. An all-`void` statement with row type `None` has no diagnostic. |
 | `unexpected-row-type` | No columns remain after `void` columns are dropped, and the row type is not `None`. `compare` is not called. |
@@ -241,11 +237,11 @@ from its parameters. A string annotation inside a class is parsed. A string as `
 | `duplicate-column` | Two columns have the same stripped name, or two names of one field. |
 | `ambiguous-column` | One column matches two pydantic fields. |
 | `column-name-mismatch` | A `NamedTuple` column name differs from the field. |
-| `unsupported-type` | A column or a parameter whose type has no leaf in the [type table](../types.md). |
+| `unsupported-type` | A column or a parameter whose type has no leaf in the [type table](../types.md). A SQLite column with no declared type is not this: it is untyped, and accepts any annotation. |
 | `type-mismatch` | A described type is not acceptable for the element. The message names both types. |
 | `nullability-mismatch` | A column may be NULL and the element is not nullable, or a NOT NULL column faces an element that is a union with `None`. The second finding is checker-only: the runtime NULL check does not raise for it. |
-| `invalid-override` | The described name is longer than 59 bytes and at most 63, and a quoted source alias is longer than 63 bytes, ends in `!` or `?`, and starts with that name. An alias of exactly 63 bytes that still ends in the suffix is not reported. A described name of 59 bytes or shorter is not reported. |
-| `param-type-mismatch` | An evident Python type the parameter does not accept. `None` is accepted for every parameter. It is not emitted for an unknown type or for a parameter already reported as `unsupported-type`. |
+| `invalid-override` | Never emitted for SQLite. The described name is longer than 59 bytes and at most 63, and a quoted source alias is longer than 63 bytes, ends in `!` or `?`, and starts with that name. An alias of exactly 63 bytes that still ends in the suffix is not reported. A described name of 59 bytes or shorter is not reported. |
+| `param-type-mismatch` | An evident Python type the parameter does not accept. `None` is accepted for every parameter. It is not emitted for an unknown type or for a parameter already reported as `unsupported-type`. It is never emitted for SQLite, whose parameters are untyped. |
 | `coverage-require-checked` | `--require-checked`, and no query was successfully described. |
 | `coverage-unchecked` | `--disallow-unchecked`, and the call is `query_unchecked`. |
 | `invalid-ignore-comment` | A malformed rowx ignore or an unknown rule in one. Default `warn`. |
@@ -389,8 +385,10 @@ caret. Server-supplied text is sanitised before it reaches a terminal ([Checker]
 `column_index` and `field`. There is no separate footer. Pass `--statistics` for the counts; diagnostic counts reflect
 visible reports, while coverage evidence is unaffected by reporting filters.
 
-PostgreSQL errors carry no `code`, so PostgreSQL output has no `code` field. The help for a SQL error is looked up by
-`code` when present, then by `sqlstate`.
+PostgreSQL errors carry no `code`, so PostgreSQL output has no `code` field. A SQLite `sql-error` has `sqlstate` and
+`code`, such as `HY000` and `SQLITE_ERROR`, and its text message ends with the code in parentheses. A `sql-error` that
+SQLite did not report has neither: a template the compiler rejected, and SQL that is not exactly one statement (which
+has `sqlstate` `HY000` and no `code`). The help for a SQL error is looked up by `code` when present, then by `sqlstate`.
 
 Described column metadata is not written to a disk cache. Every check prepares the statements it describes.
 
@@ -413,11 +411,75 @@ migration still fails. Implementation: `src/rowx/check/drift.py`.
 `--scratch` needs `[tool.rowx.migrate]`. It treats the URL as a server URL, creates a temporary database, applies
 the migrations, and checks against that. The temporary database is dropped at the end, including on cancellation.
 The connecting role needs `CREATEDB`. The drift gate does not run in this mode. Implementation:
-`src/rowx/check/scratch.py`.
+`src/rowx/check/scratch.py`. For a `sqlite:` URL the scratch is a temporary file ([SQLite](#sqlite)), and no server or
+`CREATEDB` is involved.
 
-Planned ([#334](https://github.com/mplemay/rowx/issues/334)): for a `sqlite::memory:` URL, scratch applies the
-migrations to the in-memory database. There is no server, no temporary database to create or drop and no `CREATEDB`.
-Like an explicit `--scratch`, it needs `[tool.rowx.migrate]` (exit 2 otherwise).
+## SQLite
+
+`--database-url` selects SQLite with a `sqlite:` URL. SQLite needs the `rowx[sqlite]` extra; without it the command
+exits 2 with a hint to install it. The backend is `packages/rowx-sqlite/src/rowx_sqlite/_backend.py`. The describe is
+[SQLite nullability](nullability.md#sqlite), and the type vocabulary is [Type tables](../types.md#sqlite).
+
+**URLs.** The forms are `sqlite:///relative.db`, `sqlite:////abs/path.db`, `sqlite:///C:/x.db` and `sqlite::memory:`
+([SQLite URLs](driver.md#sqlite-urls)). The CLI rejects, with a hint that shows the `sqlite:///` form: `sqlite:path`, a
+bare file path such as `app.db`, `sqlite://host/...`, a `file:` URI, an empty path, and any query string (`mode`,
+`immutable`, `vfs` and `cache=shared` are named). A bare string with no scheme that does not name a database file stays
+a PostgreSQL keyword DSN, and the one that does is rejected as a bare path. A rejected SQLite URL is exit 2.
+
+**The session.** The checker opens a file read-only (`mode=ro`, `PRAGMA query_only=ON`) and prepares each statement
+without stepping it, so nothing runs and no row is read. The session is hardened ([Security](security.md#sqlite)). The
+file must exist: a missing one is exit 2 (`could not connect to the database: 58030`). A read-only open of a WAL file
+needs a usable `-shm` and `-wal`, or a writable directory. `statement_timeout` bounds each describe, as for PostgreSQL.
+A describe that fails because the database is locked, full, corrupt, not a database, unopenable or read-only
+(`55P03`, `53100`, `XX001`, `XX002`, `58030`, `25006`) is operational: exit 2, whatever the rule levels. `57014` is a
+timeout. The help text of `SQLITE_READONLY`, `SQLITE_CANTOPEN`, `SQLITE_BUSY` and `SQLITE_LOCKED` is specific; other
+codes have none.
+
+**In memory.** A private in-memory database cannot be shared between describe workers or read from a file, so
+`sqlite::memory:` implies `--scratch` and skips the drift gate. It needs `[tool.rowx.migrate]`, and exits 2 otherwise
+with a message saying so. `rowx database` and `rowx migrate` reject an in-memory URL with exit 2, because the database
+would be gone when the command exits.
+
+**Scratch.** With `--scratch`, or an in-memory URL, the checker builds a temporary file `rowx_check_<hex>.db` in the
+system temporary directory, applies the migrations to it, converts it to the rollback journal so that read-only workers
+can open it, describes against it with `-j` workers, and removes the file and its side files on every exit path. A file
+URL given with `--scratch` is ignored: the file it names is never read. Files named `rowx_check_*.db` that are over an
+hour old are swept at the start of a run. The drift gate does not run in this mode.
+
+**Drift gate.** For a file URL the drift gate reads the history table through the read-only session, as for PostgreSQL.
+It takes no lock and writes nothing.
+
+**What is checked.**
+
+- *Types.* A typed column has one Python type ([Type tables](../types.md#sqlite)), and the annotation must be it:
+  `int` for `integer`, `float` for `real`, `bool` for `boolean`, `datetime.datetime` for `datetime` and `datetimetz`,
+  `decimal.Decimal` for `decimal`, and so on. Comparison is nominal: an `int` annotation on a `REAL` column, or `bool`
+  on an `INTEGER` column, is `type-mismatch`, and an `int` annotation on a `BOOLEAN` column is too. A `json` column
+  accepts any leaf except `None`. An `any` column accepts `int`, `float`, `str` or `bytes`. `typing.Any` and `object`
+  match every column, as for PostgreSQL. There are no arrays or ranges.
+- *Untyped columns.* A column with no declared type, such as `count(*)` or a table column declared as `a`, accepts any
+  annotation, and the diagnostic carries the note `column N "name" is untyped, so its type is not checked`. The
+  nullability rule still applies, and an untyped column is always nullable, so the annotation must say `| None` or the
+  alias `"col!"`.
+- *Untyped parameters.* A parameter has no type. The checker still compares the count (`param-count-mismatch`) and
+  infers the Python type of each interpolation. It never reports `param-type-mismatch`, and `--coverage` and
+  `--inspect` show `untyped, not compared`.
+- *Nullability.* A column is NOT NULL only when the rule proves it, and otherwise nullable, with the note
+  `nullability not proven, assumed nullable` when the cause is a view, a CTE, a subquery, a compound select, an outer
+  join, an aggregate or an expression. [Nullability](nullability.md#sqlite) is the rule. `AS "col!"` narrows it.
+- *Compilation.* The checker compiles each template with the SQLite compiler, as the runtime does. A template with a
+  parameter sigil in static SQL (`?`, `?N`, `:x`, `@x`, `$x`, `#x`), or with an interpolation inside a string literal, a
+  quoted name or a comment, is a located `sql-error` with no `sqlstate` and no `code`, because SQLite never saw it.
+  Placeholders are `?1`, `?2`, ... in `--inspect` and `--coverage`, and the cast hint is `CAST(x AS TEXT)`.
+- *One statement.* SQL that is empty, holds only comments, or has more than one statement is `sql-error` with
+  `sqlstate` `HY000` and no `code`. DDL and DML are described like a `SELECT`, and a value-setting `PRAGMA` is refused
+  by the session (`SQLITE_AUTH`). A `PRAGMA` that only reads, such as `table_info`, is described.
+- *Error spans.* SQLite reports an error offset (`sqlite3_error_offset`), a 0-based UTF-8 byte offset, which is
+  converted to the same 1-based character index that [Source map](#source-map) uses. An error SQLite gives no offset for
+  spans the whole template.
+
+**`rowx check-compat`** accepts a `sqlite:` URL. Each revision's schema is built in its own temporary file, and the file
+the URL names is never read or written. It prints no disposable-server warning.
 
 ## Module map
 

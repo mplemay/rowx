@@ -1,13 +1,14 @@
 # Executors
 
-`rowx.postgres.connect(dsn)` returns a `Connection`. Use it as an async context manager, or call `close()`. Pass a
-`ConnectOptions` instead of a DSN to set `connect_timeout`, `statement_cache_size`, `server_settings` and more
-(`ConnectOptions.from_dsn(dsn, connect_timeout=5)`).
+`rowx.postgres.connect(dsn)` returns a `Connection`. The SQLite equivalents, with their differences, are
+[SQLite](sqlite.md) and the [driver reference](../reference/driver.md#sqlite). Use it as an async context manager, or
+call `close()`. Pass a `ConnectOptions` instead of a DSN to set `connect_timeout`, `statement_cache_size`,
+`server_settings` and more (`ConnectOptions.from_dsn(dsn, connect_timeout=5)`).
 
 ## Pools
 
 A `Pool` is an `Executor`, so every query method takes it in place of a connection. Import it from `rowx.postgres`.
-`Pool` imported from `rowx` is the executor protocol, not a connection pool. The four distributions are
+`Pool` imported from `rowx` is the executor protocol, not a connection pool. The five distributions are
 [Packages](../packages.md). Coming from a `Session` is [From SQLAlchemy](../from-sqlalchemy.md).
 
 A query captures its template without selecting a database. The connection, pool or transaction passed to a query

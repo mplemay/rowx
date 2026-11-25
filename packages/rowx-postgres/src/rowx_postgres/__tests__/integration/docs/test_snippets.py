@@ -1,3 +1,4 @@
+import ast
 import tempfile
 from os import environ
 from pathlib import Path
@@ -19,6 +20,20 @@ ROOT: Final[Path] = next(parent for parent in Path(__file__).resolve().parents i
 DOC_GLOBS: Final[tuple[str, ...]] = ("README.md", "docs/**/*.md", ".agents/skills/**/*.md")
 # the pages whose snippets run the in-process engine, so they need the companion and not a server
 EMBEDDED_DOCS: Final[frozenset[str]] = frozenset({"docs/guide/embedded.md"})
+# the pages whose snippets run against SQLite. The `rowx_sqlite` runner owns them and has no database marker, so this
+# runner skips them; `test_the_sqlite_lane_is_the_set_the_sqlite_runner_owns` keeps the two sets equal
+SQLITE_DOCS: Final[frozenset[str]] = frozenset({"docs/guide/sqlite.md", ".agents/skills/use-rowx/references/sqlite.md"})
+SQLITE_RUNNER: Final[Path] = (
+    ROOT
+    / "packages"
+    / "rowx-sqlite"
+    / "src"
+    / "rowx_sqlite"
+    / "__tests__"
+    / "integration"
+    / "docs"
+    / "test_snippets.py"
+)
 SNIPPET: Final[Pattern[str]] = re_compile(r"^```python test\n(?P<body>.*?)^```$", MULTILINE | DOTALL)
 USE_ROWX_SKILL: Final[Path] = ROOT / ".agents" / "skills" / "use-rowx" / "SKILL.md"
 USE_ROWX_SKILL_URL: Final[str] = "https://github.com/mplemay/rowx/blob/main/.agents/skills/use-rowx/SKILL.md"
@@ -78,7 +93,12 @@ SERVER_SNIPPETS: Final[dict[tuple[str, str], pytest.MarkDecorator]] = {
 
 
 def _bodies() -> list[tuple[Path, int, str]]:
-    return [(path, i, m["body"]) for path in _doc_files() for i, m in enumerate(SNIPPET.finditer(path.read_text()))]
+    return [
+        (path, i, m["body"])
+        for path in _doc_files()
+        if _relative(path) not in SQLITE_DOCS
+        for i, m in enumerate(SNIPPET.finditer(path.read_text()))
+    ]
 
 
 def _marks(path: Path, body: str) -> list[pytest.MarkDecorator]:
@@ -107,6 +127,21 @@ def test_readme_and_guide_are_discovered() -> None:
     discovered = set(_doc_files())
     assert ROOT / "README.md" in discovered
     assert ROOT / "docs" / "guide.md" in discovered
+
+
+def _sqlite_runner_docs() -> frozenset[str]:
+    for node in ast.parse(SQLITE_RUNNER.read_text()).body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "SQLITE_DOCS":
+            assert isinstance(node.value, ast.Call)
+            return frozenset(ast.literal_eval(node.value.args[0]))
+    msg = "the SQLite runner does not define SQLITE_DOCS"
+    raise AssertionError(msg)
+
+
+def test_the_sqlite_lane_is_the_set_the_sqlite_runner_owns() -> None:
+    assert _sqlite_runner_docs() == SQLITE_DOCS
+    assert {_relative(path) for path in _doc_files()} >= SQLITE_DOCS
+    assert not {_relative(path) for path, _, _ in _bodies()} & SQLITE_DOCS
 
 
 def test_every_embedded_doc_is_discovered_and_has_snippets() -> None:

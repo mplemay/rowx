@@ -1,10 +1,11 @@
 ---
 name: use-rowx
 description: >-
-  Write typesafe raw SQL for Postgres with rowx and PEP 750 t-strings, check it with
+  Write typesafe raw SQL for Postgres or SQLite with rowx and PEP 750 t-strings, check it with
   rowx check, replace a SQLAlchemy Session with a typed t-string query, and run those
   queries from a FastAPI lifespan and path operation. Use when the user mentions rowx, rowx.core,
-  rowx.postgres, rowx_core, rowx_postgres, t-string SQL, a Postgres query through rowx,
+  rowx.postgres, rowx.sqlite, rowx_core, rowx_postgres, rowx_sqlite, t-string SQL, a SQLite query through rowx,
+  a Postgres query through rowx,
   rowx check, moving from SQLAlchemy to raw SQL, or FastAPI with rowx.
 license: MIT
 compatibility: Requires Python >=3.14
@@ -25,7 +26,7 @@ type. The executor you pass compiles and runs it. `rowx check` prepares each che
 Invoke this skill when:
 
 - Writing, reviewing, or debugging a rowx query
-- Installing `rowx`, `rowx-core`, or `rowx-postgres`
+- Installing `rowx`, `rowx-core`, `rowx-postgres`, or `rowx-sqlite`
 - Binding parameters, including a list with `= ANY({ids})`
 - Choosing `query` or `query_unchecked`, or allowlisting an identifier
 - Configuring a pool reset, migrations, or `rowx.testing`
@@ -54,9 +55,9 @@ Do **not** use this skill for:
    `rowx.errors` do not already export.
 6. `rowx-core` has no runtime dependencies. `rowx-postgres` depends only on matching `rowx-core`. The backend does
    not depend on the CLI. There is no ContextVar, no implicit Postgres target, and no `Any` dispatch.
-7. Postgres only. There is no unit of work and no identity map. A row is the value this statement returned. A
-   relationship is a `JOIN` or a second statement. You keep the SQL, transactions, a pool, and a dataclass or
-   pydantic row.
+7. PostgreSQL and SQLite. SQLite is `rowx[sqlite]` and `rowx.sqlite` ([references/sqlite.md](references/sqlite.md)).
+   There is no unit of work and no identity map. A row is the value this statement returned. A relationship is a `JOIN`
+   or a second statement. You keep the SQL, transactions, a pool, and a dataclass or pydantic row.
 
 ## Critical Rules
 
@@ -160,6 +161,7 @@ Load only the most relevant reference first.
 | Allowlist an identifier or reset a pool | [references/security.md](references/security.md) |
 | Add or apply migrations | [references/migrations.md](references/migrations.md) |
 | Test against a migrated database | [references/testing.md](references/testing.md) |
+| Use SQLite (`rowx[sqlite]`, `sqlite:///app.db`) | [references/sqlite.md](references/sqlite.md) |
 | Run `rowx check` and read the exit code | [references/checker.md](references/checker.md) |
 | Catch a rowx exception | [references/errors.md](references/errors.md) |
 | Replace a SQLAlchemy `Session`, `select()`, `text()`, or `tstring()` | [references/sqlalchemy.md](references/sqlalchemy.md) |
@@ -168,11 +170,11 @@ Load only the most relevant reference first.
 
 ## From SQLAlchemy
 
-Postgres only. `select(User)`, `text()`, and `tstring()` become `query[User](t"SELECT ...")`. You pass a `Pool`, a
-connection from `connect`, or a transaction. SQLAlchemy Core is command-oriented SQL. The ORM adds a state-oriented
-unit of work. rowx is the command, and `rowx check` prepares the statement. `text()` and `tstring()` run through a
-DBAPI at runtime. `{name}` is a bound value. SQLAlchemy's `tstring()` can also interpolate expressions. An
-identifier stays on `query_unchecked` after an allowlist.
+PostgreSQL and SQLite. `select(User)`, `text()`, and `tstring()` become `query[User](t"SELECT ...")`. You pass a `Pool`,
+a connection from `connect`, or a transaction. SQLAlchemy Core is command-oriented SQL. The ORM adds a state-oriented
+unit of work. rowx is the command, and `rowx check` prepares the statement. `text()` and `tstring()` run through a DBAPI
+at runtime. `{name}` is a bound value. SQLAlchemy's `tstring()` can also interpolate expressions. An identifier stays on
+`query_unchecked` after an allowlist.
 
 | SQLAlchemy | rowx |
 |---|---|
@@ -208,6 +210,8 @@ including `HTTPException`. Pass `scope="function"` so that exit finishes before 
   `Pool`.
 - Importing `connect` from `rowx` or `rowx_core`. The connection and the connection pool come from `rowx.postgres`,
   or from `rowx_postgres` when the application does not install `rowx`.
+- Using `= ANY({ids})`, `$1`, `::int` or `execute` on a row-returning statement against SQLite. See
+  [references/sqlite.md](references/sqlite.md).
 - Calling `.all()` or `.one()` with no executor.
 - Pasting a value into SQL, or building `IN ($1, $2)` instead of `= ANY({ids})`.
 - Putting `{name}` inside a SQL string literal. Bind the whole pattern.

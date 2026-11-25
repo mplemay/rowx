@@ -1,5 +1,7 @@
 # Nullability
 
+This page is PostgreSQL down to [SQLite](#sqlite), which has its own describe and a much smaller proof.
+
 Describe prepares a statement, reads catalog NOT NULL, and walks the generic plan. Unknown columns count as nullable.
 `"col!"` and `"col?"` overrides apply last. The plan pass can promote a column to nullable. A set operation, the
 computed-column whitelist, or a scan filter can prove a column NOT NULL. A later promotion still forces the column
@@ -209,3 +211,68 @@ The cases pinned by tests, and which of them are imprecise rather than wrong, ar
 [Known limits](../known-limits.md). In short: recursive CTE columns stay nullable; a computed column outside the
 whitelist stays nullable; a view, set operation or scan boundary is NOT NULL only when the rules above prove it.
 Anti joins and right anti joins are not a limit. They null-extend, and the walker marks them.
+
+## SQLite
+
+SQLite has no query planner output that names nullability, so the SQLite describe is a prepare and a rule. It is
+`crates/rowx-sqlite/src/describe.rs` and its Python binding `rowx_sqlite._core.describe`, with the statement facts read
+by the lexer in `packages/rowx-sqlite/src/rowx_sqlite/_compiler.py`. Column-name override stripping is the same
+`column_name` of `crates/rowx-core/src/row_shape.rs`.
+
+**The rule.** A column is NOT NULL (`NotNullColumn`) only when *both* hold:
+
+1. the statement reads **ordinary tables** through `FROM` and inner joins alone: the comma join, `JOIN`, `INNER JOIN`,
+   `CROSS JOIN` and `JOIN ... USING`. It contains no view, common table expression, subquery, compound select
+   (`UNION`, `INTERSECT`, `EXCEPT`), outer join (`LEFT`, `RIGHT`, `FULL`, `OUTER`, `NATURAL`) and no aggregate without a
+   `GROUP BY`, and no table-valued function, virtual table or name that SQLite cannot resolve to a table;
+2. the column resolves to a base column that is declared `NOT NULL`, or is an `INTEGER PRIMARY KEY` rowid alias, or is
+   `rowid`, `oid` or `_rowid_` of a rowid table. A rowid alias is non-null although SQLite's own flag is clear.
+
+Any other column is nullable. When condition 1 fails it is `Unproven`, and when condition 1 holds but the column has no
+`NOT NULL` it is `NullableColumn`. `Unproven` is a `NullReason` for a column that nothing disproves and nothing proves:
+SQLite can say whether a base column is declared `NOT NULL`, but not what an outer join, a view or an expression does
+to it. Until the proof is extended
+([#350](https://github.com/mplemay/rowx/issues/350)), every such column is nullable, and `"col!"` narrows it.
+
+| Reason | Meaning |
+|---|---|
+| `NotNullColumn` | Proven by the rule. |
+| `NullableColumn` | A column of an ordinary table with no `NOT NULL`, in a statement the rule can read. |
+| `Unproven` | Condition 1 failed, or the column is an expression. Nullable. |
+| `OverrideBang`, `OverrideQuestion` | The `"col!"` and `"col?"` suffixes, applied last ([Overrides](#overrides)). |
+
+`ViewColumn`, `ForeignOrView`, `Computed` and the other PostgreSQL reasons stay in the type for PostgreSQL and are never
+produced for SQLite. `ComputedExpr` keeps its PostgreSQL meaning. The cause behind an `Unproven` column is recorded in
+the described column (`common table expression`, `subquery`, `compound select`, `outer join`, `aggregate`,
+`view <name>`, `source <name> is not a table`, or `expression`), and the checker's output reads
+`nullability not proven, assumed nullable` for all of them.
+
+**Origin.** SQLite reports each result column's base database, table and column through
+`sqlite3_column_{database,table,origin}_name`. They see through views, CTEs and subqueries to the base column, and a
+compound select takes them from its leftmost arm. rowx reads them for the column's declared type and for the rule, but
+the rule then requires condition 1, so origin alone never proves a column. An expression has no origin, and neither
+does `count(*)`: it is untyped and `Unproven` ([Checker](checker.md#sqlite)).
+
+Notes on single constructs. `test_each_construct_has_its_nullability` in the package tests pins the table of them:
+
+- A statement with `GROUP BY` and no aggregate call is provable: `SELECT a FROM t GROUP BY a`. With an aggregate call it
+  is not for the aggregate column, and the bare columns stay provable. Without `GROUP BY`, an aggregate call or
+  `HAVING` returns a row even over an empty table, so every bare column of that query, `SELECT a, count(*) FROM t`, is
+  `Unproven`. A window function is not an aggregate. `min(a, b)` and `max(a, b)` with two arguments are scalar.
+- `INSERT`, `UPDATE` and `DELETE ... RETURNING` report the returned columns from their table, so a `NOT NULL` column is
+  provable. A DML statement without `RETURNING` has no columns.
+- A primary key column of a `WITHOUT ROWID` table is NOT NULL, because SQLite enforces it.
+- `INTEGER PRIMARY KEY` is the rowid alias, whether it is written on the column or as `PRIMARY KEY (id)`, and it is
+  non-null. `INT PRIMARY KEY` is not an alias, and SQLite lets such a key hold NULL, so it is nullable.
+- A name is looked up in `temp` and then `main`, or in the schema it names, and folds by ASCII case.
+
+**Overrides.** A result column whose name ends in `!` or `?` is stripped and forced NOT NULL (`OverrideBang`) or
+nullable (`OverrideQuestion`), applied last, as for PostgreSQL ([Overrides](#overrides)). SQLite has no identifier
+length limit, so a suffix is never truncated and `invalid-override` is never reported.
+
+**Describe never runs the statement.** It prepares exactly one statement and reads its columns and parameters. Text
+with no statement, with only comments, or with more than one statement is `DatabaseError` `HY000` and has no `code`.
+The describe session refreshes the schema first, so a statement is described against what the database holds now. A
+parameter is untyped: the described parameters carry only a count and, for a named one (`?1`), the name.
+
+The checker session is read-only and hardened ([Security](security.md#sqlite)).

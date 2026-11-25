@@ -1,5 +1,8 @@
 # Security
 
+This page is PostgreSQL. For SQLite see the [reference](../reference/security.md#sqlite): values stay bound, and the
+checker's session is read-only with an untrusted schema.
+
 rowx trusts what you write: the static text of a t-string, migration files, `reset_query`, the DSN and `ConnectOptions`.
 It treats three things as untrusted: the values you interpolate (and the values you give `:ident`, and their types), the
 bytes a server sends when `sslmode` is weaker than `verify-full`, and the session state that application SQL can change

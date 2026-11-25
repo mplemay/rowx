@@ -9,7 +9,7 @@ The native module is `rowx_postgres._core`. Value types live in `rowx_postgres`.
 
 | # | Topic | Decision |
 |---|---|---|
-| 1 | Backends | PostgreSQL only; 18 only |
+| 1 | Backends | PostgreSQL 18 only; **amended (#334):** SQLite (bundled 3.51.3) is a second backend |
 | 2 | Runtime | An owned driver on a Rust library, which is tokio-postgres |
 | 3 | Sync/async | Async only |
 | 4 | Types | An explicit `query[T]` verified by the checker; no codegen, no plugin |

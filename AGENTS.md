@@ -116,8 +116,9 @@
 ## Project
 
 rowx is typesafe raw SQL for Python 3.14+ with no ORM. Queries are PEP 750 t-strings with an explicit row type,
-`query[tuple[int, str]](t"...")`, run by a Rust driver built on tokio-postgres. A static checker, `rowx check`,
-validates every query against a live Postgres 18 database by preparing and describing it.
+`query[tuple[int, str]](t"...")`, run by a Rust driver built on tokio-postgres, or by the bundled-SQLite driver
+`rowx-sqlite`. A static checker, `rowx check`, validates every query against a live Postgres 18 database by preparing
+and describing it.
 
 - The reference pages under `docs/reference/` are the user contract. A feature PR must not change that contract
   silently.
@@ -134,6 +135,12 @@ validates every query against a live Postgres 18 database by preparing and descr
 | `just test-rust-embedded` | `cargo test -p rowx-embedded-host` (builds the Wasmer tree) |
 | `just build-sqlite` | Build the SQLite extension with maturin |
 | `just test-py` | `just build-sqlite`, then `uv run pytest` |
+| `just test-embedded` | The embedded lane: `ROWX_TEST_DSN=embedded:// uv run pytest -m "(db and not server) or embedded"` |
+| `just check-embedded` | Clippy for the embedded companion, a non-default workspace member |
+| `just fuzz-nullability` | Long PostgreSQL nullability fuzz with a random seed; needs `ROWX_TEST_DSN` |
+| `just bench-drivers` | Release build plus `bench/fetch_drivers.py`; needs `ROWX_TEST_DSN` |
+| `just docs` / `just docs-build` | Serve the documentation site, or build it in strict mode |
+| `just changelog` | Regenerate `docs/changelog.md` from the tagged releases |
 | `just test-sqlite` | `just build-sqlite`, then `uv run pytest` over `packages/rowx-sqlite/src/rowx_sqlite/__tests__` |
 | `just db-up` / `just db-down` | Start or stop `postgres:18` |
 | `just bench` | Release build plus `bench/fetch_100k.py` |
@@ -193,6 +200,9 @@ validates every query against a live Postgres 18 database by preparing and descr
 | Describe | `crates/rowx-postgres/src/{describe,explain}.rs`, `packages/rowx-postgres/src/describe.rs` |
 | Bindings | `packages/rowx-postgres/src/{conn,exec,stream,pool,transaction,errors,types}.rs`, `crates/rowx-py-core/src/{runtime,errors}.rs`, `packages/rowx-postgres/src/lib.rs` |
 | Python runtime (shared) | `packages/rowx-core/src/rowx_core/` |
+| SQLite driver (pure) | `crates/rowx-sqlite/src/`: `dsn`, `error`, `types`, `value/<family>`, `conn`, `exec`, `cancel`, `timeout`, `describe`, `pool`, `migrate`, `admin` |
+| SQLite bindings | `packages/rowx-sqlite/src/{conn,exec,stream,pool,describe,migrate,admin,errors,named,types,lib}.rs` and `codec/<family>.rs` (`codec/mod.rs` is dispatch only) |
+| Python SQLite backend | `packages/rowx-sqlite/src/rowx_sqlite/` (including `_compiler.py`, `_backend.py`, `_scratch.py` and `_testing.py`); the facade is `src/rowx/sqlite/` |
 | Python Postgres backend | `packages/rowx-postgres/src/rowx_postgres/` (including `_compiler.py`, `_types.py` and `_vocab.py`) |
 | Checker | `src/rowx/check/<module>.py`, one module each (including `migrate.py` and `database.py`, the CLI handlers, and `drift.py` and `scratch.py`, the migration checks) |
 | Migrations (pure) | `crates/rowx-core/src/migrate/` (filename grammar, source resolution, checksums, plan) |

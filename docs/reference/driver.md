@@ -2,7 +2,8 @@
 
 PostgreSQL connections, execution, codecs and pooling. Open them from `rowx.postgres`. The `rowx-postgres`
 distribution imports the same objects from `rowx_postgres`. The query methods that run on an executor are in
-[API](api.md).
+[API](api.md). The SQLite driver, opened from `rowx.sqlite`, is [SQLite](#sqlite); the sections before it are
+PostgreSQL.
 
 The native module is `rowx_postgres._core`. Pure Rust lives in `crates/rowx-postgres/src/` (`dsn`, `tls`, `conn`,
 `stmt_cache`, `exec`, `cancel`, `pool`, `wire/`) and in `crates/rowx-core/src/` (`state.rs` for claim and settle,
@@ -159,3 +160,185 @@ valid target for `Migrator`. Use the connection or the pool.
 
 The binding is `packages/rowx-postgres/src/transaction.rs`. The Python type is
 `packages/rowx-postgres/src/rowx_postgres/_transaction.py`.
+
+## SQLite
+
+The SQLite driver opens from `rowx.sqlite`. The `rowx-sqlite` distribution imports the same objects from `rowx_sqlite`:
+`connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction` and `Migrator`. The query methods are [API](api.md).
+The native module is `rowx_sqlite._core`. Pure Rust lives in `crates/rowx-sqlite/src/` (`dsn`, `conn`, `exec`, `cancel`,
+`timeout`, `describe`, `pool`, `migrate`, `admin`, `types` and `value/`), and the bindings in
+`packages/rowx-sqlite/src/`. `crates/rowx-sqlite` does not use PyO3. SQLite is bundled (`rusqlite` with
+`libsqlite3-sys`, SQLite 3.51.3), so the driver never links the system library. Extension loading is compiled in and
+stays disabled.
+
+The type rules are [Type mapping](type-mapping.md#sqlite). The checker is [Checker](checker.md#sqlite), and migrations
+are [Migrations](migrations.md#sqlite).
+
+### SQLite URLs
+
+`connect` and `Pool` take `str | ConnectOptions`. A string is parsed by `crates/rowx-sqlite/src/dsn.rs`, and the same
+grammar is the one `rowx check`, `rowx migrate` and `rowx.testing` apply to a `sqlite:` URL.
+
+| URL | Target |
+|---|---|
+| `sqlite:///relative.db` | a path relative to the working directory |
+| `sqlite:////abs/path.db` | an absolute path |
+| `sqlite:///C:/x.db` | a Windows drive path; `sqlite://///server/share/x.db` is a UNC path |
+| `sqlite::memory:` | a private in-memory database |
+
+The scheme is case-insensitive. One leading `/` is removed from the text after `sqlite://`. The path is
+percent-decoded, and a NUL, an invalid escape or a result that is not UTF-8 is rejected. Everything else is
+`InterfaceError`, and every message ends with a hint that shows the `sqlite:///` form. The message never repeats the
+URL.
+
+- A URL has no host (`sqlite://host/x.db`), no query string and no fragment. `mode`, `immutable`, `vfs` and `cache` are
+  named in the message (`cache=shared` is the shared-cache mode, which is not supported). A literal `?` or `#` in a path
+  is written `%3F` or `%23`.
+- An empty path, `sqlite:///:memory:` (write `sqlite::memory:`), `sqlite:path`, a bare path, and a `file:` URI are
+  rejected. A bare `file:` name that arrives through percent-decoding is prefixed with `./`, so SQLite opens a plain
+  file and never parses it as a URI, although the bundled build compiles with `SQLITE_USE_URI`.
+- A bare string that is a lone token ending in `.db`, `.sqlite`, `.sqlite3` or `.db3` is rejected as a bare path. Every
+  other string without a scheme stays a PostgreSQL keyword DSN.
+- SQLite needs the `rowx[sqlite]` extra. Without it, `import rowx.sqlite` raises `ImportError`, and a `sqlite:` URL
+  given to the CLI exits 2 with a hint to install `rowx[sqlite]`.
+
+A URL never says how to open the file: the caller does. `ConnectOptions.from_dsn(dsn, **overrides)` parses the URL and
+replaces fields.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `path` | none | The file. Exactly one of `path` and `memory` is set. |
+| `memory` | `False` | An in-memory database, which is always opened read-write and created. |
+| `mode` | `"rw"` | `"ro"` opens an existing file read-only, `"rw"` an existing file for writing, `"rwc"` creates it as well. |
+| `connect_timeout` | `None` | Seconds a statement waits for a lock, which is SQLite's busy timeout. Unset is 5 seconds. |
+| `statement_timeout` | `None` | Seconds a statement may run before it is interrupted. `0` and `None` mean no limit. |
+| `statement_cache_size` | 256 | Prepared statements kept per connection. `0` disables the cache. |
+| `read_only` | `False` | Opens the file read-only and sets `PRAGMA query_only = ON`. It wins over `mode`. |
+
+A negative or non-finite number of seconds is `ValueError`. A `mode` that is not one of the three is `InterfaceError`,
+and so is a missing path or a path together with `memory`. A missing file with `rw` is `DatabaseError` `58030`
+(`SQLITE_CANTOPEN`). A DSN cannot ask for creation: `rwc` exists only on `ConnectOptions`, and `rowx database create`
+and a migration are the other ways to make a file. `ConnectOptions.with_connect_timeout(seconds)` returns a copy.
+
+### SQLite pragmas
+
+Every setting is applied explicitly when the connection opens, because the bundled build changes SQLite's defaults
+(`SQLITE_DEFAULT_FOREIGN_KEYS=1`):
+
+- `busy_timeout` from `connect_timeout`, always set.
+- `foreign_keys=ON`, `recursive_triggers=OFF` and `synchronous=FULL`, so durability matches PostgreSQL's default.
+- The `DQS_DML` and `DQS_DDL` configuration flags are off, so a mistyped `"colum"` is an error and not a string literal.
+- `journal_mode=WAL` for a file opened read-write. A switch that does not take effect fails the open: it is
+  `SQLITE_READONLY` (`25006`) when SQLite reports that, and otherwise `SQLITE_ERROR` (`HY000`) naming the mode the
+  database stayed in. `:memory:` stays in `memory`. WAL is not supported on a network filesystem.
+- A read-only handle (`mode="ro"` or `read_only=True`) never switches the journal mode and keeps what it finds. Opening
+  a WAL file read-only needs a usable `-shm` and `-wal`, or a writable directory.
+- `read_only=True` also turns `PRAGMA query_only` on.
+
+`rowx check` opens its own session with `trusted_schema=OFF` and the defensive flag as well
+([Security](security.md#sqlite)).
+
+### SQLite execution
+
+Each connection owns one worker thread, named `rowx-sqlite`, that opens the database and runs every call as a job.
+SQLite never runs on a tokio worker or while the GIL is held, and the GIL is released around every call. The worker
+ends and closes the database when the connection is closed or dropped.
+
+One operation runs on a connection at a time, as on PostgreSQL: a second raises `ConnectionBusyError`, and an open
+stream holds the connection until it ends.
+
+Each call compiles SQL with the SQLite compiler (`packages/rowx-sqlite/src/rowx_sqlite/_compiler.py`):
+
+- Placeholders are `?1`, `?2`, ... numbered densely from 1. The same expression twice is two parameters.
+- The compiler tracks strings, quoted names (`"x"`, `` `x` ``, `[x]`) and comments with SQLite's lexer, which has no
+  dollar quotes and no escape strings.
+- A parameter sigil in static text is a `TypeError`: `?`, `?N`, `:x`, `@x`, `$x` and `#x`. SQLite would read it as a
+  parameter. `$` inside a name such as `a$b` is an identifier character, not a sigil. An interpolation inside a string
+  literal, a quoted name or a comment is a `TypeError` as well, where the PostgreSQL compiler emits it as text.
+- The adjacency space rule is the one of [API](api.md#t-string-compilation), with `?n` in place of `$n`.
+- `{x:ident}` in `query_unchecked` has no 63-byte limit. The limit is `SQLITE_MAX_LENGTH`.
+- There is no fixed parameter ceiling. A statement with more parameters than the connection's
+  `SQLITE_LIMIT_VARIABLE_NUMBER`, which is read when it connects, is `InterfaceError` before it runs.
+
+The shape check runs against the prepared statement before execution, as on PostgreSQL. A stale prepared statement is
+prepared again by SQLite itself. The statement cache is per connection.
+
+- `execute` runs one statement and returns `QueryResult(rows_affected)`. It is `InterfaceError` for a statement that
+  returns rows (a `SELECT`, `INSERT ... RETURNING`, a `PRAGMA` that answers), and it refuses before the statement
+  runs, so nothing is written. Use `one`, `all` or `fetch` for those. `rows_affected` is `0` for DDL.
+- A string of several statements is `InterfaceError` at run time, and an empty one is too. A query is one statement.
+- Stored values that do not decode are `DecodeError`, and a value that does not encode is `EncodeError`. The
+  connection stays usable.
+
+`statement_timeout` is per statement, control statements such as `BEGIN` and `COMMIT` included. The clock starts when
+the statement is about to step and not during prepare. For a stream it is per batch, and it does not run while the
+worker waits for the consumer. Migration scripts are exempt. An expired timeout is `DatabaseError` `57014`
+(`SQLITE_INTERRUPT`).
+
+### SQLite transactions
+
+`conn.transaction(mode=None, read_only=False)` and `pool.transaction(...)` return a `Transaction`, an executor, with
+the semantics of [Transactions](#transactions): a clean exit commits, an exception or a cancel rolls back, and
+`commit()` and `rollback()` end it early.
+
+| Call | Begins |
+|---|---|
+| `transaction()` | `BEGIN IMMEDIATE`, which takes the write lock at once and waits for it up to `connect_timeout` |
+| `transaction(mode="deferred")` | `BEGIN DEFERRED` |
+| `transaction(mode="exclusive")` | `BEGIN EXCLUSIVE`, which is the same as `IMMEDIATE` in WAL mode |
+| `transaction(read_only=True)` | `BEGIN DEFERRED` with `PRAGMA query_only = ON` for its length |
+
+`mode` is `"deferred"`, `"immediate"` or `"exclusive"`, and anything else is `InterfaceError`. `read_only=True` with a
+mode other than `"deferred"` is `InterfaceError`. On a connection that is itself `read_only`, the default is
+`BEGIN DEFERRED`. A deferred transaction that writes after it read can fail at once with `SQLITE_BUSY_SNAPSHOT`
+(`40001`), without waiting for the busy handler: begin a transaction that writes as `IMMEDIATE`.
+
+A nested `transaction()` on a `Transaction` is a `SAVEPOINT` and takes no `mode` or `read_only` (`InterfaceError`). The
+outermost level is always an explicit `BEGIN`, and a savepoint exists only inside an open transaction. After
+`ROLLBACK TO` the savepoint stays open and still needs its `RELEASE`, which leaving the block does. A rejected
+`COMMIT` rolls back. A `Transaction` is not a valid target for `Migrator`.
+
+A failed statement does not end the transaction, as it does on PostgreSQL. The helper still refuses to commit a block
+that swallowed an error: leaving it cleanly raises `InterfaceError` after rolling back, and rolling back to a savepoint
+clears that mark. Only an interrupted write aborts a transaction, which is the next section.
+
+### SQLite cancellation
+
+`sqlite3_interrupt` is connection-wide, and a no-op when nothing runs. Cancelling the task that awaits a call
+interrupts the statement and settles the connection before the next call, as on PostgreSQL
+([Cancellation](#cancellation)). Leaving a `fetch` early drains.
+
+- An interrupted **write** inside an explicit transaction rolls the whole transaction back, and SQLite returns the
+  connection to autocommit. Later statements in that `transaction()` raise `DatabaseError` `25P02` with `code`
+  `SQLITE_INTERRUPT`, the exception PostgreSQL raises for an aborted transaction. The connection itself stays usable.
+  An interrupted **read**, and a failed statement, leave the transaction open.
+- A cancel that lands before a statement steps fails it with `SQLITE_INTERRUPT` and leaves an explicit transaction
+  open. A cancelled `BEGIN` that was waiting for the lock leaves no transaction behind.
+- The busy handler does not wake on an interrupt. A cancel or a `statement_timeout` during a lock wait ends after
+  about `connect_timeout` with `SQLITE_BUSY` (`55P03`), not `57014`.
+- `close()` while a call runs interrupts it and raises `InterfaceError`.
+
+### SQLite pool
+
+`rowx.sqlite.Pool(options, *, min_size, max_size, acquire_timeout, idle_timeout, max_lifetime, max_queries, ping_after,
+init, setup, reset)` is the pool of [Pool](#pool) with these differences:
+
+- It is one pool. Every connection reads and writes, and SQLite serialises the writers: a transaction takes the write
+  lock up front and waits for it up to `connect_timeout`. There is no separate reader pool.
+- The defaults for a file are those of the PostgreSQL pool, including `max_size=10`.
+- There is no `reset_query`. On release the pool rolls back an open transaction and puts `query_only` back to what the
+  connection had when it connected, then runs the `reset` hook. A connection that cannot be returned to autocommit is
+  discarded.
+- A `sqlite::memory:` pool holds one connection, created when the pool opens, with no idle timeout, no lifetime and no
+  query cap, because the database lives and dies with that connection. Options left unset resolve to
+  `min_size=1`, `max_size=1`, `idle_timeout=None`, `max_lifetime=None` and `max_queries=None`. An explicit value that
+  contradicts that is `ValueError`. The pool connects once and refuses to reconnect: when the connection is lost, every
+  acquire fails at once with `InterfaceError` saying the pool is permanently broken, instead of silently handing out an
+  empty database.
+
+### SQLite concurrency
+
+One writer is in at a time, and readers proceed beside it in WAL mode. Writers wait for the lock for up to
+`connect_timeout`, then fail with `SQLITE_BUSY` (`55P03`). `SQLITE_LOCKED` has the same SQLSTATE, and `code` tells the
+two apart. A file on a network filesystem is not supported, because WAL needs shared memory. A pool used in a forked
+child raises `InterfaceError`: create it after the fork.

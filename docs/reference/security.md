@@ -140,3 +140,32 @@ The trust model of an embedded database (a private socket directory, trust authe
   categories Cc (except `\n` and `\t`), Zl, Zp and Cf, and surrogate-escaped C1 bytes (U+DC80 through U+DC9F). U+200C
   (ZWNJ), U+200D (ZWJ) and U+00AD (soft hyphen) are kept ([Output](checker.md#output)).
 - The checker never imports or executes user code, and the `template-construction` rule reads source only.
+
+## SQLite
+
+The invariant is the same: no untrusted input changes the parse tree of a statement. The differences are below.
+
+- **Values are bound** as `?N` parameters and never pasted into SQL text. The compiler rejects a parameter sigil in
+  static text (`?`, `:x`, `@x`, `$x`, `#x`) and an interpolation inside a string, quoted name or comment, with
+  `TypeError` before any IO ([SQLite execution](driver.md#sqlite-execution)). `:ident` is quoted by the same compiler
+  and is allowlisted by the application as for PostgreSQL.
+- **Pragmas on open.** Every connection sets `foreign_keys=ON`, `synchronous=FULL` and `recursive_triggers=OFF`, and
+  turns the double-quoted string literal fallback off (`DQS_DML`, `DQS_DDL`), so a mistyped `"colum"` is an error and
+  not a string ([SQLite pragmas](driver.md#sqlite-pragmas)). Extension loading is compiled into the bundled SQLite and
+  stays disabled; there is no `load_extension` path.
+- **`rowx check` on a file you did not write.** A database file is data from elsewhere: its schema can hold views,
+  triggers and generated columns that call functions. The checker session therefore opens the file `mode=ro` with
+  `PRAGMA query_only=ON`, sets `trusted_schema=OFF` and `SQLITE_DBCONFIG_DEFENSIVE`, and installs an authorizer that
+  refuses every value-setting `PRAGMA` at prepare time (only `table_info`, `table_xinfo`, `table_list`, `index_info`,
+  `index_xinfo`, `index_list`, `foreign_key_list`, `foreign_key_check`, `integrity_check` and `quick_check` with an
+  argument pass), because a pragma takes effect while it is prepared. Describing never steps a statement, so no query,
+  view or trigger body runs. The statement timeout bounds each describe.
+- **`--scratch` executes migration files**, in a temporary file the checker creates (mode `0600`, under the system
+  temporary directory) and removes afterwards. Migration files are trusted code, as for PostgreSQL. A migration file
+  cannot start or end a transaction of its own.
+- **Stored values are untrusted.** The value decoders (`crates/rowx-sqlite/src/value/`) deny `clippy::indexing_slicing`
+  and `clippy::arithmetic_side_effects`, return `DecodeError` for malformed UTF-8, text or numbers, and never panic.
+- **Redaction.** A SQLite URL holds no secret, so a path is not redacted. `redact` keeps its whole-URL replacement, and
+  a diagnostic or message never repeats the text of a rejected URL.
+- **Not supported.** WAL on a network filesystem, shared-cache mode, extension loading and SQLCipher are not supported
+  ([Known limits](../known-limits.md#sqlite-limits)).

@@ -1,13 +1,13 @@
 # First query
 
-Install the checker and the PostgreSQL backend, then run a query.
+Install the checker and the PostgreSQL backend, then run a query. SQLite is [SQLite](sqlite.md).
 
 ```sh
 uv add "rowx[postgres]"
 ```
 
 **Import `Pool` from `rowx.postgres`.** `Pool` imported from `rowx` is the executor protocol, not a connection pool.
-The four distributions are [Packages](../packages.md).
+The five distributions are [Packages](../packages.md).
 
 If you already shipped 0.2, the imports on this page are the ones you have. The wheel split is
 [Upgrading from 0.2](../packages.md#upgrading-from-02).
