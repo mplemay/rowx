@@ -82,7 +82,8 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
 
 The v1 SQLite backend leaves these out. Each is a decision, not an oversight.
 
-- **No system `libsqlite3`.** SQLite is bundled (3.51.3), so the version is the one rowx ships.
+- **No system `libsqlite3`.** SQLite is bundled ([driver reference](reference/driver.md#sqlite)), so the version is the
+  one rowx ships.
 - **No shared-cache mode**, no `ATTACH`-aware checking, no extension loading, no user-defined functions, no SQLCipher,
   no incremental blob IO, no update hooks, and no free-threaded build.
 - **No sync API.** The driver is asyncio only.

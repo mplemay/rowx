@@ -39,8 +39,9 @@ from rowx_postgres import Pool, connect
 ## rowx-sqlite
 
 The `rowx-sqlite` distribution's import root is `rowx_sqlite`. It depends only on the matching `rowx-core`. It is the
-SQLite driver: connections, a pool, transactions and migrations. SQLite 3.51.3 is built in, so it never links the system
-`libsqlite3`. It is a native wheel for the same platforms as `rowx-postgres` (including Windows), plus an sdist.
+SQLite driver: connections, a pool, transactions and migrations. SQLite is bundled
+([driver reference](reference/driver.md#sqlite)), so it never links the system `libsqlite3`. It is a native wheel for
+the same platforms as `rowx-postgres` (including Windows), plus an sdist.
 
 ```python
 from rowx_sqlite import Pool, connect

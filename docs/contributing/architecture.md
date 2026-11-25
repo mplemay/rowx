@@ -70,7 +70,8 @@ The GIL is released around IO. IO runs on that runtime.
 
 `rowx-postgres` does not import `rowx`. The checker in `rowx` selects a backend from the database URL and receives the
 backend's checker, admin and migration services as arguments. `Backend` in `packages/rowx-core/src/rowx_core/backend.py`
-has `checker`, `admin`, `migrations`, `testing`, `scratch` and `memory` factories. A missing one raises
+has `checker`, `admin`, `migrations`, `testing`, `embedded`, `scratch` and `memory` (`in_memory`) factories, and a
+`compat_warning` string shown before a compatibility run. A missing one raises
 `UnsupportedCapabilityError`. A checker-only backend need not implement administration or testing. There is no
 `ContextVar`, no default backend, and no cast through `Any` to hide a backend type. A capability the process did not
 install is an error from `backend_for`, not a silent PostgreSQL fallback. Keyword and `postgres`/`postgresql` URLs ask

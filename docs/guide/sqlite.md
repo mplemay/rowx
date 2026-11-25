@@ -1,7 +1,7 @@
 # SQLite
 
 rowx runs the same queries against a SQLite file or an in-memory database. The `sqlite` extra installs the backend with
-SQLite 3.51.3 built in, so no system `libsqlite3` is involved.
+a bundled SQLite ([version](../reference/driver.md#sqlite)), so no system `libsqlite3` is involved.
 
 ```sh
 uv add "rowx[sqlite]"
@@ -28,7 +28,9 @@ is what differs. The contract is in the [driver](../reference/driver.md#sqlite),
 
 Write an absolute path as `f"sqlite:///{path.as_posix()}"`. The path is percent-decoded, so a literal `?` or `#` is
 `%3F` or `%23`. Every other form is rejected with a hint that shows the `sqlite:///` form: `sqlite:app.db`, a bare path
-such as `app.db`, `sqlite://host/app.db`, a `file:` URI and any query string.
+such as `app.db`, `sqlite://host/app.db`, a `file:` URI and any query string. The CLI is narrower about query strings
+([Checker](../reference/checker.md#sqlite)): it names only `mode=memory`, `cache=shared`, `immutable` and `vfs`, and any
+other query string is a plain unparseable URL, exit 2.
 
 A URL never creates a file. A connection opens an existing file for writing, and a missing file raises `DatabaseError`
 `58030` (`SQLITE_CANTOPEN`). Create one with `ConnectOptions(path=..., mode="rwc")`, with `rowx database create`, or by
@@ -439,6 +441,7 @@ backup API for each test. Editing a migration builds a new template. The details
 - **Parameters are untyped.** SQLite applies the column's affinity when it stores one, so a `str` bound into an
   `INTEGER` column is stored as an integer.
 - **`execute` is for statements that return no rows.** A `SELECT`, `INSERT ... RETURNING` or a reading `PRAGMA` is
-  `InterfaceError` before it runs. Use `one`, `all` or `fetch`. A string of several statements is `InterfaceError` too.
+  `InterfaceError` before it runs. Use `one`, `all` or `fetch`. A string of several statements is `InterfaceError` too,
+  and an empty or comment-only query is `DatabaseError` (`HY000`, `SQLITE_MISUSE`).
 - **Cancellation is connection-wide.** A cancelled statement is interrupted. The details, including what happens
   inside a transaction, are in [Cancellation](../reference/driver.md#sqlite-cancellation).

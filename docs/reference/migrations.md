@@ -242,7 +242,7 @@ table in any other schema, and any `create_schemas` entry, are `ValueError`.
 |---|---|---|
 | `exists` | A regular file is at the path. | |
 | `create` | Creates an empty file exclusively. Nothing is overwritten. The CLI treats an existing file as success. | `42P04` exists; `58030` for a missing directory |
-| `create(template=...)` | Copies a template database with SQLite's backup API, which reads a consistent snapshot, WAL included. | `3D000` template missing; `55P03` when the template stays locked for 5 seconds |
+| `create(template=...)` | Copies a template database with SQLite's backup API, which reads a consistent snapshot, WAL included. | `3D000` template missing; `55P03` when the template stays locked for 5 seconds. The limit bounds only the wait for the template's lock; the backup copy runs as one step with no time limit |
 | `drop` | Removes the file and its `-wal`, `-shm` and `-journal` files. A missing file is not an error, but its orphaned side files are removed too, because a later `create` would replay them. A directory, or a file that is neither empty nor a SQLite database, is refused and nothing is removed. | `XX002` refused; `55006` on Windows when the file is open |
 | `list` | The names of the SQLite files beside the URL's path that start with a prefix, side files excluded. `comment` is `None` and `sessions` is `0`. | |
 | `ready` | Waits up to the connect timeout for the database to be usable: a directory is refused, and an existing file must open as a SQLite database. | `XX002` for a directory or a non-database |

@@ -117,8 +117,8 @@
 
 rowx is typesafe raw SQL for Python 3.14+ with no ORM. Queries are PEP 750 t-strings with an explicit row type,
 `query[tuple[int, str]](t"...")`, run by a Rust driver built on tokio-postgres, or by the bundled-SQLite driver
-`rowx-sqlite`. A static checker, `rowx check`, validates every query against a live Postgres 18 database by preparing
-and describing it.
+`rowx-sqlite`. A static checker, `rowx check`, validates every query against a live PostgreSQL 18 database, or a
+SQLite database selected by a `sqlite:` URL, by preparing and describing it.
 
 - The reference pages under `docs/reference/` are the user contract. A feature PR must not change that contract
   silently.
@@ -135,13 +135,13 @@ and describing it.
 | `just test-rust-embedded` | `cargo test -p rowx-embedded-host` (builds the Wasmer tree) |
 | `just build-sqlite` | Build the SQLite extension with maturin |
 | `just test-py` | `just build-sqlite`, then `uv run pytest` |
+| `just test-sqlite` | `just build-sqlite`, then `uv run pytest` over `packages/rowx-sqlite/src/rowx_sqlite/__tests__` |
 | `just test-embedded` | The embedded lane: `ROWX_TEST_DSN=embedded:// uv run pytest -m "(db and not server) or embedded"` |
 | `just check-embedded` | Clippy for the embedded companion, a non-default workspace member |
 | `just fuzz-nullability` | Long PostgreSQL nullability fuzz with a random seed; needs `ROWX_TEST_DSN` |
 | `just bench-drivers` | Release build plus `bench/fetch_drivers.py`; needs `ROWX_TEST_DSN` |
 | `just docs` / `just docs-build` | Serve the documentation site, or build it in strict mode |
 | `just changelog` | Regenerate `docs/changelog.md` from the tagged releases |
-| `just test-sqlite` | `just build-sqlite`, then `uv run pytest` over `packages/rowx-sqlite/src/rowx_sqlite/__tests__` |
 | `just db-up` / `just db-down` | Start or stop `postgres:18` |
 | `just bench` | Release build plus `bench/fetch_100k.py` |
 | `just bench-sqlite` | Release build of the SQLite extension plus `bench/fetch_100k_sqlite.py` (rowx only, a temporary file database) |
@@ -163,12 +163,13 @@ and describing it.
 
 ## Architecture conventions
 
-- `rowx-core` and `rowx-postgres` have no pyo3 dependency. Wire codecs in `rowx-postgres/src/wire/` are pure functions
-  over bytes with unit tests.
+- `rowx-core`, `rowx-postgres` and `rowx-sqlite` have no pyo3 dependency. Wire codecs in `rowx-postgres/src/wire/` are
+  pure functions over bytes with unit tests.
 - The GIL is released around all IO (`Python::detach`), and IO runs on the shared tokio runtime in
   `rowx-py-core/src/runtime.rs`.
-- `rowx-core` has no runtime dependencies. `rowx-postgres` depends only on `rowx-core`; `rowx` depends on `rowx-core`
-  and installs `rowx-postgres` through its `postgres` extra. The checker never imports or executes user code.
+- `rowx-core` has no runtime dependencies. `rowx-postgres` and `rowx-sqlite` each depend only on `rowx-core`; `rowx`
+  depends on `rowx-core` and installs `rowx-postgres` and `rowx-sqlite` through its `postgres` and `sqlite` extras. The
+  checker never imports or executes user code.
 - Runtime queries use the supplied executor's compiler. Checking selects its backend from an explicit database
   target; backend resources and services are passed explicitly, never through ambient context variables.
 - PostgreSQL DB tests are marked `@pytest.mark.db` and use the `schema` fixture, never `public`. Timing tests are marked

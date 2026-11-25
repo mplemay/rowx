@@ -9,11 +9,12 @@ ROOT: Final[Path] = next(parent for parent in Path(__file__).resolve().parents i
 # `.agents/skills/` may be absent; the pattern stays so a later skill page is picked up.
 DOC_GLOBS: Final[tuple[str, ...]] = ("README.md", "docs/**/*.md", ".agents/skills/**/*.md")
 # the pages whose snippets run against SQLite. The PostgreSQL runner (`rowx_postgres` integration/docs/test_snippets.py)
-# skips exactly these, and a test there keeps the two sets equal
+# skips every snippet that references SQLite, so a snippet is in exactly one lane
 SQLITE_DOCS: Final[frozenset[str]] = frozenset({
     "docs/guide/sqlite.md",
     ".agents/skills/use-rowx/references/sqlite.md",
 })
+SQLITE_WORDS: Final[tuple[str, ...]] = ("rowx.sqlite", "rowx_sqlite", "sqlite:")
 SNIPPET: Final[Pattern[str]] = re_compile(r"^```python test\n(?P<body>.*?)^```$", MULTILINE | DOTALL)
 
 
@@ -21,14 +22,13 @@ def _relative(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
-def _bodies() -> list[tuple[Path, int, str]]:
+def _pages() -> list[tuple[Path, int, str]]:
     found = sorted({path for pattern in DOC_GLOBS for path in ROOT.glob(pattern) if path.is_file()})
-    return [
-        (path, i, match["body"])
-        for path in found
-        if _relative(path) in SQLITE_DOCS
-        for i, match in enumerate(SNIPPET.finditer(path.read_text()))
-    ]
+    return [(path, i, match["body"]) for path in found for i, match in enumerate(SNIPPET.finditer(path.read_text()))]
+
+
+def _bodies() -> list[tuple[Path, int, str]]:
+    return [(path, i, body) for path, i, body in _pages() if _relative(path) in SQLITE_DOCS]
 
 
 def test_every_sqlite_doc_exists_and_has_snippets() -> None:
@@ -36,18 +36,12 @@ def test_every_sqlite_doc_exists_and_has_snippets() -> None:
     assert snippeted == SQLITE_DOCS
 
 
-# a snippet that touches SQLite but sits on a page the PostgreSQL runner owns would fail there, with a confusing error
-def test_no_other_page_runs_a_sqlite_snippet() -> None:
-    sqlite_words = ("rowx.sqlite", "rowx_sqlite", "sqlite:")
-    found = sorted(
-        _relative(path)
-        for pattern in DOC_GLOBS
-        for path in ROOT.glob(pattern)
-        if path.is_file()
-        and _relative(path) not in SQLITE_DOCS
-        and any(word in match["body"] for match in SNIPPET.finditer(path.read_text()) for word in sqlite_words)
-    )
-    assert found == []
+# the PostgreSQL runner skips a snippet that references SQLite, so this runner must run exactly those: the pages holding
+# one are the SQLITE_DOCS, and every snippet on those pages references SQLite
+def test_the_sqlite_lane_is_the_snippets_that_reference_sqlite() -> None:
+    referencing = {_relative(path) for path, _, body in _pages() if any(word in body for word in SQLITE_WORDS)}
+    assert referencing == SQLITE_DOCS
+    assert all(any(word in body for word in SQLITE_WORDS) for _, _, body in _bodies())
 
 
 # the snippets make their own databases in temporary directories, so none of them needs the working directory

@@ -1,7 +1,7 @@
 # SQLite
 
 Install `uv add "rowx[sqlite]"`. A runtime-only install is `uv add rowx-core rowx-sqlite`, imported as `rowx_core` and
-`rowx_sqlite`. The bundled SQLite is 3.51.3, with no system `libsqlite3`.
+`rowx_sqlite`. SQLite is bundled, with no system `libsqlite3`.
 
 Import from `rowx.sqlite`: `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction` and `Migrator`. Nothing
 SQLite-specific is on `rowx`. The query API is the same as for Postgres.
@@ -9,8 +9,9 @@ SQLite-specific is on `rowx`. The query API is the same as for Postgres.
 ## URL
 
 `sqlite:///relative.db`, `sqlite:////absolute/path.db`, `sqlite:///C:/x.db` and `sqlite::memory:`. Every other form is
-rejected with a hint: `sqlite:app.db`, a bare path, `sqlite://host/x.db`, `file:` URIs and any query string. A bare
-string that is not a database file name stays a PostgreSQL keyword DSN.
+rejected with a hint: `sqlite:app.db`, a bare path, `sqlite://host/x.db`, `file:` URIs. The runtime `connect` rejects
+any query string; the CLI names only `mode=memory`, `cache=shared`, `immutable` and `vfs`, and fails any other query
+string as an unparseable URL (exit 2). A bare string that is not a database file name stays a PostgreSQL keyword DSN.
 
 A URL never creates a file. Open with `ConnectOptions(path=..., mode="rwc")` to create one, or run
 `rowx database create`. A missing file is `DatabaseError` `58030`.

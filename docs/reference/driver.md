@@ -191,9 +191,10 @@ percent-decoded, and a NUL, an invalid escape or a result that is not UTF-8 is r
 `InterfaceError`, and every message ends with a hint that shows the `sqlite:///` form. The message never repeats the
 URL.
 
-- A URL has no host (`sqlite://host/x.db`), no query string and no fragment. `mode`, `immutable`, `vfs` and `cache` are
-  named in the message (`cache=shared` is the shared-cache mode, which is not supported). A literal `?` or `#` in a path
-  is written `%3F` or `%23`.
+- A URL has no host (`sqlite://host/x.db`), no query string and no fragment. At run time `connect` rejects every query
+  string, and the message names `mode`, `immutable`, `vfs` or `cache` when one of them is the key (`cache=shared` is the
+  shared-cache mode, which is not supported); any other key gets the general no-query-parameters message. The CLI is
+  narrower ([Checker](checker.md#sqlite)). A literal `?` or `#` in a path is written `%3F` or `%23`.
 - An empty path, `sqlite:///:memory:` (write `sqlite::memory:`), `sqlite:path`, a bare path, and a `file:` URI are
   rejected. A bare `file:` name that arrives through percent-decoding is prefixed with `./`, so SQLite opens a plain
   file and never parses it as a URI, although the bundled build compiles with `SQLITE_USE_URI`.
@@ -266,7 +267,8 @@ prepared again by SQLite itself. The statement cache is per connection.
 - `execute` runs one statement and returns `QueryResult(rows_affected)`. It is `InterfaceError` for a statement that
   returns rows (a `SELECT`, `INSERT ... RETURNING`, a `PRAGMA` that answers), and it refuses before the statement
   runs, so nothing is written. Use `one`, `all` or `fetch` for those. `rows_affected` is `0` for DDL.
-- A string of several statements is `InterfaceError` at run time, and an empty one is too. A query is one statement.
+- A string of several statements is `InterfaceError` at run time. An empty or comment-only query (`t""`, `t"   "`,
+  `t"-- c"`, `t";"`) is `DatabaseError` with sqlstate `HY000` and code `SQLITE_MISUSE`. A query is one statement.
 - Stored values that do not decode are `DecodeError`, and a value that does not encode is `EncodeError`. The
   connection stays usable.
 

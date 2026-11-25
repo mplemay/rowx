@@ -422,9 +422,11 @@ exits 2 with a hint to install it. The backend is `packages/rowx-sqlite/src/rowx
 
 **URLs.** The forms are `sqlite:///relative.db`, `sqlite:////abs/path.db`, `sqlite:///C:/x.db` and `sqlite::memory:`
 ([SQLite URLs](driver.md#sqlite-urls)). The CLI rejects, with a hint that shows the `sqlite:///` form: `sqlite:path`, a
-bare file path such as `app.db`, `sqlite://host/...`, a `file:` URI, an empty path, and any query string (`mode`,
-`immutable`, `vfs` and `cache=shared` are named). A bare string with no scheme that does not name a database file stays
-a PostgreSQL keyword DSN, and the one that does is rejected as a bare path. A rejected SQLite URL is exit 2.
+bare file path such as `app.db`, `sqlite://host/...`, a `file:` URI and an empty path. A query string is narrower: only
+`mode=memory`, `cache=shared`, and any `immutable` or `vfs` option get the `sqlite:///` hint, and any other query string
+(`?mode=ro`, `?foo=1`) fails as "the database URL could not be parsed", also exit 2. (The runtime `connect` rejects
+every query string, [SQLite URLs](driver.md#sqlite-urls).) A bare string with no scheme that does not name a database
+file stays a PostgreSQL keyword DSN, and the one that does is rejected as a bare path. A rejected SQLite URL is exit 2.
 
 **The session.** The checker opens a file read-only (`mode=ro`, `PRAGMA query_only=ON`) and prepares each statement
 without stepping it, so nothing runs and no row is read. The session is hardened ([Security](security.md#sqlite)). The
