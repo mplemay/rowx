@@ -1,8 +1,10 @@
+use std::cell::OnceCell;
 use std::collections::HashMap;
 
 use rowx_core::row_shape::{Override, column_name};
 use rusqlite::Connection as Raw;
 
+use crate::bytecode::{Class, Fact, analyze};
 use crate::error::Error;
 use crate::exec::refresh_schema;
 use crate::types::{Kind, lookup};
@@ -46,6 +48,8 @@ impl Construct {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NullReason {
     NotNullColumn,
+    /// The bytecode proves an expression is never NULL.
+    ComputedExpr,
     NullableColumn,
     /// Nothing proves the column; `cause` says why.
     Unproven {
@@ -60,6 +64,7 @@ impl NullReason {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::NotNullColumn => "NotNullColumn",
+            Self::ComputedExpr => "ComputedExpr",
             Self::NullableColumn => "NullableColumn",
             Self::Unproven { .. } => "Unproven",
             Self::OverrideBang => "OverrideBang",
@@ -282,6 +287,20 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
         .collect::<Result<Vec<_>, _>>()?;
     let cause = unproven_cause(structure, &kinds);
     let mut keys: HashMap<(String, String), TableKey> = HashMap::new();
+    // read only when a column needs it, and only from the bytecode, which is never run
+    let facts: OnceCell<Option<Vec<Fact>>> = OnceCell::new();
+    let fact = |index: usize| {
+        facts
+            .get_or_init(|| {
+                (stmt.is_explain() == 0)
+                    .then(|| analyze(conn, sql).ok())
+                    .flatten()
+                    .filter(|found| found.len() == stmt.column_count())
+            })
+            .as_ref()
+            .and_then(|found| found.get(index))
+            .copied()
+    };
     let mut columns = Vec::with_capacity(stmt.column_count());
     let decls = stmt.columns();
     for (index, found) in stmt.columns_with_metadata().iter().enumerate() {
@@ -322,27 +341,71 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
                 Ok(not_null || rowid)
             }
         };
-        let (nullable, reason) = match over {
-            Some(Override::Bang) => (false, NullReason::OverrideBang),
-            Some(Override::Question) => (true, NullReason::OverrideQuestion),
-            None => match proven {
-                Ok(true) => (false, NullReason::NotNullColumn),
-                Ok(false) => (true, NullReason::NullableColumn),
-                Err(cause) => (true, NullReason::Unproven { cause }),
-            },
-        };
-        let looked_up = lookup(declared);
+        let found = fact(index);
+        let (nullable, reason) = verdict(over, proven, found);
+        let (kind, type_name) = column_type(declared, found);
         columns.push(ColumnInfo {
             name,
             raw_name,
-            type_name: declared.unwrap_or_default().to_owned(),
-            kind: (!looked_up.is_untyped()).then(|| looked_up.kind()),
+            type_name,
+            kind,
             nullable,
             reason,
             origin,
         });
     }
     Ok(Describe { params, columns })
+}
+
+// The existing rule decides first, the bytecode only reads a column it left unproven, and an override applies last.
+fn verdict(
+    over: Option<Override>,
+    proven: Result<bool, String>,
+    found: Option<Fact>,
+) -> (bool, NullReason) {
+    match over {
+        Some(Override::Bang) => (false, NullReason::OverrideBang),
+        Some(Override::Question) => (true, NullReason::OverrideQuestion),
+        None => match proven {
+            Ok(true) => (false, NullReason::NotNullColumn),
+            Ok(false) => (true, NullReason::NullableColumn),
+            Err(cause) => match found {
+                Some(fact) if fact.non_null => (
+                    false,
+                    if fact.pass_through {
+                        NullReason::NotNullColumn
+                    } else {
+                        NullReason::ComputedExpr
+                    },
+                ),
+                _ => (true, NullReason::Unproven { cause }),
+            },
+        },
+    }
+}
+
+// A column with no declared type takes the one storage class the bytecode proves for it.
+fn column_type(declared: Option<&str>, found: Option<Fact>) -> (Option<Kind>, String) {
+    let looked_up = lookup(declared);
+    if !looked_up.is_untyped() {
+        return (
+            Some(looked_up.kind()),
+            declared.unwrap_or_default().to_owned(),
+        );
+    }
+    found.and_then(|fact| fact.class).map_or_else(
+        || (None, declared.unwrap_or_default().to_owned()),
+        |class| (Some(class_kind(class)), class.name().to_owned()),
+    )
+}
+
+const fn class_kind(class: Class) -> Kind {
+    match class {
+        Class::Integer => Kind::Integer,
+        Class::Real => Kind::Real,
+        Class::Text => Kind::Text,
+        Class::Blob => Kind::Blob,
+    }
 }
 
 #[cfg(test)]

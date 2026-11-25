@@ -101,7 +101,8 @@ def test_a_passing_project_exits_zero(project: CheckProject) -> None:
     write(
         project,
         'query[tuple[int, str, int]](t"SELECT id, name, age FROM users")\n'
-        'query[tuple[int | None, str | None]](t"SELECT user_id, title FROM user_posts WHERE title = {1}")\n',
+        # the WHERE clause turns the view's left join into an inner join, which proves both columns
+        'query[tuple[int, str]](t"SELECT user_id, title FROM user_posts WHERE title = {1}")\n',
     )
     assert project.check() == (0, "", "")
     assert project.check("--output-format", "json") == (0, "[]\n", "")
@@ -122,6 +123,75 @@ def test_a_left_join_view_column_is_unproven(project: CheckProject) -> None:
     assert "nullability not proven, assumed nullable" in found["notes"]
     assert found["help"] is not None
     assert 'alias the column as "title!"' in found["help"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'query[tuple[int]](t"SELECT count(*) FROM users")\n',
+        'query[tuple[int]](t"SELECT count(email) FROM users")\n',
+        'query[tuple[float]](t"SELECT total(age) FROM users")\n',
+        'query[tuple[int, int]](t"SELECT count(*), 1 FROM users")\n',
+        "query[tuple[str, str]](t\"SELECT 'x', CAST(age AS TEXT) FROM users\")\n",
+        "query[tuple[str]](t\"SELECT coalesce(email, 'none') FROM users\")\n",
+        "query[tuple[str]](t\"SELECT ifnull(email, 'none') FROM users\")\n",
+        'query[tuple[int, int]](t"SELECT id, count(*) FROM users GROUP BY id")\n',
+        'query[tuple[int]](t"SELECT CASE WHEN age > 1 THEN 1 ELSE 0 END FROM users")\n',
+        'query[tuple[int, str | None]](t"SELECT users.id, posts.title FROM users LEFT JOIN posts ON posts.id = users.id")\n',
+        "query[tuple[str]](t\"SELECT coalesce(posts.title, 'none') FROM users LEFT JOIN posts ON posts.id = users.id\")\n",
+        'query[tuple[int]](t"SELECT age + 1 FROM users")\n',
+    ],
+)
+def test_a_computed_column_passes_without_an_override(project: CheckProject, source: str) -> None:
+    assert reports(project, source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'query[tuple[int]](t"SELECT sum(age) FROM users")\n',
+        'query[tuple[int]](t"SELECT max(age) FROM users")\n',
+        'query[tuple[float]](t"SELECT avg(age) FROM users")\n',
+        'query[tuple[int]](t"SELECT age / 1 FROM users")\n',
+        "query[tuple[str]](t\"SELECT email || 'x' FROM users\")\n",
+        'query[tuple[int]](t"SELECT nullif(age, 1) FROM users")\n',
+        "query[tuple[str]](t\"SELECT CASE WHEN age > 1 THEN 'x' END FROM users\")\n",
+        'query[tuple[int]](t"SELECT count(*) + sum(age) FROM users")\n',
+    ],
+)
+def test_a_computed_column_that_can_be_null_still_needs_optional_or_an_override(
+    project: CheckProject, source: str
+) -> None:
+    (found,) = reports(project, source)
+    assert found["rule"] == "nullability-mismatch"
+    assert "nullability not proven, assumed nullable" in found["notes"]
+
+
+def test_an_optional_annotation_is_accepted_for_a_column_that_can_be_null(project: CheckProject) -> None:
+    source = (
+        'query[tuple[int | None, int | None]](t"SELECT sum(age), max(age) FROM users")\n'
+        'query[tuple[int]](t"SELECT sum(age) AS \\"total!\\" FROM users")\n'
+    )
+    assert reports(project, source) == []
+
+
+def test_a_join_that_needs_an_automatic_index_is_not_proven(project: CheckProject) -> None:
+    source = 'query[tuple[int, str | None]](t"SELECT user_id, title FROM user_posts")\n'
+    (found,) = reports(project, source)
+    assert found["rule"] == "nullability-mismatch"
+    assert "nullability not proven, assumed nullable" in found["notes"]
+
+
+def test_an_inferred_type_is_checked_against_the_annotation(project: CheckProject) -> None:
+    source = 'query[tuple[str]](t"SELECT count(*) FROM users")\n'
+    (found,) = reports(project, source)
+    assert found["rule"] == "type-mismatch"
+
+
+def test_a_computed_column_that_was_proven_is_reported_when_annotated_optional(project: CheckProject) -> None:
+    source = 'query[tuple[int | None]](t"SELECT count(*) FROM users")\n'
+    (found,) = reports(project, source)
+    assert found["rule"] == "nullability-mismatch"
 
 
 def test_a_not_null_column_read_as_optional_is_a_mismatch(project: CheckProject) -> None:
@@ -251,7 +321,7 @@ def test_diagnostics_map_through_nested_expressions_and_padded_placeholders(proj
 
 
 def test_an_element_diagnostic_lands_on_its_annotation_after_padded_placeholders(project: CheckProject) -> None:
-    source = 'x = 1\nquery[tuple[int, str]](t"SELECT id,{x}AND email FROM users WHERE id ={x}OR name={x}")\n'
+    source = 'x = 1\nquery[tuple[int, str]](t"SELECT id,{x}||email FROM users WHERE id ={x}OR name={x}")\n'
     (found,) = reports(project, source)
     assert found["rule"] == "nullability-mismatch"
     assert (found["line"], found["col"]) == position(source, "str]")
