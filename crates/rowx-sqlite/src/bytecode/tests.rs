@@ -479,6 +479,16 @@ const CASES: &[Case] = &[
         Cols(&[(U, true, false)]),
     ),
     case(
+        "two different strict columns of one class keep the class but are not a pass through",
+        "SELECT id FROM s UNION ALL SELECT n FROM s",
+        Cols(&[(I, false, false)]),
+    ),
+    case(
+        "a union all of two strict columns of one class keeps the class",
+        "SELECT x FROM s UNION ALL SELECT coalesce(y, x) FROM s",
+        Cols(&[(T, true, false)]),
+    ),
+    case(
         "a union all arm that is NULL",
         "SELECT a FROM t UNION ALL SELECT NULL",
         Cols(&[(U, false, false)]),
@@ -618,6 +628,48 @@ fn the_analysis_reads_attached_and_temp_databases() -> TestResult {
     assert_eq!(
         columns(&conn, "SELECT o.k, tmp.k, tmp.l FROM other.o o, tmp"),
         Ok(vec![(I, true, true), (U, true, true), (U, false, false)])
+    );
+    Ok(())
+}
+
+#[test]
+fn an_origin_is_the_same_only_for_the_same_column_of_the_same_table() -> TestResult {
+    let conn = database()?;
+    conn.execute_batch(
+        "ATTACH ':memory:' AS other;
+         CREATE TABLE other.t (id INTEGER PRIMARY KEY, a INTEGER NOT NULL);
+         CREATE TEMP TABLE t (id INTEGER PRIMARY KEY, a INTEGER NOT NULL);
+         CREATE TABLE r (id INTEGER PRIMARY KEY, a INTEGER NOT NULL);
+         CREATE INDEX r_a ON r (a);",
+    )?;
+    let proven = |sql: &str, pass: bool| {
+        assert_eq!(
+            columns(&conn, sql)
+                .map(|cols| cols.iter().map(|col| (col.1, col.2)).collect::<Vec<_>>()),
+            Ok(vec![(true, pass)]),
+            "{sql}"
+        );
+    };
+    // the same table name and column in two databases are two origins
+    proven(
+        "SELECT main.t.a FROM main.t UNION ALL SELECT other.t.a FROM other.t",
+        false,
+    );
+    proven(
+        "SELECT main.t.a FROM main.t UNION ALL SELECT temp.t.a FROM temp.t",
+        false,
+    );
+    proven(
+        "SELECT other.t.a FROM other.t UNION ALL SELECT other.t.a FROM other.t",
+        true,
+    );
+    // the rowid and its alias are one origin, the rowid and another column are not
+    proven("SELECT rowid FROM r UNION ALL SELECT id FROM r", true);
+    proven("SELECT rowid FROM r UNION ALL SELECT a FROM r", false);
+    // a column read through a covering index is the table's column
+    proven(
+        "SELECT a FROM r NOT INDEXED UNION ALL SELECT a FROM r INDEXED BY r_a",
+        true,
     );
     Ok(())
 }
