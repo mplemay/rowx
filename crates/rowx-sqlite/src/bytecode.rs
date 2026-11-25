@@ -10,8 +10,20 @@
 //! [`analyze`] return a [`Silent`] error, and the caller reports nothing. `EXPLAIN` opcodes are not
 //! stable between SQLite versions, so [`REVIEWED_SQLITE_VERSION`] pins the version the list in
 //! [`MODELED_OPCODES`] was reviewed against.
+//!
+//! Nested statements are modelled too. A coroutine and a subroutine called by a `Gosub` keep their
+//! return address in a register, which the state tracks. `Once` is exact: a state carries the set of
+//! `Once` instructions that already ran, and two states that differ in that set or in the return
+//! addresses they hold are never joined. The jump of a `Once` therefore only sees the values the first
+//! run left behind, and a coroutine only sees the registers of the entry it was resumed from.
+//!
+//! An ephemeral table is summarised for the whole program, not per flow: every record any path ever
+//! writes to it is joined into one summary, and a read gives the join of that summary. The program is
+//! analysed again until no summary grows. That keeps a read sound when the write comes later in the
+//! program (a loop, a recursive queue) or through another cursor of the same table (`OpenDup`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use rusqlite::Connection;
@@ -27,6 +39,8 @@ const REVIEWED_SQLITE_VERSION: &str = "3.51.3";
 
 const MAX_PROGRAM: usize = 20_000;
 const MAX_STEPS: usize = 400_000;
+// how many states with different keys (see `State::key`) one instruction may hold
+const MAX_PARTITIONS: usize = 128;
 // how many steps pass between two consultations of the stop check
 const STOP_INTERVAL: usize = 1024;
 
@@ -38,6 +52,9 @@ const BLOB: u8 = 8;
 // the rows a cursor can be on: a real row, or the all-NULL row of an outer join's missing side
 const ROW: u8 = 1;
 const NULL_ROW: u8 = 2;
+
+// OpenWrite: P2 is a register that holds the root page
+const OPFLAG_P2ISREG: i64 = 0x10;
 
 // the flags of a comparison's P5 are irrelevant to where it jumps: both successors are explored
 
@@ -66,22 +83,25 @@ macro_rules! opcodes {
 }
 
 opcodes! {
-    Init, Goto, Halt, Transaction, Noop, Once, Close,
-    OpenRead, OpenPseudo, SorterOpen,
-    Rewind, Last, Next, Prev, SorterSort, SorterNext, SorterInsert, SorterData,
-    SeekGE, SeekGT, SeekLE, SeekLT, SeekRowid, NotExists, DeferredSeek,
+    Init, Goto, Halt, Transaction, Noop, Explain, Once, Close,
+    OpenRead, OpenWrite, OpenPseudo, OpenEphemeral, OpenAutoindex, OpenDup, SorterOpen,
+    Rewind, Last, Next, Prev, SorterSort, SorterNext, SorterInsert, SorterData, ResetSorter,
+    SeekGE, SeekGT, SeekLE, SeekLT, SeekRowid, NotExists, DeferredSeek, FinishSeek,
+    Found, NotFound, NoConflict, IfEmpty,
     IdxGE, IdxGT, IdxLE, IdxLT,
-    Column, Rowid, IdxRowid, NullRow, IfNullRow, Count,
-    Integer, Int64, Real, String8, Blob, Null, Variable,
-    Copy, SCopy, Move,
+    Column, Rowid, IdxRowid, NullRow, IfNullRow, Count, RowData,
+    Insert, IdxInsert, Delete, IdxDelete, NewRowid, RowSetAdd, RowSetRead,
+    Integer, Int64, Real, String8, Blob, Null, BeginSubrtn, SoftNull, Variable,
+    Copy, SCopy, IntCopy, Move,
     NotNull, IsNull, If, IfNot, IsTrue, Not, And, Or, ZeroOrNull,
     Eq, Ne, Lt, Le, Gt, Ge, Compare, Jump,
     Add, Subtract, Multiply, Divide, Remainder, Concat, AddImm,
     BitAnd, BitOr, ShiftLeft, ShiftRight, BitNot,
-    Cast, Affinity, RealAffinity, CollSeq, ClrSubtype,
+    Cast, Affinity, RealAffinity, TypeCheck, CollSeq, ClrSubtype,
     Function, AggStep, AggFinal,
     MakeRecord, ResultRow,
-    Gosub, Return, MustBeInt, IfPos, DecrJumpZero, OffsetLimit,
+    Gosub, Return, InitCoroutine, Yield, EndCoroutine,
+    MustBeInt, IfPos, DecrJumpZero, OffsetLimit, HaltIfNull, FkCheck, Permutation,
     Filter, FilterAdd,
 }
 
@@ -107,6 +127,8 @@ pub enum Silent {
     Listing,
     #[error("the result rows disagree on their width")]
     Columns,
+    #[error("a write reaches a cursor whose table is not known")]
+    Cursor,
     /// The caller's stop check fired (a cancel or the statement timeout). Unlike every other variant
     /// this is not a property of the statement, so the caller fails instead of reporting nothing.
     #[error("the analysis was stopped")]
@@ -271,9 +293,15 @@ impl Rows {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Kind {
     Stored(Rc<Layout>),
+    /// A b-tree of the database that is not mapped onto columns.
+    Database,
     /// A cursor over the record in a register.
     Pseudo(i64),
     Sorter(Rows),
+    /// An ephemeral table, named by the address of the opcode that opened it. More than one when the
+    /// cursor was opened differently on different paths.
+    Ephemeral(BTreeSet<usize>),
+    /// A cursor nothing is known about: no write may go through it.
     Opaque,
 }
 
@@ -287,7 +315,12 @@ impl Cursor {
     fn join(&self, other: &Self) -> Self {
         let kind = match (&self.kind, &other.kind) {
             (Kind::Sorter(a), Kind::Sorter(b)) => Kind::Sorter(a.join(b)),
+            (Kind::Ephemeral(a), Kind::Ephemeral(b)) => {
+                Kind::Ephemeral(a.union(b).copied().collect())
+            }
             (a, b) if a == b => a.clone(),
+            // both are b-trees of the database, and writing to either changes no ephemeral table
+            (Kind::Stored(_) | Kind::Database, Kind::Stored(_) | Kind::Database) => Kind::Database,
             _ => Kind::Opaque,
         };
         Self {
@@ -301,9 +334,14 @@ impl Cursor {
 struct State {
     regs: BTreeMap<i64, Val>,
     cursors: BTreeMap<i64, Cursor>,
-    /// Where each `Gosub` return address register returns to.
+    /// Where each return address register (`Gosub`, `InitCoroutine`, `Yield`) resumes. A register without
+    /// an entry holds nothing known to be an address.
     returns: BTreeMap<i64, BTreeSet<usize>>,
+    /// The `Once` instructions that already ran on this path.
+    ran: BTreeSet<usize>,
 }
+
+type Key = (BTreeSet<usize>, BTreeMap<i64, BTreeSet<usize>>);
 
 impl State {
     // a register that was never written holds NULL
@@ -336,7 +374,15 @@ impl State {
             });
     }
 
-    // joins `other` into the state; true when this state grew
+    // The states of one instruction are kept apart when they differ in what a return address register
+    // holds or in which `Once` instructions ran. A subroutine or a coroutine is entered from a few places,
+    // and joining the states of different entries would let one entry's registers into the code the other
+    // runs, and a register that holds an address on some paths and a number on others has no address.
+    fn key(&self) -> Key {
+        (self.ran.clone(), self.returns.clone())
+    }
+
+    // joins `other`, which has the same key, into the state; true when this state grew
     fn absorb(&mut self, other: &Self) -> bool {
         let before = self.clone();
         let keys: BTreeSet<i64> = self.regs.keys().chain(other.regs.keys()).copied().collect();
@@ -355,12 +401,6 @@ impl State {
                 .map_or_else(|| cursor.clone(), |mine| mine.join(cursor));
             self.cursors.insert(*key, joined);
         }
-        for (key, addrs) in &other.returns {
-            self.returns
-                .entry(*key)
-                .or_default()
-                .extend(addrs.iter().copied());
-        }
         *self != before
     }
 }
@@ -373,6 +413,7 @@ struct Insn {
     p2: i64,
     p3: i64,
     p4: String,
+    p5: i64,
 }
 
 type Edge = (usize, State);
@@ -413,6 +454,7 @@ fn read_program(conn: &Connection, sql: &str) -> Result<Vec<Insn>, Silent> {
             p2: int(&column(3)?),
             p3: int(&column(4)?),
             p4: text(&column(5)?),
+            p5: int(&column(6)?),
         });
         if program.len() > MAX_PROGRAM {
             return Err(Silent::Bound);
@@ -559,7 +601,13 @@ fn read_layouts(conn: &Connection, program: &[Insn]) -> HashMap<usize, Rc<Layout
     let mut cache: HashMap<(i64, i64), Option<Rc<Layout>>> = HashMap::new();
     let mut layouts = HashMap::new();
     for (pc, insn) in program.iter().enumerate() {
-        if insn.op != Some(Op::OpenRead) {
+        // P5 of an OpenWrite can say P2 is a register that holds the root page
+        let opens = match insn.op {
+            Some(Op::OpenRead) => true,
+            Some(Op::OpenWrite) => insn.p5 & OPFLAG_P2ISREG == 0,
+            _ => false,
+        };
+        if !opens {
             continue;
         }
         let key = (insn.p3, insn.p2);
@@ -647,6 +695,46 @@ fn apply_affinity(value: &Val, affinity: u8) -> Val {
 struct Machine<'p> {
     program: &'p [Insn],
     layouts: HashMap<usize, Rc<Layout>>,
+    /// What each ephemeral table, named by the address of the opcode that opens it, may ever hold. It
+    /// only grows, across the whole program and across passes.
+    // the `RefCell` borrows in `record` and `contents` never nest: each is taken and released within the call
+    tables: RefCell<BTreeMap<usize, Rows>>,
+    /// A table grew during the pass in progress, so what was read from it may be too small.
+    grew: Cell<bool>,
+}
+
+impl<'p> Machine<'p> {
+    const fn new(program: &'p [Insn], layouts: HashMap<usize, Rc<Layout>>) -> Self {
+        Self {
+            program,
+            layouts,
+            tables: RefCell::new(BTreeMap::new()),
+            grew: Cell::new(false),
+        }
+    }
+
+    // joins the rows written to the tables a cursor may be on
+    fn record(&self, ids: &BTreeSet<usize>, written: &Rows) {
+        let mut tables = self.tables.borrow_mut();
+        for id in ids {
+            let held = tables.entry(*id).or_insert(Rows::Empty);
+            let joined = held.join(written);
+            if joined != *held {
+                *held = joined;
+                self.grew.set(true);
+            }
+        }
+    }
+
+    // everything the tables a cursor may be on have been given so far
+    fn contents(&self, ids: &BTreeSet<usize>) -> Rows {
+        let tables = self.tables.borrow();
+        let mut all = Rows::Empty;
+        for held in ids.iter().filter_map(|id| tables.get(id)) {
+            all = all.join(held);
+        }
+        all
+    }
 }
 
 impl Machine<'_> {
@@ -657,9 +745,11 @@ impl Machine<'_> {
             .ok_or(Silent::Target(addr))
     }
 
-    fn column(st: &State, cursor: i64, slot: i64) -> Val {
+    // What a column read gives, or `None` when the read cannot happen: the cursor is on a row of a table
+    // that nothing was ever written to.
+    fn column(&self, st: &State, cursor: i64, slot: i64) -> Option<Val> {
         let Some(found) = st.cursors.get(&cursor) else {
-            return Val::unknown();
+            return Some(Val::unknown());
         };
         let index = usize::try_from(slot).ok();
         let base = match &found.kind {
@@ -667,27 +757,45 @@ impl Machine<'_> {
                 .and_then(|index| layout.slots.get(index))
                 .and_then(Option::as_ref)
                 .map_or_else(Val::unknown, Slot::value),
-            Kind::Pseudo(reg) => st
-                .get(*reg)
-                .rec
-                .as_ref()
-                .and_then(|rec| index.and_then(|index| rec.get(index).cloned()))
-                .unwrap_or_else(Val::unknown),
-            Kind::Sorter(_) | Kind::Opaque => Val::unknown(),
+            // A pseudo cursor always reads the record in its register, a null row or not, so the rows it is
+            // on say nothing.
+            Kind::Pseudo(reg) => {
+                return Some(
+                    st.get(*reg)
+                        .rec
+                        .as_ref()
+                        .and_then(|rec| index.and_then(|index| rec.get(index).cloned()))
+                        .unwrap_or_else(Val::unknown),
+                );
+            }
+            // A column past the end of every record that was written reads the default, which is not known.
+            // A cursor on a row of a table nothing was written to is a flow that cannot happen, unless it
+            // may be on a null row, which reads NULL.
+            Kind::Ephemeral(tables) => match self.contents(tables) {
+                Rows::Known(fields) => index
+                    .and_then(|index| fields.get(index).cloned())
+                    .unwrap_or_else(Val::unknown),
+                Rows::Unknown => Val::unknown(),
+                Rows::Empty if found.rows & NULL_ROW == 0 => return None,
+                Rows::Empty => Val::null(),
+            },
+            Kind::Sorter(_) | Kind::Database | Kind::Opaque => Val::unknown(),
         };
-        Self::through_null_row(found, base)
+        Some(Self::through_null_row(found, base))
     }
 
     // a null-extended row reads NULL whatever the column holds
     fn through_null_row(found: &Cursor, base: Val) -> Val {
-        match (found.rows & ROW != 0, found.rows & NULL_ROW != 0) {
-            (_, false) => base,
-            (false, true) => Val::null(),
-            (true, true) => Val {
+        if found.rows & NULL_ROW == 0 {
+            base
+        } else if found.rows & ROW == 0 {
+            Val::null()
+        } else {
+            Val {
                 null: true,
                 origin: None,
                 ..base
-            },
+            }
         }
     }
 
@@ -699,10 +807,16 @@ impl Machine<'_> {
         if let Some(edges) = self.flow(pc, op, insn, st)? {
             return Ok(edges);
         }
+        if let Some(edges) = self.nested(pc, op, insn, st)? {
+            return Ok(edges);
+        }
         if let Some(edges) = self.open(pc, op, insn, st) {
             return Ok(edges);
         }
         if let Some(edges) = self.cursor(pc, op, insn, st)? {
+            return Ok(edges);
+        }
+        if let Some(edges) = self.table(pc, op, insn, st)? {
             return Ok(edges);
         }
         let mut next = st.clone();
@@ -734,8 +848,7 @@ impl Machine<'_> {
             }
             Op::Goto => vec![(self.target(insn.p2)?, st.clone())],
             Op::Halt => Vec::new(),
-            Op::Once
-            | Op::If
+            Op::If
             | Op::IfNot
             | Op::Eq
             | Op::Ne
@@ -745,7 +858,19 @@ impl Machine<'_> {
             | Op::Ge
             | Op::IfPos
             | Op::DecrJumpZero
+            | Op::IfEmpty
             | Op::Filter => both(st)?,
+            // Jumps from the second run on. The states that already ran it are kept apart from the ones
+            // that did not, so the jump only carries what the first run left.
+            Op::Once => {
+                if st.ran.contains(&pc) {
+                    vec![(self.target(insn.p2)?, st.clone())]
+                } else {
+                    let mut next = st.clone();
+                    next.ran.insert(pc);
+                    vec![(pc + 1, next)]
+                }
+            }
             Op::Jump => vec![
                 (self.target(insn.p1)?, st.clone()),
                 (self.target(insn.p2)?, st.clone()),
@@ -767,14 +892,117 @@ impl Machine<'_> {
                 next.returns.insert(insn.p1, BTreeSet::from([pc + 1]));
                 vec![(self.target(insn.p2)?, next)]
             }
-            Op::Return => {
-                // P3 set marks the BeginSubrtn form, whose register may hold NULL; that is not modelled
-                let addrs = st.returns.get(&insn.p1).filter(|_| insn.p3 == 0);
-                let addrs = addrs.ok_or(Silent::ReturnAddress)?;
-                addrs.iter().map(|addr| (*addr, st.clone())).collect()
+            _ => return Ok(None),
+        }))
+    }
+
+    // subroutine returns, coroutines, row sets and the checks that stop the program
+    fn nested(
+        &self,
+        pc: usize,
+        op: Op,
+        insn: &Insn,
+        st: &State,
+    ) -> Result<Option<Vec<Edge>>, Silent> {
+        Ok(Some(match op {
+            Op::Return => Self::return_edges(pc, insn, st)?,
+            Op::InitCoroutine => {
+                let mut next = st.clone();
+                next.set(insn.p1, Val::of(INT));
+                // the register holds P3 - 1, so a Yield resumes at P3
+                next.returns
+                    .insert(insn.p1, BTreeSet::from([self.target(insn.p3)?]));
+                let onward = if insn.p2 == 0 {
+                    pc + 1
+                } else {
+                    self.target(insn.p2)?
+                };
+                vec![(onward, next)]
+            }
+            // swaps the program counter with the register: control goes to every address it may hold, and the
+            // register is left to resume after this instruction
+            Op::Yield => {
+                let addrs = st.returns.get(&insn.p1).ok_or(Silent::ReturnAddress)?;
+                let mut edges = Vec::with_capacity(addrs.len());
+                for addr in addrs {
+                    let mut next = st.clone();
+                    next.set(insn.p1, Val::of(INT));
+                    next.returns.insert(insn.p1, BTreeSet::from([pc + 1]));
+                    edges.push((*addr, next));
+                }
+                edges
+            }
+            // The register holds the address after a Yield, and the jump is that Yield's P2. The register is
+            // left so that the next Yield comes back to this instruction.
+            Op::EndCoroutine => {
+                let addrs = st.returns.get(&insn.p1).ok_or(Silent::ReturnAddress)?;
+                let mut edges = Vec::with_capacity(addrs.len());
+                for addr in addrs {
+                    let caller = addr
+                        .checked_sub(1)
+                        .and_then(|at| self.program.get(at))
+                        .filter(|caller| caller.op == Some(Op::Yield) && caller.p2 != 0)
+                        .ok_or(Silent::ReturnAddress)?;
+                    let mut next = st.clone();
+                    next.set(insn.p1, Val::of(INT));
+                    next.returns.insert(insn.p1, BTreeSet::from([pc]));
+                    edges.push((self.target(caller.p2)?, next));
+                }
+                edges
+            }
+            // halts when the register is NULL, so only a value that is not NULL goes on
+            Op::HaltIfNull => {
+                let held = st.get(insn.p3);
+                if held.only_null() {
+                    Vec::new()
+                } else {
+                    let mut next = st.clone();
+                    if held.null {
+                        next.set(
+                            insn.p3,
+                            Val {
+                                null: false,
+                                origin: None,
+                                ..held
+                            },
+                        );
+                    }
+                    vec![(pc + 1, next)]
+                }
+            }
+            // an empty set jumps, and the register is reset to NULL; otherwise it holds the next integer
+            Op::RowSetRead => {
+                let mut empty = st.clone();
+                empty.set(insn.p1, Val::null());
+                let mut found = st.clone();
+                found.set(insn.p3, Val::of(INT));
+                vec![(pc + 1, found), (self.target(insn.p2)?, empty)]
             }
             _ => return Ok(None),
         }))
+    }
+
+    // Jumps to the address the register holds. With P3 set (a subroutine that may also be entered in line,
+    // BeginSubrtn) a register that is not an integer falls through.
+    fn return_edges(pc: usize, insn: &Insn, st: &State) -> Result<Vec<Edge>, Silent> {
+        let held = st.get(insn.p1);
+        let mut edges = Vec::new();
+        let (may_fall, may_jump) = if insn.p3 == 0 {
+            (false, true)
+        } else {
+            (
+                held.null || held.wild || held.classes & !INT != 0,
+                held.wild || held.classes & INT != 0,
+            )
+        };
+        if may_fall {
+            edges.push((pc + 1, st.clone()));
+        }
+        if may_jump {
+            let addrs = st.returns.get(&insn.p1).ok_or(Silent::ReturnAddress)?;
+            edges.extend(addrs.iter().map(|addr| (*addr, st.clone())));
+        }
+        Ok(edges)
     }
 
     // NotNull jumps when the register is not NULL and IsNull when it is; each edge knows which it took
@@ -820,12 +1048,40 @@ impl Machine<'_> {
     fn open(&self, pc: usize, op: Op, insn: &Insn, st: &State) -> Option<Vec<Edge>> {
         let mut next = st.clone();
         let edges = match op {
-            Op::OpenRead => {
+            Op::OpenRead | Op::OpenWrite => {
                 let kind = self
                     .layouts
                     .get(&pc)
-                    .map_or(Kind::Opaque, |layout| Kind::Stored(Rc::clone(layout)));
+                    .map_or(Kind::Database, |layout| Kind::Stored(Rc::clone(layout)));
                 next.cursors.insert(insn.p1, Cursor { kind, rows: ROW });
+                vec![(pc + 1, next)]
+            }
+            // A table opened again on a cursor that is open is cleared, and which table the cursor reaches
+            // afterwards is this instruction's: a cursor never reaches anything but what was written since.
+            // The cursor is on a null row until it is moved.
+            Op::OpenEphemeral | Op::OpenAutoindex => {
+                next.cursors.insert(
+                    insn.p1,
+                    Cursor {
+                        kind: Kind::Ephemeral(BTreeSet::from([pc])),
+                        rows: ROW | NULL_ROW,
+                    },
+                );
+                vec![(pc + 1, next)]
+            }
+            // the same table as another cursor
+            Op::OpenDup => {
+                let kind = match st.cursors.get(&insn.p2).map(|found| &found.kind) {
+                    Some(Kind::Ephemeral(tables)) => Kind::Ephemeral(tables.clone()),
+                    _ => Kind::Opaque,
+                };
+                next.cursors.insert(
+                    insn.p1,
+                    Cursor {
+                        kind,
+                        rows: ROW | NULL_ROW,
+                    },
+                );
                 vec![(pc + 1, next)]
             }
             Op::OpenPseudo => {
@@ -911,7 +1167,13 @@ impl Machine<'_> {
                 let mut empty = next.clone();
                 empty.set_rows(insn.p1, ROW | NULL_ROW);
                 next.set_rows(insn.p1, ROW);
-                vec![(pc + 1, next), (self.target(insn.p2)?, empty)]
+                match (op, insn.p2) {
+                    // A P2 of zero on Rewind asserts the table is never empty, so there is no jump and a row.
+                    (Op::Rewind, 0) => vec![(pc + 1, next)],
+                    // Last with a P2 of zero says nothing of the sort: it goes on over an empty table too.
+                    (Op::Last, 0) => vec![(pc + 1, empty)],
+                    _ => vec![(pc + 1, next), (self.target(insn.p2)?, empty)],
+                }
             }
             Op::Next | Op::Prev | Op::SorterNext => {
                 let mut done = next.clone();
@@ -923,7 +1185,26 @@ impl Machine<'_> {
                 let mut missed = next.clone();
                 missed.set_rows(insn.p1, ROW | NULL_ROW);
                 next.set_rows(insn.p1, ROW);
-                vec![(pc + 1, next), (self.target(insn.p2)?, missed)]
+                let mut edges = vec![(pc + 1, next)];
+                // A P2 of zero on SeekRowid and NotExists raises a corruption error instead of jumping.
+                if insn.p2 != 0 || !matches!(op, Op::SeekRowid | Op::NotExists) {
+                    edges.push((self.target(insn.p2)?, missed));
+                }
+                edges
+            }
+            // a hit leaves the cursor on the row, a miss leaves it on a null row; the jump is on a hit for
+            // Found and on a miss for the others, and a NULL in the key of NoConflict jumps from either
+            Op::Found | Op::NotFound | Op::NoConflict => {
+                let mut hit = next.clone();
+                hit.set_rows(insn.p1, ROW);
+                let mut miss = next.clone();
+                miss.set_rows(insn.p1, ROW | NULL_ROW);
+                let target = self.target(insn.p2)?;
+                if op == Op::Found {
+                    vec![(pc + 1, miss), (target, hit)]
+                } else {
+                    vec![(pc + 1, hit), (target, miss)]
+                }
             }
             Op::IdxGE | Op::IdxGT | Op::IdxLE | Op::IdxLT => both(&next)?,
             Op::DeferredSeek => {
@@ -940,11 +1221,12 @@ impl Machine<'_> {
                 vec![(pc + 1, next)]
             }
             Op::IfNullRow => self.if_null_row(pc, insn, st)?,
-            Op::Column => {
-                let value = Self::column(st, insn.p1, insn.p2);
-                next.set(insn.p3, value);
-                vec![(pc + 1, next)]
-            }
+            Op::Column => self
+                .column(st, insn.p1, insn.p2)
+                .map_or_else(Vec::new, |value| {
+                    next.set(insn.p3, value);
+                    vec![(pc + 1, next)]
+                }),
             Op::Rowid | Op::IdxRowid => {
                 let value =
                     st.cursors
@@ -965,6 +1247,75 @@ impl Machine<'_> {
             _ => return Ok(None),
         };
         Ok(Some(edges))
+    }
+
+    // The tables a write through the cursor changes: none for a b-tree of the database, which no ephemeral
+    // table can alias, and an error for a cursor that may be an ephemeral table of any kind.
+    fn written_tables(st: &State, cursor: i64) -> Result<Option<BTreeSet<usize>>, Silent> {
+        match st.cursors.get(&cursor).map(|found| &found.kind) {
+            Some(Kind::Stored(_) | Kind::Database) => Ok(None),
+            Some(Kind::Ephemeral(tables)) => Ok(Some(tables.clone())),
+            _ => Err(Silent::Cursor),
+        }
+    }
+
+    // A write or a delete can leave the cursor off its row, where a read gives NULL.
+    fn moved(st: &mut State, cursor: i64, delete: bool) {
+        if let Some(found) = st.cursors.get_mut(&cursor) {
+            found.rows |= if delete { ROW | NULL_ROW } else { NULL_ROW };
+        }
+    }
+
+    // writes to tables, and the reads of a whole row
+    fn table(
+        &self,
+        pc: usize,
+        op: Op,
+        insn: &Insn,
+        st: &State,
+    ) -> Result<Option<Vec<Edge>>, Silent> {
+        let mut next = st.clone();
+        match op {
+            // the record in P2 is what the table gains, whichever path got it there
+            Op::Insert | Op::IdxInsert => {
+                let written = st
+                    .get(insn.p2)
+                    .rec
+                    .map_or(Rows::Unknown, |rec| Rows::Known(rec.to_vec()));
+                if let Some(tables) = Self::written_tables(st, insn.p1)? {
+                    self.record(&tables, &written);
+                }
+                Self::moved(&mut next, insn.p1, false);
+            }
+            // removing a row adds no value to the table
+            Op::Delete | Op::IdxDelete => Self::moved(&mut next, insn.p1, true),
+            // P3, when set, holds the largest rowid so far, and is made an integer
+            Op::NewRowid => {
+                next.set(insn.p2, Val::of(INT));
+                if insn.p3 > 0 {
+                    next.set(insn.p3, Val::of(INT));
+                }
+                Self::moved(&mut next, insn.p1, false);
+            }
+            // the cursor is on a row, so a table nothing was written to cannot be where it is
+            Op::RowData => {
+                let value = match st.cursors.get(&insn.p1).map(|found| &found.kind) {
+                    Some(Kind::Ephemeral(tables)) => match self.contents(tables) {
+                        Rows::Known(fields) => Val {
+                            rec: Some(Rc::new(fields)),
+                            ..Val::of(BLOB)
+                        },
+                        Rows::Unknown => Val::of(BLOB),
+                        Rows::Empty => return Ok(Some(Vec::new())),
+                    },
+                    _ => Val::unknown(),
+                };
+                next.set(insn.p2, value);
+            }
+            Op::ResetSorter => next.set_rows(insn.p1, ROW | NULL_ROW),
+            _ => return Ok(None),
+        }
+        Ok(Some(vec![(pc + 1, next)]))
     }
 
     // jumps, with the register set to NULL, when the cursor is on a null row
@@ -1000,8 +1351,12 @@ impl Machine<'_> {
             Op::Real => st.set(p2, Val::of(REAL)),
             Op::String8 => st.set(p2, Val::of(TEXT)),
             Op::Blob => st.set(p2, Val::of(BLOB)),
-            Op::Null => st.set_range_null(p2, p3),
+            // BeginSubrtn is a Null whose register is the return address of a subroutine entered in line
+            Op::Null | Op::BeginSubrtn => st.set_range_null(p2, p3),
+            Op::SoftNull => st.set(p1, Val::null()),
             Op::Variable => st.set(p2, Val::unknown()),
+            // the register holds a rowset object once something is added to it
+            Op::RowSetAdd => st.set(p1, Val::unknown()),
             Op::Copy => {
                 for offset in 0..=p3 {
                     let value = st.get(p1 + offset);
@@ -1012,6 +1367,8 @@ impl Machine<'_> {
                 let value = st.get(p1);
                 st.set(p2, value);
             }
+            // a copy that is only used for an integer, which the result is
+            Op::IntCopy => st.set(p2, Val::of(INT)),
             Op::Move => {
                 for offset in 0..p3 {
                     let value = st.get(p1 + offset);
@@ -1060,6 +1417,15 @@ impl Machine<'_> {
                 st.set(p3, Val::maybe(TEXT, null));
             }
             Op::AddImm => st.set(p1, Val::of(INT)),
+            // the P2 registers from P1 are coerced to the columns of a strict table, which may change the
+            // class of a value and never its nullness: a value that cannot be coerced is an error
+            Op::TypeCheck => {
+                for offset in 0..p2 {
+                    let reg = p1 + offset;
+                    let value = apply_affinity(&st.get(reg), b'C');
+                    st.set(reg, value);
+                }
+            }
             Op::RealAffinity => {
                 let mut value = st.get(p1);
                 if value.classes & INT != 0 {
@@ -1141,42 +1507,57 @@ impl Machine<'_> {
 ///
 /// # Errors
 /// [`Silent`] when the statement cannot be analysed with certainty: `EXPLAIN` fails, the statement is an
-/// `EXPLAIN`, it reaches an opcode that is not modelled (a trigger, a virtual table, an ephemeral
-/// table, a coroutine), a step bound is hit, or no result row is reachable. [`Silent::Stopped`] when
+/// `EXPLAIN`, it reaches an opcode that is not modelled (a trigger, a virtual table, a window
+/// function, a foreign key), a write goes to a cursor that may be any ephemeral table, a bound is hit, or no
+/// result row is reachable. [`Silent::Stopped`] when
 /// `stop` returned true, which the caller must not treat as "nothing proven".
 pub fn analyze(conn: &Connection, sql: &str, stop: &dyn Fn() -> bool) -> Result<Vec<Fact>, Silent> {
     let program = read_program(conn, sql)?;
     let layouts = read_layouts(conn, &program);
-    run(
-        &Machine {
-            program: &program,
-            layouts,
-        },
-        stop,
-    )
+    run(&Machine::new(&program, layouts), stop)
 }
 
+// The program is analysed again, with the summary of every ephemeral table kept, until a pass writes
+// nothing the summaries did not already hold. The last pass read the final summaries from its first step.
 fn run(machine: &Machine<'_>, stop: &dyn Fn() -> bool) -> Result<Vec<Fact>, Silent> {
-    let size = machine.program.len();
-    let mut states: Vec<Option<State>> = vec![None; size];
-    let mut queue = VecDeque::from([0_usize]);
-    let mut queued = vec![false; size];
-    *states.first_mut().ok_or(Silent::NoResult)? = Some(State::default());
-    *queued.first_mut().ok_or(Silent::NoResult)? = true;
-    let mut result: Option<Vec<Val>> = None;
     let mut steps = 0_usize;
-    while let Some(pc) = queue.pop_front() {
-        steps += 1;
-        if steps > MAX_STEPS {
+    loop {
+        machine.grew.set(false);
+        let row = pass(machine, stop, &mut steps)?;
+        if !machine.grew.get() {
+            let row = row.ok_or(Silent::NoResult)?;
+            return Ok(row.iter().map(fact).collect());
+        }
+    }
+}
+
+// One pass over the program from its first instruction: the join of the result rows, if any was reached.
+fn pass(
+    machine: &Machine<'_>,
+    stop: &dyn Fn() -> bool,
+    steps: &mut usize,
+) -> Result<Option<Vec<Val>>, Silent> {
+    let size = machine.program.len();
+    // the states of one instruction, one per key
+    let mut states: Vec<BTreeMap<Key, State>> = vec![BTreeMap::new(); size];
+    let start = State::default();
+    let mut queue: VecDeque<(usize, Key)> = VecDeque::from([(0_usize, start.key())]);
+    let mut queued: HashSet<(usize, Key)> = HashSet::from([(0_usize, start.key())]);
+    states
+        .first_mut()
+        .ok_or(Silent::NoResult)?
+        .insert(start.key(), start);
+    let mut result: Option<Vec<Val>> = None;
+    while let Some((pc, key)) = queue.pop_front() {
+        *steps += 1;
+        if *steps > MAX_STEPS {
             return Err(Silent::Bound);
         }
         if steps.is_multiple_of(STOP_INTERVAL) && stop() {
             return Err(Silent::Stopped);
         }
-        if let Some(flag) = queued.get_mut(pc) {
-            *flag = false;
-        }
-        let Some(state) = states.get(pc).cloned().flatten() else {
+        queued.remove(&(pc, key.clone()));
+        let Some(state) = states.get(pc).and_then(|held| held.get(&key)).cloned() else {
             continue;
         };
         if let Some(insn) = machine
@@ -1196,24 +1577,23 @@ fn run(machine: &Machine<'_>, stop: &dyn Fn() -> bool) -> Result<Vec<Fact>, Sile
             });
         }
         for (target, edge) in machine.step(pc, &state)? {
-            let slot = states.get_mut(target).ok_or(Silent::Target(-1))?;
-            let grew = if let Some(known) = slot {
+            let held = states.get_mut(target).ok_or(Silent::Target(-1))?;
+            let edge_key = edge.key();
+            let grew = if let Some(known) = held.get_mut(&edge_key) {
                 known.absorb(&edge)
             } else {
-                *slot = Some(edge);
+                if held.len() >= MAX_PARTITIONS {
+                    return Err(Silent::Bound);
+                }
+                held.insert(edge_key.clone(), edge);
                 true
             };
-            let Some(flag) = queued.get_mut(target) else {
-                continue;
-            };
-            if grew && !*flag {
-                *flag = true;
-                queue.push_back(target);
+            if grew && queued.insert((target, edge_key.clone())) {
+                queue.push_back((target, edge_key));
             }
         }
     }
-    let row = result.ok_or(Silent::NoResult)?;
-    Ok(row.iter().map(fact).collect())
+    Ok(result)
 }
 
 const fn fact(value: &Val) -> Fact {

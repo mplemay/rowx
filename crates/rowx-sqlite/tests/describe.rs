@@ -290,8 +290,9 @@ async fn views_resolve_case_insensitively_and_in_a_schema() -> TestResult {
 #[tokio::test]
 async fn a_temp_table_shadows_a_main_table_of_the_same_name() -> TestResult {
     let conn = schema().await?;
-    // the temp view named like a main table is what the name means, and it is not an ordinary table
-    conn.run_raw(|raw| raw.execute_batch("CREATE TEMP VIEW s AS SELECT 1 AS x"))
+    // the temp view named like a main table is what the name means, and it is not an ordinary table; its
+    // column is NULL, so the bytecode proves nothing for it either
+    conn.run_raw(|raw| raw.execute_batch("CREATE TEMP VIEW s AS SELECT NULL AS x"))
         .await??;
     let got = describe(&conn, "SELECT x FROM s", from(&["s"])).await?;
     assert_eq!(column(&got, "x")?.reason.detail(), Some("view s"));
