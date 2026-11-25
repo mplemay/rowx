@@ -22,6 +22,7 @@ const SCHEMA: &str = "
     CREATE INDEX big_ab ON big (a, b);
     CREATE INDEX big_c ON big (c);
     CREATE VIEW v AS SELECT a, b FROM t;
+    CREATE VIEW vc AS SELECT a, count(*) AS n FROM t GROUP BY a;
     CREATE INDEX t_b ON t (b);
     CREATE INDEX s_y ON s (y, x);
     CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN INSERT INTO log (m) VALUES ('x'); END;
@@ -342,6 +343,21 @@ const CASES: &[Case] = &[
     // views, subqueries and ordering
     case("view", "SELECT a FROM v", Cols(&[(U, true, true)])),
     case(
+        "an unflattened view",
+        "SELECT n FROM vc",
+        Cols(&[(I, true, false)]),
+    ),
+    case(
+        "an unflattened view, two columns",
+        "SELECT a, n FROM vc",
+        Cols(&[(U, false, false), (I, true, false)]),
+    ),
+    case(
+        "an unflattened view on the nullable side of a left join",
+        "SELECT vc.n FROM t LEFT JOIN vc ON vc.a = t.a",
+        Cols(&[(I, false, false)]),
+    ),
+    case(
         "a subquery the flattener inlines",
         "SELECT a FROM (SELECT a FROM t)",
         Cols(&[(U, true, true)]),
@@ -508,6 +524,26 @@ const CASES: &[Case] = &[
         "a window frame that removes rows",
         "SELECT sum(a) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t",
         Quiet,
+    ),
+    case(
+        "first_value over a frame of the following rows",
+        "SELECT first_value(a) OVER (ORDER BY a ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) FROM t",
+        Cols(&[(U, false, false)]),
+    ),
+    case(
+        "first_value over a frame of the preceding rows",
+        "SELECT first_value(a) OVER (ORDER BY a ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) FROM t",
+        Cols(&[(U, false, false)]),
+    ),
+    case(
+        "nth_value past the start of the frame",
+        "SELECT nth_value(a, 2) OVER (ORDER BY a) FROM t",
+        Cols(&[(U, false, false)]),
+    ),
+    case(
+        "first_value over the whole table",
+        "SELECT first_value(a) OVER () FROM t",
+        Cols(&[(U, false, false)]),
     ),
     case(
         "a window function in a subquery",
@@ -1007,18 +1043,21 @@ const fn class_of(value: ValueRef<'_>) -> Option<Class> {
 }
 
 // Runs the statement and checks every value of every row it returns against what the analysis proved. The
-// statement is rolled back, and a statement that fails (a constraint, say) has returned the rows it did.
+// statement is rolled back, and a statement that fails (a constraint, say) has returned the rows it did. The
+// count is how many rows were checked.
 fn rows_break_the_proof(
     conn: &Connection,
     sql: &str,
     want: &[Col],
-) -> rusqlite::Result<Vec<String>> {
+) -> rusqlite::Result<(Vec<String>, usize)> {
     conn.execute_batch("SAVEPOINT probe")?;
     let mut broken = Vec::new();
+    let mut seen = 0;
     let mut run = || -> rusqlite::Result<()> {
         let mut stmt = conn.prepare(sql)?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
+            seen += 1;
             for (index, (class, non_null, _)) in want.iter().enumerate() {
                 let value = row.get_ref(index)?;
                 if *non_null && value == ValueRef::Null {
@@ -1033,9 +1072,10 @@ fn rows_break_the_proof(
         }
         Ok(())
     };
+    // a statement error is tolerated, and `seen` says how many rows were checked before it
     let _ = run();
     conn.execute_batch("ROLLBACK TO probe; RELEASE probe")?;
-    Ok(broken)
+    Ok((broken, seen))
 }
 
 #[test]
@@ -1053,13 +1093,13 @@ fn every_proof_in_the_corpus_holds_for_the_rows_the_statements_return() -> TestR
         }
         for conn in [&empty, &full] {
             checked += 1;
-            broken.extend(rows_break_the_proof(conn, case.sql, want)?);
+            broken.extend(rows_break_the_proof(conn, case.sql, want)?.0);
         }
     }
     assert!(checked > 100, "{checked}");
     assert!(broken.is_empty(), "{}", broken.join("\n"));
     // the check does see a proof that is wrong
-    let lie = rows_break_the_proof(
+    let (lie, _) = rows_break_the_proof(
         &full,
         "SELECT b, c FROM t",
         &[(T, true, false), (I, false, false)],
@@ -1119,8 +1159,8 @@ const PROBES: &[&str] = &[
     "INSERT INTO log (m) VALUES ('q') RETURNING m, m || m, length(m)",
     "INSERT INTO log (m) SELECT y FROM s RETURNING m",
     "INSERT INTO log (m) SELECT x FROM s UNION SELECT NULL RETURNING m",
-    "INSERT INTO u (uq, d, ck) VALUES ('new', NULL, 1) RETURNING d",
-    "INSERT OR IGNORE INTO u (uq, ck) VALUES ('a', 1) RETURNING k",
+    "INSERT INTO u (uq, ck) VALUES ('new', 1) RETURNING d",
+    "INSERT OR IGNORE INTO u (uq, ck) VALUES ('fresh', 1) RETURNING k",
     "INSERT OR REPLACE INTO u (k, uq, ck) VALUES (1, 'z', 9) RETURNING k, uq, d, ck",
     "INSERT INTO u (k, uq, ck) VALUES (1, 'z', 9) ON CONFLICT (k) DO UPDATE SET uq = NULL RETURNING uq, d",
     "INSERT INTO u (uq, ck) VALUES ('a', 1) ON CONFLICT (uq) DO NOTHING RETURNING k",
@@ -1164,6 +1204,16 @@ const PROBES: &[&str] = &[
     "DELETE FROM u WHERE k IN (SELECT k FROM u WHERE uq IS NULL) RETURNING uq",
 ];
 
+// probes that legitimately return no row on the populated database
+const NO_ROWS: &[&str] = &[
+    // the key conflicts, so DO NOTHING returns no row
+    "INSERT INTO u (uq, ck) VALUES ('a', 1) ON CONFLICT (uq) DO NOTHING RETURNING k",
+    // nothing in `big` is above 100
+    "DELETE FROM big WHERE a > 100 RETURNING a",
+    // OFFSET 5 is past the three rows of `s`
+    "SELECT q.n FROM (SELECT n FROM s LIMIT 1 OFFSET 5) q",
+];
+
 #[test]
 fn nothing_the_analysis_proves_for_a_probe_is_contradicted_by_running_it() -> TestResult {
     let empty = database()?;
@@ -1171,6 +1221,7 @@ fn nothing_the_analysis_proves_for_a_probe_is_contradicted_by_running_it() -> Te
     full.execute_batch(ROWS)?;
     let mut broken = Vec::new();
     let mut proven = 0;
+    let mut silent_rows = Vec::new();
     for sql in PROBES {
         let Ok(facts) = analyze(&full, sql, &|| false) else {
             continue;
@@ -1180,10 +1231,15 @@ fn nothing_the_analysis_proves_for_a_probe_is_contradicted_by_running_it() -> Te
             .map(|fact| (fact.class, fact.non_null, fact.pass_through))
             .collect();
         proven += want.iter().filter(|(_, non_null, _)| *non_null).count();
-        for conn in [&empty, &full] {
-            broken.extend(rows_break_the_proof(conn, sql, &want)?);
+        broken.extend(rows_break_the_proof(&empty, sql, &want)?.0);
+        let (found, seen) = rows_break_the_proof(&full, sql, &want)?;
+        broken.extend(found);
+        // a probe that returns nothing (or fails) on the populated database checks nothing
+        if seen == 0 && !NO_ROWS.contains(sql) {
+            silent_rows.push(*sql);
         }
     }
+    assert!(silent_rows.is_empty(), "{silent_rows:#?}");
     assert!(proven > 30, "{proven}");
     assert!(broken.is_empty(), "{}", broken.join("\n"));
     Ok(())
@@ -1216,7 +1272,8 @@ fn a_silent_statement_names_the_opcode_it_does_not_model() -> TestResult {
             "{sql}"
         );
     }
-    // a trigger or a foreign key action lists its sub-program after the program, which restarts the numbering
+    // a statement that fires a trigger or checks a foreign key lists its sub-program after the program, which
+    // restarts the numbering
     for sql in [
         "INSERT INTO t (a) VALUES (1) RETURNING id",
         "DELETE FROM t WHERE id = 1 RETURNING a",
@@ -2324,7 +2381,7 @@ fn halt_if_null_only_lets_a_value_that_is_not_null_go_on() {
 }
 
 #[test]
-fn a_rewind_or_a_rowid_seek_with_no_target_cannot_jump() -> TestResult {
+fn a_zero_target_removes_the_jump_only_where_sqlite_never_takes_it() -> TestResult {
     let state = super::State::default();
     for (name, target, edges) in [
         ("Rewind", 0, 1),
@@ -2334,7 +2391,8 @@ fn a_rewind_or_a_rowid_seek_with_no_target_cannot_jump() -> TestResult {
         ("SeekRowid", 0, 1),
         ("NotExists", 0, 1),
         ("SeekRowid", 2, 2),
-        // only these say a zero target is an assertion, an error or no jump
+        // the rows above are the opcodes whose zero target is no jump (an assertion or an error in SQLite); SeekGE
+        // is the control, which keeps both edges whatever its target
         ("SeekGE", 0, 2),
     ] {
         let program = program(&[(name, 0, target, 0), ("Halt", 0, 0, 0), ("Halt", 0, 0, 0)]);

@@ -11,15 +11,16 @@
 //! stable between SQLite versions, so [`REVIEWED_SQLITE_VERSION`] pins the version the list in
 //! [`MODELED_OPCODES`] was reviewed against.
 //!
-//! Nested statements are modelled too. A coroutine, a subroutine and a `Gosub` all keep their return
-//! address in a register, which the state tracks. `Once` is exact: a state carries the set of `Once`
-//! instructions that already ran, and two states that differ in that set or in the return addresses they
-//! hold are never joined, so the jump of a `Once` only sees the values the first run left behind and a
-//! coroutine only sees the registers of the entry it was resumed from. An ephemeral table is summarised for the whole
-//! program, not per flow: every record any path ever writes to it is joined into one summary, a read gives
-//! the join of that summary, and the program is analysed again until no summary grows. That is what keeps
-//! a read sound when the write comes later in the program (a loop, a recursive queue) or through another
-//! cursor of the same table (`OpenDup`).
+//! Nested statements are modelled too. A coroutine and a subroutine called by a `Gosub` keep their
+//! return address in a register, which the state tracks. `Once` is exact: a state carries the set of
+//! `Once` instructions that already ran, and two states that differ in that set or in the return
+//! addresses they hold are never joined. The jump of a `Once` therefore only sees the values the first
+//! run left behind, and a coroutine only sees the registers of the entry it was resumed from.
+//!
+//! An ephemeral table is summarised for the whole program, not per flow: every record any path ever
+//! writes to it is joined into one summary, and a read gives the join of that summary. The program is
+//! analysed again until no summary grows. That keeps a read sound when the write comes later in the
+//! program (a loop, a recursive queue) or through another cursor of the same table (`OpenDup`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -696,6 +697,7 @@ struct Machine<'p> {
     layouts: HashMap<usize, Rc<Layout>>,
     /// What each ephemeral table, named by the address of the opcode that opens it, may ever hold. It
     /// only grows, across the whole program and across passes.
+    // the `RefCell` borrows in `record` and `contents` never nest: each is taken and released within the call
     tables: RefCell<BTreeMap<usize, Rows>>,
     /// A table grew during the pass in progress, so what was read from it may be too small.
     grew: Cell<bool>,
@@ -751,12 +753,10 @@ impl Machine<'_> {
         };
         let index = usize::try_from(slot).ok();
         let base = match &found.kind {
-            Kind::Stored(layout) => Some(
-                index
-                    .and_then(|index| layout.slots.get(index))
-                    .and_then(Option::as_ref)
-                    .map_or_else(Val::unknown, Slot::value),
-            ),
+            Kind::Stored(layout) => index
+                .and_then(|index| layout.slots.get(index))
+                .and_then(Option::as_ref)
+                .map_or_else(Val::unknown, Slot::value),
             // A pseudo cursor always reads the record in its register, a null row or not, so the rows it is
             // on say nothing.
             Kind::Pseudo(reg) => {
@@ -769,31 +769,33 @@ impl Machine<'_> {
                 );
             }
             // A column past the end of every record that was written reads the default, which is not known.
-            // A cursor on a row of a table nothing was written to is a flow that cannot happen.
+            // A cursor on a row of a table nothing was written to is a flow that cannot happen, unless it
+            // may be on a null row, which reads NULL.
             Kind::Ephemeral(tables) => match self.contents(tables) {
-                Rows::Known(fields) => Some(
-                    index
-                        .and_then(|index| fields.get(index).cloned())
-                        .unwrap_or_else(Val::unknown),
-                ),
-                Rows::Unknown => Some(Val::unknown()),
-                Rows::Empty => None,
+                Rows::Known(fields) => index
+                    .and_then(|index| fields.get(index).cloned())
+                    .unwrap_or_else(Val::unknown),
+                Rows::Unknown => Val::unknown(),
+                Rows::Empty if found.rows & NULL_ROW == 0 => return None,
+                Rows::Empty => Val::null(),
             },
-            Kind::Sorter(_) | Kind::Database | Kind::Opaque => Some(Val::unknown()),
+            Kind::Sorter(_) | Kind::Database | Kind::Opaque => Val::unknown(),
         };
-        Self::through_null_row(found, base)
+        Some(Self::through_null_row(found, base))
     }
 
-    // a null-extended row reads NULL whatever the column holds; `None` is a read of a row that is not there
-    fn through_null_row(found: &Cursor, base: Option<Val>) -> Option<Val> {
-        match (found.rows & ROW != 0, found.rows & NULL_ROW != 0, base) {
-            (_, false, base) => base,
-            (_, true, None) | (false, true, Some(_)) => Some(Val::null()),
-            (true, true, Some(base)) => Some(Val {
+    // a null-extended row reads NULL whatever the column holds
+    fn through_null_row(found: &Cursor, base: Val) -> Val {
+        if found.rows & NULL_ROW == 0 {
+            base
+        } else if found.rows & ROW == 0 {
+            Val::null()
+        } else {
+            Val {
                 null: true,
                 origin: None,
                 ..base
-            }),
+            }
         }
     }
 
@@ -894,7 +896,7 @@ impl Machine<'_> {
         }))
     }
 
-    // subroutines, coroutines and the checks that stop the program
+    // subroutine returns, coroutines, row sets and the checks that stop the program
     fn nested(
         &self,
         pc: usize,
@@ -1232,12 +1234,11 @@ impl Machine<'_> {
                         .map_or_else(Val::unknown, |found| match &found.kind {
                             Kind::Stored(layout) => Self::through_null_row(
                                 found,
-                                Some(Val {
+                                Val {
                                     origin: Some(origin(&layout.db, &layout.table, -1)),
                                     ..Val::of(INT)
-                                }),
-                            )
-                            .unwrap_or_else(Val::unknown),
+                                },
+                            ),
                             _ => Val::unknown(),
                         });
                 next.set(insn.p2, value);

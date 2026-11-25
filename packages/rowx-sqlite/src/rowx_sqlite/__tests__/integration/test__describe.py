@@ -146,6 +146,10 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
         "SELECT a, count(*) over FROM t",
         (("a", True, UNPROVEN), ("over", False, COMPUTED)),
     ),
+    "first_value over an empty frame": (
+        "SELECT first_value(a) OVER (ORDER BY a ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS fv FROM t",
+        (("fv", True, UNPROVEN),),
+    ),
     "without rowid primary key": ("SELECT k FROM w", (("k", False, NN),)),
     "table constraint rowid alias": ("SELECT id FROM pk2", (("id", False, NN),)),
     "insert select returning": (

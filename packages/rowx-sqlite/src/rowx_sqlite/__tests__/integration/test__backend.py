@@ -116,7 +116,7 @@ def test_a_type_mismatch_is_reported(project: CheckProject) -> None:
     assert "code" not in found
 
 
-def test_a_left_join_view_column_is_unproven(project: CheckProject) -> None:
+def test_a_left_join_view_column_on_the_nullable_side_is_unproven(project: CheckProject) -> None:
     # the view's join builds an automatic index, which the bytecode analysis reads: the preserved side is proven
     source = 'query[tuple[int, str]](t"SELECT user_id, title FROM user_posts")\n'
     (found,) = reports(project, source)
