@@ -86,6 +86,7 @@ Input is the plan JSON and the column count. Output is a promotion for each top-
 
 - **Top outputs.** Every top position whose expression string equals a marked expression is promoted. Duplicate
   columns are each promoted.
+
 - **Join marking.** At a node with `Join Type`, mark the nullable children:
   - `Full`: both children;
   - `Left`: the child whose `Parent Relationship` is `Inner`;
@@ -96,12 +97,16 @@ Input is the plan JSON and the column count. Output is a promotion for each top-
   Semi joins never null-extend. **Anti joins and right anti joins do.** An anti join null-extends the other side's
   columns: they can still appear in the plan's `Output`, and they are NULL on every output row. A marked subtree
   stays marked.
+
 - **Descend through every node type**, including Sort, Limit, Aggregate, Hash, Materialize, Gather, Append and
   SubPlans, not only joins at the top.
+
 - **Scan boundaries.** A `Subquery Scan`, `CTE Scan` or `WorkTable Scan` with alias `x`. If the source subtree
   contains any null-extending join or a grouping-sets aggregate, every top output that starts with `x.` is promoted
   (`ScanBoundary`), unless the [mapping rule](#scan-boundary-mapping) removes that promotion.
+
 - **Grouping sets.** An `Aggregate` with more than one grouping set marks its own `Output` (`GroupingSets`).
+
 - **RETURNING old/new (PostgreSQL 18).** On a `ModifyTable` top node, outputs starting with `old.` are promoted for
   Insert or Merge, and outputs starting with `new.` are promoted for Delete or Merge. If a `RETURNING WITH (OLD AS o,
   NEW AS n)` alias makes the prefix ambiguous, promote every output for Merge, and promote by the declared aliases

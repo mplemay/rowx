@@ -327,6 +327,7 @@ with TemporaryDirectory() as tmp:
 
   In a transactional file, `SET LOCAL lock_timeout = '5s';` scopes the setting to that migration. A plain `SET` stays on
   the connection.
+
 - **Privileges.** The role needs `CREATE` on the schema that holds the history table, and `rowx check`'s drift gate
   needs `SELECT` on it.
 
