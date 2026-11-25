@@ -77,8 +77,16 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
     "cte shadowing a table name": ("WITH s AS (SELECT a AS x FROM t) SELECT x FROM s", (("x", False, NN),)),
     "scalar subquery": (
         "SELECT a, (SELECT max(x) FROM s) AS m FROM t",
-        (("a", True, UNPROVEN), ("m", True, UNPROVEN)),
+        (("a", False, NN), ("m", True, UNPROVEN)),
     ),
+    "scalar count subquery": (
+        "SELECT a, (SELECT count(*) FROM s) AS m FROM t",
+        (("a", False, NN), ("m", False, COMPUTED)),
+    ),
+    "scalar subquery that can return no row": ("SELECT (SELECT a FROM t WHERE id = 1) AS p", (("p", True, UNPROVEN),)),
+    "exists": ("SELECT EXISTS (SELECT 1 FROM t) AS e", (("e", False, COMPUTED),)),
+    "in a rowid subquery": ("SELECT a IN (SELECT id FROM s) AS p FROM t", (("p", False, COMPUTED),)),
+    "in a subquery with a nullable operand": ("SELECT b IN (SELECT x FROM s) AS p FROM t", (("p", True, UNPROVEN),)),
     "from subquery": ("SELECT a FROM (SELECT a FROM t)", (("a", False, NN),)),
     "union all with a null arm": ("SELECT a FROM t UNION ALL SELECT NULL", (("a", True, UNPROVEN),)),
     "inner join": (
@@ -88,7 +96,7 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
     "left join": ("SELECT t.a, s.x FROM t LEFT JOIN s ON t.id = s.id", (("a", False, NN), ("x", True, UNPROVEN))),
     "right join": (
         "SELECT t.a, s.x FROM t RIGHT JOIN s ON t.id = s.id",
-        (("a", True, UNPROVEN), ("x", True, UNPROVEN)),
+        (("a", True, UNPROVEN), ("x", False, NN)),
     ),
     "full join": (
         "SELECT t.a, s.x FROM t FULL JOIN s ON t.id = s.id",
@@ -214,9 +222,44 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
         (("x", False, NN),),
     ),
     "a table valued function stays unproven": ("SELECT value FROM json_each('[1]')", (("value", True, UNPROVEN),)),
-    "a recursive cte stays unproven": (
+    "a recursive cte is proven through its queue": (
         "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c",
+        (("n", False, COMPUTED),),
+    ),
+    "a recursive cte that writes NULL into its queue": (
+        "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT NULL FROM c LIMIT 3) SELECT n FROM c",
         (("n", True, UNPROVEN),),
+    ),
+    "union of two computed columns": ("SELECT 1 AS n UNION ALL SELECT 2", (("n", False, COMPUTED),)),
+    "union of NOT NULL columns of different tables": (
+        "SELECT a FROM t UNION SELECT id FROM s",
+        (("a", False, COMPUTED),),
+    ),
+    "union with a nullable arm": ("SELECT a FROM t UNION SELECT length(b) FROM t", (("a", True, UNPROVEN),)),
+    "intersect and except read the left arm": (
+        "SELECT a FROM t INTERSECT SELECT id FROM s EXCEPT SELECT id FROM s",
+        (("a", False, NN),),
+    ),
+    "materialized cte of a computed column": (
+        "WITH c AS MATERIALIZED (SELECT a + 1 AS n FROM t) SELECT n FROM c",
+        (("n", False, COMPUTED),),
+    ),
+    "from subquery with a limit and an aggregate": (
+        "SELECT n FROM (SELECT count(*) AS n FROM t GROUP BY a LIMIT 5)",
+        (("n", False, COMPUTED),),
+    ),
+    "distinct of an expression": ("SELECT DISTINCT a + 1 AS p FROM t", (("p", False, COMPUTED),)),
+    "insert returning an expression": (
+        "INSERT INTO s (x) VALUES ('q') RETURNING id, x || 'z' AS p",
+        (("id", False, NN), ("p", False, COMPUTED)),
+    ),
+    "update returning through coalesce": (
+        "UPDATE t SET b = NULL RETURNING coalesce(b, 'z') AS p",
+        (("p", False, COMPUTED),),
+    ),
+    "delete returning a nullable expression": (
+        "DELETE FROM t WHERE a = 1 RETURNING b || 'x' AS p",
+        (("p", True, UNPROVEN),),
     ),
     "bang override": ('SELECT b AS "b!" FROM t', (("b", False, "OverrideBang"),)),
     "question override": ('SELECT a AS "a?" FROM t', (("a", True, "OverrideQuestion"),)),
