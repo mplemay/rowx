@@ -27,6 +27,8 @@ const REVIEWED_SQLITE_VERSION: &str = "3.51.3";
 
 const MAX_PROGRAM: usize = 20_000;
 const MAX_STEPS: usize = 400_000;
+// how many steps pass between two consultations of the stop check
+const STOP_INTERVAL: usize = 1024;
 
 const INT: u8 = 1;
 const REAL: u8 = 2;
@@ -105,6 +107,10 @@ pub enum Silent {
     Listing,
     #[error("the result rows disagree on their width")]
     Columns,
+    /// The caller's stop check fired (a cancel or the statement timeout). Unlike every other variant
+    /// this is not a property of the statement, so the caller fails instead of reporting nothing.
+    #[error("the analysis was stopped")]
+    Stopped,
 }
 
 /// A storage class.
@@ -1136,17 +1142,21 @@ impl Machine<'_> {
 /// # Errors
 /// [`Silent`] when the statement cannot be analysed with certainty: `EXPLAIN` fails, the statement is an
 /// `EXPLAIN`, it reaches an opcode that is not modelled (a trigger, a virtual table, an ephemeral
-/// table, a coroutine), a step bound is hit, or no result row is reachable.
-pub fn analyze(conn: &Connection, sql: &str) -> Result<Vec<Fact>, Silent> {
+/// table, a coroutine), a step bound is hit, or no result row is reachable. [`Silent::Stopped`] when
+/// `stop` returned true, which the caller must not treat as "nothing proven".
+pub fn analyze(conn: &Connection, sql: &str, stop: &dyn Fn() -> bool) -> Result<Vec<Fact>, Silent> {
     let program = read_program(conn, sql)?;
     let layouts = read_layouts(conn, &program);
-    run(&Machine {
-        program: &program,
-        layouts,
-    })
+    run(
+        &Machine {
+            program: &program,
+            layouts,
+        },
+        stop,
+    )
 }
 
-fn run(machine: &Machine<'_>) -> Result<Vec<Fact>, Silent> {
+fn run(machine: &Machine<'_>, stop: &dyn Fn() -> bool) -> Result<Vec<Fact>, Silent> {
     let size = machine.program.len();
     let mut states: Vec<Option<State>> = vec![None; size];
     let mut queue = VecDeque::from([0_usize]);
@@ -1159,6 +1169,9 @@ fn run(machine: &Machine<'_>) -> Result<Vec<Fact>, Silent> {
         steps += 1;
         if steps > MAX_STEPS {
             return Err(Silent::Bound);
+        }
+        if steps.is_multiple_of(STOP_INTERVAL) && stop() {
+            return Err(Silent::Stopped);
         }
         if let Some(flag) = queued.get_mut(pc) {
             *flag = false;

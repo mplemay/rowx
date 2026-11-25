@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rowx_core::row_shape::{Override, column_name};
 use rusqlite::Connection as Raw;
 
-use crate::bytecode::{Class, Fact, analyze};
+use crate::bytecode::{Class, Fact, Silent, analyze};
 use crate::error::Error;
 use crate::exec::refresh_schema;
 use crate::types::{Kind, lookup};
@@ -265,8 +265,14 @@ fn is_rowid(key: &TableKey, column: &str, declared: Option<&str>) -> bool {
 ///
 /// # Errors
 /// `Sqlite` (with the error offset) when SQLite rejects the SQL, `NotOneStatement` for no statement or
-/// more than one.
-pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe, Error> {
+/// more than one. `stop` is consulted while the bytecode is analysed; when it fires the describe fails
+/// as an interrupted statement does, rather than reporting less.
+pub fn describe(
+    conn: &Raw,
+    sql: &str,
+    structure: &Structure,
+    stop: &dyn Fn() -> bool,
+) -> Result<Describe, Error> {
     refresh_schema(conn)?;
     let stmt = match conn.prepare(sql) {
         Ok(stmt) => stmt,
@@ -296,20 +302,12 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
     let cause = unproven_cause(structure, &kinds);
     let mut keys: HashMap<(String, String), TableKey> = HashMap::new();
     // read only when a column needs it, and only from the bytecode, which is never run
-    let facts: OnceCell<Option<Vec<Fact>>> = OnceCell::new();
-    let fact = |index: usize| {
-        facts
-            .get_or_init(|| {
-                #[cfg(test)]
-                ANALYSES.with(|count| count.set(count.get() + 1));
-                (stmt.is_explain() == 0)
-                    .then(|| analyze(conn, sql).ok())
-                    .flatten()
-                    .filter(|found| found.len() == stmt.column_count())
-            })
-            .as_ref()
-            .and_then(|found| found.get(index))
-            .copied()
+    let facts: OnceCell<Result<Option<Vec<Fact>>, Error>> = OnceCell::new();
+    let fact = |index: usize| -> Result<Option<Fact>, Error> {
+        match facts.get_or_init(|| read_facts(conn, sql, &stmt, stop)) {
+            Ok(found) => Ok(found.as_ref().and_then(|found| found.get(index)).copied()),
+            Err(err) => Err(err.clone()),
+        }
     };
     let mut columns = Vec::with_capacity(stmt.column_count());
     let decls = stmt.columns();
@@ -354,7 +352,7 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
         // the bytecode answers a nullability the existing rule left unproven and a class the declaration lacks
         let untyped = declared.is_none_or(|name| name.trim().is_empty());
         let found = if (over.is_none() && proven.is_err()) || untyped {
-            fact(index)
+            fact(index)?
         } else {
             None
         };
@@ -371,6 +369,25 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
         });
     }
     Ok(Describe { params, columns })
+}
+
+// The bytecode facts of a statement. A stopped analysis is an error, an unprovable one is no facts.
+fn read_facts(
+    conn: &Raw,
+    sql: &str,
+    stmt: &rusqlite::Statement<'_>,
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<Vec<Fact>>, Error> {
+    #[cfg(test)]
+    ANALYSES.with(|count| count.set(count.get() + 1));
+    if stmt.is_explain() != 0 {
+        return Ok(None);
+    }
+    match analyze(conn, sql, stop) {
+        Ok(found) => Ok(Some(found).filter(|found| found.len() == stmt.column_count())),
+        Err(Silent::Stopped) => Err(crate::exec::interrupted()),
+        Err(_) => Ok(None),
+    }
 }
 
 // The existing rule decides first, the bytecode only reads a column it left unproven, and an override applies last.
@@ -472,7 +489,7 @@ mod tests {
     fn multiple_or_no_statements_are_not_one_statement() -> rusqlite::Result<()> {
         let conn = Connection::open_in_memory()?;
         for sql in ["select 1; select 2", "", "-- only a comment"] {
-            let err = describe(&conn, sql, &Structure::default());
+            let err = describe(&conn, sql, &Structure::default(), &|| false);
             assert!(
                 matches!(err, Err(Error::NotOneStatement(_))),
                 "{sql:?}: {err:?}"

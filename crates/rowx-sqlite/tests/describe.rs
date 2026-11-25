@@ -1,6 +1,7 @@
 pub mod common;
 
-use common::{TestResult, connect, file_options, memory, path, pragma, run};
+use common::{TestResult, backend_of, connect, failure, file_options, memory, path, pragma, run};
+use rowx_core::cancel::Backend;
 use rowx_sqlite::conn::ConnectOptions;
 use rowx_sqlite::conn::Connection;
 use rowx_sqlite::describe::{ColumnInfo, Construct, Describe, NullReason, Structure};
@@ -658,5 +659,17 @@ async fn a_runtime_connection_still_sets_pragmas() -> TestResult {
     let conn = connect(&memory()).await?;
     run(&conn, "PRAGMA recursive_triggers = ON").await?;
     assert_eq!(pragma(&conn, "recursive_triggers").await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_describe_after_a_cancel_fails_as_an_interrupt() -> TestResult {
+    let conn = schema().await?;
+    backend_of(&conn).send_cancel().await?;
+    let err = describe(&conn, "SELECT a + 1 FROM t", from(&["t"]))
+        .await
+        .err()
+        .ok_or("the flag should stop the describe")?;
+    assert_eq!(failure(&err), Some(("SQLITE_INTERRUPT", "57014")));
     Ok(())
 }

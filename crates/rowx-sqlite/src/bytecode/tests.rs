@@ -572,7 +572,7 @@ const CASES: &[Case] = &[
 ];
 
 fn columns(conn: &Connection, sql: &str) -> Result<Vec<Col>, Silent> {
-    Ok(analyze(conn, sql)?
+    Ok(analyze(conn, sql, &|| false)?
         .iter()
         .map(|fact| (fact.class, fact.non_null, fact.pass_through))
         .collect())
@@ -608,17 +608,17 @@ fn a_silent_statement_names_the_opcode_it_does_not_model() -> TestResult {
         ("INSERT INTO log (m) VALUES ('x')", "OpenWrite"),
     ] {
         assert_eq!(
-            analyze(&conn, sql),
+            analyze(&conn, sql, &|| false),
             Err(Silent::Unmodelled(opcode.to_owned())),
             "{sql}"
         );
     }
     assert_eq!(
-        analyze(&conn, "SELECT a FROM t WHERE 0"),
+        analyze(&conn, "SELECT a FROM t WHERE 0", &|| false),
         Err(Silent::NoResult)
     );
     assert!(matches!(
-        analyze(&conn, "SELECT nope FROM t"),
+        analyze(&conn, "SELECT nope FROM t", &|| false),
         Err(Silent::Explain(_))
     ));
     Ok(())
@@ -761,7 +761,7 @@ fn every_opcode_the_corpus_emits_is_modelled_or_silences_the_analysis() -> TestR
             .collect();
         if !unmodelled.is_empty() {
             assert!(
-                analyze(&conn, case.sql).is_err(),
+                analyze(&conn, case.sql, &|| false).is_err(),
                 "{}: {unmodelled:?} reach a result",
                 case.sql
             );
@@ -1144,7 +1144,7 @@ fn describe_applies_the_bytecode_only_to_unproven_columns() -> TestResult {
         .chain(origin_describe_cases())
         .chain(view_describe_cases())
     {
-        let got = match describe(&conn, sql, &structure) {
+        let got = match describe(&conn, sql, &structure, &|| false) {
             Ok(described) => described
                 .columns
                 .iter()
@@ -1188,7 +1188,7 @@ fn describe_applies_the_bytecode_only_to_unproven_columns() -> TestResult {
 fn analyses_run(sql: &str) -> Result<usize, Box<dyn std::error::Error>> {
     let conn = database()?;
     let before = ANALYSES.with(Cell::get);
-    describe(&conn, sql, &from(&["t"]))?;
+    describe(&conn, sql, &from(&["t"]), &|| false)?;
     Ok(ANALYSES.with(Cell::get) - before)
 }
 
@@ -1210,7 +1210,7 @@ fn the_bytecode_is_analysed_only_for_a_column_that_needs_it() -> TestResult {
 #[test]
 fn describing_an_explain_statement_never_reads_its_bytecode() -> TestResult {
     let conn = database()?;
-    let described = describe(&conn, "EXPLAIN SELECT 1", &Structure::default())?;
+    let described = describe(&conn, "EXPLAIN SELECT 1", &Structure::default(), &|| false)?;
     assert!(
         described
             .columns
@@ -1229,7 +1229,7 @@ fn describing_never_runs_the_statement() -> TestResult {
         "DELETE FROM log RETURNING m",
         "SELECT count(*) FROM log",
     ] {
-        describe(&conn, sql, &Structure::default())?;
+        describe(&conn, sql, &Structure::default(), &|| false)?;
     }
     let rows: i64 = conn.query_row("SELECT count(*) FROM log", [], |row| row.get(0))?;
     assert_eq!(rows, 0);
@@ -1300,5 +1300,46 @@ fn the_no_row_edge_of_a_cursor_move_may_be_a_null_row() -> TestResult {
         Some(super::ROW)
     );
     assert_eq!(rows_after("SELECT a FROM t", Op::Next, false)?, Some(both));
+    Ok(())
+}
+
+// a straight-line program of more steps than one stop interval
+fn wide_select() -> String {
+    let columns: Vec<String> = (1..=700).map(|n| format!("a + {n}")).collect();
+    format!("SELECT {} FROM t", columns.join(", "))
+}
+
+#[test]
+fn a_stop_check_that_fires_stops_the_analysis_with_the_stop_outcome() -> TestResult {
+    let conn = database()?;
+    let sql = wide_select();
+    assert_eq!(analyze(&conn, &sql, &|| true), Err(Silent::Stopped));
+    Ok(())
+}
+
+#[test]
+fn a_stop_check_that_never_fires_leaves_the_analysis_unchanged() -> TestResult {
+    let conn = database()?;
+    let sql = wide_select();
+    let calls = Cell::new(0_usize);
+    let counting = || {
+        calls.set(calls.get() + 1);
+        false
+    };
+    let counted = analyze(&conn, &sql, &counting)?;
+    assert_eq!(counted, analyze(&conn, &sql, &|| false)?);
+    assert_eq!(counted.len(), 700);
+    // consulted periodically, not on every step
+    assert!(calls.get() > 0);
+    assert!(calls.get() < 1_000);
+    Ok(())
+}
+
+#[test]
+fn a_stopped_analysis_fails_the_describe_as_an_interrupt() -> TestResult {
+    let conn = database()?;
+    let sql = wide_select();
+    let err = describe(&conn, &sql, &from(&["t"]), &|| true);
+    assert_eq!(err, Err(crate::exec::interrupted()));
     Ok(())
 }
