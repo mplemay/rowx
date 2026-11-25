@@ -36,7 +36,7 @@ timestamps and the other out-of-range values is [Known limits](../guide.md#known
 
 `RowNotFound`, `RowShapeError`, and `DecodeError` are defined in `rowx_core.errors`. `rowx` and `rowx.errors`
 re-export those same objects, so `from rowx import RowNotFound` is `rowx_core.errors.RowNotFound`. The native error
-registry uses those classes. There is no Postgres-specific exception tree. The attributes are
+registry uses those classes. There is no database-specific exception tree. The attributes are
 [Errors](../reference/api.md#errors).
 
 Constructing a query raises `TypeError` before any IO: a value that is not a template, a NUL in the static text, a

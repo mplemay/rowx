@@ -25,8 +25,9 @@ POSTGRES_WHEEL: Final[str] = "rowx_postgres-0.2.0-py3-none-any.whl"
 SQLITE_WHEEL: Final[str] = "rowx_sqlite-0.2.0-py3-none-any.whl"
 WHEELS: Final[tuple[str, ...]] = (ROWX_WHEEL, CORE_WHEEL, POSTGRES_WHEEL, SQLITE_WHEEL)
 KEYWORDS: Final[str] = "sql,postgresql,postgres,typed,async,t-string"
+ROWX_KEYWORDS: Final[str] = "sql,postgresql,postgres,sqlite,typed,async,t-string"
 SQLITE_KEYWORDS: Final[str] = "sql,sqlite,typed,async,t-string"
-DEFAULT_KEYWORDS: Final[dict[str, str]] = {ROWX_SQLITE: SQLITE_KEYWORDS}
+DEFAULT_KEYWORDS: Final[dict[str, str]] = {ROWX: ROWX_KEYWORDS, ROWX_SQLITE: SQLITE_KEYWORDS}
 NATIVE_PLATFORMS: Final[tuple[str, ...]] = (
     "cp314-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64",
     "cp314-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64",
@@ -635,3 +636,9 @@ def test_release_with_a_wrong_sqlite_requires_dist_fails(tmp_path: Path) -> None
     _write_release(tmp_path, sqlite_requires=(f"rowx-core=={WRONG_VERSION}",))
     with pytest.raises(SystemExit, match="requirements are"):
         VALIDATE_RELEASE(tmp_path, VERSION)
+
+
+def test_rowx_wheel_rejects_keywords_without_sqlite(tmp_path: Path) -> None:
+    path = _write_wheel(tmp_path, WheelBuild(filename=ROWX_WHEEL, keywords=KEYWORDS))
+    with pytest.raises(SystemExit, match="keywords are"):
+        VALIDATE_WHEEL(path)

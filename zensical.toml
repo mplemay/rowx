@@ -11,6 +11,7 @@ nav = [
   { "Home" = "index.md" },
   { "Start" = [
     { "First query" = "guide/get-started.md" },
+    { "SQLite" = "guide/sqlite.md" },
     { "Check" = "guide/checker.md" },
     { "From SQLAlchemy" = "from-sqlalchemy.md" },
   ] },

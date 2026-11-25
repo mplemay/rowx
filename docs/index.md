@@ -3,20 +3,23 @@
 rowx is typesafe raw SQL for Python 3.14+, with no ORM. You write SQL as a [PEP 750](https://peps.python.org/pep-0750/)
 t-string and say what a row looks like.
 
-`rowx check` prepares each checked `query` against a live Postgres 18 database. `query_unchecked` SQL is not described.
+`rowx check` prepares each checked `query` against a live PostgreSQL 18 or SQLite database. `query_unchecked` SQL is not
+described.
 
 - **SQL stays SQL.** You write the statement you would write in psql. `{name}` is a bound parameter. It is never pasted
   into the SQL text.
 - **The row is a normal type.** A tuple, a scalar, a dataclass, a `NamedTuple`, a `TypedDict`, or a pydantic model.
   pyright, mypy, and ty see that type with no plugin.
-- **The database checks it.** `rowx check` asks Postgres to prepare and describe the statement, then compares the
+- **The database checks it.** `rowx check` asks the database to prepare and describe the statement, then compares the
   columns and parameters with the row type.
-- **Postgres, async, one driver.** Python 3.14+, `asyncio`, and `rowx.postgres`. There is no dialect layer.
+- **PostgreSQL or SQLite, async.** Python 3.14+, `asyncio`, and `rowx.postgres` or `rowx.sqlite`. There is no dialect
+  layer.
 
-Postgres only. One statement per query. `query_unchecked` SQL is not described. There is no ORM and no generated query
-functions. The boundary is [Why rowx](why.md) and [Known limits](known-limits.md).
+PostgreSQL and SQLite. One statement per query. `query_unchecked` SQL is not described. There is no ORM and no generated
+query functions. The boundary is [Why rowx](why.md) and [Known limits](known-limits.md).
 
-Install the checker and the PostgreSQL backend with `uv add "rowx[postgres]"`.
+Install the checker and the PostgreSQL backend with `uv add "rowx[postgres]"`, or the SQLite backend with
+`uv add "rowx[sqlite]"` ([SQLite](guide/sqlite.md)).
 
 ```python test
 import asyncio
@@ -73,6 +76,7 @@ error[type-mismatch]: column 2 "name": column type is `int` but the annotation i
 ## Next
 
 - [First query](guide/get-started.md): install, then `SELECT`.
+- [SQLite](guide/sqlite.md): the same on a file or in memory.
 - [From SQLAlchemy](from-sqlalchemy.md): a `Session`, `select()`, and `text()` / `tstring()`, and what replaces them.
 - [Why rowx](why.md): the decision, then SQLx, sqlc, asyncpg, and psycopg.
 

@@ -1,7 +1,7 @@
 import string.templatelib
 import typing
 from string import templatelib
-from string.templatelib import Template, _template_unpickle  # error: [template-construction]  # ty: ignore[import-not-found]
+from string.templatelib import Template, _template_unpickle  # error: [template-construction]  # ty: ignore[missing-module-member]
 from typing import Annotated, cast
 
 import rowx_core._template

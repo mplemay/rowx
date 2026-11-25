@@ -1,18 +1,18 @@
 # Why rowx
 
 rowx is typesafe raw SQL for Python 3.14+, with no ORM. A query is a [PEP 750](https://peps.python.org/pep-0750/)
-t-string plus the Python type of the row. `rowx check` finds
-`query[T](t"...")` in your files. The checker never imports or executes application code. It asks Postgres to prepare
-and describe each checked statement, using `--database-url` or `DATABASE_URL`, and compares the columns and parameters
-with `T`. `query_unchecked` SQL is not described. Described metadata is not written to disk, so a check needs a
-database.
+t-string plus the Python type of the row. `rowx check` finds `query[T](t"...")` in your files. The checker never imports
+or executes application code. It asks the database (PostgreSQL or SQLite) to prepare and describe each checked
+statement, using `--database-url` or `DATABASE_URL`, and compares the columns and parameters with `T`. `query_unchecked`
+SQL is not described. Described metadata is not written to disk, so a check needs a database.
 
-- **SQL stays SQL.** The statement in the source is the statement Postgres prepares.
+- **SQL stays SQL.** The statement in the source is the statement the database prepares.
 - **The row is a normal type.** A tuple, a scalar, a dataclass, a `NamedTuple`, a `TypedDict`, or a pydantic model.
   pyright, mypy, and ty see it with no plugin.
 - **The database checks it.** A mismatch is an error before the program runs. The sample diagnostic is on the
   [home page](index.md).
-- **Postgres, async, one driver.** Python 3.14+ and `rowx.postgres`. There is no session and no query builder.
+- **PostgreSQL or SQLite, async, one driver each.** Python 3.14+, `rowx.postgres` and `rowx.sqlite`. There is no session
+  and no query builder.
 
 Leaving a `Session` is [From SQLAlchemy](from-sqlalchemy.md). The first query is
 [First query](guide/get-started.md).
@@ -45,7 +45,7 @@ One row per project. The kinship section above is where the offline cache and th
 
 | Project | Where the SQL lives | Live database check | ORM | Driver |
 |---|---|---|---|---|
-| rowx | An inline t-string on `query[T]` ([Queries](guide/query.md)). | Yes, for a checked statement. | No. | Yes. `rowx-postgres`. |
+| rowx | An inline t-string on `query[T]` ([Queries](guide/query.md)). | Yes, for a checked statement. | No. | Yes. `rowx-postgres` and `rowx-sqlite`. |
 | [SQLx](https://docs.rs/sqlx/latest/sqlx/) | String literals in [`query!`](https://docs.rs/sqlx/latest/sqlx/macro.query.html) and `query_as!`. | Yes, at compile time, unless offline mode is used. | No. | Yes. [`Postgres`](https://docs.rs/sqlx/latest/sqlx/struct.Postgres.html). |
 | [asyncpg](https://magicstack.github.io/asyncpg/current/index.html) | Strings passed to [`execute`](https://magicstack.github.io/asyncpg/current/usage.html) and `fetchrow`. | No. They run at runtime. | No. | Yes. |
 | [psycopg](https://www.psycopg.org/psycopg3/docs/) | Strings passed to [`execute`](https://www.psycopg.org/psycopg3/docs/basic/usage.html). | No. Typing covers the Python API, not the statement. | No. | Yes. |
@@ -54,7 +54,8 @@ One row per project. The kinship section above is where the offline cache and th
 
 ## What rowx does not do
 
-- **Postgres only.** One async driver, on [Packages](packages.md). There is no dialect layer.
+- **PostgreSQL and SQLite only.** One async driver for each, on [Packages](packages.md). There is no dialect layer, so
+  the SQL you write is that database's SQL, and the checker proves less on SQLite ([SQLite](guide/sqlite.md)).
 - **One statement per query.** A string of several statements fails at prepare.
   [Known limits](known-limits.md#execution-limits).
 - **`query_unchecked` is not described.** The checker still resolves `T`. [Checker guide](guide/checker.md).

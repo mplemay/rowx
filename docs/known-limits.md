@@ -78,6 +78,31 @@ less precise than the database allows. A `correct` case is a hard-looking shape 
   `cube` is checked when a statement is prepared. `DROP EXTENSION` or `ALTER EXTENSION` while a connection holds a
   cached statement is not noticed until that statement is prepared again.
 
+## SQLite limits
+
+The v1 SQLite backend leaves these out. Each is a decision, not an oversight.
+
+- **No system `libsqlite3`.** SQLite is bundled ([driver reference](reference/driver.md#sqlite)), so the version is the
+  one rowx ships.
+- **No shared-cache mode**, no `ATTACH`-aware checking, no extension loading, no user-defined functions, no SQLCipher,
+  no incremental blob IO, no update hooks, and no free-threaded build.
+- **No sync API.** The driver is asyncio only.
+- **No typed describe for virtual tables and FTS.** A virtual table or a table-valued function is `Unproven`, and its
+  columns are untyped.
+- **No `JSONB`.** A `JSONB` blob raises `DecodeError`. Store JSON as TEXT.
+- **No WAL on a network filesystem.** A file database is opened in WAL mode, which needs shared memory.
+- **No multi-statement execution at runtime** ([#300](https://github.com/mplemay/rowx/issues/300)). A query is one
+  statement, and `execute` is also refused for a statement that returns rows.
+- **Nullability is mostly unproven.** A column is NOT NULL only for plain tables read through `FROM` and inner joins. A
+  view, CTE, subquery, compound select, outer join, aggregate or expression is `Unproven`, and a computed column stays
+  nullable until the follow-up ([#350](https://github.com/mplemay/rowx/issues/350)). `"col!"` narrows it.
+- **Parameters are untyped.** There is no `param-type-mismatch`, and a naive or aware `datetime` mismatch surfaces as a
+  `DecodeError` when read ([Type mapping](reference/type-mapping.md#sqlite)).
+- **`DECIMAL` and `JSON` columns are lossy** through SQLite's numeric affinity, and there is no column type override
+  ([#302](https://github.com/mplemay/rowx/issues/302)).
+- **One writer at a time**, and a cancel during a lock wait ends after the busy timeout.
+- **A `-- no-transaction` migration is not locked.** A second migrator that starts meanwhile fails `Dirty`.
+
 ## Migration limits
 
 - **`-- no-transaction` is still one implicit transaction.** The file is sent as a single simple-protocol query, so

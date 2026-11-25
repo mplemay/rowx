@@ -1,16 +1,16 @@
 # Packages
 
-rowx publishes four distributions, all released together under one version (0.4.2). Install matching versions of the
+rowx publishes five distributions, all released together under one version (0.4.2). Install matching versions of the
 ones you use. Each distribution has its own import root. An application that runs queries and checks them installs
-one extra, `rowx[postgres]`.
+one extra, `rowx[postgres]` or `rowx[sqlite]`.
 
 An application that installs `rowx[postgres]` imports `from rowx import ...` and `from rowx.postgres import ...`.
 `from rowx import query` is the same object as `from rowx_core import query`, and `from rowx.postgres import connect`
 is the same object as `from rowx_postgres import connect`. `Pool` imported from `rowx` is the executor protocol, not a
 connection pool. `import rowx` loads no backend.
 
-Install the two packages separately when the application should not include the `rowx` command. That install imports
-`rowx_core` and `rowx_postgres`.
+Install the packages separately when the application should not include the `rowx` command. That install imports
+`rowx_core` and `rowx_postgres` (or `rowx_sqlite`).
 
 ```sh
 uv add rowx-core rowx-postgres
@@ -36,13 +36,28 @@ The canonical connection imports are:
 from rowx_postgres import Pool, connect
 ```
 
+## rowx-sqlite
+
+The `rowx-sqlite` distribution's import root is `rowx_sqlite`. It depends only on the matching `rowx-core`. It is the
+SQLite driver: connections, a pool, transactions and migrations. SQLite is bundled
+([driver reference](reference/driver.md#sqlite)), so it never links the system `libsqlite3`. It is a native wheel for
+the same platforms as `rowx-postgres` (including Windows), plus an sdist.
+
+```python
+from rowx_sqlite import Pool, connect
+```
+
+`rowx.sqlite` re-exports `connect`, `ConnectOptions`, `Connection`, `Pool`, `Transaction` and `Migrator`, and needs the
+`sqlite` extra. Nothing SQLite-specific is added to the top-level `rowx` namespace. See [SQLite](guide/sqlite.md).
+
 ## rowx
 
 The `rowx` distribution's import root is `rowx`. It is the command-line checker and depends on the matching `rowx-core`.
-The `postgres` extra adds the matching `rowx-postgres`:
+The `postgres` extra adds the matching `rowx-postgres`, and the `sqlite` extra adds the matching `rowx-sqlite`:
 
 ```sh
 uv add "rowx[postgres]"
+uv add "rowx[sqlite]"
 ```
 
 Free-threaded CPython 3.14t cannot install the abi3 wheels, so pip builds rowx-postgres from the source distribution.
@@ -51,9 +66,9 @@ The `embedded` extra adds `rowx-postgres` and the matching `rowx-embedded` as we
 [rowx-embedded](#rowx-embedded)).
 
 `rowx` re-exports the query API. `rowx.core` re-exports the `rowx_core` names that `rowx` and `rowx.errors` do not
-already export. `rowx.postgres` re-exports the driver and needs the `postgres` extra. `rowx.embedded` re-exports
-`rowx_embedded.Database` and needs the `embedded` extra. `from rowx import query` and `from rowx_core import query` are
-the same object.
+already export. `rowx.postgres` re-exports the PostgreSQL driver and needs the `postgres` extra, and `rowx.sqlite`
+re-exports the SQLite driver and needs the `sqlite` extra. `rowx.embedded` re-exports `rowx_embedded.Database` and needs
+the `embedded` extra. `from rowx import query` and `from rowx_core import query` are the same object.
 
 ```python
 from rowx import query

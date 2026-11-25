@@ -127,4 +127,8 @@ with TemporaryDirectory() as tmp:
 A complete project, with migrations, an application module, drift-checked queries and a `conftest.py`, is in
 [`examples/migrations`](https://github.com/mplemay/rowx/tree/main/examples/migrations).
 
+With SQLite, `DATABASE_URL=sqlite::memory:` selects the backend, the URL is never opened, and each test gets a copy of a
+migrated file made with SQLite's backup API: see [SQLite](sqlite.md#tests). The role, `CREATEDB` and server notes above
+are PostgreSQL.
+
 To run these fixtures with no server at all, see [Embedded Postgres](embedded.md#the-pytest-plugin).

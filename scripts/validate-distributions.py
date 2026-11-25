@@ -67,7 +67,9 @@ EXPECTED_CLASSIFIERS: Final[frozenset[str]] = frozenset({
     "Topic :: Database",
     "Framework :: AsyncIO",
 })
-EXPECTED_KEYWORDS: Final[tuple[str, ...]] = ("sql", "postgresql", "postgres", "typed", "async", "t-string")
+# the `rowx` distribution names both databases it can check; `rowx-core` and `rowx-postgres` keep the PostgreSQL list
+EXPECTED_KEYWORDS: Final[tuple[str, ...]] = ("sql", "postgresql", "postgres", "sqlite", "typed", "async", "t-string")
+POSTGRES_KEYWORDS: Final[tuple[str, ...]] = ("sql", "postgresql", "postgres", "typed", "async", "t-string")
 SQLITE_KEYWORDS: Final[tuple[str, ...]] = ("sql", "sqlite", "typed", "async", "t-string")
 # the namespaces that ship a compiled extension: five platform wheels and a source distribution each
 NATIVE_NAMESPACES: Final[tuple[str, ...]] = (ROWX_POSTGRES, ROWX_SQLITE)
@@ -91,8 +93,8 @@ LICENSE_SOURCES: Final[dict[str, Path]] = {
 }
 KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
     ROWX: EXPECTED_KEYWORDS,
-    ROWX_CORE: EXPECTED_KEYWORDS,
-    ROWX_POSTGRES: EXPECTED_KEYWORDS,
+    ROWX_CORE: POSTGRES_KEYWORDS,
+    ROWX_POSTGRES: POSTGRES_KEYWORDS,
     ROWX_SQLITE: SQLITE_KEYWORDS,
 }
 NATIVE_SUFFIXES: Final[tuple[str, ...]] = (".so", ".pyd", ".dll", ".dylib")

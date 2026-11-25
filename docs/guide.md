@@ -1,14 +1,15 @@
 # rowx user guide
 
 rowx is typesafe raw SQL for Python 3.14+, with no ORM. You write SQL as a t-string and say what a row looks like.
-`rowx check` prepares every query against a live Postgres 18 database.
+`rowx check` prepares every query against a live PostgreSQL 18 or SQLite database.
 
-The `python test` blocks in this guide run against a seeded database (users `alice`, `bob`, and `carol`, plus
-`orders`). The test suite sets `DSN`.
+Except [SQLite](guide/sqlite.md), the `python test` blocks in this guide run against a seeded database (users `alice`,
+`bob`, and `carol`, plus `orders`). The test suite sets `DSN`.
 
 ## Start
 
 - [First query](guide/get-started.md): install `rowx[postgres]` and run `SELECT`.
+- [SQLite](guide/sqlite.md): the same on a file or in memory, with `rowx[sqlite]`.
 - [Rows](guide/rows.md): a scalar, a tuple, or a class you already write.
 - [Check](guide/checker.md): the diagnostic when a column and `T` disagree.
 - [From SQLAlchemy](from-sqlalchemy.md): what you give up, and what you keep.
@@ -36,6 +37,8 @@ Each case is pinned in [known limits](known-limits.md). The short index:
   `unsupported-type` in the checker and raise `DecodeError` at runtime. Cast to `text`.
 - **Decode errors.** `date`, `timestamp` and `timestamptz` that are infinite or outside years 1 to 9999, and `interval`
   values with a months component, raise `DecodeError`. Cast to `text`.
+- **SQLite** proves less: a column is NOT NULL only for plain tables, parameters are untyped, and `DECIMAL` is lossy.
+  See [known limits](known-limits.md#sqlite-limits).
 - **Array elements.** Element types and nullability inside `list[...]` are not checked at runtime; a NULL element
   decodes to `None`.
 - **One operation per connection.** There is no pipelining yet. An open `fetch` stream holds the connection until it

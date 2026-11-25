@@ -9,57 +9,74 @@ linked, and which checks run without a database.
 |---|---|---|
 | `rowx-core` | `rowx_core` | none |
 | `rowx-postgres` | `rowx_postgres` | matching `rowx-core` only |
-| `rowx` | `rowx` | matching `rowx-core`; the `postgres` extra adds matching `rowx-postgres`, and the `embedded` extra adds matching `rowx-postgres` and `rowx-embedded` |
+| `rowx-sqlite` | `rowx_sqlite` | matching `rowx-core` only; SQLite is bundled, so there is no system library |
+| `rowx` | `rowx` | matching `rowx-core`; the `postgres` extra adds matching `rowx-postgres`, the `sqlite` extra adds matching `rowx-sqlite`, and the `embedded` extra adds matching `rowx-postgres` and `rowx-embedded` |
 | `rowx-embedded` | `rowx_embedded` | matching `rowx-core` and `rowx-postgres`; it is the optional embedded engine, and no other distribution depends on it except through the `embedded` extra |
 
 `from rowx import query` and `from rowx_core import query` are the same object. `import rowx` loads no backend.
-Connections are `from rowx_postgres import Pool, connect`. The `postgres` extra is what installs that package. The
+Connections are `from rowx_postgres import Pool, connect` or `from rowx_sqlite import Pool, connect`. The `postgres` and
+`sqlite` extras install those packages. The
 backend does not depend on the CLI.
 
 Python packages:
 
 | Path | Role |
 |---|---|
-| `packages/rowx-core/src/rowx_core/` | Shared query, template capture, executor protocols, errors, migration contracts. |
+| `packages/rowx-core/src/rowx_core/` | Shared query, template capture, executor protocols, errors, migration contracts, and the backend-neutral bases both drivers build on: the connection, transaction and pool (`_connection.py`, `_transaction.py`, `_pool.py`), the dialect-driven compiler builder (`_compiler.py`), row shapes, the `Backend` protocols (`backend.py`), and the lock and lifecycle helpers the test provisioners share (`filelock.py`, `lifecycle.py`). |
 | `packages/rowx-postgres/src/rowx_postgres/` | PostgreSQL connection, pool, compiler, value types, `Migrator`, bound services. |
+| `packages/rowx-sqlite/src/rowx_sqlite/` | SQLite connection, pool, compiler and lexer, describe, `Migrator`, admin, scratch, test provisioner. |
 | `src/rowx/` | CLI, checker, pytest plugin, and the core re-exports. |
 
 Rust crates:
 
 | Path | Role |
 |---|---|
-| `crates/rowx-core` | No PyO3. Claim/settle (`state.rs`), cancel plumbing (`cancel.rs`), row shape (`row_shape.rs`), pool, migration plan. |
+| `crates/rowx-core` | No PyO3. Claim/settle (`state.rs`), cancel plumbing (`cancel.rs`), row shape (`row_shape.rs`), the generic pool (`pool/`), and the migration filename grammar, source resolution, checksums, plan and status (`migrate/`). Both drivers use it. |
 | `crates/rowx-postgres` | No PyO3. DSN, TLS, connection, execution, statement cache, describe, explain, wire codecs. Depends only on `rowx-core` among the workspace crates. |
-| `crates/rowx-py-core` | Shared PyO3 support: the tokio runtime (`runtime.rs`) and the exception-class registry (`errors.rs`). |
+| `crates/rowx-sqlite` | No PyO3. DSN, error mapping, type table and value codecs (`value/`), the connection worker, execution, cancel, statement timeout, describe, pool, migrations and admin. Depends only on `rowx-core`. |
+| `crates/rowx-py-core` | Shared PyO3 support: the tokio runtime (`runtime.rs`), the exception-class registry and shared error helpers (`errors.rs`), execution access and cancel callbacks (`exec.rs`), row building and shapes (`row.rs`, `shape.rs`), migration bindings (`migrate.rs`) and seconds parsing (`time.rs`). |
+| `packages/rowx-sqlite` | The SQLite cdylib. Cargo package name `rowx-sqlite-py`, library name `rowx_sqlite_core`, module `rowx_sqlite._core`. |
 | `packages/rowx-postgres` | The cdylib. Cargo package name `rowx-postgres-py`, library name `_core`. This is the binding crate, not a separate distribution. |
 
-The default workspace members are those four paths. The embedded companion (`packages/rowx-embedded` and its
-`crates/rowx-embedded-host`) is a member too, but not a default one (see [Embedded companion](#embedded-companion)).
-`pyo3` and `pyo3-async-runtimes` are workspace dependencies and their minor versions move together. `uv sync` installs
-the workspace. `ty` checks each package in place, with no merged type-check tree and no cross-package symlink. Build the
-extension with `uv run maturin develop -m packages/rowx-postgres/Cargo.toml`. Do not `cargo build` the cdylib on its
-own.
+The default workspace members are the six paths of the two drivers and the shared crates. The embedded companion
+(`packages/rowx-embedded` and its `crates/rowx-embedded-host`) is a member too, but not a default one (see
+[Embedded companion](#embedded-companion)). `pyo3` and `pyo3-async-runtimes` are workspace dependencies and their minor
+versions move together. `uv sync` installs the workspace. `ty` checks each package in place, with no merged type-check
+tree and no cross-package symlink. Build the extension with
+`uv run maturin develop -m packages/rowx-postgres/Cargo.toml`. Do not `cargo build` the cdylib on its own.
 
 ## Native module and runtimes
 
 The Python module is `rowx_postgres._core` (`module-name` in `packages/rowx-postgres/pyproject.toml`).
-`packages/rowx-postgres/src/lib.rs` registers it and calls `rowx_py_core::runtime::init()` from the module
-initialiser. That builds one multi-thread tokio runtime for the extension, named `rowx-io`, and registers it with
-`pyo3-async-runtimes`. The runtime static lives in the extension, so each backend extension links
-`rowx-py-core` statically and owns its runtime. Only the PostgreSQL extension exists today.
+`packages/rowx-postgres/src/lib.rs` registers it and calls `rowx_py_core::runtime::init()` from the module initialiser.
+That builds one multi-thread tokio runtime for the extension, named `rowx-io`, and registers it with
+`pyo3-async-runtimes`. The runtime static lives in the extension, so each backend extension links `rowx-py-core`
+statically and owns its runtime. The PostgreSQL extension and the SQLite extension are separate cdylibs, so each owns
+one runtime and loads independently. The library names differ (`_core` and `rowx_sqlite_core`) so the two do not collide
+in `target/`, and both export `PyInit__core` under their own module name.
+
+### SQLite worker threads
+
+The SQLite driver does not drive IO on tokio. Each connection owns one OS thread, named `rowx-sqlite`, that opens the
+database and serves jobs from a channel; every call is a job answered through a oneshot, so SQLite never runs on a tokio
+worker or under the GIL. `sqlite3_interrupt` is the cancel path, behind `rowx_core::cancel::Backend`, and a timer thread
+serves `statement_timeout`. Streams deliver rows in batches over a bounded channel, and the worker parks when the
+consumer is behind. A dropped connection ends its worker, and a worker that unwinds breaks the connection state, which
+callers see as `TaskStopped`. The shared tokio runtime still resolves futures and runs the pool.
 
 The GIL is released around IO. IO runs on that runtime.
 
 ## Acyclic dependencies
 
-`rowx-postgres` does not import `rowx`. The checker in `rowx` selects a backend from the database URL and receives
-the backend's checker, admin and migration services as arguments. `Backend` in
-`packages/rowx-core/src/rowx_core/backend.py` has `checker`, `admin`, `migrations`, and `testing` factories. A
-missing one raises `UnsupportedCapabilityError`. A checker-only backend need not implement administration or
-testing. There is no `ContextVar`, no default backend, and no cast through `Any` to hide a backend type. A
-capability the process did not install is an error from `backend_for`, not a silent PostgreSQL fallback. Keyword
-and `postgres`/`postgresql` URLs ask for `rowx_postgres`. Error redaction is string processing over the URL the
-command already holds. It does not import a provider.
+`rowx-postgres` does not import `rowx`. The checker in `rowx` selects a backend from the database URL and receives the
+backend's checker, admin and migration services as arguments. `Backend` in `packages/rowx-core/src/rowx_core/backend.py`
+has `checker`, `admin`, `migrations`, `testing`, `embedded`, `scratch` and `memory` (`in_memory`) factories, and a
+`compat_warning` string shown before a compatibility run. A missing one raises
+`UnsupportedCapabilityError`. A checker-only backend need not implement administration or testing. There is no
+`ContextVar`, no default backend, and no cast through `Any` to hide a backend type. A capability the process did not
+install is an error from `backend_for`, not a silent PostgreSQL fallback. Keyword and `postgres`/`postgresql` URLs ask
+for `rowx_postgres`. Error redaction is string processing over the URL the command already holds. It does not import a
+provider.
 
 ## Validation timing
 
@@ -187,7 +204,7 @@ These items are not specified in the reference and are tracked by the issues bel
 - [#303](https://github.com/mplemay/rowx/issues/303) parser-based nullability narrowing
 - [#304](https://github.com/mplemay/rowx/issues/304) listen/notify, copy, client certificates, libpq env and
   free-threading
-- [#305](https://github.com/mplemay/rowx/issues/305) additional database backends
+- [#305](https://github.com/mplemay/rowx/issues/305) additional database backends beyond PostgreSQL and SQLite
 - [#306](https://github.com/mplemay/rowx/issues/306) package-resource migrations
 - [#307](https://github.com/mplemay/rowx/issues/307) per-test SQL fixtures for `rowx.testing`
 

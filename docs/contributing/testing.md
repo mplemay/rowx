@@ -80,11 +80,12 @@ not start a database.
 
 ## Test plugin
 
-`rowx.testing` (`src/rowx/testing.py`) is opt-in. Nothing registers it as a pytest plugin entry point. A project
-sets `pytest_plugins = ["rowx.testing"]` and depends on `rowx[pytest]`, which adds pytest and does not add a
-database backend. The plugin reads `[tool.rowx.migrate]` and the database URL. It builds a template database and
-gives each test a clone. Without a URL the tests skip, or fail when the project requires a database. The plugin
-tests under `src/rowx/__tests__/unit/test_testing.py` use fakes and do not connect.
+`rowx.testing` (`src/rowx/testing.py`) is opt-in. The SQLite provisioner (`rowx_sqlite/_testing.py`) needs no server and
+runs in the SQLite tests, which carry no `db` marker and always run. Nothing registers it as a pytest plugin entry
+point. A project sets `pytest_plugins = ["rowx.testing"]` and depends on `rowx[pytest]`, which adds pytest and does not
+add a database backend. The plugin reads `[tool.rowx.migrate]` and the database URL. It builds a template database and
+gives each test a clone. Without a URL the tests skip, or fail when the project requires a database. The plugin tests
+under `src/rowx/__tests__/unit/test_testing.py` use fakes and do not connect.
 
 ## Embedded lane
 
