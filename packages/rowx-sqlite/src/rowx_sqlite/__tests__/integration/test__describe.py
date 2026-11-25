@@ -101,7 +101,7 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
     "cross join": ("SELECT t.a, s.x FROM t CROSS JOIN s", (("a", False, NN), ("x", False, NN))),
     "aggregates": (
         "SELECT count(*) AS n, max(a) AS m, a + 1 AS p FROM t",
-        (("n", False, "ComputedExpr"), ("m", True, UNPROVEN), ("p", True, UNPROVEN)),
+        (("n", False, COMPUTED), ("m", True, UNPROVEN), ("p", True, UNPROVEN)),
     ),
     "aggregate without group by": (
         "SELECT a, max(a) AS m FROM t",
@@ -109,21 +109,21 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
     ),
     "count without group by": (
         "SELECT id, count(*) AS n FROM t",
-        (("id", True, UNPROVEN), ("n", False, "ComputedExpr")),
+        (("id", True, UNPROVEN), ("n", False, COMPUTED)),
     ),
     "quoted count without group by": (
         'SELECT a, "count"(*) AS n FROM t',
-        (("a", True, UNPROVEN), ("n", False, "ComputedExpr")),
+        (("a", True, UNPROVEN), ("n", False, COMPUTED)),
     ),
     "min without group by": ("SELECT id, min(a) AS m FROM t", (("id", True, UNPROVEN), ("m", True, UNPROVEN))),
     "having without group by": (
         "SELECT a, count(*) AS n FROM t HAVING n >= 0",
-        (("a", True, UNPROVEN), ("n", False, "ComputedExpr")),
+        (("a", True, UNPROVEN), ("n", False, COMPUTED)),
     ),
     "group by without aggregate": ("SELECT a FROM t GROUP BY a", (("a", False, NN),)),
     "aggregate with group by": (
         "SELECT a, count(*) AS n FROM t GROUP BY a",
-        (("a", False, NN), ("n", False, "ComputedExpr")),
+        (("a", False, NN), ("n", False, COMPUTED)),
     ),
     "two argument max is scalar": ("SELECT max(a, 1) AS m, a FROM t", (("m", True, UNPROVEN), ("a", False, NN))),
     "window function is not an aggregate": (
@@ -136,7 +136,7 @@ CASES: Final[dict[str, tuple[str, Expected]]] = {
     ),
     "over as a column alias": (
         "SELECT a, count(*) over FROM t",
-        (("a", True, UNPROVEN), ("over", False, "ComputedExpr")),
+        (("a", True, UNPROVEN), ("over", False, COMPUTED)),
     ),
     "without rowid primary key": ("SELECT k FROM w", (("k", False, NN),)),
     "table constraint rowid alias": ("SELECT id FROM pk2", (("id", False, NN),)),

@@ -469,6 +469,16 @@ const CASES: &[Case] = &[
         Cols(&[(U, true, true)]),
     ),
     case(
+        "a union all of two different columns is not a pass through",
+        "SELECT a FROM t UNION ALL SELECT a FROM big",
+        Cols(&[(U, true, false)]),
+    ),
+    case(
+        "a case choosing between two columns is not a pass through",
+        "SELECT CASE WHEN a > 1 THEN a ELSE id END FROM t",
+        Cols(&[(U, true, false)]),
+    ),
+    case(
         "a union all arm that is NULL",
         "SELECT a FROM t UNION ALL SELECT NULL",
         Cols(&[(U, false, false)]),
@@ -864,16 +874,48 @@ fn expression_describe_cases() -> Vec<DescribeCase> {
 }
 
 fn join_describe_cases() -> Vec<DescribeCase> {
+    vec![(
+        "the left of a left join keeps its column proof, the right is nullable",
+        "SELECT t.a, s.x FROM t LEFT JOIN s ON t.id = s.id",
+        with(Construct::OuterJoin, &["t", "s"]),
+        vec![
+            (INT_KIND, "INTEGER", false, "NotNullColumn", None),
+            (TEXT_KIND, "TEXT", true, "Unproven", Some("outer join")),
+        ],
+    )]
+}
+
+fn origin_describe_cases() -> Vec<DescribeCase> {
     vec![
         (
-            "the left of a left join keeps its column proof, the right is nullable",
-            "SELECT t.a, s.x FROM t LEFT JOIN s ON t.id = s.id",
-            with(Construct::OuterJoin, &["t", "s"]),
-            vec![
-                (INT_KIND, "INTEGER", false, "NotNullColumn", None),
-                (TEXT_KIND, "TEXT", true, "Unproven", Some("outer join")),
-            ],
+            "a case choosing between two NOT NULL columns is computed",
+            "SELECT CASE WHEN a > 1 THEN a ELSE id END AS v FROM t",
+            from(&["t"]),
+            vec![(None, "", false, "ComputedExpr", None)],
         ),
+        (
+            "a union all of two different NOT NULL columns is computed",
+            "SELECT a FROM t UNION ALL SELECT a FROM big",
+            with(Construct::CompoundSelect, &["t", "big"]),
+            vec![(INT_KIND, "INTEGER", false, "ComputedExpr", None)],
+        ),
+        (
+            "a union all of the same column stays a column",
+            "SELECT a FROM t UNION ALL SELECT a FROM t",
+            with(Construct::CompoundSelect, &["t"]),
+            vec![(INT_KIND, "INTEGER", false, "NotNullColumn", None)],
+        ),
+        (
+            "the left of a left join on a constant stays a column",
+            "SELECT t.a FROM t LEFT JOIN s ON 1",
+            with(Construct::OuterJoin, &["t", "s"]),
+            vec![(INT_KIND, "INTEGER", false, "NotNullColumn", None)],
+        ),
+    ]
+}
+
+fn view_describe_cases() -> Vec<DescribeCase> {
+    vec![
         (
             "a view column over a NOT NULL column",
             "SELECT a, b FROM v",
@@ -971,6 +1013,8 @@ fn describe_applies_the_bytecode_only_to_unproven_columns() -> TestResult {
     for (name, sql, structure, want) in expression_describe_cases()
         .into_iter()
         .chain(join_describe_cases())
+        .chain(origin_describe_cases())
+        .chain(view_describe_cases())
     {
         let got = match describe(&conn, sql, &structure) {
             Ok(described) => described

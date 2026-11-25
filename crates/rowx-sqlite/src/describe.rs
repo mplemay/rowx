@@ -133,7 +133,7 @@ fn schemas(parts: &[String]) -> Vec<&str> {
     }
 }
 
-fn quote(name: &str) -> String {
+pub(crate) fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
@@ -386,17 +386,15 @@ fn verdict(
 
 // A column with no declared type takes the one storage class the bytecode proves for it.
 fn column_type(declared: Option<&str>, found: Option<Fact>) -> (Option<Kind>, String) {
-    let looked_up = lookup(declared);
-    if !looked_up.is_untyped() {
-        return (
-            Some(looked_up.kind()),
-            declared.unwrap_or_default().to_owned(),
-        );
+    let text = declared.unwrap_or_default().to_owned();
+    if declared.is_some_and(|name| !name.trim().is_empty()) {
+        return (Some(lookup(declared).kind()), text);
     }
-    found.and_then(|fact| fact.class).map_or_else(
-        || (None, declared.unwrap_or_default().to_owned()),
-        |class| (Some(class_kind(class)), class.name().to_owned()),
-    )
+    found
+        .and_then(|fact| fact.class)
+        .map_or((None, text), |class| {
+            (Some(class_kind(class)), class.name().to_owned())
+        })
 }
 
 const fn class_kind(class: Class) -> Kind {
@@ -410,9 +408,47 @@ const fn class_kind(class: Class) -> Kind {
 
 #[cfg(test)]
 mod tests {
-    use super::{Construct, SourceKind, Structure, describe, unproven_cause};
+    use super::{Construct, SourceKind, Structure, column_type, describe, unproven_cause};
+    use crate::bytecode::{Class, Fact};
     use crate::error::Error;
+    use crate::types::Kind;
     use rusqlite::Connection;
+
+    const fn fact(class: Option<Class>) -> Fact {
+        Fact {
+            non_null: true,
+            class,
+            pass_through: false,
+        }
+    }
+
+    #[test]
+    fn column_type_applies_the_bytecode_class_only_without_a_declared_type() {
+        let integer = Some(fact(Some(Class::Integer)));
+        assert_eq!(
+            column_type(None, integer),
+            (Some(Kind::Integer), "INTEGER".to_owned())
+        );
+        assert_eq!(
+            column_type(Some("  "), integer),
+            (Some(Kind::Integer), "INTEGER".to_owned())
+        );
+        assert_eq!(column_type(None, None), (None, String::new()));
+        assert_eq!(column_type(None, Some(fact(None))), (None, String::new()));
+        // a declared type keeps its own text and kind whatever the bytecode proves
+        assert_eq!(
+            column_type(Some("TEXT"), integer),
+            (Some(Kind::Text), "TEXT".to_owned())
+        );
+        assert_eq!(
+            column_type(Some("NUMERIC"), None),
+            (Some(Kind::Decimal), "NUMERIC".to_owned())
+        );
+        assert_eq!(
+            column_type(Some("DECIMAL(10, 2)"), integer),
+            (Some(Kind::Decimal), "DECIMAL(10, 2)".to_owned())
+        );
+    }
 
     #[test]
     fn multiple_or_no_statements_are_not_one_statement() -> rusqlite::Result<()> {

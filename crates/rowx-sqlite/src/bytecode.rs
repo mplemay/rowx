@@ -18,9 +18,12 @@ use rusqlite::Connection;
 use rusqlite::types::Value;
 use thiserror::Error;
 
+use crate::describe::quote;
+
 /// The SQLite version whose `EXPLAIN` output the modelled opcodes were reviewed against. A test fails
 /// when the bundled version differs, so a bump has to review [`MODELED_OPCODES`].
-pub const REVIEWED_SQLITE_VERSION: &str = "3.51.3";
+#[cfg(test)]
+const REVIEWED_SQLITE_VERSION: &str = "3.51.3";
 
 const MAX_PROGRAM: usize = 20_000;
 const MAX_STEPS: usize = 400_000;
@@ -45,7 +48,7 @@ macro_rules! opcodes {
 
         /// Every opcode the analysis models. A statement that reaches any other opcode is analysed to
         /// nothing.
-        pub const MODELED_OPCODES: &[&str] = &[$(stringify!($name)),*];
+        const MODELED_OPCODES: &[&str] = &[$(stringify!($name)),*];
 
         impl Op {
             const ALL: &'static [Self] = &[$(Self::$name),*];
@@ -145,8 +148,8 @@ struct Val {
     classes: u8,
     /// The value may have a class that is not tracked.
     wild: bool,
-    /// The value is exactly a base table column's value, read from a row that exists.
-    pass: bool,
+    /// The base table column the value is exactly a read of, from a row that exists.
+    origin: Option<Rc<Origin>>,
     /// The value is a record (`MakeRecord`, a sorter row), with its fields.
     rec: Option<Rc<Vec<Self>>>,
 }
@@ -157,7 +160,7 @@ impl Val {
             null,
             classes,
             wild,
-            pass: false,
+            origin: None,
             rec: None,
         }
     }
@@ -189,7 +192,10 @@ impl Val {
             null: self.null || other.null,
             classes: self.classes | other.classes,
             wild: self.wild || other.wild,
-            pass: self.pass && other.pass,
+            origin: match (&self.origin, &other.origin) {
+                (Some(a), Some(b)) if a == b => Some(Rc::clone(a)),
+                _ => None,
+            },
             rec,
         }
     }
@@ -200,22 +206,30 @@ impl Val {
     }
 }
 
+// A base table column, named by its table and column rather than by the cursor that reads it. A cid of -1 is
+// the rowid.
+#[derive(Debug, PartialEq, Eq)]
+struct Origin {
+    db: String,
+    table: String,
+    cid: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Slot {
     not_null: bool,
     classes: u8,
     wild: bool,
-    /// The rowid, which the index record ends with.
-    rowid: bool,
+    origin: Option<Rc<Origin>>,
 }
 
 impl Slot {
-    const fn value(&self) -> Val {
+    fn value(&self) -> Val {
         Val {
             null: !self.not_null,
             classes: self.classes,
             wild: self.wild,
-            pass: self.not_null,
+            origin: self.origin.clone().filter(|_| self.not_null),
             rec: None,
         }
     }
@@ -224,6 +238,8 @@ impl Slot {
 /// How the stored record of a table or index maps onto its columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Layout {
+    db: String,
+    table: String,
     slots: Vec<Option<Slot>>,
 }
 
@@ -355,10 +371,6 @@ struct Insn {
 
 type Edge = (usize, State);
 
-fn quote(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
 const fn int(value: &Value) -> i64 {
     match value {
         Value::Integer(number) => *number,
@@ -438,13 +450,21 @@ fn table_columns(conn: &Connection, db: &str, table: &str) -> rusqlite::Result<V
     Ok(columns)
 }
 
-fn table_slot(column: &TableColumn, strict: bool) -> Slot {
+fn origin(db: &str, table: &str, cid: i64) -> Rc<Origin> {
+    Rc::new(Origin {
+        db: db.to_owned(),
+        table: table.to_owned(),
+        cid,
+    })
+}
+
+fn table_slot(db: &str, table: &str, column: &TableColumn, strict: bool) -> Slot {
     let (classes, wild) = declared_class(&column.declared, strict);
     Slot {
         not_null: column.not_null,
         classes,
         wild,
-        rowid: false,
+        origin: Some(origin(db, table, column.cid)),
     }
 }
 
@@ -484,7 +504,7 @@ fn load_layout(conn: &Connection, db: &str, root: i64) -> rusqlite::Result<Optio
         "table" => columns
             .iter()
             .filter(|column| matches!(column.hidden, 0 | 3))
-            .map(|column| Some(table_slot(column, *strict)))
+            .map(|column| Some(table_slot(db, table, column, *strict)))
             .collect(),
         "index" => {
             let mut slots = Vec::new();
@@ -496,12 +516,12 @@ fn load_layout(conn: &Connection, db: &str, root: i64) -> rusqlite::Result<Optio
                         not_null: true,
                         classes: INT,
                         wild: false,
-                        rowid: true,
+                        origin: Some(origin(db, table, -1)),
                     }),
                     cid if cid >= 0 => columns
                         .iter()
                         .find(|column| column.cid == cid)
-                        .map(|column| table_slot(column, *strict)),
+                        .map(|column| table_slot(db, table, column, *strict)),
                     _ => None,
                 });
                 Ok(())
@@ -510,7 +530,11 @@ fn load_layout(conn: &Connection, db: &str, root: i64) -> rusqlite::Result<Optio
         }
         _ => return Ok(None),
     };
-    Ok(Some(Layout { slots }))
+    Ok(Some(Layout {
+        db: db.to_owned(),
+        table: table.clone(),
+        slots,
+    }))
 }
 
 fn database_name(conn: &Connection, index: i64) -> rusqlite::Result<Option<String>> {
@@ -579,7 +603,7 @@ fn scalar(name: &str, args: &[Val]) -> Val {
         // returns its first argument, or NULL
         ("nullif", 2) => args.first().map_or_else(Val::unknown, |first| Val {
             null: true,
-            pass: false,
+            origin: None,
             rec: None,
             ..first.clone()
         }),
@@ -608,7 +632,7 @@ fn apply_affinity(value: &Val, affinity: u8) -> Val {
             null: value.null,
             classes: 0,
             wild: !value.only_null(),
-            pass: false,
+            origin: None,
             rec: None,
         },
     }
@@ -655,7 +679,7 @@ impl Machine<'_> {
             (false, true) => Val::null(),
             (true, true) => Val {
                 null: true,
-                pass: false,
+                origin: None,
                 ..base
             },
         }
@@ -767,7 +791,7 @@ impl Machine<'_> {
                 insn.p1,
                 Val {
                     null: false,
-                    pass: false,
+                    origin: None,
                     ..value
                 },
             );
@@ -916,16 +940,19 @@ impl Machine<'_> {
                 vec![(pc + 1, next)]
             }
             Op::Rowid | Op::IdxRowid => {
-                let value = match st.cursors.get(&insn.p1) {
-                    Some(found) if matches!(found.kind, Kind::Stored(_)) => Self::through_null_row(
-                        found,
-                        Val {
-                            pass: true,
-                            ..Val::of(INT)
-                        },
-                    ),
-                    _ => Val::unknown(),
-                };
+                let value =
+                    st.cursors
+                        .get(&insn.p1)
+                        .map_or_else(Val::unknown, |found| match &found.kind {
+                            Kind::Stored(layout) => Self::through_null_row(
+                                found,
+                                Val {
+                                    origin: Some(origin(&layout.db, &layout.table, -1)),
+                                    ..Val::of(INT)
+                                },
+                            ),
+                            _ => Val::unknown(),
+                        });
                 next.set(insn.p2, value);
                 vec![(pc + 1, next)]
             }
@@ -1177,7 +1204,7 @@ const fn fact(value: &Val) -> Fact {
     Fact {
         non_null: !value.null,
         class,
-        pass_through: value.pass && !value.null,
+        pass_through: value.origin.is_some() && !value.null,
     }
 }
 
