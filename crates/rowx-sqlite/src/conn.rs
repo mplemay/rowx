@@ -16,7 +16,7 @@ use crate::cancel::{Shared, SqliteBackend};
 use crate::describe::{self, Describe, Structure};
 use crate::dsn::{OpenMode, OpenOptions, Target};
 use crate::error::Error;
-use crate::timeout::Timer;
+use crate::timeout::{Armed, Timer};
 
 pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_STATEMENT_CACHE_SIZE: usize = 256;
@@ -470,8 +470,11 @@ impl Connection {
                 return Err(crate::exec::interrupted());
             }
             // the clock covers the prepare, the only step a describe runs
-            let _armed = ctx.timer.as_ref().map(Timer::arm);
-            describe::describe(&ctx.conn, &sql, &structure)
+            let armed = ctx.timer.as_ref().map(Timer::arm);
+            // the bytecode analysis is plain Rust, so the interrupt cannot reach it: it polls the same
+            // two signals instead
+            let stop = || ctx.shared.is_cancelled() || armed.as_ref().is_some_and(Armed::fired);
+            describe::describe(&ctx.conn, &sql, &structure, &stop)
         })
         .await
     }

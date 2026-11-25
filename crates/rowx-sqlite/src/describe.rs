@@ -1,8 +1,12 @@
+#[cfg(test)]
+use std::cell::Cell;
+use std::cell::OnceCell;
 use std::collections::HashMap;
 
 use rowx_core::row_shape::{Override, column_name};
 use rusqlite::Connection as Raw;
 
+use crate::bytecode::{Class, Fact, Silent, analyze};
 use crate::error::Error;
 use crate::exec::refresh_schema;
 use crate::types::{Kind, lookup};
@@ -46,6 +50,8 @@ impl Construct {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NullReason {
     NotNullColumn,
+    /// The bytecode proves an expression is never NULL.
+    ComputedExpr,
     NullableColumn,
     /// Nothing proves the column; `cause` says why.
     Unproven {
@@ -60,6 +66,7 @@ impl NullReason {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::NotNullColumn => "NotNullColumn",
+            Self::ComputedExpr => "ComputedExpr",
             Self::NullableColumn => "NullableColumn",
             Self::Unproven { .. } => "Unproven",
             Self::OverrideBang => "OverrideBang",
@@ -128,7 +135,13 @@ fn schemas(parts: &[String]) -> Vec<&str> {
     }
 }
 
-fn quote(name: &str) -> String {
+#[cfg(test)]
+thread_local! {
+    // how many times a describe has run the bytecode analysis on this thread
+    pub(crate) static ANALYSES: Cell<usize> = const { Cell::new(0) };
+}
+
+pub(crate) fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
@@ -252,8 +265,14 @@ fn is_rowid(key: &TableKey, column: &str, declared: Option<&str>) -> bool {
 ///
 /// # Errors
 /// `Sqlite` (with the error offset) when SQLite rejects the SQL, `NotOneStatement` for no statement or
-/// more than one.
-pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe, Error> {
+/// more than one. `stop` is consulted while the bytecode is analysed; when it fires the describe fails
+/// as an interrupted statement does, rather than reporting less.
+pub fn describe(
+    conn: &Raw,
+    sql: &str,
+    structure: &Structure,
+    stop: &dyn Fn() -> bool,
+) -> Result<Describe, Error> {
     refresh_schema(conn)?;
     let stmt = match conn.prepare(sql) {
         Ok(stmt) => stmt,
@@ -282,6 +301,14 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
         .collect::<Result<Vec<_>, _>>()?;
     let cause = unproven_cause(structure, &kinds);
     let mut keys: HashMap<(String, String), TableKey> = HashMap::new();
+    // read only when a column needs it, and only from the bytecode, which is never run
+    let facts: OnceCell<Result<Option<Vec<Fact>>, Error>> = OnceCell::new();
+    let fact = |index: usize| -> Result<Option<Fact>, Error> {
+        match facts.get_or_init(|| read_facts(conn, sql, &stmt, stop)) {
+            Ok(found) => Ok(found.as_ref().and_then(|found| found.get(index)).copied()),
+            Err(err) => Err(err.clone()),
+        }
+    };
     let mut columns = Vec::with_capacity(stmt.column_count());
     let decls = stmt.columns();
     for (index, found) in stmt.columns_with_metadata().iter().enumerate() {
@@ -322,21 +349,20 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
                 Ok(not_null || rowid)
             }
         };
-        let (nullable, reason) = match over {
-            Some(Override::Bang) => (false, NullReason::OverrideBang),
-            Some(Override::Question) => (true, NullReason::OverrideQuestion),
-            None => match proven {
-                Ok(true) => (false, NullReason::NotNullColumn),
-                Ok(false) => (true, NullReason::NullableColumn),
-                Err(cause) => (true, NullReason::Unproven { cause }),
-            },
+        // the bytecode answers a nullability the existing rule left unproven and a class the declaration lacks
+        let untyped = declared.is_none_or(|name| name.trim().is_empty());
+        let found = if (over.is_none() && proven.is_err()) || untyped {
+            fact(index)?
+        } else {
+            None
         };
-        let looked_up = lookup(declared);
+        let (nullable, reason) = verdict(over, proven, found, origin.is_some());
+        let (kind, type_name) = column_type(declared, found);
         columns.push(ColumnInfo {
             name,
             raw_name,
-            type_name: declared.unwrap_or_default().to_owned(),
-            kind: (!looked_up.is_untyped()).then(|| looked_up.kind()),
+            type_name,
+            kind,
             nullable,
             reason,
             origin,
@@ -345,17 +371,125 @@ pub fn describe(conn: &Raw, sql: &str, structure: &Structure) -> Result<Describe
     Ok(Describe { params, columns })
 }
 
+// The bytecode facts of a statement. A stopped analysis is an error, an unprovable one is no facts.
+fn read_facts(
+    conn: &Raw,
+    sql: &str,
+    stmt: &rusqlite::Statement<'_>,
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<Vec<Fact>>, Error> {
+    #[cfg(test)]
+    ANALYSES.with(|count| count.set(count.get() + 1));
+    if stmt.is_explain() != 0 {
+        return Ok(None);
+    }
+    match analyze(conn, sql, stop) {
+        Ok(found) => Ok(Some(found).filter(|found| found.len() == stmt.column_count())),
+        Err(Silent::Stopped) => Err(crate::exec::interrupted()),
+        Err(_) => Ok(None),
+    }
+}
+
+// The existing rule decides first, the bytecode only reads a column it left unproven, and an override applies last.
+fn verdict(
+    over: Option<Override>,
+    proven: Result<bool, String>,
+    found: Option<Fact>,
+    has_origin: bool,
+) -> (bool, NullReason) {
+    match over {
+        Some(Override::Bang) => (false, NullReason::OverrideBang),
+        Some(Override::Question) => (true, NullReason::OverrideQuestion),
+        None => match proven {
+            Ok(true) => (false, NullReason::NotNullColumn),
+            Ok(false) => (true, NullReason::NullableColumn),
+            Err(cause) => match found {
+                Some(fact) if fact.non_null => (
+                    false,
+                    // SQLite names no origin for a read it does not report as a column, such as `+a`
+                    if fact.pass_through && has_origin {
+                        NullReason::NotNullColumn
+                    } else {
+                        NullReason::ComputedExpr
+                    },
+                ),
+                _ => (true, NullReason::Unproven { cause }),
+            },
+        },
+    }
+}
+
+// A column with no declared type takes the one storage class the bytecode proves for it.
+fn column_type(declared: Option<&str>, found: Option<Fact>) -> (Option<Kind>, String) {
+    let text = declared.unwrap_or_default().to_owned();
+    if declared.is_some_and(|name| !name.trim().is_empty()) {
+        return (Some(lookup(declared).kind()), text);
+    }
+    found
+        .and_then(|fact| fact.class)
+        .map_or((None, text), |class| {
+            (Some(class_kind(class)), class.name().to_owned())
+        })
+}
+
+const fn class_kind(class: Class) -> Kind {
+    match class {
+        Class::Integer => Kind::Integer,
+        Class::Real => Kind::Real,
+        Class::Text => Kind::Text,
+        Class::Blob => Kind::Blob,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Construct, SourceKind, Structure, describe, unproven_cause};
+    use super::{Construct, SourceKind, Structure, column_type, describe, unproven_cause};
+    use crate::bytecode::{Class, Fact};
     use crate::error::Error;
+    use crate::types::Kind;
     use rusqlite::Connection;
+
+    const fn fact(class: Option<Class>) -> Fact {
+        Fact {
+            non_null: true,
+            class,
+            pass_through: false,
+        }
+    }
+
+    #[test]
+    fn column_type_applies_the_bytecode_class_only_without_a_declared_type() {
+        let integer = Some(fact(Some(Class::Integer)));
+        assert_eq!(
+            column_type(None, integer),
+            (Some(Kind::Integer), "INTEGER".to_owned())
+        );
+        assert_eq!(
+            column_type(Some("  "), integer),
+            (Some(Kind::Integer), "INTEGER".to_owned())
+        );
+        assert_eq!(column_type(None, None), (None, String::new()));
+        assert_eq!(column_type(None, Some(fact(None))), (None, String::new()));
+        // a declared type keeps its own text and kind whatever the bytecode proves
+        assert_eq!(
+            column_type(Some("TEXT"), integer),
+            (Some(Kind::Text), "TEXT".to_owned())
+        );
+        assert_eq!(
+            column_type(Some("NUMERIC"), None),
+            (Some(Kind::Decimal), "NUMERIC".to_owned())
+        );
+        assert_eq!(
+            column_type(Some("DECIMAL(10, 2)"), integer),
+            (Some(Kind::Decimal), "DECIMAL(10, 2)".to_owned())
+        );
+    }
 
     #[test]
     fn multiple_or_no_statements_are_not_one_statement() -> rusqlite::Result<()> {
         let conn = Connection::open_in_memory()?;
         for sql in ["select 1; select 2", "", "-- only a comment"] {
-            let err = describe(&conn, sql, &Structure::default());
+            let err = describe(&conn, sql, &Structure::default(), &|| false);
             assert!(
                 matches!(err, Err(Error::NotOneStatement(_))),
                 "{sql:?}: {err:?}"
