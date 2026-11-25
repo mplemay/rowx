@@ -442,6 +442,7 @@ backup API for each test. Editing a migration builds a new template. The details
   `INTEGER` column is stored as an integer.
 - **`execute` is for statements that return no rows.** A `SELECT`, `INSERT ... RETURNING` or a reading `PRAGMA` is
   `InterfaceError` before it runs. Use `one`, `all` or `fetch`. A string of several statements is `InterfaceError` too,
-  and an empty or comment-only query is `DatabaseError` (`HY000`, `SQLITE_MISUSE`).
+  and an empty or comment-only query is `DatabaseError` (`HY000`, `SQLITE_MISUSE`) through `execute`, but
+  `RowShapeError` through a method that returns rows, because the row type is checked first.
 - **Cancellation is connection-wide.** A cancelled statement is interrupted. The details, including what happens
   inside a transaction, are in [Cancellation](../reference/driver.md#sqlite-cancellation).

@@ -139,7 +139,8 @@ from rowx.sqlite import ConnectOptions, Connection, Migrator, Pool, Transaction,
 
 The `rowx-sqlite` distribution imports the same objects from `rowx_sqlite`. The query methods above are unchanged, with
 one difference: `execute` is `InterfaceError` for a statement that returns rows, a string of several statements is
-`InterfaceError`, and an empty or comment-only query is `DatabaseError` (`HY000`, `SQLITE_MISUSE`). `ConnectOptions` has
+`InterfaceError`, and an empty or comment-only query is `DatabaseError` (`HY000`, `SQLITE_MISUSE`) through `execute` but
+`RowShapeError` through a method that returns rows. `ConnectOptions` has
 `path`, `memory`, `mode`, `connect_timeout`, `statement_timeout`, `statement_cache_size` and `read_only`
 ([SQLite URLs](driver.md#sqlite-urls)). `transaction(mode=None, read_only=False)` is in
 [SQLite transactions](driver.md#sqlite-transactions), `Pool` in [SQLite pool](driver.md#sqlite-pool), and `Migrator` in

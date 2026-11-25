@@ -268,7 +268,9 @@ prepared again by SQLite itself. The statement cache is per connection.
   returns rows (a `SELECT`, `INSERT ... RETURNING`, a `PRAGMA` that answers), and it refuses before the statement
   runs, so nothing is written. Use `one`, `all` or `fetch` for those. `rows_affected` is `0` for DDL.
 - A string of several statements is `InterfaceError` at run time. An empty or comment-only query (`t""`, `t"   "`,
-  `t"-- c"`, `t";"`) is `DatabaseError` with sqlstate `HY000` and code `SQLITE_MISUSE`. A query is one statement.
+  `t"-- c"`, `t";"`) is `DatabaseError` with sqlstate `HY000` and code `SQLITE_MISUSE` through `execute`, and
+  `RowShapeError` through `all`, `one`, `optional` or `fetch`, because the row type is checked first. A query is one
+  statement.
 - Stored values that do not decode are `DecodeError`, and a value that does not encode is `EncodeError`. The
   connection stays usable.
 
