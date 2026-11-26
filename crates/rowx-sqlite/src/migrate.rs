@@ -308,7 +308,13 @@ fn violations_message(found: &[String], total: usize) -> String {
 async fn check_foreign_keys(conn: &Connection) -> Result<(), Error> {
     let (found, total) = conn
         .call(|ctx| {
+            if ctx.shared.is_cancelled() {
+                return Err(interrupted());
+            }
             let mut stmt = ctx.conn.prepare("PRAGMA foreign_key_check")?;
+            // the scan covers the whole database, so the statement timeout bounds it as it bounds the file's
+            // own statements; the clock starts after the prepare, where an interrupt would be lost
+            let _armed = ctx.timer.as_ref().map(Timer::arm);
             let mut rows = stmt.query([])?;
             let mut found = Vec::new();
             let mut total = 0_usize;

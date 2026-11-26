@@ -705,6 +705,39 @@ async fn a_no_transaction_file_that_leaves_foreign_key_violations_fails_dirty() 
 }
 
 #[tokio::test]
+async fn the_statement_timeout_bounds_the_foreign_key_check() -> TestResult {
+    let dir = TempDir::new()?;
+    // enough child rows that the database-wide check outlasts the timeout, while the file's own statement
+    // finishes well within it
+    let setup = connect(&file(&dir)).await?;
+    let seed = [simple(
+        1,
+        "CREATE TABLE p (id INTEGER PRIMARY KEY);\n\
+         CREATE TABLE c (pid INTEGER REFERENCES p (id));\n\
+         INSERT INTO p VALUES (1);\n\
+         WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000000)\n\
+         INSERT INTO c SELECT 1 FROM n;",
+    )];
+    run(&setup, &config(), &seed, PlanOptions::default(), &LIVE).await?;
+    drop(setup);
+
+    let mut options = file(&dir);
+    options.statement_timeout = Some(Duration::from_millis(20));
+    let conn = connect(&options).await?;
+    let all = [seed[0].clone(), simple(2, "-- no-transaction\nSELECT 1")];
+    let err = within(run(&conn, &config(), &all, PlanOptions::default(), &LIVE))
+        .await?
+        .err()
+        .ok_or("the check should time out")?;
+    assert_eq!(failed_with(&err), Some(("SQLITE_INTERRUPT", 2)), "{err:?}");
+    assert!(
+        matches!(err, MigrateError::Failed { dirty: true, .. }),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_claim_with_no_time_says_another_migrator_may_still_be_running_it() -> TestResult {
     let dir = TempDir::new()?;
     let conn = connect(&file(&dir)).await?;
