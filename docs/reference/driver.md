@@ -328,7 +328,9 @@ interrupts the statement and settles the connection before the next call, as on 
   open. A cancelled `BEGIN` that was waiting for the lock leaves no transaction behind.
 - The busy handler does not wake on an interrupt. A cancel or a `statement_timeout` during a lock wait ends after
   about `connect_timeout` with `SQLITE_BUSY` (`55P03`), not `57014`.
-- `close()` while a call runs interrupts it and raises `InterfaceError`.
+- `close()` while a call runs interrupts it and raises `InterfaceError`. A `COMMIT` already running is not
+  interrupted: `close()` waits for it, so the caller learns whether it committed. A `COMMIT` waiting for a lock can hold
+  `close()` up to the busy timeout (`connect_timeout`).
 
 ### SQLite pool
 

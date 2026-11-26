@@ -1,4 +1,5 @@
 import asyncio
+import gc
 from contextlib import AsyncExitStack
 
 import pytest
@@ -198,3 +199,130 @@ def test_ending_with_a_savepoint_open_rolls_back_and_raises() -> None:
     with pytest.raises(InterfaceError, match="the transaction ended while a savepoint was still open"):
         run(body())
     assert native.log == ["begin ", "savepoint 1", "rollback"]
+
+
+def test_a_begin_cancelled_after_it_opened_the_transaction_rolls_it_back() -> None:
+    native = FakeNative()
+    conn = make(native)
+
+    # the native side handed the transaction over (the depth rose), then the awaiting call was cancelled
+    async def begin(impl: FakeNative) -> None:  # ruff: ignore[unused-async]
+        impl._txn_depth += 1
+        impl.log.append("begin")
+        raise asyncio.CancelledError
+
+    tx = BaseTransaction(conn, begin)
+    with pytest.raises(asyncio.CancelledError):
+        run(enter_and_exit(tx))
+    assert native.log == ["begin", "rollback"]
+    assert native._txn_depth == 0
+    assert conn._tx is None
+
+
+def test_a_begin_cancelled_before_it_opened_the_transaction_ends_nothing() -> None:
+    native = FakeNative()
+    conn = make(native)
+
+    async def begin(impl: FakeNative) -> None:  # ruff: ignore[unused-async]
+        impl.log.append("begin")
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        run(enter_and_exit(BaseTransaction(conn, begin)))
+    assert native.log == ["begin"]
+
+
+def test_a_failed_undo_is_noted_on_the_cancellation() -> None:
+    native = FakeNative()
+    conn = make(native)
+
+    async def begin(impl: FakeNative) -> None:  # ruff: ignore[unused-async]
+        impl._txn_depth += 1
+        impl.end_failure = InterfaceError("the connection is closed")
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        run(enter_and_exit(BaseTransaction(conn, begin)))
+    assert caught.value.__notes__ == [
+        "undoing the transaction it opened also failed: the connection is closed",
+    ]
+
+
+def test_a_begin_closed_after_it_opened_the_transaction_still_rolls_it_back() -> None:
+    native = FakeNative()
+    conn = make(native)
+
+    async def begin(impl: FakeNative) -> None:
+        impl._txn_depth += 1
+        impl.log.append("begin")
+        await asyncio.get_running_loop().create_future()
+
+    async def body() -> None:
+        entering = enter_and_exit(BaseTransaction(conn, begin))
+        entering.send(None)
+        # closing the coroutine throws GeneratorExit at the await; it cannot await the undo, which runs on
+        entering.close()
+        await asyncio.gather(*(task for task in asyncio.all_tasks() if task is not asyncio.current_task()))
+
+    run(body())
+    assert native.log == ["begin", "rollback"]
+
+
+def test_an_undo_that_fails_after_a_second_cancellation_is_retrieved() -> None:
+    native = FakeNative()
+    conn = make(native)
+    unretrieved: list[dict[str, object]] = []
+
+    async def begin(impl: FakeNative) -> None:  # ruff: ignore[unused-async]
+        impl._txn_depth += 1
+        raise asyncio.CancelledError
+
+    async def body() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def end() -> None:
+            started.set()
+            await release.wait()
+            msg = "the connection is closed"
+            raise InterfaceError(msg)
+
+        native._end_transaction = lambda _commit: end()  # ty: ignore[invalid-assignment]
+        entering = asyncio.create_task(enter_and_exit(BaseTransaction(conn, begin)))
+        await started.wait()
+        # the second cancellation stops the wait on the shielded undo, which then fails with nobody awaiting it
+        entering.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await entering
+        release.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        gc.collect()
+
+    run(body())
+    assert unretrieved == []
+
+
+def test_a_savepoint_cancelled_after_it_opened_is_released(monkeypatch: pytest.MonkeyPatch) -> None:
+    native = FakeNative()
+    conn = make(native)
+    opened = native._savepoint
+
+    async def savepoint() -> int:
+        await opened()
+        raise asyncio.CancelledError
+
+    async def body() -> None:
+        async with transaction(conn, native) as outer:
+            # the test's begin leaves the depth alone; the outermost transaction counts as one
+            native._txn_depth = 1
+            monkeypatch.setattr(native, "_savepoint", savepoint)
+            with pytest.raises(asyncio.CancelledError):
+                await enter_and_exit(transaction(conn, native, parent=outer))
+            assert outer._child is None
+            assert conn._tx is outer
+
+    run(body())
+    assert native.log == ["begin ", "savepoint 1", "release 2", "commit"]
