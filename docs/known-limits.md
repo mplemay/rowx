@@ -93,9 +93,18 @@ The v1 SQLite backend leaves these out. Each is a decision, not an oversight.
 - **No WAL on a network filesystem.** A file database is opened in WAL mode, which needs shared memory.
 - **No multi-statement execution at runtime** ([#300](https://github.com/mplemay/rowx/issues/300)). A query is one
   statement, and `execute` is also refused for a statement that returns rows.
-- **Nullability is mostly unproven.** A column is NOT NULL only for plain tables read through `FROM` and inner joins. A
-  view, CTE, subquery, compound select, outer join, aggregate or expression is `Unproven`, and a computed column stays
-  nullable until the follow-up ([#350](https://github.com/mplemay/rowx/issues/350)). `"col!"` narrows it.
+- **Nullability is proven by a rule and the bytecode.** A `NOT NULL` column of a plain table read through `FROM` and
+  inner joins is NOT NULL. Any other column, an expression, a view, CTE, subquery, compound select, outer join or
+  aggregate, is NOT NULL only when the `EXPLAIN` bytecode proves it ([Nullability](reference/nullability.md#sqlite)).
+  `count(*)` and `coalesce(b, 'z')` are proven; `max(a)`, a division, an unlisted function, and every column of a
+  statement with a window function, a virtual table or a trigger stay `Unproven`. `"col!"` narrows it.
+- **A compound column with mixed types is untyped.** SQLite declares a compound select's column, also inside a view,
+  subquery or CTE, with its leftmost arm. rowx keeps that declaration only when every arm agrees, and otherwise checks
+  the column as untyped, so `query[int]` over `SELECT i ... UNION ALL SELECT tx ...` is not reported and a text row
+  raises `DecodeError` when read.
+- **No session state at check time.** The checker describes against the database schema alone. A `TEMP` table or an
+  `ATTACH`ed database created by the application at runtime is not seen, and a `TEMP` table that shadows a `main`
+  table of the same name is checked as the `main` one. Qualify the name (`main.t`, `temp.t`) or avoid shadowing.
 - **Parameters are untyped.** There is no `param-type-mismatch`, and a naive or aware `datetime` mismatch surfaces as a
   `DecodeError` when read ([Type mapping](reference/type-mapping.md#sqlite)).
 - **`DECIMAL` and `JSON` columns are lossy** through SQLite's numeric affinity, and there is no column type override
