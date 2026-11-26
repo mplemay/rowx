@@ -1,7 +1,9 @@
 import asyncio
 import os
 import secrets
+import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, override
 
@@ -292,7 +294,9 @@ def test_a_dead_sessions_leftovers_are_removed(project: Project) -> None:
     project.run().assert_outcomes(passed=2)
     base = f"{TEMPLATE_PREFIX}{project.prefix}"
     stale = project.cache / f"{base}_{'0' * HEX_LENGTH}.db"
-    stale.write_bytes(b"")
+    # a template is a real database; `drop` refuses an empty file, which nothing shows is one
+    with closing(sqlite3.connect(stale)) as raw:
+        raw.execute("CREATE TABLE t (a)")
     hold = project.cache / f"{stale.stem}.1.dead{HOLD_SUFFIX}"
     hold.write_bytes(b"")
     temporary = project.cache / f"{base}_{'1' * HEX_LENGTH}{TMP_MARKER}1_dead.db"

@@ -52,10 +52,9 @@ class SqliteAdmin:
     async def create_scratch(self, name: str, *, comment: str) -> None:
         await self.create(name, comment=comment)
 
-    # a file needs no forcing: it has no sessions to end
+    # a file has no sessions to end: `force` only skips the check that no connection holds it open
     async def drop(self, name: str | None = None, *, force: bool = False) -> None:
-        del force
-        await drop_database(self._name(name))
+        await drop_database(self._name(name), force=force)
 
     async def list(self, prefix: str) -> Sequence[DatabaseInfo]:
         return await list_databases(self._name(None), prefix)

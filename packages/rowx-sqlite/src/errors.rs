@@ -207,6 +207,7 @@ pub fn migrate_to_py_err(
         MigrateError::Busy(e) | MigrateError::Connection(e) => {
             to_py_err(py, &Failure::from(e.clone()))
         }
+        MigrateError::Claimed { version } => shared::dirty_error(py, &err.to_string(), *version),
         MigrateError::Cancelled => shared::interface_error(py, &err.to_string()),
     }
 }
@@ -255,7 +256,7 @@ pub fn admin_to_py_err(py: Python<'_>, err: &AdminError) -> PyErr {
         AdminError::InUse(_) => state("55006"),
         // lock_not_available, as for SQLITE_BUSY and SQLITE_LOCKED
         AdminError::TemplateBusy(_) => state("55P03"),
-        AdminError::NotSqlite(_) => state("XX002"),
+        AdminError::NotSqlite(_) | AdminError::Symlink(_) => state("XX002"),
         // the nearest to SQLITE_CANTOPEN and an IO failure
         AdminError::NoDirectory(_) | AdminError::Io { .. } => state("58030"),
     }

@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rowx_core::error::{CoreError, TaskStopped};
 use rowx_core::state::{Phase, State};
@@ -170,6 +170,36 @@ fn journal_error(found: &str) -> Error {
     )
 }
 
+// the first pause between two tries of the switch to WAL, doubled up to `WAL_PAUSE_MAX`
+const WAL_PAUSE_MIN: Duration = Duration::from_millis(1);
+const WAL_PAUSE_MAX: Duration = Duration::from_millis(50);
+
+// Two connections that both read a file still in a rollback mode and both ask for WAL each hold a shared
+// lock and need an exclusive one, so SQLite answers `SQLITE_BUSY` at once instead of calling the busy
+// handler (it would deadlock). The switch is tried again until `budget` (the busy timeout) is spent, and
+// stops early when nobody waits for the connection any more.
+fn retry_busy<T>(
+    budget: Duration,
+    abandoned: &dyn Fn() -> bool,
+    mut attempt: impl FnMut() -> Result<T, Error>,
+) -> Result<T, Error> {
+    let deadline = Instant::now() + budget;
+    let mut pause = WAL_PAUSE_MIN;
+    loop {
+        match attempt() {
+            Err(err) if err.is_busy() && !abandoned() => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(err);
+                }
+                thread::sleep(pause.min(deadline - now));
+                pause = (pause * 2).min(WAL_PAUSE_MAX);
+            }
+            other => return other,
+        }
+    }
+}
+
 // Pragmas that take an argument and only read, so describing them cannot change the session.
 const READ_ONLY_PRAGMAS: [&str; 10] = [
     "table_info",
@@ -203,7 +233,11 @@ pub(crate) fn authorize(ctx: AuthContext<'_>) -> Authorization {
 
 // Every pragma is set explicitly, because the bundled build changes SQLite's defaults
 // (`SQLITE_DEFAULT_FOREIGN_KEYS=1`).
-fn apply_pragmas(conn: &rusqlite::Connection, options: &ConnectOptions) -> Result<Box<str>, Error> {
+fn apply_pragmas(
+    conn: &rusqlite::Connection,
+    options: &ConnectOptions,
+    abandoned: &dyn Fn() -> bool,
+) -> Result<Box<str>, Error> {
     conn.busy_timeout(options.busy_timeout)?;
     // a double-quoted name that matches no column is an error, not a string literal
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
@@ -220,7 +254,9 @@ fn apply_pragmas(conn: &rusqlite::Connection, options: &ConnectOptions) -> Resul
         // of a WAL file (or of a file in another mode) must still succeed, so it takes what it finds.
         conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?
     } else {
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?
+        retry_busy(options.busy_timeout, abandoned, || {
+            Ok(conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?)
+        })?
     };
     let is_file = matches!(options.open.target, Target::File(_));
     if is_file && !options.is_read_only() {
@@ -236,10 +272,11 @@ fn open(
     options: &ConnectOptions,
     shared: Arc<Shared>,
     state: Arc<State>,
+    abandoned: &dyn Fn() -> bool,
 ) -> Result<(Ctx, Ready), Error> {
     let conn =
         rusqlite::Connection::open_with_flags(options.open.target.open_path(), options.flags())?;
-    let journal_mode = apply_pragmas(&conn, options)?;
+    let journal_mode = apply_pragmas(&conn, options, abandoned)?;
     // after the pragmas above, which set values
     if options.untrusted {
         conn.authorizer(Some(authorize))?;
@@ -287,7 +324,9 @@ fn work(
         state: Arc::clone(&state),
         finished: false,
     };
-    let mut ctx = match open(options, shared, state) {
+    // the caller dropped its `connect` future, so nothing waits for the connection
+    let abandoned = || ready.is_closed();
+    let mut ctx = match open(options, shared, state, &abandoned) {
         Ok((ctx, info)) => {
             if ready.send(Ok(info)).is_err() {
                 lifeline.finished = true;
@@ -600,8 +639,62 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-    use super::{require_wal, rollback_until_idle};
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    use super::{require_wal, retry_busy, rollback_until_idle};
     use crate::error::Error;
+
+    fn busy() -> Error {
+        Error::from_code(rusqlite::ffi::SQLITE_BUSY, "database is locked", None)
+    }
+
+    #[test]
+    fn a_busy_switch_is_tried_again_until_it_succeeds() {
+        let tries = Cell::new(0);
+        let out = retry_busy(Duration::from_secs(5), &|| false, || {
+            tries.set(tries.get() + 1);
+            if tries.get() < 3 { Err(busy()) } else { Ok(7) }
+        });
+        assert_eq!(out, Ok(7));
+        assert_eq!(tries.get(), 3);
+    }
+
+    #[test]
+    fn a_switch_that_stays_busy_gives_up_after_the_budget() {
+        let started = Instant::now();
+        let out: Result<(), Error> =
+            retry_busy(Duration::from_millis(60), &|| false, || Err(busy()));
+        assert!(out.is_err_and(|err| err.is_busy()));
+        assert!(started.elapsed() >= Duration::from_millis(60));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_abandoned_connect_stops_retrying() {
+        let tries = Cell::new(0);
+        let out: Result<(), Error> = retry_busy(Duration::from_secs(30), &|| true, || {
+            tries.set(tries.get() + 1);
+            Err(busy())
+        });
+        assert!(out.is_err_and(|err| err.is_busy()));
+        assert_eq!(tries.get(), 1);
+    }
+
+    #[test]
+    fn an_error_that_is_not_busy_is_not_retried() {
+        let tries = Cell::new(0);
+        let out: Result<(), Error> = retry_busy(Duration::from_secs(5), &|| false, || {
+            tries.set(tries.get() + 1);
+            Err(Error::from_code(
+                rusqlite::ffi::SQLITE_READONLY,
+                "read only",
+                None,
+            ))
+        });
+        assert!(out.is_err());
+        assert_eq!(tries.get(), 1);
+    }
 
     #[test]
     fn a_rollback_that_keeps_failing_is_tried_a_bounded_number_of_times() {
