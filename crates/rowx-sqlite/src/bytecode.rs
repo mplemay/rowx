@@ -31,6 +31,7 @@ use rusqlite::types::Value;
 use thiserror::Error;
 
 use crate::describe::quote;
+use crate::types::lookup;
 
 /// The SQLite version whose `EXPLAIN` output the modelled opcodes were reviewed against. A test fails
 /// when the bundled version differs, so a bump has to review [`MODELED_OPCODES`].
@@ -158,7 +159,7 @@ impl Class {
 }
 
 /// What the bytecode proves about one result column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fact {
     /// No path reaching a result row leaves the column NULL.
     pub non_null: bool,
@@ -166,6 +167,10 @@ pub struct Fact {
     pub class: Option<Class>,
     /// The column is a plain read of a base table column, which was never null-extended.
     pub pass_through: bool,
+    /// The declared type every non-NULL value was stored under: each is an unchanged read of a base
+    /// table column declared with this text. `None` when a value may come from anything else, such as an
+    /// expression or columns declared differently in two arms of a compound select.
+    pub declared: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +183,8 @@ struct Val {
     wild: bool,
     /// The base table column the value is exactly a read of, from a row that exists.
     origin: Option<Rc<Origin>>,
+    /// The declared type of the base table columns every non-NULL value is an unchanged read of.
+    declared: Option<Rc<str>>,
     /// The value is a record (`MakeRecord`, a sorter row), with its fields.
     rec: Option<Rc<Vec<Self>>>,
 }
@@ -189,6 +196,7 @@ impl Val {
             classes,
             wild,
             origin: None,
+            declared: None,
             rec: None,
         }
     }
@@ -224,6 +232,19 @@ impl Val {
                 (Some(a), Some(b)) if a == b => Some(Rc::clone(a)),
                 _ => None,
             },
+            // a value that is only ever NULL has no stored type to disagree with
+            declared: if self.only_null() {
+                other.declared.clone()
+            } else if other.only_null() {
+                self.declared.clone()
+            } else {
+                // two declarations agree when they decode alike (`INT` and `INTEGER`, `DECIMAL(10, 2)` and
+                // `DECIMAL(10,2)`), which is all the runtime reads from the leftmost one
+                match (&self.declared, &other.declared) {
+                    (Some(a), Some(b)) if same_kind(a, b) => Some(Rc::clone(a)),
+                    _ => None,
+                }
+            },
             rec,
         }
     }
@@ -249,6 +270,7 @@ struct Slot {
     classes: u8,
     wild: bool,
     origin: Option<Rc<Origin>>,
+    declared: Option<Rc<str>>,
 }
 
 impl Slot {
@@ -258,6 +280,7 @@ impl Slot {
             classes: self.classes,
             wild: self.wild,
             origin: self.origin.clone().filter(|_| self.not_null),
+            declared: self.declared.clone(),
             rec: None,
         }
     }
@@ -463,6 +486,12 @@ fn read_program(conn: &Connection, sql: &str) -> Result<Vec<Insn>, Silent> {
     Ok(program)
 }
 
+/// Whether two declared types map to the same kind in the type table, so their values decode alike.
+#[must_use]
+pub fn same_kind(a: &str, b: &str) -> bool {
+    lookup(Some(a)).kind() == lookup(Some(b)).kind()
+}
+
 fn declared_class(declared: &str, strict: bool) -> (u8, bool) {
     if !strict {
         return (0, true);
@@ -513,6 +542,9 @@ fn table_slot(db: &str, table: &str, column: &TableColumn, strict: bool) -> Slot
         classes,
         wild,
         origin: Some(origin(db, table, column.cid)),
+        declared: Some(column.declared.trim())
+            .filter(|text| !text.is_empty())
+            .map(Rc::from),
     }
 }
 
@@ -565,6 +597,7 @@ fn load_layout(conn: &Connection, db: &str, root: i64) -> rusqlite::Result<Optio
                         classes: INT,
                         wild: false,
                         origin: Some(origin(db, table, -1)),
+                        declared: None,
                     }),
                     cid if cid >= 0 => columns
                         .iter()
@@ -658,6 +691,7 @@ fn scalar(name: &str, args: &[Val]) -> Val {
         ("nullif", 2) => args.first().map_or_else(Val::unknown, |first| Val {
             null: true,
             origin: None,
+            declared: None,
             rec: None,
             ..first.clone()
         }),
@@ -687,6 +721,7 @@ fn apply_affinity(value: &Val, affinity: u8) -> Val {
             classes: 0,
             wild: !value.only_null(),
             origin: None,
+            declared: None,
             rec: None,
         },
     }
@@ -1596,7 +1631,7 @@ fn pass(
     Ok(result)
 }
 
-const fn fact(value: &Val) -> Fact {
+fn fact(value: &Val) -> Fact {
     let class = match (value.wild, value.classes) {
         (false, INT) => Some(Class::Integer),
         (false, REAL) => Some(Class::Real),
@@ -1608,6 +1643,7 @@ const fn fact(value: &Val) -> Fact {
         non_null: !value.null,
         class,
         pass_through: value.origin.is_some() && !value.null,
+        declared: value.declared.as_deref().map(str::to_owned),
     }
 }
 
