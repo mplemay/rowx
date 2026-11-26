@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use common::{LONG_QUERY, TestResult, connect, file, ints, pragma, within};
+use common::{LONG_QUERY, TestResult, cancel_of, connect, file, ints, pragma, within};
 use rowx_core::migrate::{
     Migration, MigrationKind, MigrationStatus, PlanError, PlanOptions, RevertTarget, SchemaName,
     TableName, checksum,
 };
 use rowx_core::row_shape::Shape;
+use rowx_sqlite::cancel::{Hook, spawn};
 use rowx_sqlite::conn::Connection;
 use rowx_sqlite::error::Error;
 use rowx_sqlite::migrate::{
@@ -705,6 +706,33 @@ async fn a_no_transaction_file_that_leaves_foreign_key_violations_fails_dirty() 
 }
 
 #[tokio::test]
+async fn a_foreign_key_the_check_cannot_read_fails_the_file_with_a_clear_error() -> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    // the parent column has no unique index, so SQLite cannot check the key at all
+    let all = [simple(
+        1,
+        "-- no-transaction\nCREATE TABLE p (x);\nCREATE TABLE c (y REFERENCES p (x));",
+    )];
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+        .await
+        .err()
+        .ok_or("the check should fail")?;
+    assert_eq!(failed_with(&err), Some(("SQLITE_ERROR", 1)), "{err:?}");
+    assert!(
+        matches!(err, MigrateError::Failed { dirty: true, .. }),
+        "{err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("foreign key mismatch") && message.contains("UNIQUE index"),
+        "{message}"
+    );
+    assert_eq!(history(&conn).await?, [(1, false)]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_statement_timeout_bounds_the_foreign_key_check() -> TestResult {
     let dir = TempDir::new()?;
     // enough child rows that the database-wide check outlasts the timeout, while the file's own statement
@@ -734,6 +762,47 @@ async fn the_statement_timeout_bounds_the_foreign_key_check() -> TestResult {
         matches!(err, MigrateError::Failed { dirty: true, .. }),
         "{err:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cancelled_no_transaction_file_records_that_it_stopped() -> TestResult {
+    let dir = TempDir::new()?;
+    let migrator = Arc::new(connect(&file(&dir)).await?);
+    let observer = connect(&file(&dir)).await?;
+    let all = vec![simple(
+        1,
+        &format!("-- no-transaction\nCREATE TABLE gate (i int);\n{LONG_QUERY};"),
+    )];
+    let cancel = cancel_of(&migrator);
+    let hook = Hook::new(cancel.state.claim()?);
+    let worker = Arc::clone(&migrator);
+    let pending = spawn(&cancel, &hook, async move {
+        run(&worker, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .map(|_| ())
+    })?;
+    within(async {
+        loop {
+            if table_exists(&observer, "gate").await? {
+                return Ok::<_, Box<dyn std::error::Error>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    hook.fire();
+    let outcome = within(pending.wait()).await??;
+    let err = outcome.err().ok_or("the file should be interrupted")?;
+    assert!(
+        matches!(err, MigrateError::Failed { dirty: true, .. }),
+        "{err:?}"
+    );
+    within(cancel.state.wait_settled()).await??;
+    // the row is dirty, but its time says the file stopped rather than that it may still be running
+    let applied = list_applied(&observer, &config()).await?;
+    assert_eq!(history(&observer).await?, [(1, false)]);
+    assert!(applied[0].execution_time >= 0, "{applied:?}");
     Ok(())
 }
 

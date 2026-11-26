@@ -411,8 +411,10 @@ fn drop_now(path: &Path, force: bool) -> Result<(), AdminError> {
     if !found.is_file() {
         return Err(AdminError::NotSqlite(path.display().to_string()));
     }
-    // a mistyped URL must never delete a file that is not a database
-    if !is_sqlite_file(path)? {
+    // a mistyped URL must never delete a file that is not a database; an empty file holds nothing to lose,
+    // and SQLite opens one as an empty database, so `force` removes it
+    let forced_empty = force && found.len() == 0;
+    if !forced_empty && !is_sqlite_file(path)? {
         return Err(AdminError::NotSqlite(path.display().to_string()));
     }
     // Windows refuses to remove an open file on its own; elsewhere the writers would carry on into a file
@@ -430,11 +432,11 @@ fn drop_now(path: &Path, force: bool) -> Result<(), AdminError> {
 /// A missing file is not an error, but its orphaned side files are still removed when their content shows
 /// SQLite wrote them: left behind, a later `create` at the same path would make SQLite replay a stale WAL or
 /// hot journal into the new database. Off Windows, a database another connection holds open is refused
-/// unless `force` is set (best effort; see `ensure_unused`).
+/// unless `force` is set (best effort; see `ensure_unused`). `force` also removes an empty file.
 ///
 /// # Errors
 /// `NotSqlite` for a directory or a file that does not start with the SQLite header (an empty file
-/// included), `Symlink` for a symbolic link (nothing is removed for either), `InUse` when the database is
+/// included, unless `force` is set), `Symlink` for a symbolic link (nothing is removed for either), `InUse` when the database is
 /// open elsewhere, `Io` otherwise.
 pub async fn drop_database(name: &str, force: bool) -> Result<(), AdminError> {
     let path = check_name(name)?.to_path_buf();
@@ -780,6 +782,14 @@ mod tests {
             Err(AdminError::NotSqlite(_))
         ));
         assert!(empty.exists());
+        // `force` removes an empty file, which holds nothing, but never a file with content
+        drop_database(&path_str(&empty), true).await?;
+        assert!(!empty.exists());
+        assert!(matches!(
+            drop_database(&path_str(&text), true).await,
+            Err(AdminError::NotSqlite(_))
+        ));
+        assert!(text.exists());
         // what `create` makes, `drop` removes
         let made = dir.path().join("made.db");
         create(&path_str(&made), None).await?;

@@ -302,6 +302,29 @@ fn violations_message(found: &[String], total: usize) -> String {
     )
 }
 
+// SQLite refuses to check a foreign key whose parent columns have no unique index ("foreign key mismatch"),
+// so the check cannot say whether rows lost their parent; the schema needs fixing before any write to the
+// child table can succeed with enforcement on
+fn mismatch(err: Error) -> Error {
+    match err {
+        Error::Sqlite {
+            code,
+            message,
+            offset,
+            ..
+        } if message.starts_with("foreign key mismatch") => Error::from_code(
+            code,
+            format!(
+                "after the `-- no-transaction` migration, `PRAGMA foreign_key_check` could not run ({message}): a \
+                     foreign key names parent columns without a PRIMARY KEY or UNIQUE index, so the migration is \
+                     left dirty"
+            ),
+            offset,
+        ),
+        other => other,
+    }
+}
+
 // What SQLite's own table-rebuild procedure ends with. A file may turn enforcement off (and back on) to rebuild
 // a table, and rows it left without a parent would go unnoticed: the file cannot say whether it did, so the
 // check runs after every `-- no-transaction` file
@@ -333,7 +356,8 @@ async fn check_foreign_keys(conn: &Connection) -> Result<(), Error> {
             }
             Ok((found, total))
         })
-        .await?;
+        .await
+        .map_err(mismatch)?;
     if total == 0 {
         return Ok(());
     }
@@ -365,14 +389,14 @@ async fn after_script(conn: &Connection, ran: Result<(), Error>) -> Result<(), E
 }
 
 // The time a failed `-- no-transaction` file ran, so its dirty row no longer reads as a claim still at work.
-// Best effort: the failure being reported matters more than this write.
+// Best effort: the failure being reported matters more than this write. It ignores the cancel flag, since a
+// cancelled run is exactly the one whose row must stop claiming it is still running.
 async fn record_failure(conn: &Connection, quoted: &str, version: i64, started: Instant) {
-    let _ = execute(
-        conn,
-        format!("UPDATE {quoted} SET execution_time = ?1 WHERE version = ?2 AND success = 0"),
-        vec![Param::Integer(nanos(started)), Param::Integer(version)],
-    )
-    .await;
+    let sql = format!("UPDATE {quoted} SET execution_time = ?1 WHERE version = ?2 AND success = 0");
+    let elapsed = nanos(started);
+    let _ = conn
+        .call(move |ctx| Ok(ctx.conn.execute(&sql, (elapsed, version))?))
+        .await;
 }
 
 fn failure(version: i64, dirty: bool, source: Error) -> MigrateError {

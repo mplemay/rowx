@@ -251,14 +251,14 @@ other schema, and any `create_schemas` entry, are `ValueError`.
 | `exists` | A regular file is at the path. | |
 | `create` | Creates an empty database exclusively, in WAL mode with its header written, so connections that open it at once never race to switch its journal mode. Nothing is overwritten. The CLI treats an existing file as success. | `42P04` exists; `58030` for a missing directory |
 | `create(template=...)` | Copies a template database with SQLite's backup API, which reads a consistent snapshot, WAL included. | `3D000` template missing; `55P03` when the template stays locked for 5 seconds. The limit bounds only the wait for the template's lock; the backup copy runs as one step with no time limit |
-| `drop` | Removes the file and its `-wal`, `-shm` and `-journal` files. A missing file is not an error, but its orphaned side files are removed too when their first bytes show SQLite wrote them (the WAL magic, a hot journal's header, or the wal-index version in a `-shm`), because a later `create` would replay them; any other file with those names is kept. A directory, a symbolic link (removing it would leave the database it points to and that database's side files), and a file that does not start with the SQLite header (an empty file included) are refused, and nothing is removed. A database another connection holds open is refused (see below) unless `force=True`. | `XX002` refused; `55006` when the file is open |
+| `drop` | Removes the file and its `-wal`, `-shm` and `-journal` files. A missing file is not an error, but its orphaned side files are removed too when their first bytes show SQLite wrote them (the WAL magic, a hot journal's header, or the wal-index version in a `-shm`), because a later `create` would replay them; any other file with those names is kept. A directory, a symbolic link (removing it would leave the database it points to and that database's side files), and a file that does not start with the SQLite header (an empty file included) are refused, and nothing is removed. A database another connection holds open is refused (see below) unless `force=True`, which also removes an empty file. | `XX002` refused; `55006` when the file is open |
 | `list` | The names of the SQLite files (those that start with the SQLite header, so not an empty file) beside the URL's path that start with a prefix, side files excluded. `comment` is `None` and `sessions` is `0`. | |
 | `ready` | Waits up to the connect timeout for the database to be usable: a directory is refused, and an existing file must open as a SQLite database. | `XX002` for a directory or a non-database |
 
 `create_scratch` is `create` with the comment ignored. A file has no sessions to end, so `force` on `drop` (and
-`rowx database drop|reset --force`) only skips the open-connection check. A clone made through `VACUUM INTO` could
-renumber the rowids of a table with no `INTEGER PRIMARY KEY`, so the backup API is used. A clone of a WAL file is a WAL
-file. `rowx database reset` validates the migrations before it deletes anything, as on PostgreSQL.
+`rowx database drop|reset --force`) only skips the open-connection check and accepts an empty file. A clone made through
+`VACUUM INTO` could renumber the rowids of a table with no `INTEGER PRIMARY KEY`, so the backup API is used. A clone of
+a WAL file is a WAL file. `rowx database reset` validates the migrations before it deletes anything, as on PostgreSQL.
 
 **Open connections.** On Windows the operating system refuses to remove an open file, which is `55006` with or without
 `force`. Elsewhere, removing a file that a connection holds would let that connection go on writing to a file nobody
