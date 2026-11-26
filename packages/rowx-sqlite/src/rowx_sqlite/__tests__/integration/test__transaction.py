@@ -1,4 +1,6 @@
 import asyncio
+import time
+from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING
 
 import pytest
@@ -402,3 +404,76 @@ async def test_a_cancelled_begin_that_waits_for_the_lock_leaves_no_transaction_b
     finally:
         await holder.close()
         await waiter.close()
+
+
+# blocks the event loop until the native side has handed the new transaction or savepoint over (its depth rose), so the
+# awaiting `__aenter__` cannot resume before the cancel lands: the window where the result is delivered but never seen
+def block_until_handed_over(conn: Connection, depth: int) -> None:
+    deadline = time.monotonic() + 5
+    while conn._impl._txn_depth < depth:
+        assert time.monotonic() < deadline, "the transaction was never handed over"
+
+
+async def cancel_after_hand_over(conn: Connection, transaction: Transaction, depth: int) -> None:
+    task = asyncio.ensure_future(AsyncExitStack().enter_async_context(transaction))
+    # one turn of the loop, so the task calls the native begin
+    await asyncio.sleep(0)
+    block_until_handed_over(conn, depth)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_a_begin_cancelled_after_it_was_handed_over_rolls_back(conn: Connection, other: Connection) -> None:
+    await make_table(conn)
+    await cancel_after_hand_over(conn, conn.transaction(), 1)
+    assert conn._impl._txn_depth == 0
+    # the connection is back in autocommit: a write is visible elsewhere, and a new transaction begins
+    await query(t"INSERT INTO t VALUES (1)").execute(conn)
+    assert await count(other) == 1
+    async with conn.transaction() as tx:
+        await query(t"INSERT INTO t VALUES (2)").execute(tx)
+    assert await count(other) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_begin_cancelled_after_it_was_handed_over_restores_writes(conn: Connection) -> None:
+    await make_table(conn)
+    await cancel_after_hand_over(conn, conn.transaction(read_only=True), 1)
+    await query(t"INSERT INTO t VALUES (1)").execute(conn)
+    assert await count(conn) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_savepoint_cancelled_after_it_was_handed_over_is_released(conn: Connection, other: Connection) -> None:
+    await make_table(conn)
+    async with conn.transaction() as outer:
+        await cancel_after_hand_over(conn, outer.transaction(), 2)
+        assert conn._impl._txn_depth == 1
+        async with outer.transaction() as inner:
+            await query(t"INSERT INTO t VALUES (1)").execute(inner)
+    assert await count(other) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_begin_at_any_point_leaves_no_transaction_behind(
+    conn: Connection, other: Connection
+) -> None:
+    await make_table(conn)
+    for turns in range(200):
+        stack = AsyncExitStack()
+        task = asyncio.ensure_future(stack.enter_async_context(conn.transaction()))
+        for _ in range(turns % 7):
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            await stack.aclose()
+        async with conn.transaction():
+            pass
+    await query(t"INSERT INTO t VALUES (1)").execute(conn)
+    assert await count(other) == 1

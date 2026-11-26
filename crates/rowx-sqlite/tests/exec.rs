@@ -372,6 +372,50 @@ async fn simple_runs_one_statement_and_rejects_a_script() -> TestResult {
 }
 
 #[tokio::test]
+async fn sql_without_a_statement_is_an_interface_error() -> TestResult {
+    let conn = connect(&memory()).await?;
+    for sql in ["", "   ", "-- c", "/* c */", ";", " ; ;"] {
+        let err = run(&conn, sql)
+            .await
+            .err()
+            .ok_or("execute took no statement")?;
+        assert_eq!(
+            err,
+            Error::Interface("the SQL holds no statement".to_owned())
+        );
+        let err = fetch(&conn, sql)
+            .await
+            .err()
+            .ok_or("fetch took no statement")?;
+        assert_eq!(
+            err,
+            Error::Interface("the SQL holds no statement".to_owned())
+        );
+    }
+    // a real statement without columns or parameters is not mistaken for an empty one
+    assert_eq!(run(&conn, "CREATE TABLE t (a)").await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn several_statements_are_refused_before_any_runs() -> TestResult {
+    let conn = connect(&memory()).await?;
+    run(&conn, "CREATE TABLE t (a)").await?;
+    let err = run(&conn, "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)")
+        .await
+        .err()
+        .ok_or("execute took a script")?;
+    assert!(matches!(err, Error::Interface(_)), "{err:?}");
+    let err = fetch(&conn, "SELECT 1; SELECT 2")
+        .await
+        .err()
+        .ok_or("fetch took a script")?;
+    assert!(matches!(err, Error::Interface(_)), "{err:?}");
+    assert_eq!(ints(&conn, "SELECT count(*) FROM t").await?, [0]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_migration_script_runs_every_statement_and_stops_at_the_first_failure() -> TestResult {
     let conn = connect(&memory()).await?;
     conn.execute_migration_script(

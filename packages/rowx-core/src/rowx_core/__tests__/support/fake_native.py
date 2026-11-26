@@ -33,6 +33,8 @@ class FakeNative:
         self.log: list[str] = []
         self.next_savepoint = 0
         self.end_failure: BaseException | None = None
+        # the open transaction and savepoints; a test's `begin` raises it for the outermost one
+        self._txn_depth = 0
 
     def _record(self, name: str, *args: object) -> None:
         self.calls.append((name, args))
@@ -80,10 +82,12 @@ class FakeNative:
 
     async def _savepoint(self) -> int:
         self.next_savepoint += 1
+        self._txn_depth += 1
         self.log.append(f"savepoint {self.next_savepoint}")
         return self.next_savepoint
 
     async def _release_savepoint(self, n: int) -> None:
+        self._txn_depth -= 1
         self.log.append(f"release {n}")
 
     async def _rollback_to_savepoint(self, n: int) -> None:
@@ -99,6 +103,7 @@ class FakeNative:
 
         # the protocol wants an awaitable, and the fake has nothing to wait for
         async def end() -> None:  # ruff: ignore[unused-async]
+            self._txn_depth = 0
             self.log.append("commit" if commit else "rollback")
 
         return end()

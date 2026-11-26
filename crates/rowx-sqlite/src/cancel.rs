@@ -29,6 +29,9 @@ pub(crate) struct Shared {
     // pairs with `wake`: a worker parked on a full stream channel sleeps here
     gate: Mutex<()>,
     wake: Condvar,
+    // set while a statement whose outcome the caller must learn runs (a COMMIT); closing then waits for it
+    // instead of interrupting it. A lock, not an atomic, so an interrupt is never sent after the check
+    spared: Mutex<bool>,
     // wakes async waiters of a cancel request, which the condition variable cannot reach
     requested: Notify,
 }
@@ -47,6 +50,7 @@ impl Default for Shared {
             stepped: AtomicU64::new(0),
             gate: Mutex::new(()),
             wake: Condvar::new(),
+            spared: Mutex::new(false),
             requested: Notify::new(),
         }
     }
@@ -175,18 +179,41 @@ impl SqliteBackend {
     }
 
     /// Wakes the worker and keeps interrupting it until closing can proceed. SQLite ignores an
-    /// interrupt sent between statements, including the gap just before the first step.
+    /// interrupt sent between statements, including the gap just before the first step. While a
+    /// [`Spared`] guard lives no interrupt is sent, so the statement it covers finishes; the cancel flag
+    /// is still set, so a statement that has not started yet is refused.
     pub async fn interrupt_until_closed<F: Future>(&self, completion: F) -> F::Output {
         self.shared.request_cancel();
         tokio::pin!(completion);
         loop {
-            self.interrupt.interrupt();
+            {
+                let spared = self
+                    .shared
+                    .spared
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if !*spared {
+                    self.interrupt.interrupt();
+                }
+            }
             if let Ok(result) =
                 tokio::time::timeout(CLOSE_INTERRUPT_INTERVAL, &mut completion).await
             {
                 return result;
             }
         }
+    }
+
+    /// Keeps closing from interrupting the statements run while the guard lives. Only for a statement
+    /// whose outcome the caller must learn and that ends on its own, such as a `COMMIT`.
+    #[must_use]
+    pub fn spare(&self) -> Spared {
+        *self
+            .shared
+            .spared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+        Spared(Arc::clone(&self.shared))
     }
 
     #[cfg(feature = "test-support")]
@@ -213,6 +240,16 @@ impl Backend for SqliteBackend {
     fn is_alive(&self) -> impl Future<Output = bool> {
         self.shared.clear_cancel();
         std::future::ready(self.shared.is_alive())
+    }
+}
+
+/// Holds off closing's interrupts until it is dropped; see [`SqliteBackend::spare`].
+#[derive(Debug)]
+pub struct Spared(Arc<Shared>);
+
+impl Drop for Spared {
+    fn drop(&mut self) {
+        *self.0.spared.lock().unwrap_or_else(PoisonError::into_inner) = false;
     }
 }
 

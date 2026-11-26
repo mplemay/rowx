@@ -135,6 +135,32 @@ async fn closing_interrupts_a_statement_that_starts_after_the_first_interrupt() 
     Ok(())
 }
 
+// long enough to span several of closing's interrupt rounds (100ms apart), but finite
+const SPARED_ROWS: i64 = 5_000_000;
+const SPARED_QUERY: &str = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 5000000) SELECT count(*) FROM c";
+
+#[tokio::test]
+async fn closing_waits_for_a_spared_statement_instead_of_interrupting_it() -> TestResult {
+    let conn = connect(&memory()).await?;
+    let backend = conn.backend();
+    let spared = backend.spare();
+    let started = Instant::now();
+    let work = conn.run_raw(|raw| {
+        raw.query_row(SPARED_QUERY, [], |row| row.get::<_, i64>(0))
+            .map_err(Error::from)
+    });
+    let counted = timeout(
+        Duration::from_secs(30),
+        backend.interrupt_until_closed(work),
+    )
+    .await???;
+    assert_eq!(counted, SPARED_ROWS);
+    // the rounds that were held back fell while the statement ran
+    assert!(started.elapsed() > Duration::from_millis(100));
+    drop(spared);
+    Ok(())
+}
+
 // rows of about a kilobyte each, so the write outgrows the page cache and spills into the WAL file
 const LONG_WRITE: &str = "INSERT INTO t WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000000000) SELECT n, zeroblob(1000) FROM c";
 

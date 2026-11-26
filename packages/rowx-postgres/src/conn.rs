@@ -214,7 +214,13 @@ impl Connection {
             ));
         }
         let sql = begin_sql(isolation, readonly, deferrable).map_err(|e| to_py_err(py, &e))?;
-        exec::txn_step(py, &self.cancel, &self.access, sql, Depth::Enter)
+        exec::txn_step(
+            py,
+            &self.cancel,
+            &self.access,
+            sql,
+            Depth::Enter("ROLLBACK".to_owned()),
+        )
     }
 
     // resolves to the depth, which names the savepoint
@@ -224,8 +230,14 @@ impl Connection {
         if depth == 0 {
             return Err(interface_error(py, "there is no open transaction"));
         }
-        let sql = savepoint_sql(depth + 1);
-        exec::txn_step(py, &self.cancel, &self.access, sql, Depth::Enter)
+        let n = depth + 1;
+        exec::txn_step(
+            py,
+            &self.cancel,
+            &self.access,
+            savepoint_sql(n),
+            Depth::Enter(release_savepoint_sql(n)),
+        )
     }
 
     #[pyo3(name = "_release_savepoint")]
@@ -258,6 +270,13 @@ impl Connection {
     #[getter]
     fn closed(&self) -> bool {
         self.cancel.state.is_closed()
+    }
+
+    // the open transaction and savepoints the session holds; a caller cancelled while entering one
+    // compares it with the depth before, to learn whether it opened after all
+    #[getter(_txn_depth)]
+    fn txn_depth(&self) -> u32 {
+        self.cancel.state.txn_depth()
     }
 
     /// Cancels and settles whatever still runs on the connection, so a reset hook can use it.

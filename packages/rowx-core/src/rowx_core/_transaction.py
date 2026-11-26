@@ -1,3 +1,4 @@
+from asyncio import shield
 from typing import TYPE_CHECKING, Self
 
 from rowx_core.errors import ConnectionBusyError, InterfaceError
@@ -34,6 +35,26 @@ class TrackedStream:
     @property
     def rows_affected(self) -> int | None:
         return self._inner.rows_affected
+
+
+# a cancellation can land after the native side handed over the new transaction or savepoint (its depth rose) but before
+# the awaiting `__aenter__` resumed; `async with` then never calls `__aexit__`, so it is undone here
+async def open_or_undo[T](impl: NativeConnection[Any], depth: int, opening: Awaitable[T]) -> T:
+    try:
+        return await opening
+    except BaseException as exc:
+        if impl._txn_depth > depth:  # ruff: ignore[private-member-access]
+            try:
+                undo = (
+                    impl._end_transaction(False)  # ruff: ignore[private-member-access, boolean-positional-value-in-call]
+                    if depth == 0
+                    else impl._release_savepoint(depth + 1)  # ruff: ignore[private-member-access]
+                )
+                # shielded, so a second cancellation cannot stop the undo halfway
+                await shield(undo)
+            except Exception as undo_error:  # ruff: ignore[blind-except]
+                exc.add_note(f"undoing the transaction it opened also failed: {undo_error}")
+        raise
 
 
 # `begin` opens the outermost transaction on the native connection with the backend's own arguments (isolation level
@@ -110,14 +131,16 @@ class BaseTransaction[I: NativeConnection[Any], S]:
             raise InterfaceError(msg)
         impl = self._conn._impl  # ruff: ignore[private-member-access]
         if self._parent is None:
-            await self._begin(impl)
+            depth = impl._txn_depth  # ruff: ignore[private-member-access]
+            await open_or_undo(impl, depth, self._begin(impl))
         else:
             parent = self._parent
             parent._check_active()  # ruff: ignore[private-member-access]
             if parent._child is not None:  # ruff: ignore[private-member-access]
                 msg = "a savepoint is already open in this transaction"
                 raise InterfaceError(msg)
-            self._savepoint = await impl._savepoint()  # ruff: ignore[private-member-access]
+            depth = impl._txn_depth  # ruff: ignore[private-member-access]
+            self._savepoint = await open_or_undo(impl, depth, impl._savepoint())  # ruff: ignore[private-member-access]
             parent._child = self  # ruff: ignore[private-member-access]
         self._active = True
         # the innermost open transaction is the one a failing statement aborts

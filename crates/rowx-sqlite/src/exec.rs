@@ -217,6 +217,7 @@ fn prepare_checked<'c, 's>(
     shape: &'s OwnedShape,
 ) -> Result<(rusqlite::CachedStatement<'c>, Reader<'s>), Error> {
     let stmt = conn.prepare_cached(sql)?;
+    require_statement(&stmt)?;
     if let Ok(reader) = Reader::new(shape, &stmt, 0) {
         return Ok((stmt, reader));
     }
@@ -226,6 +227,16 @@ fn prepare_checked<'c, 's>(
     let stmt = conn.prepare_cached(sql)?;
     let reader = Reader::new(shape, &stmt, 0)?;
     Ok((stmt, reader))
+}
+
+// SQLite prepares nothing for text that holds only whitespace, comments or semicolons, and stepping that
+// empty statement is `SQLITE_MISUSE`. Only such a statement has no columns, no parameters and no text,
+// so the text is read just for the statements that pass the first two checks.
+fn require_statement(stmt: &rusqlite::Statement<'_>) -> Result<(), Error> {
+    if stmt.column_count() == 0 && stmt.parameter_count() == 0 && stmt.expanded_sql().is_none() {
+        return Err(Error::Interface("the SQL holds no statement".to_owned()));
+    }
+    Ok(())
 }
 
 // `prepare` reads the schema the connection has in memory, which another connection's DDL leaves
@@ -273,6 +284,7 @@ pub(crate) fn execute_sql(ctx: &Ctx, sql: &str, params: &[Param]) -> Result<u64,
     // declared before the statement, so it drops after the statement was reset
     let armed;
     let mut stmt = ctx.conn.prepare_cached(sql)?;
+    require_statement(&stmt)?;
     // checked before anything steps: `Statement::execute` applies a write before it notices the rows,
     // so `INSERT ... RETURNING` would be committed and then reported as an error
     if stmt.column_count() > 0 {

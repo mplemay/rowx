@@ -337,11 +337,12 @@ impl Connection {
         if depth == 0 {
             return Err(interface_error(py, "there is no open transaction"));
         }
+        let n = depth.saturating_add(1);
         exec::txn_step(
             py,
             &self.core,
-            format!("SAVEPOINT rowx_sp_{}", depth.saturating_add(1)),
-            Depth::Enter,
+            format!("SAVEPOINT rowx_sp_{n}"),
+            Depth::Enter(format!("RELEASE SAVEPOINT rowx_sp_{n}")),
         )
     }
 
@@ -373,6 +374,13 @@ impl Connection {
     #[getter]
     fn closed(&self) -> bool {
         self.core.cancel.state.is_closed()
+    }
+
+    // the open transaction and savepoints as the caller sees them; a caller cancelled while entering
+    // one compares it with the depth before, to learn whether it opened after all
+    #[getter(_txn_depth)]
+    fn txn_depth(&self) -> u32 {
+        self.core.depth()
     }
 
     #[getter]
