@@ -651,6 +651,147 @@ async fn a_failed_no_transaction_file_leaves_foreign_keys_on() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_no_transaction_file_that_leaves_foreign_key_violations_fails_dirty() -> TestResult {
+    for turned_back_on in ["", "PRAGMA foreign_keys = ON;\n"] {
+        let dir = TempDir::new()?;
+        let conn = connect(&file(&dir)).await?;
+        let all = [
+            simple(
+                1,
+                "CREATE TABLE p (id INTEGER PRIMARY KEY);\n\
+                 CREATE TABLE c (pid INTEGER REFERENCES p (id));\n\
+                 INSERT INTO p VALUES (1), (2); INSERT INTO c VALUES (1), (2);",
+            ),
+            simple(
+                2,
+                &format!(
+                    "-- no-transaction\nPRAGMA foreign_keys = OFF;\nDELETE FROM p;\n{turned_back_on}"
+                ),
+            ),
+            simple(3, "CREATE TABLE after (i int)"),
+        ];
+        let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .err()
+            .ok_or("the violations should fail the migration")?;
+        assert_eq!(
+            failed_with(&err),
+            Some(("SQLITE_CONSTRAINT_FOREIGNKEY", 2)),
+            "{err:?}"
+        );
+        assert!(
+            matches!(err, MigrateError::Failed { dirty: true, .. }),
+            "{err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("2 row(s)") && message.contains("c rowid 1"),
+            "{message}"
+        );
+        assert_eq!(history(&conn).await?, [(1, true), (2, false)]);
+        assert!(!table_exists(&conn, "after").await?);
+        assert_eq!(pragma(&conn, "foreign_keys").await?, 1);
+        // the failure wrote its time, so the row is a failure, not a claim that may still be running
+        let next = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .err()
+            .ok_or("the dirty row should block")?;
+        assert!(
+            matches!(next, MigrateError::Plan(PlanError::Dirty { version: 2 })),
+            "{next:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_claim_with_no_time_says_another_migrator_may_still_be_running_it() -> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    let all = [
+        simple(1, "-- no-transaction\nCREATE TABLE t (i int)"),
+        simple(2, "SELECT 1"),
+    ];
+    skip(
+        &conn,
+        &config(),
+        &all,
+        PlanOptions {
+            target: Some(1),
+            ..PlanOptions::default()
+        },
+        &LIVE,
+    )
+    .await?;
+    // what a migrator that is still running the file (or was killed in it) leaves
+    conn.simple(&format!(
+        "UPDATE {TABLE} SET success = 0, execution_time = -1 WHERE version = 1"
+    ))
+    .await?;
+    for err in [
+        run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .err(),
+        revert(&conn, &config(), &all, RevertTarget::Latest, false, &LIVE)
+            .await
+            .err(),
+        skip(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .err(),
+        run_dry(&conn, &config(), &all, PlanOptions::default())
+            .await
+            .err(),
+    ] {
+        let err = err.ok_or("the claim should block")?;
+        assert!(
+            matches!(err, MigrateError::Claimed { version: 1 }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("may still be running"), "{err}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_temp_table_cannot_shadow_the_history_table() -> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    let all = [
+        simple(1, "CREATE TABLE base (x)"),
+        simple(
+            2,
+            &format!(
+                "CREATE TEMP TABLE {TABLE} (version, description, installed_on, success, checksum, \
+                 execution_time)"
+            ),
+        ),
+        simple(3, "CREATE TABLE after3 (x)"),
+    ];
+    let applied = run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    assert_eq!(versions(applied), [1, 2, 3]);
+    // the TEMP table is still there on this connection, and nothing went into it
+    assert_eq!(
+        count(&conn, &format!("SELECT count(*) FROM temp.{TABLE}")).await?,
+        0
+    );
+    assert_eq!(
+        count(
+            &conn,
+            &format!("SELECT count(*) FROM main.{TABLE} WHERE success")
+        )
+        .await?,
+        3
+    );
+    let details = info(&conn, &config(), &all).await?;
+    assert!(
+        details
+            .iter()
+            .all(|d| d.info.status == MigrationStatus::Applied)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn revert_reverts_newest_first_to_a_target_and_to_zero() -> TestResult {
     let dir = TempDir::new()?;
     let conn = connect(&file(&dir)).await?;

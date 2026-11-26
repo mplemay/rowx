@@ -315,17 +315,23 @@ pub fn migration_file_failed(py: Python<'_>, failure: &FileFailure<'_>, cause: P
     }
 }
 
+/// `DirtyMigrationError` with a backend's own explanation of why the version is dirty.
+#[must_use]
+pub fn dirty_error(py: Python<'_>, message: &str, version: i64) -> PyErr {
+    build(
+        py,
+        &DIRTY_MIGRATION_ERROR,
+        "DirtyMigrationError",
+        (message.to_owned(), version),
+    )
+}
+
 // an unknown or too new target is a bad argument; a missing `.down.sql` is a problem with the files
 #[must_use]
 pub fn plan_error(py: Python<'_>, err: &PlanError) -> PyErr {
     let message = err.to_string();
     match err {
-        PlanError::Dirty { version } => build(
-            py,
-            &DIRTY_MIGRATION_ERROR,
-            "DirtyMigrationError",
-            (message, *version),
-        ),
+        PlanError::Dirty { version } => dirty_error(py, &message, *version),
         PlanError::Missing { versions } => match PyTuple::new(py, versions) {
             Ok(versions) => build(
                 py,

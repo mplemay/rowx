@@ -192,8 +192,9 @@ execution_time BIGINT NOT NULL
 ```
 
 The table is created only when it does not exist, in a transaction of its own, and an existing table is never written to
-for that. `table` follows the PostgreSQL identifier rules and may be written `main.name`. SQLite has no schemas, so a
-table in any other schema, and any `create_schemas` entry, are `ValueError`.
+for that. Every statement on it names the `main` schema, so a `TEMP` table of the same name never stands in for it.
+`table` follows the PostgreSQL identifier rules and may be written `main.name`. SQLite has no schemas, so a table in any
+other schema, and any `create_schemas` entry, are `ValueError`.
 
 **Locking.** There is no advisory lock. The lock is SQLite's own write lock, and the design is:
 
@@ -208,11 +209,14 @@ table in any other schema, and any `create_schemas` entry, are `ValueError`.
 - **A `-- no-transaction` file claims its version first.** The marker is the same byte prefix as for PostgreSQL. The
   migrator commits a history row with `success = 0` in an `IMMEDIATE` transaction, then runs the file outside any
   transaction, then sets `success = 1`. A crash or a failure leaves the dirty row, and the next run raises
-  `DirtyMigrationError`, as on PostgreSQL. The file runs unlocked, so a second migrator that starts meanwhile sees the
-  claim row and fails with `DirtyMigrationError` at once instead of waiting.
+  `DirtyMigrationError`, as on PostgreSQL. The claim row's `execution_time` is `-1` until the file ends; a failure
+  writes the time it ran. The file runs unlocked, so a second migrator that starts meanwhile sees the claim row and
+  fails with `DirtyMigrationError` at once instead of waiting. While the time is still `-1` the message says another
+  migrator may still be running the file (or was interrupted in it), so wait for that one before fixing anything.
 - **`revert`** mirrors this: a transactional revert deletes the history row in the transaction, and a non-transactional
-  one marks the row dirty, runs the file and deletes the row.
-- `info` and a dry run take no lock and create nothing. The drift gate reads through the read-only session.
+  one marks the row dirty (with `execution_time = -1`), runs the file and deletes the row.
+- `info` and a dry run take no lock and create nothing. The drift gate reads through the read-only session
+  (`open(readonly=True)`), which, like a read-write one, waits up to `connect_timeout` for a lock.
 
 **What a file may contain.**
 
@@ -221,7 +225,11 @@ table in any other schema, and any `create_schemas` entry, are `ValueError`.
   body. The file runs statement by statement and stops at the first failure.
 - `VACUUM`, `PRAGMA journal_mode`, `ATTACH`, `DETACH` and any table rebuild that needs `PRAGMA foreign_keys = OFF`
   cannot run inside a transaction (the pragma is a no-op there), so the file starts with `-- no-transaction`. After such
-  a file the migrator turns `foreign_keys` back on and fails the migration if it cannot.
+  a file the migrator turns `foreign_keys` back on and fails the migration if it cannot. It then runs
+  `PRAGMA foreign_key_check`, as SQLite's table-rebuild procedure does, and when any row violates a foreign key the
+  migration fails and is left dirty: `MigrationFailedError` with `SQLITE_CONSTRAINT_FOREIGNKEY` (`23503`), whose
+  message counts the rows and names the first ten. The check covers the whole database, so rows that violated a key
+  before the file ran fail it too.
 - A `-- no-transaction` file that leaves a transaction open (an unreleased `SAVEPOINT`) has the work since the
   `SAVEPOINT` rolled back, and fails the migration.
 - A file that fails in a transaction rolls back and records nothing. The failure is `MigrationFailedError` with
@@ -241,16 +249,24 @@ table in any other schema, and any `create_schemas` entry, are `ValueError`.
 | Operation | Behaviour | Failure |
 |---|---|---|
 | `exists` | A regular file is at the path. | |
-| `create` | Creates an empty file exclusively. Nothing is overwritten. The CLI treats an existing file as success. | `42P04` exists; `58030` for a missing directory |
+| `create` | Creates an empty database exclusively, in WAL mode with its header written, so connections that open it at once never race to switch its journal mode. Nothing is overwritten. The CLI treats an existing file as success. | `42P04` exists; `58030` for a missing directory |
 | `create(template=...)` | Copies a template database with SQLite's backup API, which reads a consistent snapshot, WAL included. | `3D000` template missing; `55P03` when the template stays locked for 5 seconds. The limit bounds only the wait for the template's lock; the backup copy runs as one step with no time limit |
-| `drop` | Removes the file and its `-wal`, `-shm` and `-journal` files. A missing file is not an error, but its orphaned side files are removed too, because a later `create` would replay them. A directory, or a file that is neither empty nor a SQLite database, is refused and nothing is removed. | `XX002` refused; `55006` on Windows when the file is open |
-| `list` | The names of the SQLite files beside the URL's path that start with a prefix, side files excluded. `comment` is `None` and `sessions` is `0`. | |
+| `drop` | Removes the file and its `-wal`, `-shm` and `-journal` files. A missing file is not an error, but its orphaned side files are removed too when their first bytes show SQLite wrote them (the WAL magic, a hot journal's header, or the wal-index version in a `-shm`), because a later `create` would replay them; any other file with those names is kept. A directory, a symbolic link (removing it would leave the database it points to and that database's side files), and a file that does not start with the SQLite header (an empty file included) are refused, and nothing is removed. A database another connection holds open is refused (see below) unless `force=True`. | `XX002` refused; `55006` when the file is open |
+| `list` | The names of the SQLite files (those that start with the SQLite header, so not an empty file) beside the URL's path that start with a prefix, side files excluded. `comment` is `None` and `sessions` is `0`. | |
 | `ready` | Waits up to the connect timeout for the database to be usable: a directory is refused, and an existing file must open as a SQLite database. | `XX002` for a directory or a non-database |
 
-`create_scratch` is `create` with the comment ignored, and `drop` ignores `force`, since a file has no sessions to end.
-A clone made through `VACUUM INTO` could renumber the rowids of a table with no `INTEGER PRIMARY KEY`, so the backup API
-is used. A clone of a WAL file is a WAL file. Dropping a file that connections still hold fails on Windows with a clear
-error. `rowx database reset` validates the migrations before it deletes anything, as on PostgreSQL.
+`create_scratch` is `create` with the comment ignored. A file has no sessions to end, so `force` on `drop` (and
+`rowx database drop|reset --force`) only skips the open-connection check. A clone made through `VACUUM INTO` could
+renumber the rowids of a table with no `INTEGER PRIMARY KEY`, so the backup API is used. A clone of a WAL file is a WAL
+file. `rowx database reset` validates the migrations before it deletes anything, as on PostgreSQL.
+
+**Open connections.** On Windows the operating system refuses to remove an open file, which is `55006` with or without
+`force`. Elsewhere, removing a file that a connection holds would let that connection go on writing to a file nobody
+can open again, so `drop` first opens the database, sets `locking_mode = EXCLUSIVE` and tries `BEGIN EXCLUSIVE` without
+waiting, and raises `55006` when another connection holds a lock. Every connection to a WAL database (every rowx
+connection, and any reader of a WAL file) holds a shared lock while it is open, so it is seen. The check is best effort:
+a connection to a database in a rollback journal mode holds no lock while it is idle, a connection that has opened the
+file but not yet read it holds none either, and a connection that opens after the check is not seen.
 
 ### SQLite tests
 

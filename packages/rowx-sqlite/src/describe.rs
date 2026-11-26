@@ -161,23 +161,29 @@ pub fn describe<'py>(
 /// Opens the session the checker describes through: read-only, `query_only`, `trusted_schema` off and
 /// the defensive flag on.
 ///
+/// `connect_timeout` is the busy timeout, as for `connect`; unset keeps the default.
+///
 /// # Errors
-/// `InterfaceError` for a bad DSN, `ValueError` for a bad `statement_timeout`; open failures surface when
-/// the future is awaited.
+/// `InterfaceError` for a bad DSN, `ValueError` for a bad `statement_timeout` or `connect_timeout`; open
+/// failures surface when the future is awaited.
 #[pyfunction]
-#[pyo3(signature = (dsn, statement_timeout=10.0))]
+#[pyo3(signature = (dsn, statement_timeout=10.0, *, connect_timeout=None))]
 pub fn connect_checker<'py>(
     py: Python<'py>,
     dsn: &str,
     statement_timeout: f64,
+    connect_timeout: Option<f64>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let target = dsn::parse(dsn).map_err(|e| to_py_err(py, &Failure::from(Error::Dsn(e))))?;
     let timeout = seconds("statement_timeout", statement_timeout)?;
     // like `connect`, zero means no limit
-    let options = ConnectOptions::checker(
+    let mut options = ConnectOptions::checker(
         target,
         Some(timeout).filter(|limit| *limit > Duration::ZERO),
     );
+    if let Some(secs) = connect_timeout {
+        options.busy_timeout = seconds("connect_timeout", secs)?;
+    }
     let handle = runtime::handle()?;
     future_into_py(py, async move {
         let conn = SqliteConnection::connect(&options)

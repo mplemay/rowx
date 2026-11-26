@@ -14,6 +14,12 @@ use crate::error::Error;
 
 // The first 16 bytes of every SQLite database file.
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
+// The first bytes of the side files that SQLite would read back: a WAL file (either checksum byte order) and
+// a hot rollback journal. A `-shm` file has no magic, but its header starts with the wal-index version
+// 3007000 in the machine's byte order.
+const WAL_MAGIC: [u32; 2] = [0x377f_0682, 0x377f_0683];
+const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+const SHM_VERSION: u32 = 3_007_000;
 // What follows the database's name on the files SQLite keeps beside it; keep in step with `SIDECARS` in `_scratch.py`
 const SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
@@ -37,6 +43,11 @@ pub enum AdminError {
     NotSqlite(String),
     #[error("the database {0:?} has open connections; close them before removing the file")]
     InUse(String),
+    #[error(
+        "{0:?} is a symbolic link, so it is not touched: SQLite keeps the side files beside the file it \
+         points to; name that file instead"
+    )]
+    Symlink(String),
     #[error("the directory {0:?} does not exist")]
     NoDirectory(String),
     #[error("the template database {0:?} is locked by another connection")]
@@ -152,6 +163,18 @@ fn stat(path: &Path) -> Result<Option<fs::Metadata>, AdminError> {
     }
 }
 
+// what is at `path` itself, a symbolic link not followed
+fn lstat(path: &Path) -> Result<Option<fs::Metadata>, AdminError> {
+    match fs::symlink_metadata(path) {
+        Ok(found) => Ok(Some(found)),
+        Err(err) if is_gone(&err) => Ok(None),
+        Err(err) => Err(io_error(
+            format!("could not look at {}", path.display()),
+            err,
+        )),
+    }
+}
+
 fn exists_now(path: &Path) -> Result<bool, AdminError> {
     Ok(stat(path)?.is_some_and(|found| found.is_file()))
 }
@@ -249,29 +272,76 @@ pub async fn create(name: &str, template: Option<&str>) -> Result<(), AdminError
     let template = template.map(check_name).transpose()?.map(Path::to_path_buf);
     on_thread(move || {
         template.map_or_else(
-            || create_empty(&path).map(drop),
+            || create_wal(&path),
             |template| clone_into(&template, &path, BACKUP_BUDGET),
         )
     })
     .await
 }
 
-fn is_sqlite_file(path: &Path) -> Result<bool, AdminError> {
+// The switch writes the header, so the file is a database `drop` recognises, and it is already in the mode
+// every read-write connection asks for, so connections that open it at once never race to switch it.
+fn create_wal(path: &Path) -> Result<(), AdminError> {
+    drop(create_empty(path)?);
+    let switched = open(path, OpenFlags::SQLITE_OPEN_READ_WRITE).and_then(|raw| {
+        let mode: String =
+            raw.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+        Ok(mode)
+    });
+    match switched {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => Ok(()),
+        Ok(mode) => {
+            remove_files(path);
+            Err(AdminError::Sqlite(Error::from_code(
+                rusqlite::ffi::SQLITE_ERROR,
+                format!("could not switch the new database to WAL; it stayed in {mode} mode"),
+                None,
+            )))
+        }
+        Err(err) => {
+            // the file is ours: the claim above succeeded
+            remove_files(path);
+            Err(err)
+        }
+    }
+}
+
+// the first `N` bytes, or `None` for a shorter file
+fn head<const N: usize>(path: &Path) -> Result<Option<[u8; N]>, AdminError> {
     let mut file = File::open(path)
         .map_err(|err| io_error(format!("could not open {}", path.display()), err))?;
-    let mut head = [0_u8; 16];
+    let mut head = [0_u8; N];
     let mut filled = 0;
-    while filled < head.len() {
+    while filled < N {
         let read = file
             .read(&mut head[filled..])
             .map_err(|err| io_error(format!("could not read {}", path.display()), err))?;
         if read == 0 {
-            break;
+            return Ok(None);
         }
         filled += read;
     }
-    // an empty file is an empty database; anything else must start with the magic
-    Ok(filled == 0 || head == *MAGIC)
+    Ok(Some(head))
+}
+
+// Only the header proves a file is a database. An empty file opens as an empty database, but so would any
+// empty file a mistyped URL names, and `create` writes the header, so an empty file is not one.
+fn is_sqlite_file(path: &Path) -> Result<bool, AdminError> {
+    Ok(head::<16>(path)?.is_some_and(|found| found == *MAGIC))
+}
+
+// Whether an orphaned side file holds what SQLite would read back into a database created at the same path
+fn is_side_file(path: &Path, suffix: &str) -> Result<bool, AdminError> {
+    Ok(match suffix {
+        "-wal" => {
+            head::<4>(path)?.is_some_and(|found| WAL_MAGIC.contains(&u32::from_be_bytes(found)))
+        }
+        "-journal" => head::<8>(path)?.is_some_and(|found| found == JOURNAL_MAGIC),
+        "-shm" => head::<4>(path)?.is_some_and(|found| {
+            u32::from_le_bytes(found) == SHM_VERSION || u32::from_be_bytes(found) == SHM_VERSION
+        }),
+        _ => false,
+    })
 }
 
 fn remove_one(path: &Path, windows: bool) -> Result<(), AdminError> {
@@ -288,6 +358,7 @@ fn remove_one(path: &Path, windows: bool) -> Result<(), AdminError> {
     }
 }
 
+// beside a database, SQLite itself uses (and overwrites) these names, so they are its own
 fn remove_side_files(path: &Path) -> Result<(), AdminError> {
     for suffix in SIDE_FILES {
         remove_one(&side_path(path, suffix), cfg!(windows))?;
@@ -295,17 +366,59 @@ fn remove_side_files(path: &Path) -> Result<(), AdminError> {
     Ok(())
 }
 
-fn drop_now(path: &Path) -> Result<(), AdminError> {
-    let Some(found) = stat(path)? else {
-        // orphans of a deleted file stay out of the way of a later `create`, which would replay them
-        return remove_side_files(path);
+// With no database to vouch for them, only side files whose content shows SQLite wrote them are removed
+fn remove_orphans(path: &Path) -> Result<(), AdminError> {
+    for suffix in SIDE_FILES {
+        let side = side_path(path, suffix);
+        let regular = lstat(&side)?.is_some_and(|found| found.file_type().is_file());
+        if regular && is_side_file(&side, suffix)? {
+            remove_one(&side, cfg!(windows))?;
+        }
+    }
+    Ok(())
+}
+
+// Every connection to a WAL database holds a shared lock on the file for as long as it is open, so an
+// exclusive lock taken without waiting shows nobody else has it open. In a rollback mode an idle connection
+// holds no lock, and a connection that opens after this check is not seen: the guard is best effort. Any
+// failure other than a lock held elsewhere leaves the decision to the removal.
+fn ensure_unused(path: &Path) -> Result<(), AdminError> {
+    let probe = || -> Result<(), AdminError> {
+        let raw = open(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        raw.busy_timeout(Duration::ZERO)?;
+        // in WAL mode only the exclusive locking mode takes the file's exclusive lock for a write transaction
+        raw.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        raw.execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")?;
+        Ok(())
     };
+    match probe() {
+        Err(AdminError::Sqlite(err)) if err.is_busy() => {
+            Err(AdminError::InUse(path.display().to_string()))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn drop_now(path: &Path, force: bool) -> Result<(), AdminError> {
+    let Some(found) = lstat(path)? else {
+        // orphans of a deleted file stay out of the way of a later `create`, which would replay them
+        return remove_orphans(path);
+    };
+    // removing a link would leave the database it points to, and its side files, where they are
+    if found.file_type().is_symlink() {
+        return Err(AdminError::Symlink(path.display().to_string()));
+    }
     if !found.is_file() {
         return Err(AdminError::NotSqlite(path.display().to_string()));
     }
     // a mistyped URL must never delete a file that is not a database
     if !is_sqlite_file(path)? {
         return Err(AdminError::NotSqlite(path.display().to_string()));
+    }
+    // Windows refuses to remove an open file on its own; elsewhere the writers would carry on into a file
+    // nobody can open again
+    if !force && !cfg!(windows) {
+        ensure_unused(path)?;
     }
     // the main file goes first: if it is held open nothing else is removed
     remove_one(path, cfg!(windows))?;
@@ -314,15 +427,18 @@ fn drop_now(path: &Path) -> Result<(), AdminError> {
 
 /// Removes the database file and its `-wal`, `-shm` and `-journal` side files.
 ///
-/// A missing file is not an error, but its orphaned side files are still removed: left behind, a later
-/// `create` at the same path would make SQLite replay a stale WAL or hot journal into the new database.
+/// A missing file is not an error, but its orphaned side files are still removed when their content shows
+/// SQLite wrote them: left behind, a later `create` at the same path would make SQLite replay a stale WAL or
+/// hot journal into the new database. Off Windows, a database another connection holds open is refused
+/// unless `force` is set (best effort; see `ensure_unused`).
 ///
 /// # Errors
-/// `NotSqlite` for a directory or a file that is not empty and does not start with the SQLite header
-/// (nothing is removed), `InUse` when Windows refuses because the file is open, `Io` otherwise.
-pub async fn drop_database(name: &str) -> Result<(), AdminError> {
+/// `NotSqlite` for a directory or a file that does not start with the SQLite header (an empty file
+/// included), `Symlink` for a symbolic link (nothing is removed for either), `InUse` when the database is
+/// open elsewhere, `Io` otherwise.
+pub async fn drop_database(name: &str, force: bool) -> Result<(), AdminError> {
     let path = check_name(name)?.to_path_buf();
-    on_thread(move || drop_now(&path)).await
+    on_thread(move || drop_now(&path, force)).await
 }
 
 fn list_now(anchor: &Path, prefix: &str) -> Result<Vec<DatabaseInfo>, AdminError> {
@@ -422,8 +538,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        AdminError, MAGIC, clone_into, create, drop_database, exists, list, ready,
-        sharing_violation,
+        AdminError, JOURNAL_MAGIC, MAGIC, SHM_VERSION, clone_into, create, drop_database, exists,
+        list, ready, sharing_violation,
     };
     use crate::error::Error;
 
@@ -459,10 +575,13 @@ mod tests {
             create(&name, None).await,
             Err(AdminError::Exists(_))
         ));
-        // an empty file is a valid empty database
-        let tables: i64 =
-            Raw::open(&name)?.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
+        // an empty database with the header written, already in WAL mode
+        let raw = Raw::open(&name)?;
+        let tables: i64 = raw.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
         assert_eq!(tables, 0);
+        let mode: String = raw.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        assert_eq!(mode, "wal");
+        assert_eq!(fs::read(&name)?.get(..16), Some(MAGIC.as_slice()));
         Ok(())
     }
 
@@ -560,7 +679,7 @@ mod tests {
             fs::write(format!("{}{suffix}", path.display()), b"x")?;
         }
         fs::write(dir.path().join("a.db.bak"), b"x")?;
-        drop_database(&path_str(&path)).await?;
+        drop_database(&path_str(&path), false).await?;
         let left = fs::read_dir(dir.path())?
             .map(|entry| entry.map(|e| e.file_name()))
             .collect::<Result<Vec<_>, _>>()?;
@@ -572,27 +691,54 @@ mod tests {
     async fn dropping_a_missing_file_removes_its_orphaned_side_files() -> Outcome {
         let dir = tempdir()?;
         let path = dir.path().join("a.db");
-        // no connection is open, so the files can go on every platform
-        for suffix in ["-wal", "-shm", "-journal"] {
-            fs::write(format!("{}{suffix}", path.display()), b"orphan")?;
+        // no connection is open, so the files can go on every platform; each starts as SQLite writes it
+        let mut wal = 0x377f_0682_u32.to_be_bytes().to_vec();
+        wal.extend([0_u8; 28]);
+        let mut journal = JOURNAL_MAGIC.to_vec();
+        journal.extend([0_u8; 20]);
+        let mut shm = SHM_VERSION.to_ne_bytes().to_vec();
+        shm.extend([0_u8; 60]);
+        for (suffix, content) in [("-wal", &wal), ("-journal", &journal), ("-shm", &shm)] {
+            fs::write(format!("{}{suffix}", path.display()), content)?;
         }
         fs::write(dir.path().join("a.db.keep"), b"x")?;
         assert!(!path.exists());
-        drop_database(&path_str(&path)).await?;
+        drop_database(&path_str(&path), false).await?;
         let left = fs::read_dir(dir.path())?
             .map(|entry| entry.map(|e| e.file_name()))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(left, vec![OsString::from("a.db.keep")]);
         create(&path_str(&path), None).await?;
-        assert_eq!(fs::metadata(&path)?.len(), 0);
+        assert!(fs::metadata(&path)?.len() > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_a_missing_file_keeps_side_named_files_sqlite_did_not_write() -> Outcome {
+        let dir = tempdir()?;
+        let path = dir.path().join("cfg");
+        for suffix in ["-wal", "-shm", "-journal"] {
+            fs::write(
+                format!("{}{suffix}", path.display()),
+                b"important user data",
+            )?;
+        }
+        // empty ones prove nothing either
+        let empty = dir.path().join("other");
+        for suffix in ["-wal", "-shm", "-journal"] {
+            fs::write(format!("{}{suffix}", empty.display()), b"")?;
+        }
+        drop_database(&path_str(&path), false).await?;
+        drop_database(&path_str(&empty), false).await?;
+        assert_eq!(fs::read_dir(dir.path())?.count(), 6);
         Ok(())
     }
 
     #[tokio::test]
     async fn dropping_a_missing_file_is_not_an_error() -> Outcome {
         let dir = tempdir()?;
-        drop_database(&path_str(&dir.path().join("none.db"))).await?;
-        drop_database(&path_str(&dir.path().join("nodir").join("none.db"))).await?;
+        drop_database(&path_str(&dir.path().join("none.db")), false).await?;
+        drop_database(&path_str(&dir.path().join("nodir").join("none.db")), false).await?;
         Ok(())
     }
 
@@ -603,7 +749,7 @@ mod tests {
         fs::write(&plain, b"x")?;
         let name = path_str(&plain.join("x.db"));
         assert!(!exists(&name).await?);
-        drop_database(&name).await?;
+        drop_database(&name, false).await?;
         assert!(!exists(&name).await?);
         assert_eq!(fs::read(&plain)?, b"x");
         Ok(())
@@ -619,22 +765,30 @@ mod tests {
         for refused in [&text, &short, &dir.path().to_path_buf()] {
             assert!(
                 matches!(
-                    drop_database(&path_str(refused)).await,
+                    drop_database(&path_str(refused), false).await,
                     Err(AdminError::NotSqlite(_))
                 ),
                 "{refused:?}"
             );
         }
         assert!(text.exists() && short.exists());
-        // an empty file is an empty database
-        let empty = dir.path().join("empty.db");
+        // an empty file opens as an empty database, but nothing shows it is one
+        let empty = dir.path().join("__init__.py");
         fs::write(&empty, b"")?;
-        drop_database(&path_str(&empty)).await?;
-        assert!(!empty.exists());
+        assert!(matches!(
+            drop_database(&path_str(&empty), false).await,
+            Err(AdminError::NotSqlite(_))
+        ));
+        assert!(empty.exists());
+        // what `create` makes, `drop` removes
+        let made = dir.path().join("made.db");
+        create(&path_str(&made), None).await?;
+        drop_database(&path_str(&made), false).await?;
+        assert!(!made.exists());
         let real = dir.path().join("real.db");
         drop(database(&real)?);
         assert_eq!(fs::read(&real)?.get(..16), Some(MAGIC.as_slice()));
-        drop_database(&path_str(&real)).await?;
+        drop_database(&path_str(&real), false).await?;
         assert!(!real.exists());
         Ok(())
     }
@@ -643,7 +797,8 @@ mod tests {
     async fn list_names_the_databases_beside_the_anchor_without_side_files() -> Outcome {
         let dir = tempdir()?;
         drop(database(&dir.path().join("rowx_b.db"))?);
-        fs::write(dir.path().join("rowx_a.db"), b"")?;
+        drop(database(&dir.path().join("rowx_a.db"))?);
+        fs::write(dir.path().join("rowx_empty.db"), b"")?;
         fs::write(dir.path().join("rowx_a.db-wal"), b"x")?;
         fs::write(dir.path().join("rowx_a.db-journal"), b"x")?;
         fs::write(dir.path().join("rowx_text.db"), b"not a database")?;
@@ -757,6 +912,67 @@ mod tests {
         let copied = ids(&target)?;
         assert_eq!(copied.len(), 4000);
         assert_eq!(copied, ids(&template)?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drop_refuses_a_symlink_and_leaves_the_database_it_points_to() -> Outcome {
+        let dir = tempdir()?;
+        let real = dir.path().join("real.db");
+        let holder = database(&real)?;
+        holder.execute_batch("PRAGMA journal_mode = WAL; INSERT INTO t VALUES ('d');")?;
+        drop(holder);
+        let link = dir.path().join("link.db");
+        std::os::unix::fs::symlink(&real, &link)?;
+        assert!(matches!(
+            drop_database(&path_str(&link), false).await,
+            Err(AdminError::Symlink(_))
+        ));
+        assert!(link.is_symlink() && real.exists());
+        assert_eq!(rows(&real)?.len(), 4);
+        // a link to nothing is refused too, so it is never mistaken for a missing file
+        let dangling = dir.path().join("dangling.db");
+        std::os::unix::fs::symlink(dir.path().join("gone.db"), &dangling)?;
+        assert!(matches!(
+            drop_database(&path_str(&dangling), false).await,
+            Err(AdminError::Symlink(_))
+        ));
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn drop_refuses_a_database_another_connection_holds_open() -> Outcome {
+        let dir = tempdir()?;
+        let path = dir.path().join("used.db");
+        create(&path_str(&path), None).await?;
+        let holder = Raw::open(&path)?;
+        holder.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('a');")?;
+        assert!(matches!(
+            drop_database(&path_str(&path), false).await,
+            Err(AdminError::InUse(_))
+        ));
+        assert!(path.exists());
+        assert_eq!(rows(&path)?.len(), 1);
+        // a read-only connection holds it as well
+        drop(holder);
+        let reader = Raw::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        reader.query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0))?;
+        assert!(matches!(
+            drop_database(&path_str(&path), false).await,
+            Err(AdminError::InUse(_))
+        ));
+        // `force` removes it anyway, as before the check
+        drop_database(&path_str(&path), true).await?;
+        assert!(!path.exists());
+        drop(reader);
+        // once every connection is closed, the check passes
+        let again = dir.path().join("again.db");
+        create(&path_str(&again), None).await?;
+        Raw::open(&again)?.execute_batch("CREATE TABLE t (v TEXT);")?;
+        drop_database(&path_str(&again), false).await?;
+        assert!(!again.exists());
         Ok(())
     }
 
