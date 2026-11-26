@@ -176,8 +176,9 @@ SQLITE_NOTES: Final[str] = """
   affinity rules, in SQLite's order: a name containing `INT` is `integer`, then `CHAR`, `CLOB` or `TEXT` is `text`,
   `BLOB` is `blob`, and `REAL`, `FLOA` or `DOUB` is `real`. Any other name is `any`. The substring rules are SQLite's
   and catch names you did not mean: `POINT` and `INTERVAL` contain `INT`, so they are `integer`.
-- A column with no declared type, and every expression, is **untyped**. It reads as `any` by the storage class of each
-  value and is always nullable. The checker accepts any annotation for it ([Checker](reference/checker.md#sqlite)).
+- A column with no declared type, and every expression, takes the storage class the bytecode analysis proves for it
+  (`count(*)` is `integer`). Without one it is **untyped**: it reads as `any` by the storage class of each value, and
+  the checker accepts any annotation for it ([Checker](reference/checker.md#sqlite)).
 - A `STRICT` table allows only `INT`, `INTEGER`, `REAL`, `TEXT`, `BLOB` and `ANY` as column types, so only `integer`,
   `real`, `text`, `blob` and `any` occur there. A date in a strict table is `text`.
 - A stored value that disagrees with its column's declared type raises `DecodeError`. It is never converted. A

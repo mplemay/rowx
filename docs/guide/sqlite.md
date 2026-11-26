@@ -156,9 +156,11 @@ Four rules explain most surprises:
 - **A table declared `STRICT` accepts only `INT`, `INTEGER`, `REAL`, `TEXT`, `BLOB` and `ANY`.** There the rich types
   above do not exist: a date is a `TEXT` column read as `str`.
 
-A column declared with no type, and every expression such as `count(*)` or `upper(name)`, is read by the kind of value
-stored in each row. The checker calls such a column *untyped* and accepts any annotation for it, and the column is
-always nullable until you say otherwise: `count(*) AS "n!"`.
+A column declared with no type, and every expression, is read by the kind of value stored in each row. The checker
+types an expression by what the statement's bytecode proves: `count(*)` is a non-null `int`, `upper(name)` is a `str`,
+and `coalesce(nickname, name)` is non-null. A column it cannot type, such as `max(id)` or a non-strict column declared
+with no type, is *untyped* and accepts any annotation, and one it cannot prove non-null stays nullable until you say
+otherwise: `max(id) AS "m!"`. A compound select is typed by every arm, not only the first.
 
 ## Transactions and errors
 
@@ -271,8 +273,9 @@ rowx check src --database-url sqlite::memory:
 ```
 
 The checker proves less than it does on PostgreSQL, and says so. A column that SQLite does not guarantee to be
-`NOT NULL` is nullable, and the diagnostic note reads `nullability not proven, assumed nullable` for a column that comes
-through a view, a subquery, a CTE, a compound select, an outer join or an expression. Parameters are untyped, so there
+`NOT NULL`, and that the statement's bytecode does not prove non-null, is nullable, and the diagnostic note reads
+`nullability not proven, assumed nullable` for a column that comes through a view, a subquery, a CTE, a compound
+select, an outer join or an expression. Parameters are untyped, so there
 is no `param-type-mismatch`. Narrow a column with `AS "col!"`, as in [Parameters](parameters.md#nullability-overrides).
 
 ```python test
