@@ -36,6 +36,10 @@ pub struct FetchArgs {
 // bit 1 of the per-column flags: an `interval` is read as `rowx_postgres.Interval`
 const SPAN: u8 = BACKEND;
 
+// tries of the statement that undoes a transaction or savepoint whose caller was cancelled: a cancel request
+// resent while the task still runs can abort one of them
+const UNDO_ATTEMPTS: usize = 3;
+
 /// What only the PostgreSQL binding does with an [`Access`].
 pub trait AccessExt {
     /// `fail`, and a stale cached plan also bumps the pool's schema epoch.
@@ -374,7 +378,14 @@ pub fn txn_step<'py>(
             }
             // the caller was cancelled before it could learn of the transaction or savepoint, so
             // nobody would end it; a session that keeps it is broken
-            if conn.simple(&undo).await.is_err() {
+            let mut undone = false;
+            for _ in 0..UNDO_ATTEMPTS {
+                if conn.simple(&undo).await.is_ok() {
+                    undone = true;
+                    break;
+                }
+            }
+            if !undone {
                 state.mark_broken();
             }
             drop(conn);

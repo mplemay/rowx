@@ -236,7 +236,13 @@ impl Connection {
             &self.cancel,
             &self.access,
             savepoint_sql(n),
-            Depth::Enter(release_savepoint_sql(n)),
+            // a cancel request that aborts one try leaves the transaction aborted, which the rollback to the
+            // (still empty) savepoint clears, so the undo can simply be tried again
+            Depth::Enter(format!(
+                "{}; {}",
+                rollback_to_savepoint_sql(n),
+                release_savepoint_sql(n)
+            )),
         )
     }
 

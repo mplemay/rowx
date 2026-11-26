@@ -1,9 +1,10 @@
-from asyncio import shield
+from asyncio import ensure_future, wait
 from typing import TYPE_CHECKING, Self
 
 from rowx_core.errors import ConnectionBusyError, InterfaceError
 
 if TYPE_CHECKING:
+    from asyncio import Future
     from collections.abc import Awaitable, Callable, Sequence
     from types import TracebackType
     from typing import Any
@@ -45,16 +46,26 @@ async def open_or_undo[T](impl: NativeConnection[Any], depth: int, opening: Awai
     except BaseException as exc:
         if impl._txn_depth > depth:  # ruff: ignore[private-member-access]
             try:
-                undo = (
+                undo = ensure_future(
                     impl._end_transaction(False)  # ruff: ignore[private-member-access, boolean-positional-value-in-call]
                     if depth == 0
                     else impl._release_savepoint(depth + 1)  # ruff: ignore[private-member-access]
                 )
-                # shielded, so a second cancellation cannot stop the undo halfway
-                await shield(undo)
+                # a failure nobody is left to await (a second cancellation, a closed coroutine) is still retrieved
+                undo.add_done_callback(retrieve)
+                # a coroutine being closed cannot await, so its undo runs on without it
+                if not isinstance(exc, GeneratorExit):
+                    # waited on, not awaited, so a second cancellation stops only the wait and never the undo
+                    await wait((undo,))
+                    undo.result()
             except Exception as undo_error:  # ruff: ignore[blind-except]
                 exc.add_note(f"undoing the transaction it opened also failed: {undo_error}")
         raise
+
+
+def retrieve(task: Future[Any]) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 # `begin` opens the outermost transaction on the native connection with the backend's own arguments (isolation level
