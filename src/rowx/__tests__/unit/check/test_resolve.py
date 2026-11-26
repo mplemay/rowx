@@ -1904,3 +1904,77 @@ def test_attrs_selected_receiver_does_not_retain_temporary_edges(
     assert result.diagnostic is None
     assert counts
     assert max(counts) == 0
+
+
+@pytest.mark.parametrize("shared", [True, False])
+@pytest.mark.parametrize(
+    ("body", "reject"),
+    [
+        (
+            "source = [FIELD]\nresult = (rhs := source)\nrhs[0] = attrs.field()\nsource[0].default(lambda self: 42)",
+            False,
+        ),
+        (
+            "source = [attrs.field()]\nresult = (rhs := source)\nrhs[0] = FIELD\nsource[0].default(lambda self: 42)",
+            True,
+        ),
+        ("alias = FIELD\nrhs = [alias] if True else []\ndel alias\nrhs[0].default(lambda self: 42)", True),
+        (
+            "alias = FIELD\nflag = bool(1)\nrhs = [alias] if flag else []\ndel alias\nrhs[0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "alias = FIELD\nitems = []\nitems.extend((rhs := ([] if False else [alias])))\ndel alias\nrhs[0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "alias = attrs.field()\nitems = []\nitems.extend((rhs := ([alias] if True else [FIELD])))\ndel alias\nrhs[0].default(lambda self: 42)",
+            False,
+        ),
+    ],
+)
+def test_attrs_walrus_overwrite_and_conditional_carriers(
+    tmp_path: Path, body: str, *, shared: bool, reject: bool
+) -> None:
+    test_attrs_captured_nested_carrier_identity(tmp_path, body, shared=shared, reject=reject)
+
+
+def test_attrs_module_captured_nodes_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = _Resolver._attrs_carrier_related
+    sizes: list[int] = []
+
+    def related(carrier: str, state: Collection[str]) -> set[str]:
+        sizes.append(len(state))
+        return original(carrier, state)
+
+    monkeypatch.setattr(_Resolver, "_attrs_carrier_related", staticmethod(related))
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\n"
+        + "(a := [None])\n" * 400
+        + "@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t'select 1')\n"
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert sizes
+    assert max(sizes) < 50
+
+
+@pytest.mark.parametrize("dictionary", [True, False])
+def test_attrs_node_pruning_preserves_reachable_graph(*, dictionary: bool) -> None:
+    facts = {
+        "\0carrier:\0node1",
+        "\0carrier:\0node2",
+        "\0carrier:\0node3",
+        "\0child:root:0:\0node1",
+        "\0alias:\0node1:\0node2",
+        "\0slot:\0node2:0",
+        "\0alias:\0node3:\0node3",
+        "\0slot:\0node3:0",
+    }
+    state: dict[str, bool | _Module] | set[str] = dict.fromkeys(facts, True) if dictionary else facts.copy()
+    _Resolver._attrs_prune_nodes(state)
+    assert "\0slot:\0node2:0" in state
+    assert "\0carrier:\0node3" not in state
+    assert "\0slot:\0node3:0" not in state

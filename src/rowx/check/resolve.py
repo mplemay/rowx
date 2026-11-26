@@ -2370,6 +2370,9 @@ class _Resolver:
             )
         if isinstance(expr, ast.Tuple | ast.List | ast.Set):
             return any(self._attrs_carried_value(item, scope, field, module, globals_) for item in expr.elts)
+        alternatives = self._attrs_expression_branches(expr)
+        if alternatives != [expr]:
+            return any(self._attrs_carried_value(item, scope, field, module, globals_) for item in alternatives)
         return self._attrs_class_value(expr, scope, field, module, globals_) is True
 
     # Receiver and argument evaluation must stay in the same ordered transfer.
@@ -2764,6 +2767,7 @@ class _Resolver:
                     return True
             elif self._attrs_scan_simple(node, scope, field, module, globals_):
                 return True
+            self._attrs_prune_nodes(scope)
             self._attrs_record_exception_state(scope)
         return False
 
@@ -3134,6 +3138,7 @@ class _Resolver:
             source = name(item) if isinstance(item, ast.Name) else None
             if source is not None and _Resolver._attrs_carrier_tracked(source, state):
                 child = f"\0node{namespace}_{item.lineno}_{item.col_offset}"
+                _Resolver._attrs_bind_captured(child, set(), state, binding=False)
                 _Resolver._attrs_link_named_child(child, source, state, value=value(item))
             elif isinstance(item, ast.Tuple | ast.List):
                 children = _Resolver._attrs_flatten_values(item.elts)
@@ -3398,7 +3403,7 @@ class _Resolver:
         return [_Resolver._attrs_capture_child(item, state, value, name, namespace=namespace) for item in values]
 
     @staticmethod
-    def _attrs_prune_nodes(state: set[str]) -> None:
+    def _attrs_prune_nodes(state: dict[str, bool | _Module] | set[str]) -> None:
         nodes = {key.removeprefix("\0carrier:") for key in state if key.startswith("\0carrier:\0node")}
         edges = [key.split(":", 3)[1:] for key in state if key.startswith("\0child:")]
         aliases = [key.split(":", 2)[1:] for key in state if key.startswith("\0alias:")]
@@ -3409,29 +3414,32 @@ class _Resolver:
             for node, other in ((left, right), (right, left))
             if node in nodes and other not in nodes
         )
-        while True:
-            prior = reachable.copy()
-            reachable.update(child for parent, _, child in edges if parent in reachable)
-            reachable.update(
-                node
-                for left, right in aliases
-                for node, other in ((left, right), (right, left))
-                if node in nodes and other in reachable
-            )
-            if reachable == prior:
-                break
+        adjacency: dict[str, set[str]] = {}
+        for parent, _, child in edges:
+            adjacency.setdefault(parent, set()).add(child)
+        for left, right in aliases:
+            adjacency.setdefault(left, set()).add(right)
+            adjacency.setdefault(right, set()).add(left)
+        pending = list(reachable)
+        while pending:
+            for child in adjacency.get(pending.pop(), set()) - reachable:
+                reachable.add(child)
+                pending.append(child)
         dead = nodes - reachable
-        state.difference_update(
-            key
-            for key in state.copy()
-            if key in dead
-            or any(
-                key.startswith(f"{prefix}{node}:") or key == f"{prefix}{node}"
-                for node in dead
-                for prefix in ("\0slot:", "\0carrier:", "\0tuple:", "\0wide:", "\0child:")
+        keys = set()
+        for key in state:
+            parts = key.split(":")
+            owned = len(parts) > 1 and parts[0] in {"\0slot", "\0carrier", "\0tuple", "\0wide", "\0child", "\0alias"}
+            referenced = len(parts) > 1 and (
+                parts[1] in dead or (parts[0] in {"\0child", "\0alias"} and parts[-1] in dead)
             )
-            or (key.startswith("\0alias:") and any(part in dead for part in key.split(":")[1:]))
-        )
+            if key in dead or (owned and referenced):
+                keys.add(key)
+        if isinstance(state, dict):
+            for key in keys:
+                del state[key]
+        else:
+            state.difference_update(keys)
 
     @staticmethod
     def _attrs_sequence_values(
@@ -4475,7 +4483,11 @@ class _Resolver:
             if key.startswith(f"\0slot:{target.id}:"):
                 del scope[key]
         if not isinstance(value, ast.Tuple | ast.List):
-            scope[target.id] = self._attrs_class_value(value, sources, field, module, globals_)
+            scope[target.id] = (
+                self._attrs_carried_value(value, sources, field, module, globals_)
+                if self._attrs_expression_branches(value) != [value]
+                else self._attrs_class_value(value, sources, field, module, globals_)
+            )
             return
         scope[f"\0carrier:{target.id}"] = True
         if isinstance(value, ast.Tuple):
