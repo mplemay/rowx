@@ -2974,8 +2974,8 @@ class _Resolver:
             if conditional_capture is not None and isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name):
-                        self._attrs_bind_conditional(
-                            target.id, node.value, conditional_capture, scope, lambda item: item.id
+                        self._attrs_bind_captured(
+                            target.id, conditional_capture[1], scope, binding=conditional_capture[0]
                         )
             if pop_child is not None and isinstance(node, ast.Assign):
                 for target in node.targets:
@@ -3451,13 +3451,14 @@ class _Resolver:
                     branch, state, value, lambda _: False, context
                 )
             else:
-                branch_children = _Resolver._attrs_capture_child(branch, state, value, name, namespace=namespace)
+                branch_children = _Resolver._attrs_capture_possible_branch(branch, state, value, name, namespace)
             children.update(branch_children)
         binding = value(expr)
         if not children:
             return binding, children, found
         child = f"\0node{namespace}_{expr.lineno}_{expr.col_offset}_conditional"
         _Resolver._attrs_bind_captured(child, set(), state, binding=binding)
+        _Resolver._attrs_link_possible(child, children, state)
         layouts = [_Resolver._attrs_captured_layout({source}, state) for source in children]
         if all(slots is not None and nested is not None for slots, nested in layouts):
             size = max(len(slots) for slots, _ in layouts if slots is not None)
@@ -3474,19 +3475,25 @@ class _Resolver:
         return binding, {child}, found
 
     @staticmethod
-    def _attrs_bind_conditional(
-        dest: str,
-        expr: ast.expr,
-        capture: tuple[bool, set[str], bool],
+    def _attrs_capture_possible_branch(
+        branch: ast.expr,
         state: dict[str, bool | _Module] | set[str],
+        value: Callable[[ast.expr], bool],
         name: Callable[[ast.Name], str],
-    ) -> None:
-        _Resolver._attrs_bind_captured(dest, capture[1], state, binding=capture[0])
-        branches = _Resolver._attrs_expression_branches(expr)
-        if len(branches) > 1:
-            for branch in branches:
-                if isinstance(branch, ast.Name):
-                    _Resolver._attrs_store_fact(state, f"\0mayalias:{dest}:{name(branch)}", value=True)
+        namespace: str,
+    ) -> set[str]:
+        related = _Resolver._attrs_carrier_related(name(branch), state) if isinstance(branch, ast.Name) else set()
+        existing = sorted(item for item in related if item.startswith("\0node"))
+        return (
+            {existing[0]}
+            if existing
+            else _Resolver._attrs_capture_child(branch, state, value, name, namespace=namespace)
+        )
+
+    @staticmethod
+    def _attrs_link_possible(child: str, sources: set[str], state: dict[str, bool | _Module] | set[str]) -> None:
+        for source in sources:
+            _Resolver._attrs_store_fact(state, f"\0mayalias:{child}:{source}", value=True)
 
     @staticmethod
     def _attrs_bind_captured(  # ruff: ignore[complex-structure, too-many-branches]
@@ -3576,6 +3583,7 @@ class _Resolver:
         nodes = {key.removeprefix("\0carrier:") for key in state if key.startswith("\0carrier:\0node")}
         edges = [key.split(":", 3)[1:] for key in state if key.startswith("\0child:")]
         aliases = [key.split(":", 2)[1:] for key in state if key.startswith("\0alias:")]
+        possible = [key.split(":", 2)[1:] for key in state if key.startswith("\0mayalias:")]
         reachable = {child for parent, _, child in edges if parent not in nodes}
         reachable.update(
             node
@@ -3589,6 +3597,8 @@ class _Resolver:
         for left, right in aliases:
             adjacency.setdefault(left, set()).add(right)
             adjacency.setdefault(right, set()).add(left)
+        for left, right in possible:
+            adjacency.setdefault(left, set()).add(right)
         pending = list(reachable)
         while pending:
             for child in adjacency.get(pending.pop(), set()) - reachable:
@@ -3598,9 +3608,17 @@ class _Resolver:
         keys = set()
         for key in state:
             parts = key.split(":")
-            owned = len(parts) > 1 and parts[0] in {"\0slot", "\0carrier", "\0tuple", "\0wide", "\0child", "\0alias"}
+            owned = len(parts) > 1 and parts[0] in {
+                "\0slot",
+                "\0carrier",
+                "\0tuple",
+                "\0wide",
+                "\0child",
+                "\0alias",
+                "\0mayalias",
+            }
             referenced = len(parts) > 1 and (
-                parts[1] in dead or (parts[0] in {"\0child", "\0alias"} and parts[-1] in dead)
+                parts[1] in dead or (parts[0] in {"\0child", "\0alias", "\0mayalias"} and parts[-1] in dead)
             )
             if key in dead or (owned and referenced):
                 keys.add(key)
@@ -6103,12 +6121,11 @@ class _Resolver:
                         if conditional_capture is None:
                             bind(target, captured, aliases, sources)
                     if conditional_capture is not None and isinstance(target, ast.Name):
-                        self._attrs_bind_conditional(
+                        self._attrs_bind_captured(
                             _mangle(class_name, target.id),
-                            item.value,
-                            conditional_capture,
+                            conditional_capture[1],
                             aliases,
-                            lambda part: _mangle(class_name, part.id),
+                            binding=conditional_capture[0],
                         )
                     if pop_child is not None and isinstance(target, ast.Name):
                         bind(target, ast.Name(id=pop_child, ctx=ast.Load()), aliases, pop_source)

@@ -2000,6 +2000,44 @@ def test_attrs_walrus_overwrite_and_conditional_carriers(
     test_attrs_captured_nested_carrier_identity(tmp_path, body, shared=shared, reject=reject)
 
 
+@pytest.mark.parametrize("shared", [True, False])
+@pytest.mark.parametrize(
+    ("body", "reject"),
+    [
+        (
+            "source = [attrs.field()]\nrhs = source if flag else []\nsource.append(FIELD)\nrhs[-1].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "source = [attrs.field()]\nold = source\nrhs = source if flag else []\nsource = []\nrhs.append(FIELD)\nold[-1].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "source = [FIELD]\nold = source\nrhs = source if flag else []\nsource = []\nrhs.clear()\nold[0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "source = [attrs.field()]\nold = source\nrhs = source if flag else []\nsource = [attrs.field()]\nrhs.append(FIELD)\nsource[-1].default(lambda self: 42)",
+            False,
+        ),
+        (
+            "source = [FIELD]\nold = source\nrhs = source if flag else []\nsource = [FIELD]\nrhs.clear()\nsource[0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "source = [attrs.field()]\nrhs = source if flag else []\nother = rhs\nrhs = []\nother.append(FIELD)\nsource[-1].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "source = [FIELD]\nrhs = source if flag else []\nother = rhs\nrhs = []\nother.clear()\nsource[0].default(lambda self: 42)",
+            True,
+        ),
+    ],
+)
+def test_attrs_possible_alias_survives_rebinding(tmp_path: Path, body: str, *, shared: bool, reject: bool) -> None:
+    test_attrs_captured_nested_carrier_identity(tmp_path, "flag = bool(1)\n" + body, shared=shared, reject=reject)
+
+
 def test_attrs_module_captured_nodes_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     original = _Resolver._attrs_carrier_related
     sizes: list[int] = []
@@ -2022,6 +2060,28 @@ def test_attrs_module_captured_nodes_are_bounded(tmp_path: Path, monkeypatch: py
     assert max(sizes) < 50
 
 
+def test_attrs_discarded_possible_aliases_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = _Resolver._attrs_prune_nodes
+    sizes: list[int] = []
+
+    def prune(state: dict[str, bool | _Module] | set[str]) -> None:
+        original(state)
+        sizes.append(len(state))
+
+    monkeypatch.setattr(_Resolver, "_attrs_prune_nodes", staticmethod(prune))
+    path = tmp_path / "case.py"
+    path.write_text(
+        "import attrs\nfrom rowx import query\nspec = attrs.field()\nsource = [spec]\nflag = bool(1)\n"
+        + "rhs = source if flag else []\nrhs = []\n" * 200
+        + "@attrs.define\nclass Row:\n    value: int = spec\nquery[Row](t'select 1')\n"
+    )
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is None
+    assert sizes
+    assert max(sizes) < 100
+
+
 @pytest.mark.parametrize("dictionary", [True, False])
 def test_attrs_node_pruning_preserves_reachable_graph(*, dictionary: bool) -> None:
     facts = {
@@ -2030,12 +2090,21 @@ def test_attrs_node_pruning_preserves_reachable_graph(*, dictionary: bool) -> No
         "\0carrier:\0node3",
         "\0child:root:0:\0node1",
         "\0alias:\0node1:\0node2",
+        "\0mayalias:\0node2:\0node4",
+        "\0carrier:\0node4",
+        "\0slot:\0node4:0",
         "\0slot:\0node2:0",
         "\0alias:\0node3:\0node3",
+        "\0mayalias:\0node3:\0node5",
+        "\0carrier:\0node5",
+        "\0alias:live:\0node5",
         "\0slot:\0node3:0",
     }
     state: dict[str, bool | _Module] | set[str] = dict.fromkeys(facts, True) if dictionary else facts.copy()
     _Resolver._attrs_prune_nodes(state)
     assert "\0slot:\0node2:0" in state
+    assert "\0slot:\0node4:0" in state
+    assert "\0carrier:\0node5" in state
+    assert "\0mayalias:\0node3:\0node5" not in state
     assert "\0carrier:\0node3" not in state
     assert "\0slot:\0node3:0" not in state
