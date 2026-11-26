@@ -1918,6 +1918,19 @@ def test_attrs_selected_receiver_does_not_retain_temporary_edges(
             "source = [attrs.field()]\nresult = (rhs := source)\nrhs[0] = FIELD\nsource[0].default(lambda self: 42)",
             True,
         ),
+        ("rhs = [FIELD, attrs.field()] if True else []\nrhs[1].default(lambda self: 42)", False),
+        ("rhs = [] if False else [attrs.field(), FIELD]\nrhs[1].default(lambda self: 42)", True),
+        ("rhs = [[FIELD]] if True else []\nrhs[0][0].default(lambda self: 42)", True),
+        ("rhs = [[FIELD], [attrs.field()]] if True else []\nrhs[1][0].default(lambda self: 42)", False),
+        (
+            "source = [FIELD]\nrhs = source if True else []\nrhs[0] = attrs.field()\nsource[0].default(lambda self: 42)",
+            False,
+        ),
+        (
+            "source = [attrs.field()]\nrhs = source if True else []\nrhs[0] = FIELD\nsource[0].default(lambda self: 42)",
+            True,
+        ),
+        ("flag = bool(1)\nrhs = [[FIELD]] if flag else []\nrhs[0][0].default(lambda self: 42)", True),
         ("alias = FIELD\nrhs = [alias] if True else []\ndel alias\nrhs[0].default(lambda self: 42)", True),
         (
             "alias = FIELD\nflag = bool(1)\nrhs = [alias] if flag else []\ndel alias\nrhs[0].default(lambda self: 42)",
