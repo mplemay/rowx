@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from string.templatelib import Interpolation, Template
 from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 import pytest
@@ -13,8 +14,9 @@ from rowx_core.errors import (
     RowShapeError,
 )
 from rowx_sqlite import Connection, ConnectOptions, connect
+from rowx_sqlite._compiler import MAX_PARAMETERS
 
-from rowx import query
+from rowx import query, query_unchecked
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -200,6 +202,15 @@ async def test_a_second_call_before_the_first_settles_is_busy(conn: Connection) 
     results = await asyncio.gather(statement.one(conn), statement.one(conn), return_exceptions=True)
     assert results[0] == 1
     assert isinstance(results[1], ConnectionBusyError)
+
+
+@pytest.mark.asyncio
+async def test_the_compile_ceiling_is_the_connections_default_limit(conn: Connection) -> None:
+    # the compiler's ceiling is the bundled build's maximum, which a connection starts at
+    assert conn._impl.variable_limit == MAX_PARAMETERS
+    one = 1
+    items = Template(*[part for i in range(MAX_PARAMETERS) for part in (", " if i else "", Interpolation(one, "one"))])
+    assert await query_unchecked[int](t"SELECT 1 WHERE 1 IN ({items})").one(conn) == 1
 
 
 @pytest.mark.asyncio

@@ -181,7 +181,7 @@ grammar is the one `rowx check`, `rowx migrate` and `rowx.testing` apply to a `s
 
 | URL | Target |
 |---|---|
-| `sqlite:///relative.db` | a path relative to the working directory |
+| `sqlite:///relative.db` | a path relative to the working directory, resolved once (below) |
 | `sqlite:////abs/path.db` | an absolute path |
 | `sqlite:///C:/x.db` | a Windows drive path; `sqlite://///server/share/x.db` is a UNC path |
 | `sqlite::memory:` | a private in-memory database |
@@ -193,11 +193,15 @@ URL.
 
 - A URL has no host (`sqlite://host/x.db`), no query string and no fragment. At run time `connect` rejects every query
   string, and the message names `mode`, `immutable`, `vfs` or `cache` when one of them is the key (`cache=shared` is the
-  shared-cache mode, which is not supported); any other key gets the general no-query-parameters message. The CLI is
-  narrower ([Checker](checker.md#sqlite)). A literal `?` or `#` in a path is written `%3F` or `%23`.
+  shared-cache mode, which is not supported); any other key gets the general no-query-parameters message. The CLI
+  rejects the same forms ([Checker](checker.md#sqlite)). A literal `?` or `#` in a path is written `%3F` or `%23`.
 - An empty path, `sqlite:///:memory:` (write `sqlite::memory:`), `sqlite:path`, a bare path, and a `file:` URI are
-  rejected. A bare `file:` name that arrives through percent-decoding is prefixed with `./`, so SQLite opens a plain
-  file and never parses it as a URI, although the bundled build compiles with `SQLITE_USE_URI`.
+  rejected. A bare `file:` name that arrives through percent-decoding is made absolute (below), or prefixed with `./`
+  where it is still relative, so SQLite opens a plain file and never parses it as a URI, although the bundled build
+  compiles with `SQLITE_USE_URI`.
+- A relative path is made absolute against the working directory once, when `connect`, `Pool` or the checker is
+  called, and never again: a later `os.chdir` does not move a pool, whose new connections keep opening the same file.
+  `..` and symlinks are kept as written. `ConnectOptions.path` itself stays as given.
 - A bare string that is a lone token ending in `.db`, `.sqlite`, `.sqlite3` or `.db3` is rejected as a bare path. Every
   other string without a scheme stays a PostgreSQL keyword DSN.
 - SQLite needs the `rowx[sqlite]` extra. Without it, `import rowx.sqlite` raises `ImportError`, and a `sqlite:` URL

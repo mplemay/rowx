@@ -26,7 +26,6 @@ SCHEMES: Final[dict[str, tuple[str, str]]] = {
     "sqlite": ("rowx_sqlite._backend", "sqlite"),
 }
 SQLITE_HINT: Final[str] = "use `sqlite:///relative.db`, `sqlite:////absolute/path.db` or `sqlite::memory:`"
-SQLITE_MEMORY: Final[str] = "sqlite::memory:"
 SQLITE_MEMORY_FILE: Final[str] = ":memory:"
 SQLITE_SUFFIXES: Final[tuple[str, ...]] = (".db", ".sqlite", ".sqlite3", ".db3")
 # query options that a SQLite URL may not carry, as name -> the values that are rejected (empty rejects any value)
@@ -61,14 +60,16 @@ def _sqlite_error(problem: str) -> UnsupportedSchemeError:
     return UnsupportedSchemeError(f"{problem}; {SQLITE_HINT}")
 
 
-def _check_sqlite_url(token: str) -> None:
-    if token.lower() == SQLITE_MEMORY:
+# Mirrors the grammar of `crates/rowx-sqlite/src/dsn.rs`, so a URL routed to SQLite is one the driver accepts and
+# every rejection carries the hint: only the scheme is case-insensitive, and no query string or fragment is allowed.
+def _check_sqlite_url(url: str) -> None:
+    if url[len("sqlite:") :] == SQLITE_MEMORY_FILE:
         return
-    if not token.lower().startswith("sqlite://"):
+    if not url.lower().startswith("sqlite://"):
         msg = "a SQLite URL needs `//` after the scheme"
         raise _sqlite_error(msg)
     try:
-        parsed = urlparse(token)
+        parsed = urlparse(url)
         options = parse_qsl(parsed.query, keep_blank_values=True)
     except ValueError:
         msg = "the SQLite URL is not valid"
@@ -79,15 +80,26 @@ def _check_sqlite_url(token: str) -> None:
     if parsed.path in {"", "/"}:
         msg = "the SQLite URL has an empty path"
         raise _sqlite_error(msg)
-    # SQLite opens the filename `:memory:` as an in-memory database; strip only the one leading slash
-    if unquote(parsed.path).removeprefix("/").lower() == SQLITE_MEMORY_FILE:
+    # SQLite opens the filename `:memory:` (exactly, case included) as an in-memory database; strip only the one
+    # leading slash
+    if unquote(parsed.path).removeprefix("/") == SQLITE_MEMORY_FILE:
         msg = "an in-memory database is written `sqlite::memory:`"
         raise _sqlite_error(msg)
+    _check_sqlite_suffix(url, options)
+
+
+def _check_sqlite_suffix(url: str, options: list[tuple[str, str]]) -> None:
     for name, value in options:
         rejected = SQLITE_REJECTED_OPTIONS.get(name.lower())
         if rejected is not None and (not rejected or value.lower() in rejected):
             msg = f"the SQLite URL option `{name}` is not supported"
             raise _sqlite_error(msg)
+    if "?" in url:
+        msg = "a SQLite URL takes no query parameters (encode a literal `?` as `%3F`)"
+        raise _sqlite_error(msg)
+    if "#" in url:
+        msg = "a SQLite URL takes no fragment (encode a literal `#` as `%23`)"
+        raise _sqlite_error(msg)
 
 
 def _scheme(dsn: str) -> str | None:
@@ -101,7 +113,11 @@ def _scheme(dsn: str) -> str | None:
         return "embedded"
     lowered = token.lower()
     if lowered.startswith("sqlite:"):
-        _check_sqlite_url(token)
+        # the driver reads the string exactly as given: a space is part of the path, and leading space no scheme
+        if not dsn.lower().startswith("sqlite:"):
+            msg = "a SQLite URL must not start with whitespace"
+            raise _sqlite_error(msg)
+        _check_sqlite_url(dsn)
         return "sqlite"
     if lowered.startswith("file:"):
         msg = "a `file:` URI is not a SQLite target"

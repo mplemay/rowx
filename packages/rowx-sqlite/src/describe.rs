@@ -5,7 +5,7 @@ use rowx_py_core::runtime;
 use rowx_py_core::time::seconds;
 use rowx_sqlite::conn::{ConnectOptions, Connection as SqliteConnection};
 use rowx_sqlite::describe::{self as sqlite, Construct, Structure};
-use rowx_sqlite::dsn;
+use rowx_sqlite::dsn::{self, Target};
 use rowx_sqlite::error::Error;
 use std::time::Duration;
 
@@ -174,7 +174,9 @@ pub fn connect_checker<'py>(
     statement_timeout: f64,
     connect_timeout: Option<f64>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let target = dsn::parse(dsn).map_err(|e| to_py_err(py, &Failure::from(Error::Dsn(e))))?;
+    let target = dsn::parse(dsn)
+        .and_then(Target::absolute)
+        .map_err(|e| to_py_err(py, &Failure::from(Error::Dsn(e))))?;
     let timeout = seconds("statement_timeout", statement_timeout)?;
     // like `connect`, zero means no limit
     let mut options = ConnectOptions::checker(

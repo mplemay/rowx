@@ -453,6 +453,10 @@ pub(crate) fn options_from_py(py: Python<'_>, opts: &Bound<'_, PyAny>) -> PyResu
             ));
         }
     };
+    // fixed here, once: a pool reopens connections later, and a relative path must not follow a `chdir`
+    let target = target
+        .absolute()
+        .map_err(|e| to_py_err(py, &Failure::from(Error::Dsn(e))))?;
     let mode = match opts.getattr("mode")?.extract::<String>()?.as_str() {
         "ro" => OpenMode::ReadOnly,
         "rw" => OpenMode::ReadWrite,
