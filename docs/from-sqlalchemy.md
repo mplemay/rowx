@@ -4,7 +4,7 @@ You have a `Session`, a mapped class, and either `select(User)` or `text()` / `t
 source, a typed row, and a failure when the schema drifts.
 
 rowx is that command. You write the SQL, name the row in ordinary Python, and `rowx check` prepares the statement
-against a live Postgres database. There is no session and no identity map.
+against a live PostgreSQL or SQLite database. There is no session and no identity map.
 
 ```python test
 import asyncio
@@ -54,7 +54,7 @@ and compares the result with `User` before the program runs.
 |---|---|
 | `scalar_one` / `scalar_one_or_none` | `.one` / `.optional` |
 | `session.begin()` | `conn.transaction()` or `pool.transaction()` |
-| `create_async_engine` | `Pool` from `rowx.postgres` |
+| `create_async_engine` | `Pool` from `rowx.postgres` or `rowx.sqlite` |
 | a second lookup that hit the identity map | a second query you wrote |
 | `relationship()` | a `JOIN`, or a second statement |
 | Alembic autogenerate | SQL files and `rowx migrate` |
@@ -75,13 +75,14 @@ statement you write. A second read is a second statement. `relationship()` does 
 `JOIN`, or you run the next query.
 
 You keep the SQL, the transaction, and the pool. The row can be a dataclass or a pydantic model. pyright, mypy, and ty
-see it with no plugin. `rowx check` fails the build when Postgres disagrees with that type.
+see it with no plugin. `rowx check` fails the build when the database disagrees with that type.
 
 ## When to stay
 
 Stay on SQLAlchemy when the application speaks more than one database, when a large unit of work is the model you are
-not rewriting, or when the code depends on identity-map semantics: two lookups return the same instance. rowx is
-Postgres only, and one async driver.
+not rewriting, or when the code depends on identity-map semantics: two lookups return the same instance. rowx speaks
+PostgreSQL and SQLite, with one async driver for each and no dialect layer between them. A SQLite file is
+[SQLite](guide/sqlite.md).
 
 The decision in the other direction is [Why rowx](why.md). The first query, with no mapping table, is
 [First query](guide/get-started.md).

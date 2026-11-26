@@ -12,6 +12,10 @@ Rules of thumb:
 - **Don't write `$n` by hand.** It causes the same count mismatch.
 - **Reusing an expression** (`{a}` twice) creates two parameters.
 
+On SQLite, parameters are untyped, a list or tuple is bound as JSON text (`IN (SELECT value FROM json_each({ids}))`), a
+`$1` or `:name` in static text is rejected, and a cast is `CAST({x} AS TEXT)`. See
+[SQLite](sqlite.md#what-differs-from-postgresql).
+
 ## Nullability overrides
 
 The checker infers column nullability from the catalog and the query plan. When it can't prove a column is NOT NULL, it

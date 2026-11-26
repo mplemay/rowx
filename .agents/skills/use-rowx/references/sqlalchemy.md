@@ -1,6 +1,6 @@
 # From SQLAlchemy
 
-Postgres only. You have a `Session` or an `AsyncSession`, a mapped class, and either `select(User)` or raw SQL
+PostgreSQL and SQLite. You have a `Session` or an `AsyncSession`, a mapped class, and either `select(User)` or raw SQL
 through `text()` or `tstring()`. The rowx form is `query[T](t"...")` on a `Pool`, a connection, or a transaction.
 
 SQLAlchemy Core is command-oriented SQL. The ORM adds a state-oriented unit of work. rowx is the command. The row

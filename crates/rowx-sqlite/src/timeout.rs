@@ -138,6 +138,13 @@ impl Armed {
         slot.fired
     }
 
+    /// Whether the clock has fired, without stopping it.
+    #[must_use]
+    pub(super) fn fired(&self) -> bool {
+        let slot = lock(&self.inner.slot);
+        slot.generation == self.generation && slot.fired
+    }
+
     /// Stops the clock and reports whether it fired meanwhile.
     #[must_use]
     pub(super) fn finish(self) -> bool {

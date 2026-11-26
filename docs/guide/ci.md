@@ -35,6 +35,9 @@ jobs:
       - run: uv run rowx check src
 ```
 
+A SQLite project needs no service: `uv add "rowx[sqlite]"` and `rowx check src --database-url sqlite::memory:` builds
+the database from `[tool.rowx.migrate]` in the job ([SQLite](sqlite.md#check)).
+
 Pin the action versions to commit hashes in your own workflow. Migrate **before** checking: the checker validates
 against whatever schema the database has. With SQL file migrations, [`rowx check --scratch`](migrations.md#checking)
 builds the database itself.

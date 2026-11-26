@@ -97,7 +97,7 @@ async def test_a_closed_session_fails_as_lost(session: SqliteCheckerSession) -> 
 
 
 @pytest.mark.asyncio
-async def test_describe_proves_a_plain_table_column_and_leaves_a_left_join_view_unproven(
+async def test_describe_proves_a_plain_table_column_and_the_preserved_side_of_a_left_join_view(
     session: SqliteCheckerSession,
 ) -> None:
     plain = await session.describe("SELECT id, name FROM users")
@@ -106,7 +106,90 @@ async def test_describe_proves_a_plain_table_column_and_leaves_a_left_join_view_
         ("name", "text", False, "NotNullColumn"),
     ]
     view = await session.describe("SELECT user_id, title FROM user_posts")
-    assert [(c.nullable, c.reason) for c in view.columns] == [(True, "Unproven"), (True, "Unproven")]
+    # the join builds an automatic index, which the bytecode analysis reads: only the right side can be NULL
+    assert [(c.nullable, c.reason) for c in view.columns] == [(False, "NotNullColumn"), (True, "Unproven")]
+
+
+@pytest.mark.asyncio
+async def test_describe_proves_a_computed_column_from_the_bytecode(session: SqliteCheckerSession) -> None:
+    described = await session.describe(
+        "SELECT count(*) AS n, typeof(id) AS t, coalesce(name, 'x') AS c, 'x' AS s FROM users"
+    )
+    assert [(c.name, c.type_key, c.type_name, c.nullable, c.reason) for c in described.columns] == [
+        ("n", "integer", "INTEGER", False, "ComputedExpr"),
+        ("t", "text", "TEXT", False, "ComputedExpr"),
+        ("c", None, "", False, "ComputedExpr"),
+        ("s", "text", "TEXT", False, "ComputedExpr"),
+    ]
+    # a total of +inf and -inf is NaN, which SQLite returns as NULL
+    total = await session.describe("SELECT total(id) AS t FROM users")
+    assert [(c.name, c.type_key, c.nullable, c.reason) for c in total.columns] == [
+        ("t", "real", True, "Unproven"),
+    ]
+    casts = await session.describe("SELECT CAST(id AS TEXT) AS k, upper(name) AS u FROM users")
+    assert [(c.name, c.type_key, c.type_name, c.nullable, c.reason) for c in casts.columns] == [
+        ("k", "text", "TEXT", False, "ComputedExpr"),
+        ("u", "text", "TEXT", False, "ComputedExpr"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_describe_proves_the_left_side_of_a_rowid_left_join(session: SqliteCheckerSession) -> None:
+    described = await session.describe(
+        "SELECT users.id, posts.title, coalesce(posts.title, 'none') AS c FROM users LEFT JOIN posts ON posts.rowid = users.id"
+    )
+    assert [(c.nullable, c.reason) for c in described.columns] == [
+        (False, "NotNullColumn"),
+        (True, "Unproven"),
+        (False, "ComputedExpr"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_describe_leaves_a_column_that_can_be_null_unproven(session: SqliteCheckerSession) -> None:
+    described = await session.describe("SELECT sum(id) AS s, max(id) AS m, avg(id) AS a, id / 1 AS d FROM users")
+    assert [(c.name, c.type_key, c.nullable, c.reason) for c in described.columns] == [
+        ("s", None, True, "Unproven"),
+        ("m", None, True, "Unproven"),
+        ("a", "real", True, "Unproven"),
+        ("d", None, True, "Unproven"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_describe_proves_a_computed_column_of_a_nested_statement(session: SqliteCheckerSession) -> None:
+    for sql in (
+        "SELECT DISTINCT name FROM users UNION SELECT title FROM posts",
+        "SELECT n FROM (SELECT count(*) AS n FROM users GROUP BY name LIMIT 5)",
+        "WITH c AS MATERIALIZED (SELECT id + 1 AS n FROM users) SELECT n FROM c",
+        "SELECT (SELECT count(*) FROM posts)",
+        "SELECT EXISTS (SELECT 1 FROM posts)",
+    ):
+        described = await session.describe(sql)
+        assert [(c.nullable, c.reason) for c in described.columns] == [(False, "ComputedExpr")], sql
+    returning = await session.describe("INSERT INTO posts (user_id, title) VALUES (1, 'x') RETURNING title || '!' AS t")
+    assert [(c.nullable, c.reason) for c in returning.columns] == [(False, "ComputedExpr")]
+
+
+@pytest.mark.asyncio
+async def test_describe_leaves_a_nested_column_that_can_be_null_unproven(session: SqliteCheckerSession) -> None:
+    for sql in (
+        "SELECT (SELECT max(id) FROM users)",
+        "SELECT id FROM users UNION ALL SELECT NULL",
+        "SELECT t.title FROM users LEFT JOIN (SELECT user_id, title FROM posts LIMIT 3) t ON t.user_id = users.id",
+    ):
+        described = await session.describe(sql)
+        assert [(c.nullable, c.reason) for c in described.columns] == [(True, "Unproven")], sql
+
+
+@pytest.mark.asyncio
+async def test_describe_stays_silent_for_a_statement_the_bytecode_does_not_model(
+    session: SqliteCheckerSession,
+) -> None:
+    described = await session.describe("SELECT count(*) OVER () AS n FROM users")
+    assert [(c.nullable, c.reason) for c in described.columns] == [(True, "Unproven")]
+    described = await session.describe("SELECT value FROM json_each('[1]')")
+    assert [(c.type_key, c.nullable, c.reason) for c in described.columns] == [(None, True, "Unproven")]
 
 
 @pytest.mark.asyncio

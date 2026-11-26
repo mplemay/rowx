@@ -3,9 +3,10 @@
 Migrations are plain `.sql` files in the **same format sqlx uses**, so an existing sqlx project can switch without
 renaming files or rewriting its history table.
 
-Shared contracts, filename grammar, checksums and the plan live in `rowx_core` (`packages/rowx-core/src/rowx_core/`
-and `crates/rowx-core/src/migrate/`). The concrete `Migrator` and the bound migration, admin and checker services
-live in `rowx_postgres`. The `rowx migrate` and `rowx database` commands live in `rowx`
+Shared contracts, filename grammar, checksums and the plan live in `rowx_core` (`packages/rowx-core/src/rowx_core/` and
+`crates/rowx-core/src/migrate/`). The concrete `Migrator` and the bound migration, admin and checker services live in
+`rowx_postgres`, and in `rowx_sqlite` for SQLite. The sections down to [SQLite](#sqlite) describe PostgreSQL. The
+`rowx migrate` and `rowx database` commands live in `rowx`
 ([Migrate and database commands](checker.md#migrate-and-database-commands)). The test plugin is
 [rowx.testing](../contributing/testing.md#test-plugin).
 
@@ -161,3 +162,108 @@ the database. A bad directory fails `reset` before the drop.
 - Package-resource migrations ([#306](https://github.com/mplemay/rowx/issues/306)).
 - Python-code migrations, repeatable migrations and squashing.
 - Per-test SQL fixtures ([#307](https://github.com/mplemay/rowx/issues/307)).
+
+## SQLite
+
+`rowx_sqlite.Migrator` (also `rowx.sqlite.Migrator`) reads the same files, with the same filename grammar, the same
+SHA-384 checksum and the same [plan rules](#plan-rules) as PostgreSQL, and `rowx migrate` and `rowx database` run on a
+`sqlite:` file URL. The engine is `crates/rowx-sqlite/src/migrate.rs`, the Python class is
+`packages/rowx-sqlite/src/rowx_sqlite/_migrate.py`, and the bound service is `_services.py`. The neutral parts (the
+plan, the status, and the failure text) are shared in `rowx_core::migrate` and `crates/rowx-py-core/src/migrate.rs`.
+
+```python
+Migrator(path, *, table="_rowx_migrations", create_schemas=(), ignore_missing=False, allow_out_of_order=False)
+```
+
+There is no `locking` option. `run`, `revert`, `skip` and `info` take a `Connection` or a `Pool`, and a `Transaction`,
+or a connection with an open transaction, is `InterfaceError`. A pool with hooks runs them on the caller's loop. The
+statement timeout does not apply to a migration file.
+
+**History table.** The default name is `_rowx_migrations`. The columns are those of sqlx's SQLite `_sqlx_migrations`,
+so a table that sqlx created is read as it is (`table = "_sqlx_migrations"` adopts it):
+
+```sql
+version        BIGINT PRIMARY KEY,
+description    TEXT NOT NULL,
+installed_on   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+success        BOOLEAN NOT NULL,
+checksum       BLOB NOT NULL,
+execution_time BIGINT NOT NULL
+```
+
+The table is created only when it does not exist, in a transaction of its own, and an existing table is never written to
+for that. `table` follows the PostgreSQL identifier rules and may be written `main.name`. SQLite has no schemas, so a
+table in any other schema, and any `create_schemas` entry, are `ValueError`.
+
+**Locking.** There is no advisory lock. The lock is SQLite's own write lock, and the design is:
+
+- **Each migration runs in its own `BEGIN IMMEDIATE` transaction.** It reads the applied set *inside* that transaction,
+  so the work another migrator committed while this one waited is seen, plans the next step from it, runs the file,
+  writes the history row (with `success = 1` and the elapsed time) and commits. A file and its history row land together
+  or not at all, and a file's changes are never recorded without it.
+- **A concurrent migrator waits.** `BEGIN IMMEDIATE` waits for the lock for up to the busy timeout, which comes from
+  `connect_timeout` (10 seconds for `rowx migrate`). It then fails with `DatabaseError` `55P03` and the message
+  `another migrator holds the database`. Two migrators on one file therefore take turns, and each version is applied
+  once.
+- **A `-- no-transaction` file claims its version first.** The marker is the same byte prefix as for PostgreSQL. The
+  migrator commits a history row with `success = 0` in an `IMMEDIATE` transaction, then runs the file outside any
+  transaction, then sets `success = 1`. A crash or a failure leaves the dirty row, and the next run raises
+  `DirtyMigrationError`, as on PostgreSQL. The file runs unlocked, so a second migrator that starts meanwhile sees the
+  claim row and fails with `DirtyMigrationError` at once instead of waiting.
+- **`revert`** mirrors this: a transactional revert deletes the history row in the transaction, and a non-transactional
+  one marks the row dirty, runs the file and deletes the row.
+- `info` and a dry run take no lock and create nothing. The drift gate reads through the read-only session.
+
+**What a file may contain.**
+
+- A file with its own `BEGIN`, `COMMIT` or `ROLLBACK` is rejected when it is prepared, with `SQLITE_AUTH`, and rowx
+  rewrites the message to say so. `SAVEPOINT` and `RELEASE` are allowed, and so is the `BEGIN ... END` of a trigger
+  body. The file runs statement by statement and stops at the first failure.
+- `VACUUM`, `PRAGMA journal_mode`, `ATTACH`, `DETACH` and any table rebuild that needs `PRAGMA foreign_keys = OFF`
+  cannot run inside a transaction (the pragma is a no-op there), so the file starts with `-- no-transaction`. After such
+  a file the migrator turns `foreign_keys` back on and fails the migration if it cannot.
+- A `-- no-transaction` file that leaves a transaction open (an unreleased `SAVEPOINT`) has the work since the
+  `SAVEPOINT` rolled back, and fails the migration.
+- A file that fails in a transaction rolls back and records nothing. The failure is `MigrationFailedError` with
+  `__cause__` the `DatabaseError`, and `.dirty` says whether a row was left with `success = 0`. A failure in the lock,
+  history-table or plan code is a plain `DatabaseError`. A cancel is checked before each step and rolls back the
+  transaction that is open.
+
+**Administration.** `rowx database create|drop|reset|setup` treat a database as a file. See
+[Administration](#sqlite-administration).
+
+### SQLite administration
+
+`SqliteAdmin` (`rowx_sqlite/_admin.py`, `crates/rowx-sqlite/src/admin.rs`) is the administration service. A database
+**name is its file path**, and a `sqlite::memory:` URL has no name, so every `rowx database` command rejects it (exit
+2). Errors map to the SQLSTATEs of the PostgreSQL operations they replace:
+
+| Operation | Behaviour | Failure |
+|---|---|---|
+| `exists` | A regular file is at the path. | |
+| `create` | Creates an empty file exclusively. Nothing is overwritten. The CLI treats an existing file as success. | `42P04` exists; `58030` for a missing directory |
+| `create(template=...)` | Copies a template database with SQLite's backup API, which reads a consistent snapshot, WAL included. | `3D000` template missing; `55P03` when the template stays locked for 5 seconds. The limit bounds only the wait for the template's lock; the backup copy runs as one step with no time limit |
+| `drop` | Removes the file and its `-wal`, `-shm` and `-journal` files. A missing file is not an error, but its orphaned side files are removed too, because a later `create` would replay them. A directory, or a file that is neither empty nor a SQLite database, is refused and nothing is removed. | `XX002` refused; `55006` on Windows when the file is open |
+| `list` | The names of the SQLite files beside the URL's path that start with a prefix, side files excluded. `comment` is `None` and `sessions` is `0`. | |
+| `ready` | Waits up to the connect timeout for the database to be usable: a directory is refused, and an existing file must open as a SQLite database. | `XX002` for a directory or a non-database |
+
+`create_scratch` is `create` with the comment ignored, and `drop` ignores `force`, since a file has no sessions to end.
+A clone made through `VACUUM INTO` could renumber the rowids of a table with no `INTEGER PRIMARY KEY`, so the backup API
+is used. A clone of a WAL file is a WAL file. Dropping a file that connections still hold fails on Windows with a clear
+error. `rowx database reset` validates the migrations before it deletes anything, as on PostgreSQL.
+
+### SQLite tests
+
+The `rowx.testing` provisioner is `rowx_sqlite/_testing.py`. The URL in the environment variable **only selects the
+backend**: it is validated and never opened, created or modified, and `sqlite::memory:` is accepted. The layout:
+
+- The template is `<cache>/rowx-sqlite/rowx_tpl_<p>_<h>.db` under the runner's cache directory, or
+  `rowx-templates-*` in a per-session temporary directory when there is no cache. It is built under a `_tmp_` name,
+  switched to the rollback journal, and moved into place with `os.replace`, so a file under the final name is complete.
+- Each test's clone is `rowx-clones-*/rowx_test_<p>_<hex>.db`, a backup-API copy in a per-session directory, dropped
+  with its side files after the test. `<p>` and `<h>` are those of
+  [rowx.testing](../contributing/testing.md#test-plugin), and the identity includes the bundled SQLite version.
+- A session takes an exclusive hold file `<template>.<pid>.<hex>.hold` (`flock`, or `msvcrt` on Windows) and the
+  project lock `rowx_tpl_<p>.lock`. A stale template is dropped only when no hold is taken, and `--rowx-keep-templates`
+  keeps them.
+- `pytest_addoption` still describes `rowx_database_url_env` as a server URL; for SQLite it is only a selector.

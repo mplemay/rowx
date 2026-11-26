@@ -1,6 +1,7 @@
 pub mod common;
 
-use common::{TestResult, connect, file_options, memory, path, pragma, run};
+use common::{TestResult, backend_of, connect, failure, file_options, memory, path, pragma, run};
+use rowx_core::cancel::Backend;
 use rowx_sqlite::conn::ConnectOptions;
 use rowx_sqlite::conn::Connection;
 use rowx_sqlite::describe::{ColumnInfo, Construct, Describe, NullReason, Structure};
@@ -242,7 +243,7 @@ async fn a_provable_statement_trusts_not_null_and_the_rowid_alias() -> TestResul
 #[tokio::test]
 async fn an_expression_is_unproven() -> TestResult {
     let conn = schema().await?;
-    let got = describe(&conn, "SELECT a + 1 AS n FROM t", from(&["t"])).await?;
+    let got = describe(&conn, "SELECT b || 'x' AS n FROM t", from(&["t"])).await?;
     let n = column(&got, "n")?;
     assert!(n.nullable);
     assert_eq!(
@@ -257,11 +258,11 @@ async fn an_expression_is_unproven() -> TestResult {
 #[tokio::test]
 async fn a_view_source_makes_every_column_unproven() -> TestResult {
     let conn = schema().await?;
-    let got = describe(&conn, "SELECT a FROM v", from(&["v"])).await?;
-    let a = column(&got, "a")?;
-    assert!(a.nullable);
-    assert_eq!(a.reason.name(), "Unproven");
-    assert_eq!(a.reason.detail(), Some("view v"));
+    let got = describe(&conn, "SELECT b FROM v", from(&["v"])).await?;
+    let b = column(&got, "b")?;
+    assert!(b.nullable);
+    assert_eq!(b.reason.name(), "Unproven");
+    assert_eq!(b.reason.detail(), Some("view v"));
     Ok(())
 }
 
@@ -269,8 +270,8 @@ async fn a_view_source_makes_every_column_unproven() -> TestResult {
 async fn views_resolve_case_insensitively_and_in_a_schema() -> TestResult {
     let conn = schema().await?;
     for (sql, parts) in [
-        ("SELECT a FROM V", &["v"][..]),
-        ("SELECT a FROM main.v", &["main", "v"]),
+        ("SELECT b FROM V", &["v"][..]),
+        ("SELECT b FROM main.v", &["main", "v"]),
     ] {
         let structure = Structure {
             sources: vec![names(parts)],
@@ -278,7 +279,7 @@ async fn views_resolve_case_insensitively_and_in_a_schema() -> TestResult {
         };
         let got = describe(&conn, sql, structure).await?;
         assert_eq!(
-            column(&got, "a")?.reason.detail(),
+            column(&got, "b")?.reason.detail(),
             Some(&*format!("view {}", parts.join("."))),
             "{sql}"
         );
@@ -289,8 +290,9 @@ async fn views_resolve_case_insensitively_and_in_a_schema() -> TestResult {
 #[tokio::test]
 async fn a_temp_table_shadows_a_main_table_of_the_same_name() -> TestResult {
     let conn = schema().await?;
-    // the temp view named like a main table is what the name means, and it is not an ordinary table
-    conn.run_raw(|raw| raw.execute_batch("CREATE TEMP VIEW s AS SELECT 1 AS x"))
+    // the temp view named like a main table is what the name means, and it is not an ordinary table; its
+    // column is NULL, so the bytecode proves nothing for it either
+    conn.run_raw(|raw| raw.execute_batch("CREATE TEMP VIEW s AS SELECT NULL AS x"))
         .await??;
     let got = describe(&conn, "SELECT x FROM s", from(&["s"])).await?;
     assert_eq!(column(&got, "x")?.reason.detail(), Some("view s"));
@@ -362,10 +364,11 @@ async fn each_structural_flag_makes_a_base_column_unproven() -> TestResult {
         ),
     ];
     for (cause, structure) in flags {
-        let got = describe(&conn, "SELECT a FROM t", structure).await?;
-        let a = column(&got, "a")?;
-        assert!(a.nullable, "{cause}");
-        assert_eq!(a.reason.detail(), Some(cause));
+        // a nullable column, so the bytecode proves nothing the structure denies
+        let got = describe(&conn, "SELECT b FROM t", structure).await?;
+        let b = column(&got, "b")?;
+        assert!(b.nullable, "{cause}");
+        assert_eq!(b.reason.detail(), Some(cause));
     }
     Ok(())
 }
@@ -657,5 +660,17 @@ async fn a_runtime_connection_still_sets_pragmas() -> TestResult {
     let conn = connect(&memory()).await?;
     run(&conn, "PRAGMA recursive_triggers = ON").await?;
     assert_eq!(pragma(&conn, "recursive_triggers").await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_describe_after_a_cancel_fails_as_an_interrupt() -> TestResult {
+    let conn = schema().await?;
+    backend_of(&conn).send_cancel().await?;
+    let err = describe(&conn, "SELECT a + 1 FROM t", from(&["t"]))
+        .await
+        .err()
+        .ok_or("the flag should stop the describe")?;
+    assert_eq!(failure(&err), Some(("SQLITE_INTERRUPT", "57014")));
     Ok(())
 }

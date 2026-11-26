@@ -1868,7 +1868,8 @@ def test_difference_keys_name_corpus_cases() -> None:
 @pytest.mark.db
 def test_difference_list_matches_doc() -> None:
     text = TYPES_DOC.read_text()
-    section = text.split(DOC_HEADING, 1)[1]
+    # the section ends at the next heading (the SQLite tables follow it)
+    section = text.split(DOC_HEADING, 1)[1].split("\n## ", 1)[0]
     # a bullet may wrap onto indented continuation lines
     bullets = " ".join(section.splitlines()).split("- `")[1:]
     documented = {}

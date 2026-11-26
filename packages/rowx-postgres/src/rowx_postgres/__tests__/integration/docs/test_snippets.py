@@ -19,6 +19,9 @@ ROOT: Final[Path] = next(parent for parent in Path(__file__).resolve().parents i
 DOC_GLOBS: Final[tuple[str, ...]] = ("README.md", "docs/**/*.md", ".agents/skills/**/*.md")
 # the pages whose snippets run the in-process engine, so they need the companion and not a server
 EMBEDDED_DOCS: Final[frozenset[str]] = frozenset({"docs/guide/embedded.md"})
+# a snippet that references SQLite belongs to the SQLite lane: the `rowx_sqlite` runner owns it (it has no database
+# marker), so this runner skips it. Both runners apply this rule independently, so together they partition the snippets
+SQLITE_WORDS: Final[tuple[str, ...]] = ("rowx.sqlite", "rowx_sqlite", "sqlite:")
 SNIPPET: Final[Pattern[str]] = re_compile(r"^```python test\n(?P<body>.*?)^```$", MULTILINE | DOTALL)
 USE_ROWX_SKILL: Final[Path] = ROOT / ".agents" / "skills" / "use-rowx" / "SKILL.md"
 USE_ROWX_SKILL_URL: Final[str] = "https://github.com/mplemay/rowx/blob/main/.agents/skills/use-rowx/SKILL.md"
@@ -78,7 +81,12 @@ SERVER_SNIPPETS: Final[dict[tuple[str, str], pytest.MarkDecorator]] = {
 
 
 def _bodies() -> list[tuple[Path, int, str]]:
-    return [(path, i, m["body"]) for path in _doc_files() for i, m in enumerate(SNIPPET.finditer(path.read_text()))]
+    return [
+        (path, i, m["body"])
+        for path in _doc_files()
+        for i, m in enumerate(SNIPPET.finditer(path.read_text()))
+        if not any(word in m["body"] for word in SQLITE_WORDS)
+    ]
 
 
 def _marks(path: Path, body: str) -> list[pytest.MarkDecorator]:

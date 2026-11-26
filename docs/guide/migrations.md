@@ -1,5 +1,8 @@
 # Migrations
 
+This page is PostgreSQL. SQLite uses the same files and commands, with a per-migration `BEGIN IMMEDIATE` transaction and
+no advisory lock: see [SQLite](sqlite.md#migrations) and the [reference](../reference/migrations.md#sqlite).
+
 Migrations are plain `.sql` files in the format [sqlx](https://github.com/launchbadge/sqlx) uses. `Migrator` applies
 them in version order, records each one in a history table, and holds an advisory lock while it works. `rowx migrate`
 and `rowx database` do the same from the command line, and `rowx check` and the `rowx.testing` pytest plugin build on
@@ -324,6 +327,7 @@ with TemporaryDirectory() as tmp:
 
   In a transactional file, `SET LOCAL lock_timeout = '5s';` scopes the setting to that migration. A plain `SET` stays on
   the connection.
+
 - **Privileges.** The role needs `CREATE` on the schema that holds the history table, and `rowx check`'s drift gate
   needs `SELECT` on it.
 

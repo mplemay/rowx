@@ -36,7 +36,9 @@ type StatusRow = tuple[int, str, MigrationState, int | None, int | None, bytes |
 # (version, elapsed in ns); None for a dry run or a skip
 type ResultRow = tuple[int, int | None]
 type MigrationEntry = tuple[int, str, Literal["simple", "reversible"], Path, Path | None, bytes, bytes | None, bool]
-type NullReasonName = Literal["NotNullColumn", "NullableColumn", "Unproven", "OverrideBang", "OverrideQuestion"]
+type NullReasonName = Literal[
+    "NotNullColumn", "NullableColumn", "ComputedExpr", "Unproven", "OverrideBang", "OverrideQuestion"
+]
 
 def sqlite_version() -> str: ...
 

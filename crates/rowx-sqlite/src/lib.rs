@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod bytecode;
 pub mod cancel;
 pub mod conn;
 pub mod describe;

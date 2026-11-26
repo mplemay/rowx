@@ -19,7 +19,7 @@ classifiers = [
     "Topic :: Database",
     "Framework :: AsyncIO",
 ]
-keywords = ["sql", "postgresql", "postgres", "typed", "async", "t-string"]
+keywords = ["sql", "postgresql", "postgres", "sqlite", "typed", "async", "t-string"]
 dependencies = ["rowx-core==0.4.2", "pathspec>=1.1.1,<2"]
 
 [project.optional-dependencies]

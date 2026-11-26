@@ -2,8 +2,8 @@
 
 `crates/rowx-postgres/src/types.rs` is the only OID-to-Python table. `rowx_postgres._core.type_table()` exports it, and
 `rowx_postgres/_types.py` is the typed view the checker and the row plan read. No other file may hard-code OID to
-Python mappings. The generated rows are [Postgres type mapping](../types.md). This page is the rules that table does
-not spell out.
+Python mappings. The generated rows are [Type tables](../types.md). This page is the rules that table does not spell
+out. Everything down to [SQLite](#sqlite) is PostgreSQL.
 
 Codec dispatch uses the `tokio_postgres::types::Type` from `Statement::params()` and `Column::type_()`, not the bare
 OID. tokio-postgres resolves non-builtin OIDs at prepare time. rowx then resolves recursively: a domain uses its base
@@ -73,3 +73,116 @@ reports only the `record` pseudo-type. Adding a supported type means appending a
    treated as sequences.
 3. **Extracting parameters.** `bool` is checked before `int`, and `datetime` before `date`, because they are
    subclasses.
+
+## SQLite
+
+SQLite has no column types in the sense PostgreSQL does. Any column can hold any storage class (`INTEGER`, `REAL`,
+`TEXT`, `BLOB` or NULL), and the declared type only sets an *affinity*. rowx therefore reads each column by its
+**declared type**, which `sqlite3_column_decltype` reports, and checks that every stored value fits it.
+
+`packages/rowx-sqlite/src/types.rs` is the table of kinds (`rowx_sqlite._core.type_table()`), and
+`crates/rowx-sqlite/src/types.rs` is the lookup from a declared type to a kind. `rowx_sqlite/_types.py` is the typed
+view the checker reads. The generated rows are [Type tables](../types.md#sqlite).
+
+### Lookup
+
+1. The declared type is case-folded and trimmed, and `(n, m)` arguments are removed. If the result is one of the names
+   `BOOLEAN`, `DATETIME`, `TIMESTAMP`, `TIMESTAMPTZ`, `DATETIMETZ`, `DATE`, `TIME`, `DECIMAL`, `NUMERIC`, `UUID` or
+   `JSON`, that is the kind.
+2. Otherwise SQLite's own affinity rules apply, in SQLite's order. A name containing `INT` is `integer`. Then `CHAR`,
+   `CLOB` or `TEXT` is `text`, `BLOB` is `blob`, and `REAL`, `FLOA` or `DOUB` is `real`.
+3. Any other name has numeric affinity, and the kind is `any`: each value decodes by its storage class.
+4. A column with **no declared type** is *untyped*. That is a table column declared without a type, and every
+   expression (`count(*)`, `upper(name)`, a literal). It decodes like `any`, and it is always nullable.
+
+The substring rules in step 2 are SQLite's, and they catch names you did not mean: `POINT` and `INTERVAL` contain
+`INT`, so they are `integer`, and a stored point or interval raises `DecodeError`. Every name in step 1 has numeric
+affinity in SQLite, which matters for the traps below.
+
+A table declared `STRICT` accepts only `INT`, `INTEGER`, `REAL`, `TEXT`, `BLOB` and `ANY` as column types, and SQLite
+enforces them. In a strict table the kinds are `integer`, `real`, `text`, `blob` and `any`, and `ANY` decodes by
+storage class. A date, a UUID or a decimal in a strict table is `text`. The rich kinds need an ordinary table.
+
+### Reading
+
+A stored value whose storage class disagrees with the column's kind is `DecodeError` and is never coerced. NULL is
+`None` for every kind.
+
+| Kind | Reads |
+|---|---|
+| `integer` | INTEGER only. TEXT is never parsed. |
+| `real` | REAL, and an INTEGER that converts exactly (magnitude up to 2^53). `inf` and `-inf` are accepted. |
+| `text` | TEXT that is valid UTF-8. Invalid UTF-8 is `DecodeError`. |
+| `blob` | BLOB. |
+| `boolean` | The INTEGER `0` or `1`. Any other value, `42` included, is `DecodeError`. |
+| `datetime` | ISO-8601 text, an INTEGER as Unix seconds, or a REAL as a Julian day. |
+| `datetimetz` | The same, with text that carries an offset. |
+| `date` | TEXT `YYYY-MM-DD`. |
+| `time` | TEXT `HH:MM:SS[.ffffff]`. |
+| `decimal` | TEXT exactly, an INTEGER as its digits, or a REAL as the shortest text that names the same value. |
+| `uuid` | TEXT, hyphenated, in either case, or a 16-byte BLOB. |
+| `json` | TEXT, parsed with `json.loads`. A stored INTEGER or REAL reads as the JSON number it spells. |
+| `any` | INTEGER as `int`, REAL as `float`, TEXT as `str`, BLOB as `bytes`. |
+
+Temporal text and the other formats, in detail:
+
+- **Text form.** `YYYY-MM-DD`, then optionally a space or `T` and `HH:MM`, `HH:MM:SS` or `HH:MM:SS.fraction`. A date
+  alone is midnight. More than six fraction digits are accepted only when the extra digits are zeros. Years are 1 to
+  9999, and anything outside that is `DecodeError`.
+- **Offsets.** A `datetime` column rejects text with an offset. A `datetimetz` column requires one (`Z`, `±HH:MM`,
+  `±HHMM` or `±HH`), converts to UTC and returns an aware UTC value. A number in a `datetimetz` column is already UTC.
+- **Julian days** are rounded to the millisecond, as SQLite computes them.
+- **`decimal`** accepts a sign, digits, a fraction and an exponent. NaN, `Infinity`, whitespace and `_` are rejected. A
+  REAL is formatted with Rust's shortest round-trip form, which can differ in spelling from Python's `repr` (`1e21`
+  and `1e+21`) while naming the same value. A non-finite REAL, which a stored `1e400` becomes, is `DecodeError`.
+- **`uuid`** reads 36 hyphenated characters in either case, or exactly 16 bytes.
+- **`json`** syntax is checked when the text is parsed, in the binding. A BLOB is SQLite's binary `JSONB`, which rowx
+  does not read: it is `DecodeError`. A non-finite REAL is `DecodeError`.
+- **`any`** never coerces: it is how a strict `ANY` column and a column with no affinity read.
+
+### Writing
+
+A parameter has no declared type, so the Python type of the value chooses how it is stored:
+
+| Python | Stored |
+|---|---|
+| `bool` | INTEGER `0` or `1` |
+| `int` | INTEGER. A value outside 64 bits is `EncodeError`. |
+| `float` | REAL. `nan` is `EncodeError`, because SQLite would store NULL. `inf` is stored. |
+| `str` | TEXT. A NUL or a lone surrogate is `EncodeError`. |
+| `bytes`, `bytearray`, `memoryview` | BLOB |
+| `datetime`, naive | TEXT `YYYY-MM-DD HH:MM:SS[.ffffff]` as it is |
+| `datetime`, aware | TEXT `YYYY-MM-DD HH:MM:SS[.ffffff]+00:00`, converted to UTC |
+| `date` | TEXT `YYYY-MM-DD` |
+| `time` | TEXT `HH:MM:SS[.ffffff]`. An aware `time` is `EncodeError`. |
+| `Decimal` | TEXT |
+| `UUID` | TEXT, lowercase and hyphenated |
+| `dict`, `list`, `tuple` | TEXT from `json.dumps`, with `allow_nan=False`. A value that is not serialisable is `EncodeError`. |
+| `None` | NULL |
+| anything else | `EncodeError` |
+
+`bool` is checked before `int`, and `datetime` before `date`, because they are subclasses. A parameter is never rejected
+for its type, and SQLite then applies the column's affinity when it stores the value: a `str` bound into an `INTEGER`
+column that looks like a number is stored as an INTEGER. The checker emits no parameter type mismatch
+([Checker](checker.md#sqlite)).
+
+Because a parameter does not know its column, **a naive or aware mismatch is not an `EncodeError` on write**, as it is
+on PostgreSQL. A naive `datetime` bound for a `TIMESTAMPTZ` column is stored without an offset, and an aware one bound
+for a `TIMESTAMP` column is stored with `+00:00`. Both surface as `DecodeError` when the row is read. Bind an aware
+value for a `TIMESTAMPTZ` column and a naive one for a `TIMESTAMP` column.
+
+An `EncodeError` carries a note that names the parameter (`while binding parameter ?2`). A statement with more
+parameters than `SQLITE_LIMIT_VARIABLE_NUMBER` is `InterfaceError`.
+
+### Affinity traps
+
+- **`DECIMAL` and `NUMERIC` are lossy.** The names have numeric affinity, so SQLite converts the text `'1.50'` to the
+  REAL `1.5` when it stores it. The `Decimal` that is read is `1.5`, and a value with more than about 15 significant
+  digits loses its tail. To keep exact text, declare the column `TEXT` and read a `str`. There is no column type
+  override ([#302](https://github.com/mplemay/rowx/issues/302)).
+- **`JSON` normalises bare numbers.** The same affinity turns the text `1.0` into the INTEGER `1`, so it reads back as
+  `1`, and a large integer can lose precision. `1e400` overflows to infinity and fails to decode. JSON objects and
+  arrays are stored as TEXT and are unchanged.
+- **`POINT`, `INTERVAL` and any name containing `INT`** are integers (above).
+- **A value that does not fit raises.** A date column holding the text `'tomorrow'` is `DecodeError` when read. The
+  checker cannot see stored data, only declarations.

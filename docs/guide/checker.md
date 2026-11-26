@@ -40,6 +40,16 @@ statement_timeout = "10s"         # integer + unit: ms|s|min
 
 `[tool.rowx.migrate]` is described under [Migrations](migrations.md).
 
+## SQLite
+
+`--database-url sqlite:///app.db` checks against a SQLite file, opened read-only, and `sqlite::memory:` builds the
+database from your migrations first (it implies `--scratch`). The checker proves less than on PostgreSQL: a column is
+NOT NULL only for plain tables, so a view, a subquery, an outer join or an expression reads
+`nullability not proven, assumed nullable`. A column with no declared type, such as `count(*)`, is untyped and accepts
+any annotation, and parameters are untyped, so there is no `param-type-mismatch`. A SQL error carries `code`, such as
+`SQLITE_ERROR`, in the JSON output. A runnable example is [SQLite](sqlite.md#check), and the contract is the
+[checker reference](../reference/checker.md#sqlite).
+
 The database URL comes from `--database-url`, else from the environment variable named by `database_url_env`
 (default `DATABASE_URL`). Described metadata is not written to disk, so a check needs a database. The checker does not
 infer which executor will run a query. It checks every recognized `query` and `query_unchecked` construction, including
@@ -172,6 +182,10 @@ any `rowx_check_*` database whose tag is over an hour old and which has no sessi
 cancelled CI run doesn't leak its database. Administrative connections use the URL's own database, or `postgres`
 (`template1` when the target is `postgres`), and fall back from `postgres` to `template1` where `postgres` is missing or
 refused.
+
+With a SQLite file the session is read-only and hardened (`trusted_schema=OFF`, defensive mode, and no value-setting
+`PRAGMA`), and `--scratch` builds a temporary file in the system temp directory, so it needs no server and no
+`CREATEDB`.
 
 The checker's session is read-only by default (`default_transaction_read_only = on`) and sets `statement_timeout`,
 `lock_timeout` and `idle_in_transaction_session_timeout`.

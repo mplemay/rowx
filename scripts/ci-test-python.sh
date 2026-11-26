@@ -12,7 +12,7 @@ case "$CI_PACKAGE" in
   postgres | cli | embedded) uv run maturin develop --locked -m packages/rowx-postgres/Cargo.toml ;;
 esac
 case "$CI_PACKAGE" in
-  sqlite | cli) uv run maturin develop --locked -m packages/rowx-sqlite/Cargo.toml ;;
+  sqlite | cli | postgres) uv run maturin develop --locked -m packages/rowx-sqlite/Cargo.toml ;;
 esac
 
 case "$CI_PACKAGE" in
