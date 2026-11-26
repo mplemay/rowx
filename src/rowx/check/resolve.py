@@ -2385,7 +2385,32 @@ class _Resolver:
         globals_: dict[str, bool | _Module],
         *,
         receiver_id: int | None = None,
+        possible_aliases: bool = True,
     ) -> bool | None:
+        if (
+            possible_aliases
+            and isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr
+            in {"append", "extend", "insert", "pop", "remove", "clear", "reverse", "sort", "__setitem__"}
+        ):
+            alternatives = self._attrs_possible_alias_states(node.func.value, scope, lambda item: item.id)
+            if alternatives:
+                found = self._attrs_scan_mutation_call(
+                    node, scope, field, module, globals_, receiver_id=receiver_id, possible_aliases=False
+                )
+                for branch in alternatives:
+                    if not isinstance(branch, dict):
+                        continue
+                    branch_found = self._attrs_scan_mutation_call(
+                        node, branch, field, module, globals_, receiver_id=receiver_id, possible_aliases=False
+                    )
+                    found = found or branch_found
+                    for key in tuple(branch):
+                        if key.startswith("\0alias:") and key not in scope:
+                            del branch[key]
+                    self._attrs_join_scope(scope, branch)
+                return found
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -2949,8 +2974,8 @@ class _Resolver:
             if conditional_capture is not None and isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name):
-                        self._attrs_bind_captured(
-                            target.id, conditional_capture[1], scope, binding=conditional_capture[0]
+                        self._attrs_bind_conditional(
+                            target.id, node.value, conditional_capture, scope, lambda item: item.id
                         )
             if pop_child is not None and isinstance(node, ast.Assign):
                 for target in node.targets:
@@ -3063,11 +3088,17 @@ class _Resolver:
         prefix = f"\0slot:{parent}:"
         positions = {key.removeprefix(prefix).removesuffix(":known") for key in state if key.startswith(prefix)}
         length = len({position for position in positions if position.isdigit()})
-        if index < 0 and -length <= index:
+        if index < 0 and f"\0wide:{parent}" not in state and -length <= index:
             index += length
         if index < 0:
-            return None
+            index = -1
         children = {key.split(":", 3)[3] for key in state if key.startswith(f"\0child:{parent}:{index}:")}
+        if (
+            f"\0wide:{parent}" in state
+            and f"\0slot:{parent}:{index}" not in state
+            and f"\0slot:{parent}:{index}:known" not in state
+        ):
+            children.update(key.split(":", 3)[3] for key in state if key.startswith(f"\0child:{parent}:*:"))
         return next(iter(children)) if len(children) == 1 else None
 
     @staticmethod
@@ -3090,9 +3121,16 @@ class _Resolver:
                 for key in state
                 if key.startswith(prefix) and key.removeprefix(prefix).removesuffix(":known").isdigit()
             })
-            position = index + length if index < 0 else index
+            position = index + length if index < 0 and f"\0wide:{parent}" not in state else index
             edge = f"\0child:{parent}:{position}:"
             children.update(key.removeprefix(edge) for key in state if key.startswith(edge))
+            if (
+                f"\0wide:{parent}" in state
+                and f"\0slot:{parent}:{position}" not in state
+                and f"\0slot:{parent}:{position}:known" not in state
+            ):
+                wildcard = f"\0child:{parent}:*:"
+                children.update(key.removeprefix(wildcard) for key in state if key.startswith(wildcard))
         return children
 
     @staticmethod
@@ -3287,33 +3325,6 @@ class _Resolver:
             _Resolver._attrs_forget_nested(root, state)
             return results
 
-        def capture_sequence(values: list[ast.expr]) -> tuple[list[tuple[bool, set[str], bool]], bool, bool]:
-            results = []
-            wide = False
-            found = False
-            root = f"\0capture{id(expr)}"
-            for part in values:
-                result = _Resolver._attrs_capture_ordered_child(
-                    part.value if isinstance(part, ast.Starred) else part, state, value, scan, context
-                )
-                found |= result[2]
-                if isinstance(part, ast.Starred):
-                    slots, nested = _Resolver._attrs_captured_layout(result[1], state)
-                    if slots is None or nested is None:
-                        wide = True
-                        results.append(result)
-                    else:
-                        results.extend(
-                            (binding, children, result[2]) for binding, children in zip(slots, nested, strict=True)
-                        )
-                else:
-                    results.append(result)
-                for index, (_, children, _) in enumerate(results):
-                    for nested_child in children:
-                        _Resolver._attrs_store_fact(state, f"\0child:{root}:{index}:{nested_child}", value=True)
-            _Resolver._attrs_forget_nested(root, state)
-            return results, wide, found
-
         if isinstance(expr, ast.IfExp):
             return _Resolver._attrs_capture_conditional_child(expr, state, value, scan, context)
         selected = _Resolver._attrs_literal_slot(expr) if isinstance(expr, ast.Subscript) else None
@@ -3322,30 +3333,97 @@ class _Resolver:
             results = capture_values(values)
             return results[index][0], results[index][1], any(result[2] for result in results)
         if isinstance(expr, ast.Tuple | ast.List):
-            results, wide, found = capture_sequence(expr.elts)
-            child = f"\0node{namespace}_{expr.lineno}_{expr.col_offset}"
-            _Resolver._attrs_bind_captured(child, set(), state, binding=False)
-            for index, (binding, children, _) in enumerate(results):
-                for offset in (index, index - len(results)):
-                    _Resolver._attrs_store_slot(state, f"\0slot:{child}:{offset}", value=binding)
-                for nested in children:
-                    _Resolver._attrs_store_fact(state, f"\0child:{child}:{index}:{nested}", value=True)
-            _Resolver._attrs_store_fact(state, f"\0carrier:{child}", value=True)
-            if wide:
-                _Resolver._attrs_store_fact(state, f"\0wide:{child}", value=True)
-            if isinstance(expr, ast.Tuple):
-                _Resolver._attrs_store_fact(state, f"\0tuple:{child}", value=True)
-            binding = any(result[0] for result in results)
-            _Resolver._attrs_store_fact(state, child, value=binding)
-            return binding, {child}, found
+            return _Resolver._attrs_capture_sequence_child(expr, state, value, scan, context)
         if isinstance(expr, ast.NamedExpr):
             binding, children, found = _Resolver._attrs_capture_ordered_child(expr.value, state, value, scan, context)
             _Resolver._attrs_bind_captured(name(expr.target), children, state, binding=binding)
             record()
             return binding, children, found
+        if (source := _Resolver._attrs_shallow_copy_source(expr)) is not None:
+            binding, children, found = _Resolver._attrs_capture_ordered_child(source, state, value, scan, context)
+            child = f"\0node{namespace}_{expr.lineno}_{expr.col_offset}_copy"
+            _Resolver._attrs_bind_captured(child, children, state, binding=binding)
+            for edge in list(state):
+                if edge.startswith("\0alias:") and child in edge.split(":")[1:]:
+                    if isinstance(state, dict):
+                        del state[edge]
+                    else:
+                        state.discard(edge)
+            return binding, {child}, found
+        carrier = _Resolver._attrs_carrier_path(expr, name, state) if isinstance(expr, ast.Subscript) else None
         binding = value(expr)
-        children = _Resolver._attrs_capture_child(expr, state, value, name, namespace=namespace)
+        children = (
+            {carrier}
+            if carrier is not None
+            else _Resolver._attrs_capture_child(expr, state, value, name, namespace=namespace)
+        )
         return binding, children, scan(expr)
+
+    @staticmethod
+    def _attrs_capture_sequence_child(
+        expr: ast.Tuple | ast.List,
+        state: dict[str, bool | _Module] | set[str],
+        value: Callable[[ast.expr], bool],
+        scan: Callable[[ast.expr], bool],
+        context: tuple[Callable[[ast.Name], str], str, Callable[[], None]],
+    ) -> tuple[bool, set[str], bool]:
+        namespace = context[1]
+        results, wide_at, found = _Resolver._attrs_capture_sequence(expr, state, value, scan, context)
+        child = f"\0node{namespace}_{expr.lineno}_{expr.col_offset}"
+        _Resolver._attrs_bind_captured(child, set(), state, binding=False)
+        for index, (binding, children, _) in enumerate(results):
+            if wide_at is not None and index >= wide_at:
+                for nested in children:
+                    _Resolver._attrs_store_fact(state, f"\0child:{child}:*:{nested}", value=True)
+                continue
+            offsets = (index,) if wide_at is not None else (index, index - len(results))
+            for offset in offsets:
+                _Resolver._attrs_store_slot(state, f"\0slot:{child}:{offset}", value=binding)
+            for nested in children:
+                _Resolver._attrs_store_fact(state, f"\0child:{child}:{index}:{nested}", value=True)
+        _Resolver._attrs_store_fact(state, f"\0carrier:{child}", value=True)
+        if wide_at is not None:
+            _Resolver._attrs_store_fact(state, f"\0wide:{child}", value=True)
+        if isinstance(expr, ast.Tuple):
+            _Resolver._attrs_store_fact(state, f"\0tuple:{child}", value=True)
+        binding = any(result[0] for result in results)
+        _Resolver._attrs_store_fact(state, child, value=binding)
+        return binding, {child}, found
+
+    @staticmethod
+    def _attrs_capture_sequence(
+        expr: ast.Tuple | ast.List,
+        state: dict[str, bool | _Module] | set[str],
+        value: Callable[[ast.expr], bool],
+        scan: Callable[[ast.expr], bool],
+        context: tuple[Callable[[ast.Name], str], str, Callable[[], None]],
+    ) -> tuple[list[tuple[bool, set[str], bool]], int | None, bool]:
+        results = []
+        wide_at = None
+        found = False
+        root = f"\0capture{id(expr)}"
+        for part in expr.elts:
+            result = _Resolver._attrs_capture_ordered_child(
+                part.value if isinstance(part, ast.Starred) else part, state, value, scan, context
+            )
+            found |= result[2]
+            if isinstance(part, ast.Starred):
+                slots, nested = _Resolver._attrs_captured_layout(result[1], state)
+                if slots is None or nested is None:
+                    if wide_at is None:
+                        wide_at = len(results)
+                    results.append(result)
+                else:
+                    results.extend(
+                        (binding, children, result[2]) for binding, children in zip(slots, nested, strict=True)
+                    )
+            else:
+                results.append(result)
+            for index, (_, children, _) in enumerate(results):
+                for nested_child in children:
+                    _Resolver._attrs_store_fact(state, f"\0child:{root}:{index}:{nested_child}", value=True)
+        _Resolver._attrs_forget_nested(root, state)
+        return results, wide_at, found
 
     @staticmethod
     def _attrs_capture_conditional_child(
@@ -3394,6 +3472,21 @@ class _Resolver:
             _Resolver._attrs_store_fact(state, f"\0wide:{child}", value=True)
         _Resolver._attrs_store_fact(state, f"\0carrier:{child}", value=True)
         return binding, {child}, found
+
+    @staticmethod
+    def _attrs_bind_conditional(
+        dest: str,
+        expr: ast.expr,
+        capture: tuple[bool, set[str], bool],
+        state: dict[str, bool | _Module] | set[str],
+        name: Callable[[ast.Name], str],
+    ) -> None:
+        _Resolver._attrs_bind_captured(dest, capture[1], state, binding=capture[0])
+        branches = _Resolver._attrs_expression_branches(expr)
+        if len(branches) > 1:
+            for branch in branches:
+                if isinstance(branch, ast.Name):
+                    _Resolver._attrs_store_fact(state, f"\0mayalias:{dest}:{name(branch)}", value=True)
 
     @staticmethod
     def _attrs_bind_captured(  # ruff: ignore[complex-structure, too-many-branches]
@@ -3624,7 +3717,62 @@ class _Resolver:
                         scope[f"\0slot:{carrier}:{index}"] = binding
                         scope[f"\0slot:{carrier}:{index - len(updated)}"] = binding
 
+    @staticmethod
+    def _attrs_possible_alias_states(
+        node: ast.stmt | ast.expr,
+        state: dict[str, bool | _Module] | set[str],
+        name: Callable[[ast.Name], str],
+    ) -> list[dict[str, bool | _Module] | set[str]]:
+        branches = []
+        targets = [node] if isinstance(node, ast.expr) else _Resolver._attrs_write_targets(node)
+        for target in targets:
+            if isinstance(node, ast.AugAssign | ast.expr):
+                receiver = target
+            elif isinstance(target, ast.Subscript):
+                receiver = target.value
+            else:
+                continue
+            if not isinstance(receiver, ast.expr):
+                continue
+            carrier = _Resolver._attrs_carrier_path(receiver, name, state)
+            if carrier is None:
+                continue
+            related = _Resolver._attrs_carrier_related(carrier, state)
+            for key in state:
+                if not key.startswith("\0mayalias:"):
+                    continue
+                _, left, right = key.split(":", 2)
+                if left in related or right in related:
+                    branch = state.copy()
+                    _Resolver._attrs_store_fact(branch, f"\0alias:{left}:{right}", value=True)
+                    branches.append(branch)
+        return branches
+
     def _attrs_transfer_writes(  # ruff: ignore[too-many-arguments]
+        self,
+        node: ast.stmt,
+        scope: dict[str, bool | _Module],
+        *,
+        write: tuple[bool, str, Callable[[ast.expr], bool]],
+        writes: dict[int, list[bool] | None],
+        additions: list[bool] | None,
+        captured_children: list[set[str]] | None = None,
+    ) -> None:
+        alternatives = self._attrs_possible_alias_states(node, scope, lambda item: item.id)
+        self._attrs_transfer_writes_inner(
+            node, scope, write=write, writes=writes, additions=additions, captured_children=captured_children
+        )
+        for branch in alternatives:
+            if isinstance(branch, dict):
+                self._attrs_transfer_writes_inner(
+                    node, branch, write=write, writes=writes, additions=additions, captured_children=captured_children
+                )
+                for key in tuple(branch):
+                    if key.startswith("\0alias:") and key not in scope:
+                        del branch[key]
+                self._attrs_join_scope(scope, branch)
+
+    def _attrs_transfer_writes_inner(  # ruff: ignore[too-many-arguments]
         self,
         node: ast.stmt,
         scope: dict[str, bool | _Module],
@@ -5116,7 +5264,13 @@ class _Resolver:
             writes: dict[int, list[bool] | None] | None = None,
             additions: list[bool] | None = None,
             captured_children: list[set[str]] | None = None,
+            possible: bool = True,
         ) -> None:
+            alternatives = (
+                self._attrs_possible_alias_states(item, aliases, lambda part: _mangle(class_name, part.id))
+                if possible
+                else []
+            )
             for original_target in self._attrs_write_targets(item):
                 self._attrs_widen_write(
                     original_target, aliases, lambda part: _mangle(class_name, part.id), value=value
@@ -5237,6 +5391,22 @@ class _Resolver:
                     if updated is not None:
                         set_slots(related, aliases, updated)
 
+            for branch in alternatives:
+                if isinstance(branch, set):
+                    transfer_writes(
+                        item,
+                        branch,
+                        value=value,
+                        writes=writes,
+                        additions=additions,
+                        captured_children=captured_children,
+                        possible=False,
+                    )
+                    branch.difference_update(
+                        key for key in branch.copy() if key.startswith("\0alias:") and key not in aliases
+                    )
+                    aliases.update(branch)
+
         def scan_ifexp(item: ast.IfExp, aliases: set[str]) -> None:
             scan(item.test, aliases)
             branches = []
@@ -5266,7 +5436,29 @@ class _Resolver:
             for possible in exception_states:
                 possible.update(aliases)
 
-        def scan(item: ast.AST, aliases: set[str], *, receiver_id: int | None = None) -> None:  # ruff: ignore[complex-structure, too-many-return-statements, too-many-branches, too-many-statements, too-many-locals]
+        def scan(  # ruff: ignore[complex-structure, too-many-return-statements, too-many-branches, too-many-statements, too-many-locals]
+            item: ast.AST, aliases: set[str], *, receiver_id: int | None = None, possible_aliases: bool = True
+        ) -> None:
+            if (
+                possible_aliases
+                and isinstance(item, ast.Call)
+                and isinstance(item.func, ast.Attribute)
+                and item.func.attr
+                in {"append", "extend", "insert", "pop", "remove", "clear", "reverse", "sort", "__setitem__"}
+            ):
+                alternatives = self._attrs_possible_alias_states(
+                    item.func.value, aliases, lambda part: _mangle(class_name, part.id)
+                )
+                if alternatives:
+                    scan(item, aliases, receiver_id=receiver_id, possible_aliases=False)
+                    for branch in alternatives:
+                        if isinstance(branch, set):
+                            scan(item, branch, receiver_id=receiver_id, possible_aliases=False)
+                            branch.difference_update(
+                                key for key in branch.copy() if key.startswith("\0alias:") and key not in aliases
+                            )
+                            aliases.update(branch)
+                    return
             if (
                 isinstance(item, ast.Call)
                 and isinstance(item.func, ast.Attribute)
@@ -5911,11 +6103,12 @@ class _Resolver:
                         if conditional_capture is None:
                             bind(target, captured, aliases, sources)
                     if conditional_capture is not None and isinstance(target, ast.Name):
-                        self._attrs_bind_captured(
+                        self._attrs_bind_conditional(
                             _mangle(class_name, target.id),
-                            conditional_capture[1],
+                            item.value,
+                            conditional_capture,
                             aliases,
-                            binding=conditional_capture[0],
+                            lambda part: _mangle(class_name, part.id),
                         )
                     if pop_child is not None and isinstance(target, ast.Name):
                         bind(target, ast.Name(id=pop_child, ctx=ast.Load()), aliases, pop_source)

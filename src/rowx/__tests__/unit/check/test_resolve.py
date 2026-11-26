@@ -1931,6 +1931,14 @@ def test_attrs_selected_receiver_does_not_retain_temporary_edges(
             True,
         ),
         ("flag = bool(1)\nrhs = [[FIELD]] if flag else []\nrhs[0][0].default(lambda self: 42)", True),
+        (
+            "flag = bool(1)\nsource = [attrs.field()]\nrhs = source if flag else []\nrhs[0] = FIELD\nsource[0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "flag = bool(1)\nsource = [FIELD]\nrhs = source if flag else []\nrhs[0] = attrs.field()\nsource[0].default(lambda self: 42)",
+            True,
+        ),
         ("alias = FIELD\nrhs = [alias] if True else []\ndel alias\nrhs[0].default(lambda self: 42)", True),
         (
             "alias = FIELD\nflag = bool(1)\nrhs = [alias] if flag else []\ndel alias\nrhs[0].default(lambda self: 42)",
@@ -1943,6 +1951,46 @@ def test_attrs_selected_receiver_does_not_retain_temporary_edges(
         (
             "alias = attrs.field()\nitems = []\nitems.extend((rhs := ([alias] if True else [FIELD])))\ndel alias\nrhs[0].default(lambda self: 42)",
             False,
+        ),
+        ("source = iter((FIELD, FIELD))\n(rhs := [*source, attrs.field()])\nrhs[1].default(lambda self: 42)", True),
+        ("source = iter(())\n(rhs := [*source, [FIELD]])\nrhs[0][0].default(lambda self: 42)", True),
+        ("source = iter((FIELD, FIELD))\n(rhs := [attrs.field(), *source])\nrhs[0].default(lambda self: 42)", False),
+        ("items = [[attrs.field()]]\n(rhs := items[0])\nrhs[0] = FIELD\nitems[0][0].default(lambda self: 42)", True),
+        (
+            "items = [[attrs.field()]]\n(rhs := items.copy())\nrhs[0][0] = FIELD\nitems[0][0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "items = [[FIELD]]\n(rhs := items.copy())\nrhs[0] = [attrs.field()]\nitems[0][0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "items = [[FIELD]]\n(rhs := items.copy())\nrhs[0] = [attrs.field()]\nrhs[0][0].default(lambda self: 42)",
+            False,
+        ),
+        (
+            "flag = bool(1)\nsource = [attrs.field()]\nrhs = source if flag else []\nrhs.append(FIELD)\nsource[-1].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "flag = bool(1)\nsource = [attrs.field()]\nrhs = source if flag else []\nrhs.append(((rhs := []), FIELD)[1])\nsource[-1].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "flag = bool(1)\nsource = [attrs.field()]\nrhs = source if flag else []\nrhs.extend([FIELD])\nsource[-1].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "flag = bool(1)\nsource = [attrs.field()]\nrhs = source if flag else []\nrhs += [FIELD]\nsource[-1].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "flag = bool(1)\nsource = [[attrs.field()]]\nrhs = source if flag else []\nrhs[0].append(FIELD)\nsource[0][-1].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "flag = bool(1)\nsource = [FIELD]\nrhs = source if flag else []\nrhs.clear()\nsource[0].default(lambda self: 42)",
+            True,
         ),
     ],
 )
