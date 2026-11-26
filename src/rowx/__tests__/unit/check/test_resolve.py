@@ -1101,6 +1101,22 @@ def test_attrs_ifexp_keeps_fresh_class_shadow(tmp_path: Path) -> None:
         ("items = [FIELD]\nsource = [attrs.field(), FIELD]\nitems[:] = source\nitems[1].default(lambda self: 1)", True),
         ("items = [FIELD]\nsource = [attrs.field()]\nitems[:] = [*source]\nitems[0].default(lambda self: 1)", False),
         (
+            "source=[attrs.field()]\nitems=[FIELD]\nitems.__setitem__(slice(None), [*source])\nitems[0].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "source=[FIELD]\nitems=[attrs.field()]\nitems.__setitem__(slice(None), [*source])\nitems[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "source=[[FIELD]]\nitems=[attrs.field()]\nitems.__setitem__(slice(None), [*source])\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "source=[attrs.field()]\nitems=[]\nitems.extend([*source, (source := [FIELD])])\nitems[0].default(lambda self: 1)",
+            False,
+        ),
+        (
             "items = [FIELD, attrs.field()]\nitems.__setitem__(slice(None), [attrs.field(), FIELD])\nitems[0].default(lambda self: 1)",
             False,
         ),
@@ -1306,20 +1322,68 @@ def test_attrs_ifexp_keeps_fresh_class_shadow(tmp_path: Path) -> None:
             "alias=attrs.field()\nitems=[FIELD, FIELD]\nitems.__setitem__(slice(None), [alias, (alias := FIELD)])\nitems[0].default(lambda self: 1)",
             False,
         ),
+        (
+            "alias=FIELD\nitems=[]\nitems += (rhs := [alias, (alias := attrs.field())])\ndel alias\nitems[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=FIELD\n(rhs := [alias, (alias := attrs.field())])\ndel alias\nrhs[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=attrs.field()\n(rhs := [alias, (alias := FIELD)])\ndel alias\nrhs[0].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "alias=FIELD\nsaved=(rhs := [alias, (alias := attrs.field())])\ndel alias\nsaved[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=attrs.field()\nsaved=(rhs := [alias, (alias := FIELD)])\nrhs[0]=FIELD\nsaved[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=attrs.field()\nitems=[]\nitems += (rhs := [alias, (alias := FIELD)])\ndel alias\nitems[0].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "alias=FIELD\nitems=[]\nitems.extend((rhs := [alias, (alias := attrs.field())]))\ndel alias\nrhs[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=attrs.field()\nitems=[]\nitems.extend((rhs := [alias, (alias := FIELD)]))\ndel alias\nrhs[0].default(lambda self: 1)",
+            False,
+        ),
+        (
+            "alias=FIELD\nitems=[]\nitems += [(rhs := [alias, (alias := attrs.field())])]\ndel alias\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=FIELD\nitems=[attrs.field(), attrs.field()]\nitems.__setitem__(slice(None), (rhs := [alias, (alias := attrs.field())]))\ndel alias\nitems[0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=attrs.field()\nitems=[]\nitems += [(rhs := [alias, (alias := FIELD)])]\nrhs[0]=FIELD\nitems[0][0].default(lambda self: 1)",
+            True,
+        ),
+        (
+            "alias=FIELD\nitems=[]\nitems += [(rhs := [alias, (alias := attrs.field())])]\nrhs[0]=attrs.field()\nitems[0][0].default(lambda self: 1)",
+            False,
+        ),
         ("items=[]\nitems += [(alias := [FIELD]), [attrs.field()]]\nitems[0][0].default(lambda self: 1)", True),
         (
-            "items=([attrs.field()],)\nold=items\nitems += [(alias := [FIELD])]\nitems[1][0].default(lambda self: 1)",
+            "items=([attrs.field()],)\nold=items\nitems += ((alias := [FIELD]),)\nitems[1][0].default(lambda self: 1)",
             True,
         ),
         ("items=[[attrs.field()]]\nold=items\nitems += [(alias := [FIELD])]\nold[1][0].default(lambda self: 1)", True),
         (
-            "items=([attrs.field()],)\nold=items\nitems += [(alias := [FIELD])]\nold[0][0].default(lambda self: 1)",
+            "items=([attrs.field()],)\nold=items\nitems += ((alias := [FIELD]),)\nold[0][0].default(lambda self: 1)",
             False,
         ),
         ("items=[]\nitems += [(alias := [attrs.field()]), [FIELD]]\nitems[0][0].default(lambda self: 1)", False),
         ("items=[]\nitems.insert((index := 0), [FIELD])\nitems[0][0].default(lambda self: 1)", True),
         ("items=[[attrs.field()]]\nitems.insert((index := 0), [FIELD])\nitems[1][0].default(lambda self: 1)", False),
-        ("items=[[attrs.field()]]\nitems.insert(index, [FIELD])\nitems[1][0].default(lambda self: 1)", True),
+        ("items=[[attrs.field()]]\nitems.insert(int('1'), [FIELD])\nitems[1][0].default(lambda self: 1)", True),
         ("items=[[FIELD]]\nitems[0]=[FIELD, attrs.field()]\nitems[0][0].default(lambda self: 1)", True),
         ("items=[[FIELD]]\nitems[0]=[FIELD, attrs.field()]\nitems[0][1].default(lambda self: 1)", False),
         ("items=[[attrs.field()]]\nitems[0]=(child := [FIELD])\nitems[0][0].default(lambda self: 1)", True),

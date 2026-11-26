@@ -2197,23 +2197,18 @@ class _Resolver:
                 else self._attrs_scan_ifexp(node, scope, field, module, globals_)
             )
         if isinstance(node, ast.NamedExpr):
-            earlier = (
-                self._attrs_class_value(node.value, scope, field, module, globals_)
-                if isinstance(node.value, ast.Subscript)
-                else False
+            _, _, found = self._attrs_capture_ordered_child(
+                node,
+                scope,
+                lambda part: self._attrs_carried_value(part, scope, field, module, globals_),
+                lambda part: self._attrs_scan_eager(part, scope, field, module, globals_),
+                (
+                    lambda part: part.id,
+                    str(module.path).encode().hex(),
+                    lambda: self._attrs_record_exception_state(scope),
+                ),
             )
-            if self._attrs_scan_eager(node.value, scope, field, module, globals_):
-                return True
-            binding = (
-                earlier
-                if isinstance(node.value, ast.Subscript)
-                else self._attrs_class_value(node.value, scope, field, module, globals_)
-            )
-            self._attrs_bind_target((node.target, node.value), scope, field, module, globals_=globals_)
-            if isinstance(node.value, ast.Subscript):
-                scope[node.target.id] = binding
-            self._attrs_record_exception_state(scope)
-            node = ast.Constant(value=None)
+            return found
         if isinstance(node, ast.ClassDef):
             return self._attrs_scan_nested_class(node, scope, field, module, globals_)
         if isinstance(node, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef):
@@ -2460,7 +2455,11 @@ class _Resolver:
                         scope,
                         lambda part: self._attrs_carried_value(part, scope, field, module, globals_),
                         lambda part: self._attrs_scan_eager(part, scope, field, module, globals_),
-                        (lambda part: part.id, str(module.path).encode().hex()),
+                        (
+                            lambda part: part.id,
+                            str(module.path).encode().hex(),
+                            lambda: self._attrs_record_exception_state(scope),
+                        ),
                     )
                     arguments.append(binding)
                     possible |= binding
@@ -2855,7 +2854,11 @@ class _Resolver:
                 scope,
                 lambda part: self._attrs_carried_value(part, scope, field, module, globals_),
                 lambda part: self._attrs_scan_eager(part, scope, field, module, globals_),
-                (lambda part: part.id, str(module.path).encode().hex()),
+                (
+                    lambda part: part.id,
+                    str(module.path).encode().hex(),
+                    lambda: self._attrs_record_exception_state(scope),
+                ),
             )
             additions, augmented_children = self._attrs_captured_layout(children, scope)
             if found:
@@ -3238,9 +3241,9 @@ class _Resolver:
         state: dict[str, bool | _Module] | set[str],
         value: Callable[[ast.expr], bool],
         scan: Callable[[ast.expr], bool],
-        context: tuple[Callable[[ast.Name], str], str],
+        context: tuple[Callable[[ast.Name], str], str, Callable[[], None]],
     ) -> tuple[bool, set[str], bool]:
-        name, namespace = context
+        name, namespace, record = context
 
         def capture_values(values: list[ast.expr]) -> list[tuple[bool, set[str], bool]]:
             root = f"\0capture{id(expr)}"
@@ -3253,36 +3256,103 @@ class _Resolver:
             _Resolver._attrs_forget_nested(root, state)
             return results
 
+        def capture_sequence(values: list[ast.expr]) -> tuple[list[tuple[bool, set[str], bool]], bool, bool]:
+            results = []
+            wide = False
+            found = False
+            root = f"\0capture{id(expr)}"
+            for part in values:
+                result = _Resolver._attrs_capture_ordered_child(
+                    part.value if isinstance(part, ast.Starred) else part, state, value, scan, context
+                )
+                found |= result[2]
+                if isinstance(part, ast.Starred):
+                    slots, nested = _Resolver._attrs_captured_layout(result[1], state)
+                    if slots is None or nested is None:
+                        wide = True
+                        results.append(result)
+                    else:
+                        results.extend(
+                            (binding, children, result[2]) for binding, children in zip(slots, nested, strict=True)
+                        )
+                else:
+                    results.append(result)
+                for index, (_, children, _) in enumerate(results):
+                    for nested_child in children:
+                        _Resolver._attrs_store_fact(state, f"\0child:{root}:{index}:{nested_child}", value=True)
+            _Resolver._attrs_forget_nested(root, state)
+            return results, wide, found
+
         selected = _Resolver._attrs_literal_slot(expr) if isinstance(expr, ast.Subscript) else None
         if selected is not None:
             values, index = selected
             results = capture_values(values)
             return results[index][0], results[index][1], any(result[2] for result in results)
-        if (
-            isinstance(expr, ast.Tuple | ast.List)
-            and (values := _Resolver._attrs_flatten_values(expr.elts)) is not None
-        ):
-            results = capture_values(values)
+        if isinstance(expr, ast.Tuple | ast.List):
+            results, wide, found = capture_sequence(expr.elts)
             child = f"\0node{namespace}_{expr.lineno}_{expr.col_offset}"
-            _Resolver._attrs_forget_nested(child, state)
+            _Resolver._attrs_bind_captured(child, set(), state, binding=False)
             for index, (binding, children, _) in enumerate(results):
                 for offset in (index, index - len(results)):
                     _Resolver._attrs_store_slot(state, f"\0slot:{child}:{offset}", value=binding)
                 for nested in children:
                     _Resolver._attrs_store_fact(state, f"\0child:{child}:{index}:{nested}", value=True)
             _Resolver._attrs_store_fact(state, f"\0carrier:{child}", value=True)
+            if wide:
+                _Resolver._attrs_store_fact(state, f"\0wide:{child}", value=True)
             if isinstance(expr, ast.Tuple):
                 _Resolver._attrs_store_fact(state, f"\0tuple:{child}", value=True)
             binding = any(result[0] for result in results)
             _Resolver._attrs_store_fact(state, child, value=binding)
-            return binding, {child}, any(result[2] for result in results)
+            return binding, {child}, found
         if isinstance(expr, ast.NamedExpr):
-            found = scan(expr)
-            source = expr.target
-            return value(source), _Resolver._attrs_capture_child(source, state, value, name, namespace=namespace), found
+            binding, children, found = _Resolver._attrs_capture_ordered_child(expr.value, state, value, scan, context)
+            _Resolver._attrs_bind_captured(name(expr.target), children, state, binding=binding)
+            record()
+            return binding, children, found
         binding = value(expr)
         children = _Resolver._attrs_capture_child(expr, state, value, name, namespace=namespace)
         return binding, children, scan(expr)
+
+    @staticmethod
+    def _attrs_bind_captured(  # ruff: ignore[complex-structure, too-many-branches]
+        dest: str, children: set[str], state: dict[str, bool | _Module] | set[str], *, binding: bool
+    ) -> None:
+        source = next(iter(children)) if len(children) == 1 else None
+        if source == dest:
+            _Resolver._attrs_store_fact(state, dest, value=binding)
+            return
+        sources = state.copy()
+        related = _Resolver._attrs_carrier_related(dest, state)
+        keys = {
+            key
+            for key in state
+            if key.startswith((f"\0slot:{dest}:", f"\0child:{dest}:"))
+            or key in {dest, f"\0carrier:{dest}", f"\0tuple:{dest}", f"\0wide:{dest}"}
+            or (key.startswith("\0alias:") and any(part in related for part in key.split(":")[1:]))
+        }
+        if isinstance(state, dict):
+            for key in keys:
+                del state[key]
+        else:
+            state.difference_update(keys)
+        for edge in _Resolver._attrs_reconnect_carriers(related - {dest}):
+            _Resolver._attrs_store_fact(state, edge, value=True)
+        _Resolver._attrs_store_fact(state, dest, value=binding)
+        if source is not None:
+            for key in sources:
+                if key.startswith(f"\0slot:{source}:"):
+                    copied = key.replace(f"\0slot:{source}:", f"\0slot:{dest}:", 1)
+                    if isinstance(state, dict) and isinstance(sources, dict):
+                        state[copied] = sources[key]
+                    elif isinstance(state, set):
+                        state.add(copied)
+            for kind in ("carrier", "tuple", "wide"):
+                if f"\0{kind}:{source}" in sources:
+                    _Resolver._attrs_store_fact(state, f"\0{kind}:{dest}", value=True)
+            if _Resolver._attrs_carrier_tracked(source, sources):
+                _Resolver._attrs_store_fact(state, f"\0alias:{dest}:{source}", value=True)
+            _Resolver._attrs_copy_nested(dest, source, state, sources)
 
     @staticmethod
     def _attrs_captured_layout(
@@ -4361,7 +4431,8 @@ class _Resolver:
         *,
         globals_: dict[str, bool | _Module],
     ) -> None:
-        target, value = pair
+        target, original = pair
+        value = self._attrs_captured_source(original) or original
         sources = scope.copy()
         if isinstance(target, ast.Name):
             if isinstance(value, ast.Name) and value.id == target.id:
@@ -4894,6 +4965,8 @@ class _Resolver:
                 )
 
         def bind(target: ast.expr, value: ast.expr, aliases: set[str], sources: set[str]) -> None:
+            if isinstance(value, ast.NamedExpr):
+                value = value.target
             if isinstance(target, ast.Name):
                 dest = _mangle(class_name, target.id)
                 if isinstance(value, ast.Name) and name(value) == dest:
@@ -5101,6 +5174,10 @@ class _Resolver:
                 scan(value, before)
             return bound
 
+        def record_exception(aliases: set[str]) -> None:
+            for possible in exception_states:
+                possible.update(aliases)
+
         def scan(item: ast.AST, aliases: set[str], *, receiver_id: int | None = None) -> None:  # ruff: ignore[complex-structure, too-many-return-statements, too-many-branches, too-many-statements, too-many-locals]
             if (
                 isinstance(item, ast.Call)
@@ -5190,15 +5267,17 @@ class _Resolver:
                 scan_ifexp(item, aliases)
                 return
             if isinstance(item, ast.NamedExpr):
-                earlier = shared(item.value, aliases) if isinstance(item.value, ast.Subscript) else False
-                scan(item.value, aliases)
-                bind(item.target, item.value, aliases, aliases.copy())
-                if isinstance(item.value, ast.Subscript):
-                    aliases.discard(_mangle(class_name, item.target.id))
-                    if earlier:
-                        aliases.add(_mangle(class_name, item.target.id))
-                for possible in exception_states:
-                    possible.update(aliases)
+                self._attrs_capture_ordered_child(
+                    item,
+                    aliases,
+                    lambda part: shared(part, aliases),
+                    lambda part: scan(part, aliases) or False,
+                    (
+                        lambda part: _mangle(class_name, part.id),
+                        str(klass.module.path).encode().hex(),
+                        lambda: record_exception(aliases),
+                    ),
+                )
                 return
             if (
                 isinstance(item, ast.Attribute)
@@ -5403,7 +5482,11 @@ class _Resolver:
                             aliases,
                             lambda part: shared(part, aliases),
                             scan_argument,
-                            (lambda part: _mangle(class_name, part.id), str(klass.module.path).encode().hex()),
+                            (
+                                lambda part: _mangle(class_name, part.id),
+                                str(klass.module.path).encode().hex(),
+                                lambda: record_exception(aliases),
+                            ),
                         )
                         arguments.append(binding)
                         possible |= binding
@@ -5570,7 +5653,11 @@ class _Resolver:
                         aliases,
                         lambda part: shared(part, aliases),
                         scan_augmented,
-                        (lambda part: _mangle(class_name, part.id), str(klass.module.path).encode().hex()),
+                        (
+                            lambda part: _mangle(class_name, part.id),
+                            str(klass.module.path).encode().hex(),
+                            lambda: record_exception(aliases),
+                        ),
                     )
                     additions, augmented_children = self._attrs_captured_layout(children, aliases)
                 else:
