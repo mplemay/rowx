@@ -240,7 +240,8 @@ class SqliteProvisioner(Provisioner):
     @override
     async def drop(self, name: str) -> None:
         if (path := self._live.get(name)) is not None:
-            await drop_database(str(path))
+            # as on PostgreSQL, a test database goes even when a test left a connection open
+            await drop_database(str(path), force=True)
             del self._live[name]
 
     @override

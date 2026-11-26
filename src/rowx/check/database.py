@@ -28,7 +28,11 @@ def add_parsers(subparsers: _SubParsersAction[ArgumentParser]) -> None:
     setup = commands.add_parser("setup")
 
     for parser in (drop, reset):
-        parser.add_argument("--force", action="store_true")
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="PostgreSQL: end other sessions first; SQLite: skip the open-connection check and accept an empty file",
+        )
         parser.add_argument("-y", dest="yes", action="store_true")
     for parser in (create, drop, reset, setup):
         parser.add_argument("--database-url", metavar="URL")

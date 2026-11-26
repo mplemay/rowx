@@ -3,6 +3,8 @@ import re
 import secrets
 import sqlite3
 from random import Random
+from string.templatelib import Interpolation, Template
+from time import perf_counter
 from typing import Final
 
 import pytest
@@ -10,6 +12,8 @@ from rowx_core._compiler import compile_parts as compile_parts_impl
 from rowx_sqlite._compiler import (
     COMPILER,
     DIALECT,
+    MAX_PARAMETERS,
+    VERIFY_CACHE_MAX_CHARS,
     VERIFY_CACHE_SIZE,
     Compiled,
     _verify_parameters,
@@ -84,8 +88,30 @@ def test_nested_flatten_and_renumber() -> None:
     assert values == [1, 2, 1]
 
 
-def test_no_parameter_ceiling() -> None:
-    assert DIALECT.max_parameters is None
+def nested(count: int) -> Template:
+    return Template(*[Interpolation(FIRST_VALUE, "x") for _ in range(count)])
+
+
+def test_the_parameter_ceiling_is_the_bundled_variable_number() -> None:
+    assert DIALECT.max_parameters == MAX_PARAMETERS == 32766
+    _, values = compile_template(nested(MAX_PARAMETERS), dynamic=False)
+    assert len(values) == MAX_PARAMETERS
+    with pytest.raises(TypeError, match=r"a query takes at most 32766 parameters, got 32767"):
+        compile_template(nested(MAX_PARAMETERS + 1), dynamic=False)
+
+
+def test_a_self_nested_template_fails_at_the_ceiling_without_expanding() -> None:
+    # 2^40 parameters if it were expanded in full
+    level = t"{FIRST_VALUE}"
+    for _ in range(40):
+        level = t"{level},{level}"
+    start = perf_counter()
+    with pytest.raises(TypeError, match=r"a query takes at most 32766 parameters, got 32767"):
+        compile_template(level, dynamic=True)
+    assert perf_counter() - start < 5
+
+
+def test_compile_parts_leaves_the_count_to_the_connection() -> None:
     c = compile_parts([""] * 70000)
     assert len(c.placeholders) == 69999
     assert c.sql[c.placeholders[-1][0] : c.placeholders[-1][1]] == "?69999"
@@ -166,6 +192,18 @@ def test_a_rejected_statement_is_rejected_every_time(monkeypatch: pytest.MonkeyP
 
 def test_the_verification_cache_is_bounded() -> None:
     assert _verify_parameters.cache_info().maxsize == VERIFY_CACHE_SIZE
+
+
+def test_a_large_statement_is_verified_but_not_remembered() -> None:
+    _verify_parameters.cache_clear()
+    padding = "x" * VERIFY_CACHE_MAX_CHARS
+    compiled, _ = compile_template(t"SELECT {FIRST_VALUE} AS {padding:ident}", dynamic=True)
+    assert len(compiled.sql) > VERIFY_CACHE_MAX_CHARS
+    assert _verify_parameters.cache_info().currsize == 0
+    with pytest.raises(TypeError, match="parameter in SQLite"):
+        compile_template(t"SELECT ?1, {FIRST_VALUE} AS {padding:ident}", dynamic=True)
+    compile_template(t"SELECT {FIRST_VALUE}", dynamic=False)
+    assert _verify_parameters.cache_info().currsize == 1
 
 
 def test_dollar_is_an_identifier_character_inside_a_name() -> None:

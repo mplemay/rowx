@@ -71,12 +71,18 @@ pub fn create_database(
     })
 }
 
+/// `force` skips the check that no other connection holds the database open (outside Windows, where the
+/// operating system refuses on its own).
+///
 /// # Errors
 /// As `database_exists`; a missing file is not an error.
 #[pyfunction]
-pub fn drop_database(py: Python<'_>, name: String) -> PyResult<Bound<'_, PyAny>> {
+#[pyo3(signature = (name, *, force=false))]
+pub fn drop_database(py: Python<'_>, name: String, force: bool) -> PyResult<Bound<'_, PyAny>> {
     future_into_py(py, async move {
-        sqlite::drop_database(&name).await.map_err(AdminFailure)?;
+        sqlite::drop_database(&name, force)
+            .await
+            .map_err(AdminFailure)?;
         Ok(())
     })
 }

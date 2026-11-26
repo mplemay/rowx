@@ -43,6 +43,8 @@ pub enum DsnError {
     NotUtf8,
     #[error("the database path contains a NUL byte; {}", HINT)]
     Nul,
+    #[error("the working directory cannot be read to resolve the relative database path")]
+    WorkingDirectory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +54,20 @@ pub enum Target {
 }
 
 impl Target {
+    /// Resolves a relative path against the working directory once, so every connection opened from the
+    /// result names the same file even after `chdir`. Symlinks and `..` are left alone, as `open` would.
+    ///
+    /// # Errors
+    /// [`DsnError::WorkingDirectory`] when the working directory cannot be read (or the path is empty).
+    pub fn absolute(self) -> Result<Self, DsnError> {
+        match self {
+            Self::Memory => Ok(Self::Memory),
+            Self::File(path) => std::path::absolute(&path)
+                .map(Self::File)
+                .map_err(|_| DsnError::WorkingDirectory),
+        }
+    }
+
     /// The name handed to `sqlite3_open_v2`, which never parses it as a URI.
     ///
     /// Omitting `SQLITE_OPEN_URI` is not enough: the bundled build compiles with `SQLITE_USE_URI`, which
@@ -423,6 +439,39 @@ mod tests {
             assert_eq!(flags, expected, "{mode:?}");
             assert!(!flags.contains(OpenFlags::SQLITE_OPEN_URI));
         }
+    }
+
+    #[test]
+    fn absolute_resolves_a_relative_path_against_the_working_directory() -> Result<(), DsnError> {
+        let cwd = std::env::current_dir().map_err(|_| DsnError::WorkingDirectory)?;
+        assert_eq!(file("rel.db").absolute()?, Target::File(cwd.join("rel.db")));
+        assert_eq!(
+            file("dir/sub/rel.db").absolute()?,
+            Target::File(cwd.join("dir/sub/rel.db"))
+        );
+        assert_eq!(Target::Memory.absolute()?, Target::Memory);
+        let already = Target::File(cwd.join("abs.db"));
+        assert_eq!(already.clone().absolute()?, already);
+        assert_eq!(already.clone().absolute()?.absolute()?, already);
+        Ok(())
+    }
+
+    #[test]
+    fn an_absolute_file_name_is_never_read_as_a_uri() -> Result<(), DsnError> {
+        let target = parse("sqlite:///file:x.db%3Fmode%3Dmemory")?.absolute()?;
+        let Target::File(path) = &target else {
+            return Err(DsnError::EmptyPath);
+        };
+        assert!(path.is_absolute());
+        assert!(path.ends_with("file:x.db?mode=memory"));
+        let open = target.open_path();
+        let head = open
+            .as_os_str()
+            .as_encoded_bytes()
+            .get(..5)
+            .map(<[u8]>::to_vec);
+        assert_ne!(head.as_deref(), Some(b"file:".as_slice()));
+        Ok(())
     }
 
     #[test]

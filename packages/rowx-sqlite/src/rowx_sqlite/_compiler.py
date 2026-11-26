@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 
 # SQLite has no identifier length limit of its own; this is SQLITE_MAX_LENGTH, the longest any SQL text can be
 IDENT_MAX_BYTES: Final[int] = 1_000_000_000
+# SQLITE_MAX_VARIABLE_NUMBER of the bundled build, the hard ceiling `sqlite3_limit` can only lower. Checked while
+# nested templates are flattened, so a self-nested template fails at the ceiling instead of expanding in full; the
+# connection still checks its own SQLITE_LIMIT_VARIABLE_NUMBER when the statement runs.
+MAX_PARAMETERS: Final[int] = 32766
 
 IDENT_START_CLASS: Final[str] = r"A-Za-z_\x80-\U0010ffff"
 IDENT_CLASS: Final[str] = r"A-Za-z_0-9$\x80-\U0010ffff"
@@ -174,10 +178,12 @@ def parameter_spans(sql: str) -> tuple[tuple[int, int], ...]:
 # the query objects compile on every execution, and re-lexing the finished SQL cost about 13% of a small query's
 # latency (bench: 7.7 of 58.7 us), so a statement that passed is remembered; a rejected one is never stored
 VERIFY_CACHE_SIZE: Final[int] = 1024
+# only a small statement is remembered, so the cache holds at most about VERIFY_CACHE_SIZE times this much text and
+# never pins a bulk statement's SQL and placeholder spans; a larger one is lexed again, which its IO dwarfs
+VERIFY_CACHE_MAX_CHARS: Final[int] = 4096
 
 
-@lru_cache(maxsize=VERIFY_CACHE_SIZE)
-def _verify_parameters(sql: str, placeholders: tuple[tuple[int, int], ...]) -> None:
+def _scan_parameters(sql: str, placeholders: tuple[tuple[int, int], ...]) -> None:
     spans = parameter_spans(sql)
     known = set(placeholders)
     for start, end in spans:
@@ -189,8 +195,16 @@ def _verify_parameters(sql: str, placeholders: tuple[tuple[int, int], ...]) -> N
         raise TypeError(msg)
 
 
+@lru_cache(maxsize=VERIFY_CACHE_SIZE)
+def _verify_parameters(sql: str, placeholders: tuple[tuple[int, int], ...]) -> None:
+    _scan_parameters(sql, placeholders)
+
+
 def _check_parameters(compiled: Compiled) -> Compiled:
-    _verify_parameters(compiled.sql, compiled.placeholders)
+    if len(compiled.sql) <= VERIFY_CACHE_MAX_CHARS:
+        _verify_parameters(compiled.sql, compiled.placeholders)
+    else:
+        _scan_parameters(compiled.sql, compiled.placeholders)
     return compiled
 
 
@@ -204,7 +218,7 @@ DIALECT: Final[Dialect] = Dialect(
     pads_after_param=_is_ident_char,
     quote_ident=_quote_ident,
     ends_in_code=_ends_in_code,
-    max_parameters=None,
+    max_parameters=MAX_PARAMETERS,
 )
 
 

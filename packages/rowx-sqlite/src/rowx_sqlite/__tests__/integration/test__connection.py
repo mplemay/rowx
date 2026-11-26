@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from string.templatelib import Interpolation, Template
 from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 import pytest
@@ -13,8 +14,9 @@ from rowx_core.errors import (
     RowShapeError,
 )
 from rowx_sqlite import Connection, ConnectOptions, connect
+from rowx_sqlite._compiler import MAX_PARAMETERS
 
-from rowx import query
+from rowx import query, query_unchecked
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -200,6 +202,15 @@ async def test_a_second_call_before_the_first_settles_is_busy(conn: Connection) 
     results = await asyncio.gather(statement.one(conn), statement.one(conn), return_exceptions=True)
     assert results[0] == 1
     assert isinstance(results[1], ConnectionBusyError)
+
+
+@pytest.mark.asyncio
+async def test_the_compile_ceiling_is_the_connections_default_limit(conn: Connection) -> None:
+    # the compiler's ceiling is the bundled build's maximum, which a connection starts at
+    assert conn._impl.variable_limit == MAX_PARAMETERS
+    one = 1
+    items = Template(*[part for i in range(MAX_PARAMETERS) for part in (", " if i else "", Interpolation(one, "one"))])
+    assert await query_unchecked[int](t"SELECT 1 WHERE 1 IN ({items})").one(conn) == 1
 
 
 @pytest.mark.asyncio
@@ -518,3 +529,36 @@ async def test_a_statement_that_names_more_parameters_than_given_is_an_interface
     with pytest.raises(InterfaceError):
         await native_fetch(conn, "SELECT ?1, ?2", [1])
     assert await query[int](t"SELECT 1").one(conn) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sql", ["", "   ", "-- c", "/* c */", ";"])
+async def test_sql_without_a_statement_is_an_interface_error(conn: Connection, sql: str) -> None:
+    with pytest.raises(InterfaceError, match="the SQL holds no statement"):
+        await conn._impl._execute(sql, [])
+    with pytest.raises(InterfaceError, match="the SQL holds no statement"):
+        await native_fetch(conn, sql, [])
+    stream = conn._impl._stream(sql, [], None, False, None, 10, None)  # ruff: ignore[boolean-positional-value-in-call]
+    with pytest.raises(InterfaceError, match="the SQL holds no statement"):
+        await stream._next()
+    # through the query objects, the missing statement is reported before the row type is checked
+    with pytest.raises(InterfaceError, match="the SQL holds no statement"):
+        await query(t"").execute(conn)
+    with pytest.raises(InterfaceError, match="the SQL holds no statement"):
+        await query[int](t"-- c").all(conn)
+    # the connection is still usable
+    assert await query[int](t"SELECT 1").one(conn) == 1
+
+
+@pytest.mark.asyncio
+async def test_several_statements_are_refused_at_run_time_before_any_runs(conn: Connection) -> None:
+    await seed(conn)
+    with pytest.raises(InterfaceError):
+        await query[int](t"SELECT 1; SELECT 2").all(conn)
+    with pytest.raises(InterfaceError):
+        await query[int](t"SELECT 1; SELECT 2").one(conn)
+    with pytest.raises(InterfaceError):
+        await query(t"DELETE FROM users WHERE id = 1; DELETE FROM users").execute(conn)
+    with pytest.raises(InterfaceError):
+        _ = [row async for row in query[int](t"SELECT 1; SELECT 2").fetch(conn, batch_size=2)]
+    assert await query[int](t"SELECT count(*) FROM users").one(conn) == 3

@@ -222,3 +222,32 @@ async def test_a_describe_after_close_is_still_lost_for_any_sql(session: SqliteC
     with pytest.raises(InterfaceError) as raised:
         await session.describe("SELECT id FROM users; SELECT 1")
     assert session.classify(raised.value) == "lost"
+
+
+@pytest.mark.asyncio
+async def test_describe_types_a_compound_select_by_every_arm_not_the_first(tmp_path: Path) -> None:
+    path = tmp_path / "compound.db"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE s (i INTEGER NOT NULL, tx TEXT NOT NULL, r REAL NOT NULL, i2 INTEGER NOT NULL) STRICT;
+            CREATE TABLE t (a INTEGER, b TEXT);
+            CREATE VIEW sv AS SELECT i FROM s UNION ALL SELECT tx FROM s;
+            """,
+        )
+    session = await open_checker(f"sqlite:///{path}", 5.0)
+    try:
+        # SQLite declares each of these with the leftmost arm, INTEGER, but other arms produce text
+        for sql in (
+            "SELECT i FROM s UNION ALL SELECT tx FROM s",
+            "SELECT k FROM (SELECT i AS k FROM s UNION ALL SELECT tx FROM s)",
+            "WITH c (k) AS (SELECT i FROM s UNION ALL SELECT tx FROM s) SELECT k FROM c",
+            "SELECT i FROM sv",
+            "SELECT a FROM t UNION SELECT b FROM t",
+        ):
+            described = await session.describe(sql)
+            assert [(c.type_key, c.type_name) for c in described.columns] == [(None, "")], sql
+        alike = await session.describe("SELECT i FROM s UNION ALL SELECT i2 FROM s")
+        assert [(c.type_key, c.nullable) for c in alike.columns] == [("integer", False)]
+    finally:
+        await session.close()

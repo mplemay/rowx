@@ -4,7 +4,7 @@ use pyo3::types::{PyBytes, PyDict, PyType};
 use rowx_sqlite::exec::Param;
 use rowx_sqlite::value::uuid::{self, Uuid};
 
-use super::classes::class;
+use super::classes::{class, field};
 use rowx_py_core::errors::encode_error;
 
 static UUID: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -23,14 +23,14 @@ pub fn decode<'py>(py: Python<'py>, value: &Uuid) -> PyResult<Bound<'py, PyAny>>
     uuid_class(py)?.call((), Some(&kwargs))
 }
 
+/// The value is the `int` slot read through `UUID`'s own descriptor, because `bytes` is a property a subclass can
+/// override.
+///
 /// # Errors
-/// `EncodeError` when `bytes` is not 16 bytes long.
+/// `EncodeError` when the value is not a 128-bit integer.
 pub fn encode(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Param> {
-    let raw = obj.getattr("bytes")?;
-    let bytes: [u8; 16] = raw
-        .cast::<PyBytes>()?
-        .as_bytes()
-        .try_into()
-        .map_err(|_| encode_error(py, "a UUID needs 16 bytes"))?;
-    Ok(uuid::encode(&Uuid(bytes)))
+    let value = field(obj, uuid_class(py)?, "int")?
+        .extract::<u128>()
+        .map_err(|_| encode_error(py, "a UUID needs a 128-bit value"))?;
+    Ok(uuid::encode(&Uuid(value.to_be_bytes())))
 }
