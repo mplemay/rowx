@@ -1949,6 +1949,8 @@ const COMPOUND_SCHEMA: &str = "
     CREATE VIEW csv AS SELECT i FROM cs UNION ALL SELECT tx FROM cs;
     CREATE VIEW csn AS SELECT i FROM cs UNION ALL SELECT NULL;
     CREATE VIEW ctv AS SELECT a, d FROM ct;
+    CREATE TABLE cw (id INTEGER PRIMARY KEY, w TEXT NOT NULL) WITHOUT ROWID;
+    CREATE TABLE ck (i INT NOT NULL, j INTEGER NOT NULL, m DECIMAL(10,2) NOT NULL, n DECIMAL(10, 2) NOT NULL);
 ";
 
 // SQLite declares a compound select's column with its leftmost arm, and a view, a subquery or a CTE with
@@ -2056,6 +2058,55 @@ fn a_compound_select_is_typed_by_every_arm_not_its_declaration() -> TestResult {
     let conn = database()?;
     conn.execute_batch(COMPOUND_SCHEMA)?;
     let wrong = describe_mismatches(&conn, compound_type_describe_cases());
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    Ok(())
+}
+
+// a declaration hidden by neither a compound nor a view is kept even when the bytecode cannot be read, and
+// arms whose declarations decode alike agree
+fn declared_kind_describe_cases() -> Vec<DescribeCase> {
+    vec![
+        (
+            "a subquery over a WITHOUT ROWID table keeps its declaration",
+            "SELECT w FROM (SELECT w FROM cw)",
+            with(Construct::Subquery, &["cw"]),
+            vec![(Some(Kind::Text), "TEXT", true, "Unproven", Some("subquery"))],
+        ),
+        (
+            "a window function beside a subquery column keeps its declaration",
+            "SELECT d, row_number() OVER () FROM (SELECT d FROM ct)",
+            with(Construct::Subquery, &["ct"]),
+            vec![
+                (Some(Kind::Date), "DATE", true, "Unproven", Some("subquery")),
+                (None, "", true, "Unproven", Some("subquery")),
+            ],
+        ),
+        (
+            "a union of INT and INTEGER columns keeps the declaration",
+            "SELECT i FROM ck UNION ALL SELECT j FROM ck",
+            with(Construct::CompoundSelect, &["ck"]),
+            vec![(INT_KIND, "INT", false, "ComputedExpr", None)],
+        ),
+        (
+            "a union of decimals spelled with different spacing keeps the declaration",
+            "SELECT m FROM ck UNION ALL SELECT n FROM ck",
+            with(Construct::CompoundSelect, &["ck"]),
+            vec![(
+                Some(Kind::Decimal),
+                "DECIMAL(10,2)",
+                false,
+                "ComputedExpr",
+                None,
+            )],
+        ),
+    ]
+}
+
+#[test]
+fn a_declaration_no_compound_or_view_hides_is_kept() -> TestResult {
+    let conn = database()?;
+    conn.execute_batch(COMPOUND_SCHEMA)?;
+    let wrong = describe_mismatches(&conn, declared_kind_describe_cases());
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     Ok(())
 }

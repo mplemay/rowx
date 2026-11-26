@@ -100,12 +100,15 @@ view the checker reads. The generated rows are [Type tables](../types.md#sqlite)
    [rule](nullability.md#sqlite), so it is nullable unless something proves it.
 
 SQLite declares a compound select's column with its **leftmost arm** only, and a column read through a view, a
-subquery or a CTE with the column it selects there, which may itself be a compound. In a statement with a view, a
-subquery, a CTE or a compound select, the declared type is therefore kept only when the bytecode shows that every value
-is an unchanged read of a base column declared with that same type, or NULL. `SELECT d FROM t UNION ALL SELECT d2 FROM
-t` keeps `DATE` when both are declared `DATE`, and a view over plain columns keeps their types. Otherwise the column
-takes the storage class the bytecode proves across every arm, and is untyped without one: in
-`SELECT i FROM s UNION ALL SELECT tx FROM s`, with `i INTEGER` and `tx TEXT`, the column is untyped, not `integer`.
+subquery or a CTE with the column it selects there. A view may hold a compound the statement does not show. In a
+statement with a compound select or a view, the declared type is therefore kept only when the bytecode shows that every
+value is an unchanged read of a base column declared with a type of the same kind (`INT` and `INTEGER` agree), or NULL.
+`SELECT d FROM t UNION ALL SELECT d2 FROM t` keeps `DATE` when both are declared `DATE`, and a view over plain columns
+keeps their types. Otherwise the column takes the storage class the bytecode proves across every arm, and is untyped
+without one: in `SELECT i FROM s UNION ALL SELECT tx FROM s`, with `i INTEGER` and `tx TEXT`, the column is untyped,
+not `integer`. A view read in a statement the bytecode analysis cannot model (a window function, a virtual table, a
+`WITHOUT ROWID` table) is untyped for the same reason. A subquery or CTE with no compound select keeps the declaration
+of the column it passes through.
 
 The substring rules in step 2 are SQLite's, and they catch names you did not mean: `POINT` and `INTERVAL` contain
 `INT`, so they are `integer`, and a stored point or interval raises `DecodeError`. Every name in step 1 has numeric

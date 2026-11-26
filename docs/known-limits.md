@@ -101,7 +101,8 @@ The v1 SQLite backend leaves these out. Each is a decision, not an oversight.
 - **A compound column with mixed types is untyped.** SQLite declares a compound select's column, also inside a view,
   subquery or CTE, with its leftmost arm. rowx keeps that declaration only when every arm agrees, and otherwise checks
   the column as untyped, so `query[int]` over `SELECT i ... UNION ALL SELECT tx ...` is not reported and a text row
-  raises `DecodeError` when read.
+  raises `DecodeError` when read. A view column, and a compound over a `WITHOUT ROWID` table, is also untyped when the
+  statement has a window function, a virtual table or another construct the bytecode analysis cannot model.
 - **No session state at check time.** The checker describes against the database schema alone. A `TEMP` table or an
   `ATTACH`ed database created by the application at runtime is not seen, and a `TEMP` table that shadows a `main`
   table of the same name is checked as the `main` one. Qualify the name (`main.t`, `temp.t`) or avoid shadowing.

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rowx_core::row_shape::{Override, column_name};
 use rusqlite::Connection as Raw;
 
-use crate::bytecode::{Class, Fact, Silent, analyze};
+use crate::bytecode::{Class, Fact, Silent, analyze, same_kind};
 use crate::error::Error;
 use crate::exec::refresh_schema;
 use crate::types::{Kind, lookup};
@@ -207,16 +207,11 @@ fn unproven_cause(structure: &Structure, kinds: &[SourceKind]) -> Option<String>
 }
 
 // Whether a result column's declared type may hide the values it produces. SQLite takes the declared type
-// of a compound select from its leftmost arm alone, and reaches through a view, a subquery or a common
-// table expression to the column it selects, which may itself be a compound; only a statement with none of
-// those reads each result column straight from the column whose declaration it reports.
+// of a compound select from its leftmost arm alone, and a view may hold a compound the statement cannot
+// show. A subquery or common table expression without one passes a single column through, whose
+// declaration SQLite reports as it does for a plain read.
 fn derived(structure: &Structure, kinds: &[SourceKind]) -> bool {
-    structure.constructs.iter().any(|construct| {
-        matches!(
-            construct,
-            Construct::CommonTableExpression | Construct::Subquery | Construct::CompoundSelect
-        )
-    }) || kinds.contains(&SourceKind::View)
+    structure.constructs.contains(&Construct::CompoundSelect) || kinds.contains(&SourceKind::View)
 }
 
 // the primary key columns of a table, and whether SQLite keeps a separate index for the key (which a
@@ -435,7 +430,7 @@ fn verdict(
 }
 
 // A declared type is the column's type when it is read straight from the declaring column, or when the
-// bytecode shows every value is an unchanged read of columns declared that way. Otherwise the column takes
+// bytecode shows every value is an unchanged read of columns declared with a type of the same kind. Otherwise the column takes
 // the one storage class the bytecode proves for every value, and is untyped without one.
 fn column_type(
     declared: Option<&str>,
@@ -446,7 +441,7 @@ fn column_type(
         let holds = !derived
             || found
                 .and_then(|fact| fact.declared.as_deref())
-                .is_some_and(|stored| stored.trim().eq_ignore_ascii_case(text.trim()));
+                .is_some_and(|stored| same_kind(stored, text));
         if holds {
             return (Some(lookup(declared).kind()), text.to_owned());
         }
@@ -528,6 +523,11 @@ mod tests {
         assert_eq!(
             column_type(Some("DATE"), Some(&stored(None, "date")), true),
             (Some(Kind::Date), "DATE".to_owned())
+        );
+        // or declared with another spelling of the same kind
+        assert_eq!(
+            column_type(Some("INT"), Some(&stored(None, "INTEGER")), true),
+            (Some(Kind::Integer), "INT".to_owned())
         );
         // the declaration of one arm, over values the bytecode proves are text
         assert_eq!(

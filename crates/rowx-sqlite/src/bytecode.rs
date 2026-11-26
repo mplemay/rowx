@@ -31,6 +31,7 @@ use rusqlite::types::Value;
 use thiserror::Error;
 
 use crate::describe::quote;
+use crate::types::lookup;
 
 /// The SQLite version whose `EXPLAIN` output the modelled opcodes were reviewed against. A test fails
 /// when the bundled version differs, so a bump has to review [`MODELED_OPCODES`].
@@ -237,8 +238,10 @@ impl Val {
             } else if other.only_null() {
                 self.declared.clone()
             } else {
+                // two declarations agree when they decode alike (`INT` and `INTEGER`, `DECIMAL(10, 2)` and
+                // `DECIMAL(10,2)`), which is all the runtime reads from the leftmost one
                 match (&self.declared, &other.declared) {
-                    (Some(a), Some(b)) if a == b => Some(Rc::clone(a)),
+                    (Some(a), Some(b)) if same_kind(a, b) => Some(Rc::clone(a)),
                     _ => None,
                 }
             },
@@ -481,6 +484,12 @@ fn read_program(conn: &Connection, sql: &str) -> Result<Vec<Insn>, Silent> {
         }
     }
     Ok(program)
+}
+
+/// Whether two declared types map to the same kind in the type table, so their values decode alike.
+#[must_use]
+pub fn same_kind(a: &str, b: &str) -> bool {
+    lookup(Some(a)).kind() == lookup(Some(b)).kind()
 }
 
 fn declared_class(declared: &str, strict: bool) -> (u8, bool) {
