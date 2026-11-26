@@ -80,8 +80,9 @@ def _check_sqlite_url(url: str) -> None:
     if parsed.path in {"", "/"}:
         msg = "the SQLite URL has an empty path"
         raise _sqlite_error(msg)
-    # SQLite opens the filename `:memory:` as an in-memory database; strip only the one leading slash
-    if unquote(parsed.path).removeprefix("/").lower() == SQLITE_MEMORY_FILE:
+    # SQLite opens the filename `:memory:` (exactly, case included) as an in-memory database; strip only the one
+    # leading slash
+    if unquote(parsed.path).removeprefix("/") == SQLITE_MEMORY_FILE:
         msg = "an in-memory database is written `sqlite::memory:`"
         raise _sqlite_error(msg)
     _check_sqlite_suffix(url, options)
