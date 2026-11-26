@@ -1881,18 +1881,13 @@ fn nested_describe_cases() -> Vec<DescribeCase> {
     ]
 }
 
-#[test]
-fn describe_applies_the_bytecode_only_to_unproven_columns() -> TestResult {
-    let conn = database()?;
+fn describe_mismatches(
+    conn: &Connection,
+    cases: impl IntoIterator<Item = DescribeCase>,
+) -> Vec<String> {
     let mut wrong = Vec::new();
-    for (name, sql, structure, want) in expression_describe_cases()
-        .into_iter()
-        .chain(join_describe_cases())
-        .chain(origin_describe_cases())
-        .chain(view_describe_cases())
-        .chain(nested_describe_cases())
-    {
-        let got = match describe(&conn, sql, &structure, &|| false) {
+    for (name, sql, structure, want) in cases {
+        let got = match describe(conn, sql, &structure, &|| false) {
             Ok(described) => described
                 .columns
                 .iter()
@@ -1929,6 +1924,189 @@ fn describe_applies_the_bytecode_only_to_unproven_columns() -> TestResult {
             ));
         }
     }
+    wrong
+}
+
+#[test]
+fn describe_applies_the_bytecode_only_to_unproven_columns() -> TestResult {
+    let conn = database()?;
+    let wrong = describe_mismatches(
+        &conn,
+        expression_describe_cases()
+            .into_iter()
+            .chain(join_describe_cases())
+            .chain(origin_describe_cases())
+            .chain(view_describe_cases())
+            .chain(nested_describe_cases()),
+    );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    Ok(())
+}
+
+const COMPOUND_SCHEMA: &str = "
+    CREATE TABLE cs (i INTEGER NOT NULL, tx TEXT NOT NULL, r REAL NOT NULL, i2 INTEGER NOT NULL) STRICT;
+    CREATE TABLE ct (a INTEGER, b TEXT, d DATE NOT NULL, d2 DATE NOT NULL);
+    CREATE VIEW csv AS SELECT i FROM cs UNION ALL SELECT tx FROM cs;
+    CREATE VIEW csn AS SELECT i FROM cs UNION ALL SELECT NULL;
+    CREATE VIEW ctv AS SELECT a, d FROM ct;
+    CREATE TABLE cw (id INTEGER PRIMARY KEY, w TEXT NOT NULL) WITHOUT ROWID;
+    CREATE TABLE ck (i INT NOT NULL, j INTEGER NOT NULL, m DECIMAL(10,2) NOT NULL, n DECIMAL(10, 2) NOT NULL);
+";
+
+// SQLite declares a compound select's column with its leftmost arm, and a view, a subquery or a CTE with
+// the column it selects, so that declaration alone says nothing about the other arms
+fn compound_type_describe_cases() -> Vec<DescribeCase> {
+    let compound = || with(Construct::CompoundSelect, &["cs"]);
+    let nested = |construct| Structure {
+        constructs: vec![construct, Construct::CompoundSelect],
+        ..from(&["cs"])
+    };
+    let untyped_compound = (None, "", false, "ComputedExpr", None);
+    vec![
+        (
+            "a union all of an integer and a text column is untyped",
+            "SELECT i FROM cs UNION ALL SELECT tx FROM cs",
+            compound(),
+            vec![untyped_compound],
+        ),
+        (
+            "the type of a later arm is not hidden by the first",
+            "SELECT tx FROM cs UNION ALL SELECT i FROM cs",
+            compound(),
+            vec![untyped_compound],
+        ),
+        (
+            "a union of an integer and a real column is untyped",
+            "SELECT i FROM cs UNION SELECT r FROM cs",
+            compound(),
+            vec![untyped_compound],
+        ),
+        (
+            "a compound inside a subquery is untyped",
+            "SELECT k FROM (SELECT i AS k FROM cs UNION ALL SELECT tx FROM cs)",
+            nested(Construct::Subquery),
+            vec![untyped_compound],
+        ),
+        (
+            "a compound inside a common table expression is untyped",
+            "WITH c (k) AS (SELECT i FROM cs UNION ALL SELECT tx FROM cs) SELECT k FROM c",
+            nested(Construct::CommonTableExpression),
+            vec![untyped_compound],
+        ),
+        (
+            "a compound inside a view is untyped",
+            "SELECT i FROM csv",
+            from(&["csv"]),
+            vec![(None, "", false, "ComputedExpr", None)],
+        ),
+        (
+            "a view whose compound has a NULL arm is nullable and keeps its type",
+            "SELECT i FROM csn",
+            from(&["csn"]),
+            vec![(INT_KIND, "INTEGER", true, "Unproven", Some("view csn"))],
+        ),
+        (
+            "a non-strict union of an integer and a text column is untyped",
+            "SELECT a FROM ct UNION SELECT b FROM ct",
+            with(Construct::CompoundSelect, &["ct"]),
+            vec![(None, "", true, "Unproven", Some("compound select"))],
+        ),
+        (
+            "a union all of two columns declared alike keeps the declaration",
+            "SELECT i FROM cs UNION ALL SELECT i2 FROM cs",
+            compound(),
+            vec![(INT_KIND, "INTEGER", false, "ComputedExpr", None)],
+        ),
+        (
+            "a non-strict union all of two columns declared alike keeps the declaration",
+            "SELECT d FROM ct UNION ALL SELECT d2 FROM ct",
+            with(Construct::CompoundSelect, &["ct"]),
+            vec![(Some(Kind::Date), "DATE", false, "ComputedExpr", None)],
+        ),
+        (
+            "a non-strict view over a plain column keeps its declaration",
+            "SELECT a, d FROM ctv",
+            from(&["ctv"]),
+            vec![
+                (INT_KIND, "INTEGER", true, "Unproven", Some("view ctv")),
+                (Some(Kind::Date), "DATE", false, "NotNullColumn", None),
+            ],
+        ),
+        (
+            "a non-strict subquery over a plain column keeps its declaration",
+            "SELECT d FROM (SELECT d FROM ct)",
+            with(Construct::Subquery, &["ct"]),
+            vec![(Some(Kind::Date), "DATE", false, "NotNullColumn", None)],
+        ),
+        (
+            "an arm that is NULL keeps the declaration of the other",
+            "SELECT d FROM ct UNION ALL SELECT NULL",
+            with(Construct::CompoundSelect, &["ct"]),
+            vec![(
+                Some(Kind::Date),
+                "DATE",
+                true,
+                "Unproven",
+                Some("compound select"),
+            )],
+        ),
+    ]
+}
+
+#[test]
+fn a_compound_select_is_typed_by_every_arm_not_its_declaration() -> TestResult {
+    let conn = database()?;
+    conn.execute_batch(COMPOUND_SCHEMA)?;
+    let wrong = describe_mismatches(&conn, compound_type_describe_cases());
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    Ok(())
+}
+
+// a declaration hidden by neither a compound nor a view is kept even when the bytecode cannot be read, and
+// arms whose declarations decode alike agree
+fn declared_kind_describe_cases() -> Vec<DescribeCase> {
+    vec![
+        (
+            "a subquery over a WITHOUT ROWID table keeps its declaration",
+            "SELECT w FROM (SELECT w FROM cw)",
+            with(Construct::Subquery, &["cw"]),
+            vec![(Some(Kind::Text), "TEXT", true, "Unproven", Some("subquery"))],
+        ),
+        (
+            "a window function beside a subquery column keeps its declaration",
+            "SELECT d, row_number() OVER () FROM (SELECT d FROM ct)",
+            with(Construct::Subquery, &["ct"]),
+            vec![
+                (Some(Kind::Date), "DATE", true, "Unproven", Some("subquery")),
+                (None, "", true, "Unproven", Some("subquery")),
+            ],
+        ),
+        (
+            "a union of INT and INTEGER columns keeps the declaration",
+            "SELECT i FROM ck UNION ALL SELECT j FROM ck",
+            with(Construct::CompoundSelect, &["ck"]),
+            vec![(INT_KIND, "INT", false, "ComputedExpr", None)],
+        ),
+        (
+            "a union of decimals spelled with different spacing keeps the declaration",
+            "SELECT m FROM ck UNION ALL SELECT n FROM ck",
+            with(Construct::CompoundSelect, &["ck"]),
+            vec![(
+                Some(Kind::Decimal),
+                "DECIMAL(10,2)",
+                false,
+                "ComputedExpr",
+                None,
+            )],
+        ),
+    ]
+}
+
+#[test]
+fn a_declaration_no_compound_or_view_hides_is_kept() -> TestResult {
+    let conn = database()?;
+    conn.execute_batch(COMPOUND_SCHEMA)?;
+    let wrong = describe_mismatches(&conn, declared_kind_describe_cases());
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     Ok(())
 }

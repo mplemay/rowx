@@ -145,6 +145,72 @@ async fn a_failed_switch_to_wal_is_an_error() -> TestResult {
     Ok(())
 }
 
+// a reader of a file still in a rollback mode holds a shared lock, and the switch to WAL needs an
+// exclusive one; SQLite answers `SQLITE_BUSY` at once without calling the busy handler
+fn hold_shared(target: std::path::PathBuf, held: Duration) -> std::sync::mpsc::Receiver<()> {
+    let (holding, started) = std::sync::mpsc::channel();
+    std::thread::spawn(move || -> rusqlite::Result<()> {
+        let raw = rusqlite::Connection::open(&target)?;
+        raw.execute_batch("BEGIN; SELECT count(*) FROM sqlite_master;")?;
+        let _ = holding.send(());
+        std::thread::sleep(held);
+        raw.execute_batch("COMMIT")
+    });
+    started
+}
+
+#[tokio::test]
+async fn a_switch_to_wal_waits_for_a_reader_of_a_rollback_file() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(path(&dir, "test.db"), b"")?;
+    let started = hold_shared(path(&dir, "test.db"), Duration::from_millis(300));
+    started.recv()?;
+    let conn = connect(&file(&dir)).await?;
+    assert_eq!(conn.journal_mode(), "wal");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_switch_to_wal_gives_up_after_the_busy_timeout() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(path(&dir, "test.db"), b"")?;
+    let started = hold_shared(path(&dir, "test.db"), Duration::from_secs(3));
+    started.recv()?;
+    let mut options = file(&dir);
+    options.busy_timeout = Duration::from_millis(200);
+    let begun = Instant::now();
+    let err = connect(&options)
+        .await
+        .err()
+        .ok_or("the switch should time out")?;
+    assert!(
+        err.downcast_ref::<Error>().is_some_and(Error::is_busy),
+        "{err:?}"
+    );
+    assert!(begun.elapsed() >= Duration::from_millis(200));
+    assert!(begun.elapsed() < Duration::from_secs(2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_connects_to_a_fresh_file_all_switch_to_wal() -> TestResult {
+    for _ in 0..10 {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(path(&dir, "test.db"), b"")?;
+        let options = file(&dir);
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let options = options.clone();
+                tokio::spawn(async move { rowx_sqlite::conn::Connection::connect(&options).await })
+            })
+            .collect();
+        for task in tasks {
+            assert_eq!(task.await??.journal_mode(), "wal");
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_missing_file_is_cant_open() -> TestResult {
     let dir = tempfile::tempdir()?;

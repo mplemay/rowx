@@ -6,7 +6,7 @@ import pytest
 from rowx_core.errors import DatabaseError
 from rowx_sqlite import ConnectOptions, Migrator, connect
 from rowx_sqlite._checker import SqliteCheckerSession
-from rowx_sqlite._services import open_checker
+from rowx_sqlite._services import SqliteMigrations, open_checker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,3 +59,22 @@ async def test_the_migrator_can_still_use_a_writable_file(tmp_path: Path, migrat
         assert (await session.describe("SELECT id FROM users")).columns[0].name == "id"
     finally:
         await session.close()
+
+
+@pytest.mark.asyncio
+async def test_a_readonly_migration_session_waits_for_a_lock_up_to_the_connect_timeout(
+    database: Path, migrations: Path
+) -> None:
+    service = SqliteMigrations(f"sqlite:///{database}", migrations)
+    async with await service.open(readonly=True, connect_timeout=1.25) as session:
+        # the session's connection is internal; the pragma reads the busy timeout it was opened with
+        rows = await session._connection._impl._fetch(
+            "PRAGMA busy_timeout",
+            [],
+            None,
+            False,  # ruff: ignore[boolean-positional-value-in-call]
+            True,  # ruff: ignore[boolean-positional-value-in-call]
+            None,
+            None,
+        )
+        assert rows == [(1250,)]

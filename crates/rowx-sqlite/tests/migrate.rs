@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use common::{LONG_QUERY, TestResult, connect, file, ints, pragma, within};
+use common::{LONG_QUERY, TestResult, cancel_of, connect, file, ints, pragma, within};
 use rowx_core::migrate::{
     Migration, MigrationKind, MigrationStatus, PlanError, PlanOptions, RevertTarget, SchemaName,
     TableName, checksum,
 };
 use rowx_core::row_shape::Shape;
+use rowx_sqlite::cancel::{Hook, spawn};
 use rowx_sqlite::conn::Connection;
 use rowx_sqlite::error::Error;
 use rowx_sqlite::migrate::{
@@ -647,6 +648,248 @@ async fn a_failed_no_transaction_file_leaves_foreign_keys_on() -> TestResult {
         .err()
         .ok_or("expected a failure")?;
     assert_eq!(pragma(&conn, "foreign_keys").await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_no_transaction_file_that_leaves_foreign_key_violations_fails_dirty() -> TestResult {
+    for turned_back_on in ["", "PRAGMA foreign_keys = ON;\n"] {
+        let dir = TempDir::new()?;
+        let conn = connect(&file(&dir)).await?;
+        let all = [
+            simple(
+                1,
+                "CREATE TABLE p (id INTEGER PRIMARY KEY);\n\
+                 CREATE TABLE c (pid INTEGER REFERENCES p (id));\n\
+                 INSERT INTO p VALUES (1), (2); INSERT INTO c VALUES (1), (2);",
+            ),
+            simple(
+                2,
+                &format!(
+                    "-- no-transaction\nPRAGMA foreign_keys = OFF;\nDELETE FROM p;\n{turned_back_on}"
+                ),
+            ),
+            simple(3, "CREATE TABLE after (i int)"),
+        ];
+        let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .err()
+            .ok_or("the violations should fail the migration")?;
+        assert_eq!(
+            failed_with(&err),
+            Some(("SQLITE_CONSTRAINT_FOREIGNKEY", 2)),
+            "{err:?}"
+        );
+        assert!(
+            matches!(err, MigrateError::Failed { dirty: true, .. }),
+            "{err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("2 row(s)") && message.contains("c rowid 1"),
+            "{message}"
+        );
+        assert_eq!(history(&conn).await?, [(1, true), (2, false)]);
+        assert!(!table_exists(&conn, "after").await?);
+        assert_eq!(pragma(&conn, "foreign_keys").await?, 1);
+        // the failure wrote its time, so the row is a failure, not a claim that may still be running
+        let next = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .err()
+            .ok_or("the dirty row should block")?;
+        assert!(
+            matches!(next, MigrateError::Plan(PlanError::Dirty { version: 2 })),
+            "{next:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_foreign_key_the_check_cannot_read_fails_the_file_with_a_clear_error() -> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    // the parent column has no unique index, so SQLite cannot check the key at all
+    let all = [simple(
+        1,
+        "-- no-transaction\nCREATE TABLE p (x);\nCREATE TABLE c (y REFERENCES p (x));",
+    )];
+    let err = run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+        .await
+        .err()
+        .ok_or("the check should fail")?;
+    assert_eq!(failed_with(&err), Some(("SQLITE_ERROR", 1)), "{err:?}");
+    assert!(
+        matches!(err, MigrateError::Failed { dirty: true, .. }),
+        "{err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("foreign key mismatch") && message.contains("UNIQUE index"),
+        "{message}"
+    );
+    assert_eq!(history(&conn).await?, [(1, false)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_statement_timeout_bounds_the_foreign_key_check() -> TestResult {
+    let dir = TempDir::new()?;
+    // enough child rows that the database-wide check outlasts the timeout, while the file's own statement
+    // finishes well within it
+    let setup = connect(&file(&dir)).await?;
+    let seed = [simple(
+        1,
+        "CREATE TABLE p (id INTEGER PRIMARY KEY);\n\
+         CREATE TABLE c (pid INTEGER REFERENCES p (id));\n\
+         INSERT INTO p VALUES (1);\n\
+         WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000000)\n\
+         INSERT INTO c SELECT 1 FROM n;",
+    )];
+    run(&setup, &config(), &seed, PlanOptions::default(), &LIVE).await?;
+    drop(setup);
+
+    let mut options = file(&dir);
+    options.statement_timeout = Some(Duration::from_millis(20));
+    let conn = connect(&options).await?;
+    let all = [seed[0].clone(), simple(2, "-- no-transaction\nSELECT 1")];
+    let err = within(run(&conn, &config(), &all, PlanOptions::default(), &LIVE))
+        .await?
+        .err()
+        .ok_or("the check should time out")?;
+    assert_eq!(failed_with(&err), Some(("SQLITE_INTERRUPT", 2)), "{err:?}");
+    assert!(
+        matches!(err, MigrateError::Failed { dirty: true, .. }),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cancelled_no_transaction_file_records_that_it_stopped() -> TestResult {
+    let dir = TempDir::new()?;
+    let migrator = Arc::new(connect(&file(&dir)).await?);
+    let observer = connect(&file(&dir)).await?;
+    let all = vec![simple(
+        1,
+        &format!("-- no-transaction\nCREATE TABLE gate (i int);\n{LONG_QUERY};"),
+    )];
+    let cancel = cancel_of(&migrator);
+    let hook = Hook::new(cancel.state.claim()?);
+    let worker = Arc::clone(&migrator);
+    let pending = spawn(&cancel, &hook, async move {
+        run(&worker, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .map(|_| ())
+    })?;
+    within(async {
+        loop {
+            if table_exists(&observer, "gate").await? {
+                return Ok::<_, Box<dyn std::error::Error>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    hook.fire();
+    let outcome = within(pending.wait()).await??;
+    let err = outcome.err().ok_or("the file should be interrupted")?;
+    assert!(
+        matches!(err, MigrateError::Failed { dirty: true, .. }),
+        "{err:?}"
+    );
+    within(cancel.state.wait_settled()).await??;
+    // the row is dirty, but its time says the file stopped rather than that it may still be running
+    let applied = list_applied(&observer, &config()).await?;
+    assert_eq!(history(&observer).await?, [(1, false)]);
+    assert!(applied[0].execution_time >= 0, "{applied:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_claim_with_no_time_says_another_migrator_may_still_be_running_it() -> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    let all = [
+        simple(1, "-- no-transaction\nCREATE TABLE t (i int)"),
+        simple(2, "SELECT 1"),
+    ];
+    skip(
+        &conn,
+        &config(),
+        &all,
+        PlanOptions {
+            target: Some(1),
+            ..PlanOptions::default()
+        },
+        &LIVE,
+    )
+    .await?;
+    // what a migrator that is still running the file (or was killed in it) leaves
+    conn.simple(&format!(
+        "UPDATE {TABLE} SET success = 0, execution_time = -1 WHERE version = 1"
+    ))
+    .await?;
+    for err in [
+        run(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .err(),
+        revert(&conn, &config(), &all, RevertTarget::Latest, false, &LIVE)
+            .await
+            .err(),
+        skip(&conn, &config(), &all, PlanOptions::default(), &LIVE)
+            .await
+            .err(),
+        run_dry(&conn, &config(), &all, PlanOptions::default())
+            .await
+            .err(),
+    ] {
+        let err = err.ok_or("the claim should block")?;
+        assert!(
+            matches!(err, MigrateError::Claimed { version: 1 }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("may still be running"), "{err}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_temp_table_cannot_shadow_the_history_table() -> TestResult {
+    let dir = TempDir::new()?;
+    let conn = connect(&file(&dir)).await?;
+    let all = [
+        simple(1, "CREATE TABLE base (x)"),
+        simple(
+            2,
+            &format!(
+                "CREATE TEMP TABLE {TABLE} (version, description, installed_on, success, checksum, \
+                 execution_time)"
+            ),
+        ),
+        simple(3, "CREATE TABLE after3 (x)"),
+    ];
+    let applied = run(&conn, &config(), &all, PlanOptions::default(), &LIVE).await?;
+    assert_eq!(versions(applied), [1, 2, 3]);
+    // the TEMP table is still there on this connection, and nothing went into it
+    assert_eq!(
+        count(&conn, &format!("SELECT count(*) FROM temp.{TABLE}")).await?,
+        0
+    );
+    assert_eq!(
+        count(
+            &conn,
+            &format!("SELECT count(*) FROM main.{TABLE} WHERE success")
+        )
+        .await?,
+        3
+    );
+    let details = info(&conn, &config(), &all).await?;
+    assert!(
+        details
+            .iter()
+            .all(|d| d.info.status == MigrationStatus::Applied)
+    );
     Ok(())
 }
 

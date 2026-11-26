@@ -235,7 +235,11 @@ Every setting is applied explicitly when the connection opens, because the bundl
 - The `DQS_DML` and `DQS_DDL` configuration flags are off, so a mistyped `"colum"` is an error and not a string literal.
 - `journal_mode=WAL` for a file opened read-write. A switch that does not take effect fails the open: it is
   `SQLITE_READONLY` (`25006`) when SQLite reports that, and otherwise `SQLITE_ERROR` (`HY000`) naming the mode the
-  database stayed in. `:memory:` stays in `memory`. WAL is not supported on a network filesystem.
+  database stayed in. `:memory:` stays in `memory`. WAL is not supported on a network filesystem. The switch needs
+  the file's exclusive lock, and SQLite answers `SQLITE_BUSY` at once, without its busy handler, while another
+  connection reads a file that is still in a rollback mode (two connections opening a fresh file together do this to
+  each other), so the open tries again until `connect_timeout` is spent and then fails with `SQLITE_BUSY` (`55P03`).
+  Cancelling the `connect` stops the retries.
 - A read-only handle (`mode="ro"` or `read_only=True`) never switches the journal mode and keeps what it finds. Opening
   a WAL file read-only needs a usable `-shm` and `-wal`, or a writable directory.
 - `read_only=True` also turns `PRAGMA query_only` on.

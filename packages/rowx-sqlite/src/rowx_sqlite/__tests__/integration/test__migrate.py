@@ -394,6 +394,61 @@ async def test_a_no_transaction_file_can_rebuild_a_table_with_foreign_keys_off(
 
 
 @pytest.mark.asyncio
+async def test_foreign_key_violations_left_by_a_no_transaction_file_fail_it_dirty(
+    conn: Connection, migrations: Path
+) -> None:
+    write(
+        migrations,
+        "1_tables.sql",
+        "CREATE TABLE p (id INTEGER PRIMARY KEY); CREATE TABLE c (pid INTEGER REFERENCES p (id));"
+        "INSERT INTO p VALUES (1); INSERT INTO c VALUES (1);",
+    )
+    write(migrations, "2_orphan.sql", "-- no-transaction\nPRAGMA foreign_keys = OFF;\nDELETE FROM p;\n")
+    migrator = Migrator(migrations)
+
+    with pytest.raises(MigrationFailedError) as failed:
+        await migrator.run(conn)
+    assert failed.value.version == 2
+    assert failed.value.dirty is True
+    assert (failed.value.error.code, failed.value.error.sqlstate) == ("SQLITE_CONSTRAINT_FOREIGNKEY", "23503")
+    assert "c rowid 1" in failed.value.error.message
+    assert await history(conn) == [(1, True), (2, False)]
+    with pytest.raises(DirtyMigrationError, match="did not finish"):
+        await migrator.run(conn)
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_claim_says_another_migrator_may_still_be_running_it(
+    conn: Connection, migrations: Path
+) -> None:
+    write(migrations, "1_long.sql", "-- no-transaction\nCREATE TABLE t (id INTEGER);")
+    migrator = Migrator(migrations)
+    await migrator.skip(conn)
+    # what a migrator still running the file (or killed in it) leaves behind
+    await query(t"UPDATE _rowx_migrations SET success = 0, execution_time = -1").execute(conn)
+
+    with pytest.raises(DirtyMigrationError, match="may still be running") as dirty:
+        await migrator.run(conn)
+    assert dirty.value.version == 1
+
+
+@pytest.mark.asyncio
+async def test_a_temp_table_does_not_shadow_the_history_table(conn: Connection, migrations: Path) -> None:
+    write(migrations, "1_base.sql", "CREATE TABLE base (x);")
+    write(
+        migrations,
+        "2_shadow.sql",
+        "CREATE TEMP TABLE _rowx_migrations (version, description, installed_on, success, checksum, execution_time);",
+    )
+    write(migrations, "3_after.sql", "CREATE TABLE after3 (x);")
+    migrator = Migrator(migrations)
+
+    assert [r.migration.version for r in await migrator.run(conn)] == [1, 2, 3]
+    assert [s.state for s in await migrator.info(conn)] == ["applied", "applied", "applied"]
+    assert await query_unchecked[int](t"SELECT count(*) FROM main._rowx_migrations").one(conn) == 3
+
+
+@pytest.mark.asyncio
 async def test_a_migrator_that_cannot_get_the_lock_fails_after_the_busy_timeout(
     tmp_path: Path, migrations: Path
 ) -> None:

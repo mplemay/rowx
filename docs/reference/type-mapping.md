@@ -92,8 +92,23 @@ view the checker reads. The generated rows are [Type tables](../types.md#sqlite)
 2. Otherwise SQLite's own affinity rules apply, in SQLite's order. A name containing `INT` is `integer`. Then `CHAR`,
    `CLOB` or `TEXT` is `text`, `BLOB` is `blob`, and `REAL`, `FLOA` or `DOUB` is `real`.
 3. Any other name has numeric affinity, and the kind is `any`: each value decodes by its storage class.
-4. A column with **no declared type** is *untyped*. That is a table column declared without a type, and every
-   expression (`count(*)`, `upper(name)`, a literal). It decodes like `any`, and it is always nullable.
+4. A column with **no declared type**, which is a table column declared without a type or an expression, takes the
+   one storage class the bytecode analysis ([Nullability](nullability.md#sqlite)) proves for every value it produces:
+   `count(*)` and `length(name)` are `integer`, `upper(name)`, `'x'` and `CAST(a AS TEXT)` are `text`, and
+   `total(a)` is `real`. A column with no such class, such as `a + 1`, `max(a)` or a non-strict table column declared
+   without a type, is *untyped*. It decodes like `any`, and its nullability comes from the
+   [rule](nullability.md#sqlite), so it is nullable unless something proves it.
+
+SQLite declares a compound select's column with its **leftmost arm** only, and a column read through a view, a
+subquery or a CTE with the column it selects there. A view may hold a compound the statement does not show. In a
+statement with a compound select or a view, the declared type is therefore kept only when the bytecode shows that every
+value is an unchanged read of a base column declared with a type of the same kind (`INT` and `INTEGER` agree), or NULL.
+`SELECT d FROM t UNION ALL SELECT d2 FROM t` keeps `DATE` when both are declared `DATE`, and a view over plain columns
+keeps their types. Otherwise the column takes the storage class the bytecode proves across every arm, and is untyped
+without one: in `SELECT i FROM s UNION ALL SELECT tx FROM s`, with `i INTEGER` and `tx TEXT`, the column is untyped,
+not `integer`. A view read in a statement the bytecode analysis cannot model (a window function, a virtual table, a
+`WITHOUT ROWID` table) is untyped for the same reason. A subquery or CTE with no compound select keeps the declaration
+of the column it passes through.
 
 The substring rules in step 2 are SQLite's, and they catch names you did not mean: `POINT` and `INTERVAL` contain
 `INT`, so they are `integer`, and a stored point or interval raises `DecodeError`. Every name in step 1 has numeric

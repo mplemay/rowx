@@ -461,16 +461,25 @@ It takes no lock and writes nothing.
   on an `INTEGER` column, is `type-mismatch`, and an `int` annotation on a `BOOLEAN` column is too. A `json` column
   accepts any leaf except `None`. An `any` column accepts `int`, `float`, `str` or `bytes`. `typing.Any` and `object`
   match every column, as for PostgreSQL. There are no arrays or ranges.
-- *Untyped columns.* A column with no declared type, such as `count(*)` or a table column declared as `a`, accepts any
-  annotation, and the diagnostic carries the note `column N "name" is untyped, so its type is not checked`. The
-  nullability rule still applies, and an untyped column is always nullable, so the annotation must say `| None` or the
-  alias `"col!"`.
+- *Computed columns.* An expression takes the storage class and nullability the bytecode analysis proves
+  ([Nullability](nullability.md#sqlite)): `count(*)` is a non-null `integer`, so `query[int]` passes, and
+  `coalesce(b, 'z')` is non-null. A column of a compound select, or one read through a view, subquery or CTE, keeps its
+  declared type only when every arm is a column declared that way, and otherwise takes the class the bytecode proves
+  for every arm ([Type mapping](type-mapping.md#lookup)).
+- *Untyped columns.* A column with no type, declared or proven, such as `max(a)`, `a + 1`, a table column declared as
+  `a`, or a compound whose arms are `INTEGER` and `TEXT`, accepts any annotation, and the diagnostic carries the note
+  `column N "name" is untyped, so its type is not checked`. The nullability rule still applies, so an untyped column
+  that nothing proves non-null needs `| None` or the alias `"col!"`.
 - *Untyped parameters.* A parameter has no type. The checker still compares the count (`param-count-mismatch`) and
   infers the Python type of each interpolation. It never reports `param-type-mismatch`, and `--coverage` and
   `--inspect` show `untyped, not compared`.
 - *Nullability.* A column is NOT NULL only when the rule proves it, and otherwise nullable, with the note
   `nullability not proven, assumed nullable` when the cause is a view, a CTE, a subquery, a compound select, an outer
-  join, an aggregate or an expression. [Nullability](nullability.md#sqlite) is the rule. `AS "col!"` narrows it.
+  join, an aggregate or an expression and the bytecode analysis does not prove it either.
+  [Nullability](nullability.md#sqlite) is the rule. `AS "col!"` narrows it.
+- *Session state.* A query is described against the database's own schema on a fresh connection. A `temp` table, or
+  an attached database, that the application creates at runtime is not seen, so a `TEMP` table that shadows a table of
+  `main` is checked as the `main` table ([Known limits](../known-limits.md#sqlite-limits)).
 - *Compilation.* The checker compiles each template with the SQLite compiler, as the runtime does. A template with a
   parameter sigil in static SQL (`?`, `?N`, `:x`, `@x`, `$x`, `#x`), or with an interpolation inside a string literal, a
   quoted name or a comment, is a located `sql-error` with no `sqlstate` and no `code`, because SQLite never saw it.
