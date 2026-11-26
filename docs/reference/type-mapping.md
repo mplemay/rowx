@@ -172,7 +172,8 @@ for a `TIMESTAMP` column is stored with `+00:00`. Both surface as `DecodeError` 
 value for a `TIMESTAMPTZ` column and a naive one for a `TIMESTAMP` column.
 
 An `EncodeError` carries a note that names the parameter (`while binding parameter ?2`). A statement with more
-parameters than `SQLITE_LIMIT_VARIABLE_NUMBER` is `InterfaceError`.
+parameters than `SQLITE_LIMIT_VARIABLE_NUMBER` is `InterfaceError`. A query object fails earlier, when it compiles,
+with the `TypeError` of [Compile limits](api.md#compile-limits) above 32766 parameters.
 
 ### Affinity traps
 

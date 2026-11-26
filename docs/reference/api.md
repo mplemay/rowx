@@ -412,6 +412,8 @@ Writing guidance:
 - More than 65535 parameters after nested templates are flattened:
   `TypeError("a query takes at most 65535 parameters, got N")`. The PostgreSQL compiler raises this when the method
   runs. `N` is the count at the parameter that crosses the limit. A list bound with `= ANY({ids})` is one parameter.
+  The SQLite compiler raises the same error above 32766, the bundled build's `SQLITE_MAX_VARIABLE_NUMBER`. Templates
+  are flattened lazily, so a self-nested template fails at the limit and is never expanded in full.
 
 ## Nullability overrides
 

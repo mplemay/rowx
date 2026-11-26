@@ -4,7 +4,7 @@ use pyo3::types::PyType;
 use rowx_sqlite::exec::Param;
 use rowx_sqlite::value::decimal::{self, Decimal};
 
-use super::classes::class;
+use super::classes::{call_base, class};
 use rowx_py_core::errors::encode_error;
 
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -21,11 +21,13 @@ pub fn decode<'py>(py: Python<'py>, value: &Decimal) -> PyResult<Bound<'py, PyAn
     decimal_class(py)?.call1((value.as_str(),))
 }
 
+/// The text is read through the unbound `Decimal.__str__`, so a subclass's `__str__` cannot change the value.
+///
 /// # Errors
 /// `EncodeError` for NaN and infinities.
 pub fn encode(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Param> {
-    let text = obj.str()?;
-    let parsed = Decimal::parse(&text.to_cow()?).ok_or_else(|| {
+    let text: String = call_base(obj, decimal_class(py)?, "__str__")?.extract()?;
+    let parsed = Decimal::parse(&text).ok_or_else(|| {
         encode_error(py, "a Decimal that is not a finite number cannot be stored")
     })?;
     Ok(decimal::encode(&parsed))

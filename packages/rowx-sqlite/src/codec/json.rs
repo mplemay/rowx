@@ -7,7 +7,6 @@ use rowx_sqlite::value::json;
 
 use rowx_py_core::errors::{decode_error, encode_error};
 
-static LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 fn json_fn<'py>(
@@ -24,7 +23,7 @@ fn json_fn<'py>(
 /// # Errors
 /// `DecodeError` for text that is not valid JSON.
 pub fn decode<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny>> {
-    json_fn(py, &LOADS, "loads")?.call1((text,)).map_err(|e| {
+    rowx_py_core::json::loads(py, text).map_err(|e| {
         // only bad input is a decode error; MemoryError, KeyboardInterrupt and the like propagate
         if e.is_instance_of::<PyValueError>(py) || e.is_instance_of::<PyRecursionError>(py) {
             decode_error(py, &format!("the stored value is not valid JSON: {e}"))

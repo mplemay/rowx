@@ -1,7 +1,7 @@
 import math
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 from uuid import UUID, uuid4
 
 import pytest
@@ -264,6 +264,66 @@ async def test_json_that_does_not_parse_is_a_decode_error(conn: Connection) -> N
     await store(conn, "JSON", "{not json")
     with pytest.raises(DecodeError, match="JSON"):
         await query[object](t"SELECT a FROM v").one(conn)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["NaN", "[NaN]", '{"a": Infinity}', "[-Infinity]"])
+async def test_a_non_finite_json_constant_is_a_decode_error(conn: Connection, text: str) -> None:
+    # the encoder never writes these (`allow_nan=False`), so the decoder does not accept them either
+    await store(conn, "JSON", text)
+    with pytest.raises(DecodeError, match="not a JSON number"):
+        await query[object](t"SELECT a FROM v").one(conn)
+
+
+# `bytes` names the property inside LyingUuid, so its return type is spelled outside the class
+type Raw = bytes
+
+
+class LyingDecimal(Decimal):
+    @override
+    def __str__(self) -> str:
+        return "999"
+
+
+class LyingUuid(UUID):
+    @property
+    @override
+    def bytes(self) -> Raw:
+        return b"\xff" * 16
+
+
+class LyingDatetime(datetime):
+    @property
+    @override
+    def year(self) -> int:
+        return 1999
+
+    @override
+    def utcoffset(self) -> timedelta | None:
+        return timedelta(hours=5)
+
+
+class LyingDate(date):
+    @property
+    @override
+    def day(self) -> int:
+        return 9
+
+
+@pytest.mark.asyncio
+async def test_a_subclass_cannot_change_the_bound_value(conn: Connection) -> None:
+    await query(t"CREATE TABLE v (a TEXT)").execute(conn)
+    number = LyingDecimal("12.5")
+    ident = LyingUuid("12345678-1234-5678-1234-567812345678")
+    stamp = LyingDatetime(2024, 1, 2, 3, 4, 5)
+    day = LyingDate(2024, 1, 2)
+    await query(t"INSERT INTO v VALUES ({number}), ({ident}), ({stamp}), ({day})").execute(conn)
+    assert await query[str](t"SELECT a FROM v ORDER BY rowid").all(conn) == [
+        "12.5",
+        "12345678-1234-5678-1234-567812345678",
+        "2024-01-02 03:04:05",
+        "2024-01-02",
+    ]
 
 
 @pytest.mark.asyncio

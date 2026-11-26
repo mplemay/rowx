@@ -24,7 +24,7 @@ The trust model of an embedded database (a private socket directory, trust authe
   `__contains__`, `__len__`, `encode`, `replace` or `__iter__` has no effect. Identifiers are **not** restricted to
   enum members: an application that takes a column name from a user **MUST** allowlist it.
 - **Compile limits** are `TypeError`s raised before any IO: a NUL in the SQL text, and more than 65535 parameters
-  after flattening ([Compile limits](api.md#compile-limits)).
+  (32766 on SQLite) after flattening ([Compile limits](api.md#compile-limits)).
 - **Hand-built templates.** The only way to put attacker-controlled text into the static part of a query is
   `Template(...)` with a non-literal string (or `t"…" + Template(user_str)`). The runtime compiles whatever `Template`
   it is given, and has no provenance check. The checker's `template-construction` rule
