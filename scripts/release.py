@@ -421,6 +421,9 @@ def _format_changelog(text: str) -> str:
                 "--no-sync",
                 "rumdl",
                 "fmt",
+                # the temporary file is outside the repo, so name the config the lint hook uses
+                "--config",
+                str(ROOT / "pyproject.toml"),
                 str(path),
             ],
             ROOT,
