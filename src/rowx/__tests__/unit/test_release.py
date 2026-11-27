@@ -259,6 +259,15 @@ def test_virtual_tag_render_matches_the_tagged_commit(tmp_path: Path) -> None:
     assert f" - {RELEASE_DAY}" in after_tag.split("## [0.1.0]", maxsplit=1)[0]
 
 
+def test_render_changelog_wraps_long_entries_like_the_lint_hook(tmp_path: Path) -> None:
+    root = _changelog_repo(tmp_path)
+    (root / "feature.txt").write_text("one\n", encoding="utf-8")
+    _commit(root, f"feat: add{' a long feature' * 10}", "2026-01-01T12:00:00Z")
+    lines = RELEASE.render_changelog(root, top_date=RELEASE_DAY).splitlines()
+    assert any(line.startswith("- Add a long feature") for line in lines)
+    assert max(len(line) for line in lines if "long" in line) <= 120
+
+
 def _git_executable() -> str:
     executable = which("git")
     if executable is None:
