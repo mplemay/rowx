@@ -1,6 +1,6 @@
 # Packages
 
-rowx publishes five distributions, all released together under one version (0.4.2). Install matching versions of the
+rowx publishes five distributions, all released together under one version (0.5.0). Install matching versions of the
 ones you use. Each distribution has its own import root. An application that runs queries and checks them installs
 one extra, `rowx[postgres]` or `rowx[sqlite]`.
 
@@ -105,7 +105,7 @@ it depends only on matching `rowx-core`. `rowx` is pure Python, imports as `rowx
 `rowx-core`. The `postgres` extra installs matching `rowx-postgres`. 0.4.2 added `rowx-embedded` in lockstep
 with the others.
 
-This tree is version 0.4.2.
+This tree is version 0.5.0.
 
 `rowx` re-exports the query API of `rowx_core`. `rowx.core` re-exports the `rowx_core` names that `rowx` and
 `rowx.errors` do not already export. `rowx.postgres` re-exports `rowx_postgres` and still needs the `postgres` extra.
