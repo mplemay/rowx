@@ -2038,6 +2038,32 @@ def test_attrs_possible_alias_survives_rebinding(tmp_path: Path, body: str, *, s
     test_attrs_captured_nested_carrier_identity(tmp_path, "flag = bool(1)\n" + body, shared=shared, reject=reject)
 
 
+@pytest.mark.parametrize("shared", [True, False])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "source = [attrs.field()]\na = source if flag else []\nb = a if flag else []\nb.append(FIELD)\nsource[-1].default(lambda self: 42)",
+        "source = [attrs.field()]\na = source if flag else []\nb = a if flag else []\nb[0] = FIELD\nsource[0].default(lambda self: 42)",
+        "source = [[attrs.field()]]\na = source[0] if flag else []\na.append(FIELD)\nsource[0][-1].default(lambda self: 42)",
+        "source = iter(())\na = [*source, [FIELD]] if flag else []\na[0][0].default(lambda self: 42)",
+        "source = [attrs.field()]\na = [source] if flag else []\na[0].append(FIELD)\nsource[-1].default(lambda self: 42)",
+        "source = [[attrs.field()]]\na = source if flag else []\nb = a.copy()\nb[0][0] = FIELD\nsource[0][0].default(lambda self: 42)",
+    ],
+)
+def test_attrs_transitive_and_nested_possible_aliases(tmp_path: Path, body: str, *, shared: bool) -> None:
+    test_attrs_captured_nested_carrier_identity(tmp_path, "flag = bool(1)\n" + body, shared=shared, reject=True)
+
+
+@pytest.mark.parametrize("dictionary", [True, False])
+def test_attrs_possible_alias_traversal_is_bounded(*, dictionary: bool) -> None:
+    facts = {f"\0mayalias:n{index}:n{index + 1}" for index in range(100)}
+    facts.add("\0mayalias:n100:n0")
+    state: dict[str, bool | _Module] | set[str] = dict.fromkeys(facts, True) if dictionary else facts
+    branches = _Resolver._attrs_possible_alias_states(ast.Name(id="n0", ctx=ast.Load()), state, lambda item: item.id)
+    assert len(branches) == 100
+    assert any("\0alias:n99:n100" in branch for branch in branches)
+
+
 def test_attrs_module_captured_nodes_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     original = _Resolver._attrs_carrier_related
     sizes: list[int] = []

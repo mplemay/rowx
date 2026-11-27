@@ -3412,7 +3412,13 @@ class _Resolver:
                 if slots is None or nested is None:
                     if wide_at is None:
                         wide_at = len(results)
-                    results.append(result)
+                    nested_children = {
+                        edge.rsplit(":", 1)[-1]
+                        for child in result[1]
+                        for edge in state
+                        if edge.startswith(f"\0child:{child}:")
+                    }
+                    results.append((result[0], nested_children, result[2]))
                 else:
                     results.extend(
                         (binding, children, result[2]) for binding, children in zip(slots, nested, strict=True)
@@ -3441,9 +3447,14 @@ class _Resolver:
                 branches[0], state, value, scan, context
             )
             return binding, children, found or branch_found
+        indexed = {
+            id(branch): _Resolver._attrs_carrier_paths(branch, name, state)
+            for branch in branches
+            if isinstance(branch, ast.Subscript)
+        }
         found = scan(expr)
         children: set[str] = set()
-        for branch in _Resolver._attrs_expression_branches(expr):
+        for branch in branches:
             if isinstance(branch, ast.Tuple | ast.List) and not any(
                 isinstance(part, ast.NamedExpr) for part in ast.walk(branch)
             ):
@@ -3451,7 +3462,9 @@ class _Resolver:
                     branch, state, value, lambda _: False, context
                 )
             else:
-                branch_children = _Resolver._attrs_capture_possible_branch(branch, state, value, name, namespace)
+                branch_children = indexed.get(id(branch)) or _Resolver._attrs_capture_possible_branch(
+                    branch, state, value, name, namespace
+                )
             children.update(branch_children)
         binding = value(expr)
         if not children:
@@ -3471,8 +3484,20 @@ class _Resolver:
                             _Resolver._attrs_store_fact(state, f"\0child:{child}:{index}:{source}", value=True)
         else:
             _Resolver._attrs_store_fact(state, f"\0wide:{child}", value=True)
+            _Resolver._attrs_copy_wildcard_children(child, children, state)
         _Resolver._attrs_store_fact(state, f"\0carrier:{child}", value=True)
         return binding, {child}, found
+
+    @staticmethod
+    def _attrs_copy_wildcard_children(
+        child: str, sources: set[str], state: dict[str, bool | _Module] | set[str]
+    ) -> None:
+        for source in sources:
+            prefix = f"\0child:{source}:"
+            for edge in list(state):
+                if edge.startswith(prefix):
+                    nested = edge.rsplit(":", 1)[-1]
+                    _Resolver._attrs_store_fact(state, f"\0child:{child}:*:{nested}", value=True)
 
     @staticmethod
     def _attrs_capture_possible_branch(
@@ -3755,14 +3780,34 @@ class _Resolver:
             carrier = _Resolver._attrs_carrier_path(receiver, name, state)
             if carrier is None:
                 continue
-            related = _Resolver._attrs_carrier_related(carrier, state)
-            for key in state:
-                if not key.startswith("\0mayalias:"):
+            branches.extend(_Resolver._attrs_possible_component_states(carrier, state))
+        return branches
+
+    @staticmethod
+    def _attrs_possible_component_states(
+        carrier: str, state: dict[str, bool | _Module] | set[str]
+    ) -> list[dict[str, bool | _Module] | set[str]]:
+        branches = []
+        pending: list[tuple[str, tuple[str, ...]]] = [(carrier, ())]
+        visited = {carrier}
+        edges = [key for key in state if key.startswith(("\0alias:", "\0mayalias:"))]
+        while pending:
+            current, path = pending.pop()
+            for key in edges:
+                kind, left, right = key.split(":", 2)
+                if current not in {left, right}:
                     continue
-                _, left, right = key.split(":", 2)
-                if left in related or right in related:
+                other = right if current == left else left
+                if other in visited:
+                    continue
+                visited.add(other)
+                next_path = (*path, key) if kind == "\0mayalias" else path
+                pending.append((other, next_path))
+                if next_path:
                     branch = state.copy()
-                    _Resolver._attrs_store_fact(branch, f"\0alias:{left}:{right}", value=True)
+                    for edge in next_path:
+                        _, edge_left, edge_right = edge.split(":", 2)
+                        _Resolver._attrs_store_fact(branch, f"\0alias:{edge_left}:{edge_right}", value=True)
                     branches.append(branch)
         return branches
 
