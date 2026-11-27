@@ -819,7 +819,7 @@ wheels = [
 
 [[package]]
 name = "rowx"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "pathspec" },
@@ -927,12 +927,12 @@ docs = [{ name = "zensical", specifier = "==0.1.2" }]
 
 [[package]]
 name = "rowx-core"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "packages/rowx-core" }
 
 [[package]]
 name = "rowx-embedded"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "packages/rowx-embedded" }
 dependencies = [
     { name = "rowx-core" },
@@ -947,7 +947,7 @@ requires-dist = [
 
 [[package]]
 name = "rowx-postgres"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "packages/rowx-postgres" }
 dependencies = [
     { name = "rowx-core" },
@@ -958,7 +958,7 @@ requires-dist = [{ name = "rowx-core", editable = "packages/rowx-core" }]
 
 [[package]]
 name = "rowx-sqlite"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "packages/rowx-sqlite" }
 dependencies = [
     { name = "rowx-core" },
