@@ -94,7 +94,7 @@ bench-drivers = [
     "sqlalchemy[asyncio]>=2.0.41",
 ]
 docs = [
-    "zensical==0.1.1",
+    "zensical==0.1.2",
 ]
 changelog = [
     "git-cliff==2.14.2",
