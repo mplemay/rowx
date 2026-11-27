@@ -2070,6 +2070,14 @@ def test_attrs_transitive_and_nested_possible_aliases(tmp_path: Path, body: str,
             "source = [[attrs.field()]]\na = source[0] if (source[0].append(FIELD) or True) else []\na[-1].default(lambda self: 42)",
             True,
         ),
+        (
+            "flag = bool(1)\nsource = [[attrs.field()]]\na = (source[0] if (source := [[FIELD]]) else []) if flag else []\na[0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "flag = bool(1)\nsource = [[FIELD]]\na = (source[0] if (source := [[attrs.field()]]) else []) if flag else []\na[0].default(lambda self: 42)",
+            False,
+        ),
     ],
 )
 def test_attrs_conditional_test_effects_before_branch_capture(

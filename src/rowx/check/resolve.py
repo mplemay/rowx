@@ -3502,7 +3502,7 @@ class _Resolver:
         binding = False
         for branch in branches:
             _Resolver._attrs_replace_state(state, before)
-            if isinstance(branch, ast.Tuple | ast.List | ast.NamedExpr):
+            if isinstance(branch, ast.Tuple | ast.List | ast.NamedExpr | ast.IfExp):
                 branch_binding, branch_children, branch_found = _Resolver._attrs_capture_ordered_child(
                     branch, state, value, scan, context
                 )
