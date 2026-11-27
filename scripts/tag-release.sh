@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tag a release commit and dispatch Release. A GITHUB_TOKEN tag push does not start release.yml.
+# Tag a release commit. GH_TOKEN must be an app token: its tag starts release.yml, a GITHUB_TOKEN tag does not.
 set -euo pipefail
 
 require_tag() {
@@ -29,19 +29,8 @@ case "$cmd" in
     fi
     gh api --method POST "repos/${REPOSITORY}/git/refs" -f "ref=refs/tags/${TAG_NAME}" -f "sha=${HEAD_SHA}"
     ;;
-  dispatch)
-    require_tag
-    for attempt in 1 2 3 4 5; do
-      if gh workflow run release.yml --ref "${TAG_NAME}"; then
-        exit 0
-      fi
-      sleep "$((attempt * 2))"
-    done
-    echo "could not dispatch Release on ${TAG_NAME}" >&2
-    exit 1
-    ;;
   *)
-    echo "usage: $0 fetch-main | create-tag | dispatch" >&2
+    echo "usage: $0 fetch-main | create-tag" >&2
     exit 2
     ;;
 esac

@@ -468,9 +468,12 @@ jobs:
     needs: required
     if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # holds the release app credentials and is limited to main
+    environment:
+      name: release-tag
+      deployment: false
     permissions:
-      actions: write # dispatch release.yml; a GITHUB_TOKEN tag push does not start it
-      contents: write # create the v* tag
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -502,18 +505,21 @@ jobs:
           TAG_NAME: ${{ steps.plan.outputs.tag }}
         run: scripts/validate-release.sh
 
+      # the app bypasses the tag creation ruleset, and a tag it creates starts release.yml
+      - name: Create the release app token
+        id: app-token
+        if: success() && steps.plan.outputs.action == 'tag'
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Create the tag
         if: success() && steps.plan.outputs.action == 'tag'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ steps.plan.outputs.tag }}
           HEAD_SHA: ${{ github.sha }}
         run: scripts/tag-release.sh create-tag
-
-      - name: Dispatch Release
-        if: success() && steps.plan.outputs.action == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ steps.plan.outputs.tag }}
-        run: scripts/tag-release.sh dispatch
