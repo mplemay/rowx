@@ -1,29 +1,41 @@
 # Publishing
 
-`rowx`, `rowx-core`, `rowx-postgres`, and `rowx-embedded` publish from repository `mplemay/rowx` through workflow
-`release.yml` and one GitHub environment, `pypi`.
+`rowx`, `rowx-core`, `rowx-postgres`, `rowx-sqlite`, and `rowx-embedded` publish from repository `mplemay/rowx` through
+workflow `release.yml` and one GitHub environment, `pypi`.
 
-Each package is its own job. Publish order is `rowx-core`, then `rowx-postgres`, then `rowx-embedded`, then `rowx`. Each
-job runs `uv publish`. PyPI accepts a second upload of a byte-identical file and rejects a same-name file with
-different bytes, so re-running a failed publish job uploads only what is missing. If a later publish job was skipped
-because an earlier one failed, re-run that skipped job after the failed one succeeds.
+Each package is its own job. `rowx-core` publishes first, then `rowx-postgres` and `rowx-sqlite`. `rowx-embedded`
+follows `rowx-postgres`, and `rowx` publishes last, after `rowx-postgres`, `rowx-sqlite`, and `rowx-embedded`. Each job
+runs `uv publish`. PyPI accepts a second upload of a byte-identical file and rejects a same-name file with different
+bytes, so re-running a failed publish job uploads only what is missing. If a later publish job was skipped because an
+earlier one failed, re-run that skipped job after the failed one succeeds.
 
-`rowx` already uses the `pypi` environment. The owner registers pending trusted publishers for
-`rowx-core` and `rowx-postgres`.
-
-`rowx-sqlite` is part of the lockstep version, and `just release X.Y.Z` bumps it with the others, but it does not
-publish yet: its wheels and publish job come with [#348](https://github.com/mplemay/rowx/issues/348), and no release is
-tagged until that merges.
+Each package needs a trusted publisher on PyPI for workflow `release.yml` and environment `pypi`. The owner registers a
+pending trusted publisher before the first release of a new package.
 
 `just release X.Y.Z` bumps the lockstep version, regenerates `docs/changelog.md` with git-cliff, and opens the release
 pull request. After that pull request merges, a green CI push to main runs the tag release job. That job creates
-`vX.Y.Z` on the merge commit and dispatches `release.yml` on the tag. A tag push from `GITHUB_TOKEN` does not start
-`release.yml`. The release tag creation ruleset exempts `github-actions[bot]` so `create-tag` can run, and the
-release tag integrity ruleset still blocks moving or deleting the tag.
+`vX.Y.Z` on the merge commit with a GitHub App token, and the new tag starts `release.yml`. A tag created with
+`GITHUB_TOKEN` would not start it.
+
+## Release app
+
+The owner sets this up once:
+
+1. Create a GitHub App whose only repository permission is Contents, read and write, and install it on `mplemay/rowx`
+   alone.
+2. Create the environment `release-tag`, limited to the `main` branch. Add the app's client ID as the variable
+   `RELEASE_APP_CLIENT_ID` and a private key as the secret `RELEASE_APP_PRIVATE_KEY`.
+3. Add the app to the bypass list of the release tag creation ruleset. The release tag integrity ruleset has no bypass
+   and still blocks moving or deleting a tag.
+
+If the tag job fails before the tag exists, fix the cause and re-run it. A repository admin can instead push `vX.Y.Z` on
+the release merge commit, which also starts `release.yml`.
+
+## Release runs
 
 A `workflow_dispatch` whose ref is a branch builds, checks, and rebuilds the artifacts. It does not publish.
-Publishing runs when the ref is a `v*` tag, including a dispatch of that tag. If the tag exists and the dispatch
-failed, run Release from the Actions tab with the ref set to that tag.
+Publishing runs when the ref is a `v*` tag, including a dispatch of that tag. If the tag exists and Release did not
+start, run Release from the Actions tab with the ref set to that tag.
 
 git-cliff builds `docs/changelog.md` from `feat`, `fix`, `perf`, and breaking commits that belong to a tag.
 `v0.4.0` and `v0.4.1` are ignored, so those commits stay in 0.4.2. `just changelog` regenerates that released file.
