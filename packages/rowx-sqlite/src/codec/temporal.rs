@@ -4,13 +4,14 @@ use pyo3::types::{PyDict, PyType};
 use rowx_sqlite::exec::Param;
 use rowx_sqlite::value::temporal::{self, Aware, Date, DateTime, Time};
 
-use super::classes::class;
+use super::classes::{call_base, class, field};
 use rowx_py_core::errors::encode_error;
 
 static DATE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static TIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DATETIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static TIMEZONE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static TIMEDELTA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static UTC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -31,6 +32,10 @@ pub fn time_class(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
 /// An import failure of the `datetime` module.
 pub fn datetime_class(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     class(py, &DATETIME, "datetime", "datetime")
+}
+
+fn timedelta_class(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    class(py, &TIMEDELTA, "datetime", "timedelta")
 }
 
 fn utc(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
@@ -84,44 +89,48 @@ pub fn decode_aware(py: Python<'_>, value: Aware) -> PyResult<Bound<'_, PyAny>> 
     datetime_class(py)?.call(datetime_args(value.local), Some(&kwargs))
 }
 
-fn small(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<u8> {
-    obj.getattr(name)?.extract::<u8>()
+// Every field is read through the base class's descriptor (`field`), so a subclass that shadows `year` or
+// `utcoffset` cannot change what is stored. The tzinfo is user code, so its `utcoffset` is still called, by the
+// base class's own `utcoffset`.
+fn small(obj: &Bound<'_, PyAny>, cls: &Bound<'_, PyType>, name: &str) -> PyResult<u8> {
+    field(obj, cls, name)?.extract::<u8>()
 }
 
-fn year(obj: &Bound<'_, PyAny>) -> PyResult<u16> {
-    obj.getattr("year")?.extract::<u16>()
+fn big(obj: &Bound<'_, PyAny>, cls: &Bound<'_, PyType>, name: &str) -> PyResult<i64> {
+    field(obj, cls, name)?.extract::<i64>()
 }
 
-fn big(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<i64> {
-    obj.getattr(name)?.extract::<i64>()
-}
-
-fn date_of(obj: &Bound<'_, PyAny>) -> PyResult<Date> {
+fn date_of(obj: &Bound<'_, PyAny>, cls: &Bound<'_, PyType>) -> PyResult<Date> {
     Ok(Date {
-        year: year(obj)?,
-        month: small(obj, "month")?,
-        day: small(obj, "day")?,
+        year: field(obj, cls, "year")?.extract::<u16>()?,
+        month: small(obj, cls, "month")?,
+        day: small(obj, cls, "day")?,
     })
 }
 
-fn time_of(obj: &Bound<'_, PyAny>) -> PyResult<Time> {
+fn time_of(obj: &Bound<'_, PyAny>, cls: &Bound<'_, PyType>) -> PyResult<Time> {
     Ok(Time {
-        hour: small(obj, "hour")?,
-        minute: small(obj, "minute")?,
-        second: small(obj, "second")?,
-        microsecond: obj.getattr("microsecond")?.extract::<u32>()?,
+        hour: small(obj, cls, "hour")?,
+        minute: small(obj, cls, "minute")?,
+        second: small(obj, cls, "second")?,
+        microsecond: field(obj, cls, "microsecond")?.extract::<u32>()?,
     })
 }
 
 // the UTC offset in whole seconds, or `None` for a naive value
-fn offset_of(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<i32>> {
-    let delta = obj.call_method0("utcoffset")?;
+fn offset_of(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    cls: &Bound<'_, PyType>,
+) -> PyResult<Option<i32>> {
+    let delta = call_base(obj, cls, "utcoffset")?;
     if delta.is_none() {
         return Ok(None);
     }
-    let days = big(&delta, "days")?;
-    let seconds = big(&delta, "seconds")?;
-    let micros = big(&delta, "microseconds")?;
+    let timedelta = timedelta_class(py)?;
+    let days = big(&delta, timedelta, "days")?;
+    let seconds = big(&delta, timedelta, "seconds")?;
+    let micros = big(&delta, timedelta, "microseconds")?;
     if micros != 0 {
         return Err(encode_error(
             py,
@@ -140,19 +149,21 @@ fn offset_of(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<i32>> {
 /// # Errors
 /// `EncodeError` for a date SQLite cannot store (the year must be 1 to 9999).
 pub fn encode_date(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Param> {
-    temporal::encode_date(date_of(obj)?).map_err(|e| encode_error(py, &e.to_string()))
+    temporal::encode_date(date_of(obj, date_class(py)?)?)
+        .map_err(|e| encode_error(py, &e.to_string()))
 }
 
 /// # Errors
 /// `EncodeError` for an aware time, which has no stored form.
 pub fn encode_time(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Param> {
-    if offset_of(py, obj)?.is_some() {
+    let cls = time_class(py)?;
+    if offset_of(py, obj, cls)?.is_some() {
         return Err(encode_error(
             py,
             "an aware time cannot be stored; drop the zone",
         ));
     }
-    temporal::encode_time(time_of(obj)?).map_err(|e| encode_error(py, &e.to_string()))
+    temporal::encode_time(time_of(obj, cls)?).map_err(|e| encode_error(py, &e.to_string()))
 }
 
 /// A naive datetime is written as it is and an aware one as UTC.
@@ -160,11 +171,12 @@ pub fn encode_time(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Param> {
 /// # Errors
 /// `EncodeError` for a value SQLite cannot store.
 pub fn encode_datetime(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Param> {
+    let cls = datetime_class(py)?;
     let local = DateTime {
-        date: date_of(obj)?,
-        time: time_of(obj)?,
+        date: date_of(obj, cls)?,
+        time: time_of(obj, cls)?,
     };
-    let stored = offset_of(py, obj)?.map_or_else(
+    let stored = offset_of(py, obj, cls)?.map_or_else(
         || temporal::encode_datetime(local),
         |offset_seconds| {
             temporal::encode_aware(Aware {

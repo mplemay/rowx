@@ -83,7 +83,9 @@ class SqliteMigrations:
     ) -> SqliteMigrationSession:
         # a read-only session opens the file with `mode=ro` and `PRAGMA query_only = ON`
         if readonly:
-            connection = Connection(await connect_checker(self._dsn, statement_timeout))
+            connection = Connection(
+                await connect_checker(self._dsn, statement_timeout, connect_timeout=connect_timeout)
+            )
         else:
             # `connect_timeout` is how long a statement waits for another writer's lock (SQLite's busy timeout)
             connection = await connect(ConnectOptions.from_dsn(self._dsn).with_connect_timeout(connect_timeout))

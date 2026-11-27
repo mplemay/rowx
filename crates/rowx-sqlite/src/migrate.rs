@@ -26,6 +26,8 @@ const OPEN_TRANSACTION_MESSAGE: &str = "a `-- no-transaction` migration must not
     unreleased SAVEPOINT); the work done since that SAVEPOINT was rolled back";
 const FOREIGN_KEYS_MESSAGE: &str = "foreign key enforcement could not be turned back on after a \
     `-- no-transaction` migration";
+// how many violating rows a failure names; the rest are counted
+const VIOLATIONS_SHOWN: usize = 10;
 const BUSY_MESSAGE: &str = "another migrator holds the database: the write lock was not released \
     within the busy timeout (`connect_timeout`)";
 
@@ -62,6 +64,14 @@ pub enum MigrateError {
     Busy(#[source] Error),
     #[error(transparent)]
     Connection(#[from] Error),
+    // a `-- no-transaction` file claimed the version and its row still has no time: the migrator running it
+    // may still be at work, or it was interrupted before it could record the outcome
+    #[error(
+        "migration {version} is dirty: a `-- no-transaction` migration claimed it and has not finished; \
+         another migrator may still be running it, so wait for that one to end; if none is running, it \
+         was interrupted: fix the database and its history row"
+    )]
+    Claimed { version: i64 },
     // the caller went away, so no further step was started
     #[error("the migration was cancelled")]
     Cancelled,
@@ -105,6 +115,23 @@ impl MigrateConfig {
     }
 }
 
+// A dirty row whose time is still unknown is a claim a `-- no-transaction` file made: a migrator that finished
+// it, or saw it fail, wrote the time.
+fn plan_failure(applied: &[AppliedRecord]) -> impl Fn(PlanError) -> MigrateError + '_ {
+    move |err| match err {
+        PlanError::Dirty { version }
+            if applied.iter().any(|r| {
+                r.migration.version == version
+                    && !r.migration.success
+                    && r.execution_time == UNKNOWN_EXECUTION_TIME
+            }) =>
+        {
+            MigrateError::Claimed { version }
+        }
+        other => other.into(),
+    }
+}
+
 fn stop(cancelled: &AtomicBool) -> Result<(), MigrateError> {
     if cancelled.load(Ordering::Acquire) {
         return Err(MigrateError::Cancelled);
@@ -123,10 +150,17 @@ struct History {
     name: String,
 }
 
+// Every reference names the `main` schema: an unqualified name resolves to a TEMP table of the same name
+// first, which a file can create, and the history would then be read from and written to that table.
 impl From<&MigrateConfig> for History {
     fn from(config: &MigrateConfig) -> Self {
+        let quoted = config.table.quoted();
         Self {
-            quoted: config.table.quoted(),
+            quoted: if config.table.schema().is_some() {
+                quoted
+            } else {
+                format!("\"{MAIN}\".{quoted}")
+            },
             name: config.table.name().to_owned(),
         }
     }
@@ -254,6 +288,86 @@ async fn restore_foreign_keys(conn: &Connection) -> Result<(), Error> {
     ))
 }
 
+fn violations_message(found: &[String], total: usize) -> String {
+    let more = total.saturating_sub(found.len());
+    let tail = if more > 0 {
+        format!("; and {more} more")
+    } else {
+        String::new()
+    };
+    format!(
+        "after the `-- no-transaction` migration, {total} row(s) violate a foreign key \
+         (`PRAGMA foreign_key_check`), so the migration is left dirty: {}{tail}",
+        found.join("; ")
+    )
+}
+
+// SQLite refuses to check a foreign key whose parent columns have no unique index ("foreign key mismatch"),
+// so the check cannot say whether rows lost their parent; the schema needs fixing before any write to the
+// child table can succeed with enforcement on
+fn mismatch(err: Error) -> Error {
+    match err {
+        Error::Sqlite {
+            code,
+            message,
+            offset,
+            ..
+        } if message.starts_with("foreign key mismatch") => Error::from_code(
+            code,
+            format!(
+                "after the `-- no-transaction` migration, `PRAGMA foreign_key_check` could not run ({message}): a \
+                     foreign key names parent columns without a PRIMARY KEY or UNIQUE index, so the migration is \
+                     left dirty"
+            ),
+            offset,
+        ),
+        other => other,
+    }
+}
+
+// What SQLite's own table-rebuild procedure ends with. A file may turn enforcement off (and back on) to rebuild
+// a table, and rows it left without a parent would go unnoticed: the file cannot say whether it did, so the
+// check runs after every `-- no-transaction` file
+async fn check_foreign_keys(conn: &Connection) -> Result<(), Error> {
+    let (found, total) = conn
+        .call(|ctx| {
+            if ctx.shared.is_cancelled() {
+                return Err(interrupted());
+            }
+            let mut stmt = ctx.conn.prepare("PRAGMA foreign_key_check")?;
+            // the scan covers the whole database, so the statement timeout bounds it as it bounds the file's
+            // own statements; the clock starts after the prepare, where an interrupt would be lost
+            let _armed = ctx.timer.as_ref().map(Timer::arm);
+            let mut rows = stmt.query([])?;
+            let mut found = Vec::new();
+            let mut total = 0_usize;
+            while let Some(row) = rows.next()? {
+                total += 1;
+                if found.len() < VIOLATIONS_SHOWN {
+                    let table: String = row.get(0)?;
+                    let rowid: Option<i64> = row.get(1)?;
+                    let parent: String = row.get(2)?;
+                    let row_name =
+                        rowid.map_or_else(|| "a row".to_owned(), |id| format!("rowid {id}"));
+                    found.push(format!(
+                        "{table} {row_name} references a missing row of {parent}"
+                    ));
+                }
+            }
+            Ok((found, total))
+        })
+        .await
+        .map_err(mismatch)?;
+    if total == 0 {
+        return Ok(());
+    }
+    Err(Error::from_code(
+        rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY,
+        violations_message(&found, total),
+        None,
+    ))
+}
+
 // What a `-- no-transaction` file leaves behind. A file that left a transaction open (an unreleased
 // `SAVEPOINT` starts one in autocommit mode) has it rolled back, because the history write would otherwise
 // land in a transaction nobody commits and `PRAGMA foreign_keys` would silently do nothing inside it.
@@ -270,7 +384,19 @@ async fn after_script(conn: &Connection, ran: Result<(), Error>) -> Result<(), E
         }
     }
     let restored = restore_foreign_keys(conn).await;
-    outcome.and(restored)
+    outcome.and(restored)?;
+    check_foreign_keys(conn).await
+}
+
+// The time a failed `-- no-transaction` file ran, so its dirty row no longer reads as a claim still at work.
+// Best effort: the failure being reported matters more than this write. It ignores the cancel flag, since a
+// cancelled run is exactly the one whose row must stop claiming it is still running.
+async fn record_failure(conn: &Connection, quoted: &str, version: i64, started: Instant) {
+    let sql = format!("UPDATE {quoted} SET execution_time = ?1 WHERE version = ?2 AND success = 0");
+    let elapsed = nanos(started);
+    let _ = conn
+        .call(move |ctx| Ok(ctx.conn.execute(&sql, (elapsed, version))?))
+        .await;
 }
 
 fn failure(version: i64, dirty: bool, source: Error) -> MigrateError {
@@ -438,7 +564,7 @@ async fn apply_next(
     let step = match list_applied(conn, config).await.and_then(|applied| {
         plan_run(local, &plain(&applied), options)
             .map(|plan| plan.steps.into_iter().next())
-            .map_err(Into::into)
+            .map_err(plan_failure(&applied))
     }) {
         Ok(Some(step)) => step,
         Ok(None) => {
@@ -465,12 +591,14 @@ async fn apply_next(
             return Err(err);
         }
         let ran = script(conn, &step.sql).await;
-        after_script(conn, ran)
-            .await
-            .map_err(failed_dirty(version))?;
-        set_success(conn, &quoted, version, true, Some(nanos(started)))
-            .await
-            .map_err(failed_dirty(version))?;
+        let finished = match after_script(conn, ran).await {
+            Ok(()) => set_success(conn, &quoted, version, true, Some(nanos(started))).await,
+            Err(err) => Err(err),
+        };
+        if let Err(err) = finished {
+            record_failure(conn, &quoted, version, started).await;
+            return Err(failed_dirty(version)(err));
+        }
         return Ok(Some(version));
     }
     let applied = async {
@@ -513,13 +641,17 @@ async fn revert_one(
         }
         Some(row) if !row.migration.success => {
             abandon(conn).await;
-            return Err(PlanError::Dirty { version }.into());
+            return Err(plan_failure(std::slice::from_ref(&row))(PlanError::Dirty {
+                version,
+            }));
         }
         Some(_) => {}
     }
     if step.no_transaction {
+        let started = Instant::now();
+        // the unknown time marks the row as a claim, as a run's claim row is
         let claimed = async {
-            set_success(conn, &quoted, version, false, None)
+            set_success(conn, &quoted, version, false, Some(UNKNOWN_EXECUTION_TIME))
                 .await
                 .map_err(failed(version))?;
             conn.simple("COMMIT").await.map_err(failed(version))
@@ -530,12 +662,14 @@ async fn revert_one(
             return Err(err);
         }
         let ran = script(conn, &step.sql).await;
-        after_script(conn, ran)
-            .await
-            .map_err(failed_dirty(version))?;
-        delete_row(conn, &quoted, version)
-            .await
-            .map_err(failed_dirty(version))?;
+        let finished = match after_script(conn, ran).await {
+            Ok(()) => delete_row(conn, &quoted, version).await,
+            Err(err) => Err(err),
+        };
+        if let Err(err) = finished {
+            record_failure(conn, &quoted, version, started).await;
+            return Err(failed_dirty(version)(err));
+        }
         return Ok(true);
     }
     let reverted = async {
@@ -569,7 +703,10 @@ pub async fn run(
     ensure_table(conn, config).await?;
     let applied = list_applied(conn, config).await?;
     // read without the lock, so a run with nothing to do never waits for one
-    if plan_run(local, &plain(&applied), options)?.is_empty() {
+    if plan_run(local, &plain(&applied), options)
+        .map_err(plan_failure(&applied))?
+        .is_empty()
+    {
         return Ok(Vec::new());
     }
     let mut done = Vec::new();
@@ -601,7 +738,8 @@ pub async fn revert(
     ensure_table(conn, config).await?;
     let applied = list_applied(conn, config).await?;
     // `Latest` is resolved once, here, so it never reaches past the version it named
-    let plan = plan_revert(local, &plain(&applied), target, ignore_missing)?;
+    let plan = plan_revert(local, &plain(&applied), target, ignore_missing)
+        .map_err(plan_failure(&applied))?;
     let mut done = Vec::with_capacity(plan.steps.len());
     let mut elapsed = Vec::with_capacity(plan.steps.len());
     for step in &plan.steps {
@@ -640,7 +778,10 @@ pub async fn skip(
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     ensure_table(conn, config).await?;
     let applied = list_applied(conn, config).await?;
-    if plan_skip(local, &plain(&applied), options)?.is_empty() {
+    if plan_skip(local, &plain(&applied), options)
+        .map_err(plan_failure(&applied))?
+        .is_empty()
+    {
         return Ok(Vec::new());
     }
     stop(cancelled)?;
@@ -649,7 +790,7 @@ pub async fn skip(
     let recorded = async {
         // the plan is made again from what is committed now
         let applied = list_applied(conn, config).await?;
-        let plan = plan_skip(local, &plain(&applied), options)?;
+        let plan = plan_skip(local, &plain(&applied), options).map_err(plan_failure(&applied))?;
         let mut done = Vec::with_capacity(plan.steps.len());
         for step in &plan.steps {
             insert_row(conn, &quoted, step, true, UNKNOWN_EXECUTION_TIME).await?;
@@ -680,7 +821,7 @@ pub async fn run_dry(
     options: PlanOptions,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     let applied = list_applied(conn, config).await?;
-    let plan = plan_run(local, &plain(&applied), options)?;
+    let plan = plan_run(local, &plain(&applied), options).map_err(plan_failure(&applied))?;
     Ok(planned(&plan.steps, MigrationStatus::Applied))
 }
 
@@ -697,7 +838,8 @@ pub async fn revert_dry(
     ignore_missing: bool,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     let applied = list_applied(conn, config).await?;
-    let plan = plan_revert(local, &plain(&applied), target, ignore_missing)?;
+    let plan = plan_revert(local, &plain(&applied), target, ignore_missing)
+        .map_err(plan_failure(&applied))?;
     Ok(planned(&plan.steps, MigrationStatus::Pending))
 }
 
@@ -713,7 +855,7 @@ pub async fn skip_dry(
     options: PlanOptions,
 ) -> Result<Vec<MigrationDetail>, MigrateError> {
     let applied = list_applied(conn, config).await?;
-    let plan = plan_skip(local, &plain(&applied), options)?;
+    let plan = plan_skip(local, &plain(&applied), options).map_err(plan_failure(&applied))?;
     Ok(planned(&plan.steps, MigrationStatus::Applied))
 }
 

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rowx_core::row_shape::{Override, column_name};
 use rusqlite::Connection as Raw;
 
-use crate::bytecode::{Class, Fact, Silent, analyze};
+use crate::bytecode::{Class, Fact, Silent, analyze, same_kind};
 use crate::error::Error;
 use crate::exec::refresh_schema;
 use crate::types::{Kind, lookup};
@@ -206,6 +206,14 @@ fn unproven_cause(structure: &Structure, kinds: &[SourceKind]) -> Option<String>
         })
 }
 
+// Whether a result column's declared type may hide the values it produces. SQLite takes the declared type
+// of a compound select from its leftmost arm alone, and a view may hold a compound the statement cannot
+// show. A subquery or common table expression without one passes a single column through, whose
+// declaration SQLite reports as it does for a plain read.
+fn derived(structure: &Structure, kinds: &[SourceKind]) -> bool {
+    structure.constructs.contains(&Construct::CompoundSelect) || kinds.contains(&SourceKind::View)
+}
+
 // the primary key columns of a table, and whether SQLite keeps a separate index for the key (which a
 // rowid alias never has)
 struct TableKey {
@@ -300,12 +308,13 @@ pub fn describe(
         .map(|parts| resolve(conn, parts))
         .collect::<Result<Vec<_>, _>>()?;
     let cause = unproven_cause(structure, &kinds);
+    let derived = derived(structure, &kinds);
     let mut keys: HashMap<(String, String), TableKey> = HashMap::new();
     // read only when a column needs it, and only from the bytecode, which is never run
     let facts: OnceCell<Result<Option<Vec<Fact>>, Error>> = OnceCell::new();
     let fact = |index: usize| -> Result<Option<Fact>, Error> {
         match facts.get_or_init(|| read_facts(conn, sql, &stmt, stop)) {
-            Ok(found) => Ok(found.as_ref().and_then(|found| found.get(index)).copied()),
+            Ok(found) => Ok(found.as_ref().and_then(|found| found.get(index)).cloned()),
             Err(err) => Err(err.clone()),
         }
     };
@@ -349,15 +358,16 @@ pub fn describe(
                 Ok(not_null || rowid)
             }
         };
-        // the bytecode answers a nullability the existing rule left unproven and a class the declaration lacks
+        // the bytecode answers a nullability the existing rule left unproven, a class the declaration lacks,
+        // and whether a declaration that may hide other values holds for every one
         let untyped = declared.is_none_or(|name| name.trim().is_empty());
-        let found = if (over.is_none() && proven.is_err()) || untyped {
+        let found = if (over.is_none() && proven.is_err()) || untyped || derived {
             fact(index)?
         } else {
             None
         };
+        let (kind, type_name) = column_type(declared, found.as_ref(), derived);
         let (nullable, reason) = verdict(over, proven, found, origin.is_some());
-        let (kind, type_name) = column_type(declared, found);
         columns.push(ColumnInfo {
             name,
             raw_name,
@@ -419,15 +429,26 @@ fn verdict(
     }
 }
 
-// A column with no declared type takes the one storage class the bytecode proves for it.
-fn column_type(declared: Option<&str>, found: Option<Fact>) -> (Option<Kind>, String) {
-    let text = declared.unwrap_or_default().to_owned();
-    if declared.is_some_and(|name| !name.trim().is_empty()) {
-        return (Some(lookup(declared).kind()), text);
+// A declared type is the column's type when it is read straight from the declaring column, or when the
+// bytecode shows every value is an unchanged read of columns declared with a type of the same kind. Otherwise the column takes
+// the one storage class the bytecode proves for every value, and is untyped without one.
+fn column_type(
+    declared: Option<&str>,
+    found: Option<&Fact>,
+    derived: bool,
+) -> (Option<Kind>, String) {
+    if let Some(text) = declared.filter(|name| !name.trim().is_empty()) {
+        let holds = !derived
+            || found
+                .and_then(|fact| fact.declared.as_deref())
+                .is_some_and(|stored| same_kind(stored, text));
+        if holds {
+            return (Some(lookup(declared).kind()), text.to_owned());
+        }
     }
     found
         .and_then(|fact| fact.class)
-        .map_or((None, text), |class| {
+        .map_or((None, String::new()), |class| {
             (Some(class_kind(class)), class.name().to_owned())
         })
 }
@@ -454,35 +475,73 @@ mod tests {
             non_null: true,
             class,
             pass_through: false,
+            declared: None,
+        }
+    }
+
+    fn stored(class: Option<Class>, declared: &str) -> Fact {
+        Fact {
+            declared: Some(declared.to_owned()),
+            ..fact(class)
         }
     }
 
     #[test]
     fn column_type_applies_the_bytecode_class_only_without_a_declared_type() {
-        let integer = Some(fact(Some(Class::Integer)));
+        let integer = fact(Some(Class::Integer));
         assert_eq!(
-            column_type(None, integer),
+            column_type(None, Some(&integer), false),
             (Some(Kind::Integer), "INTEGER".to_owned())
         );
         assert_eq!(
-            column_type(Some("  "), integer),
+            column_type(Some("  "), Some(&integer), false),
             (Some(Kind::Integer), "INTEGER".to_owned())
         );
-        assert_eq!(column_type(None, None), (None, String::new()));
-        assert_eq!(column_type(None, Some(fact(None))), (None, String::new()));
-        // a declared type keeps its own text and kind whatever the bytecode proves
+        assert_eq!(column_type(None, None, false), (None, String::new()));
         assert_eq!(
-            column_type(Some("TEXT"), integer),
+            column_type(None, Some(&fact(None)), false),
+            (None, String::new())
+        );
+        // a declared type read straight from its column keeps its text and kind whatever the bytecode proves
+        assert_eq!(
+            column_type(Some("TEXT"), Some(&integer), false),
             (Some(Kind::Text), "TEXT".to_owned())
         );
         assert_eq!(
-            column_type(Some("NUMERIC"), None),
+            column_type(Some("NUMERIC"), None, false),
             (Some(Kind::Decimal), "NUMERIC".to_owned())
         );
         assert_eq!(
-            column_type(Some("DECIMAL(10, 2)"), integer),
+            column_type(Some("DECIMAL(10, 2)"), Some(&integer), false),
             (Some(Kind::Decimal), "DECIMAL(10, 2)".to_owned())
         );
+    }
+
+    #[test]
+    fn column_type_trusts_a_derived_declaration_only_when_every_value_was_stored_under_it() {
+        // every value is a read of a column declared the same way
+        assert_eq!(
+            column_type(Some("DATE"), Some(&stored(None, "date")), true),
+            (Some(Kind::Date), "DATE".to_owned())
+        );
+        // or declared with another spelling of the same kind
+        assert_eq!(
+            column_type(Some("INT"), Some(&stored(None, "INTEGER")), true),
+            (Some(Kind::Integer), "INT".to_owned())
+        );
+        // the declaration of one arm, over values the bytecode proves are text
+        assert_eq!(
+            column_type(Some("INTEGER"), Some(&fact(Some(Class::Text))), true),
+            (Some(Kind::Text), "TEXT".to_owned())
+        );
+        // nothing proves the values: untyped
+        for found in [None, Some(fact(None)), Some(stored(None, "TEXT"))] {
+            assert_eq!(
+                column_type(Some("INTEGER"), found.as_ref(), true),
+                (None, String::new()),
+                "{found:?}"
+            );
+        }
     }
 
     #[test]

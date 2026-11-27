@@ -103,6 +103,28 @@ def test_a_file_pool_rejects_bad_options(tmp_path: Path, options: dict[str, Any]
 
 
 @pytest.mark.asyncio
+async def test_a_relative_path_is_resolved_once_when_the_pool_is_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    pool = Pool(ConnectOptions(path="app.db", mode="rwc"), min_size=0, max_size=2)
+    try:
+        async with pool.acquire() as held:
+            await query(t"CREATE TABLE t (n INTEGER)").execute(held)
+            monkeypatch.chdir(second)
+            # a second connection opens while the first is held, after the chdir, and sees the same file
+            async with pool.acquire() as fresh:
+                assert await count(fresh) == 0
+    finally:
+        await pool.close()
+    assert (first / "app.db").is_file()
+    assert list(second.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_a_file_pool_takes_explicit_options(tmp_path: Path) -> None:
     pool = Pool(file_options(tmp_path), min_size=2, max_size=3, idle_timeout=None, max_lifetime=None)
     try:

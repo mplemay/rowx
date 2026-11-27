@@ -119,6 +119,23 @@ impl<B> Hook<B> {
             .is_ok_and(|operation| matches!(*operation, Operation::Cancelled))
     }
 
+    /// Decides, under the lock that cancellation takes, whether a running operation's effect belongs to
+    /// its caller. Unless the caller was already cancelled, `publish` runs and the operation is finished,
+    /// so a later cancellation leaves it alone and the caller learns of the effect through what `publish`
+    /// recorded. `None` means the caller was cancelled first: nothing was published, and the operation
+    /// must undo its effect itself.
+    pub fn deliver<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
+        let mut operation = self.0.lock().ok()?;
+        if matches!(*operation, Operation::Cancelled) {
+            return None;
+        }
+        let out = publish();
+        // the claim is released here, together with the publication
+        *operation = Operation::Finished;
+        drop(operation);
+        Some(out)
+    }
+
     /// Releases a reservation or a completed operation. A cancelled task settles separately.
     pub fn finish(&self) {
         if let Ok(mut operation) = self.0.lock()
@@ -388,6 +405,50 @@ mod tests {
         assert_eq!(cancel.state.phase(), Phase::Busy);
         assert_eq!(cancel.backend.requests.load(Ordering::Relaxed), 0);
         drop(next);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delivery_before_cancellation_publishes_and_ignores_the_cancel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cancel = cancel();
+        let hook = Hook::new(cancel.state.claim()?);
+        let (release, wait) = oneshot::channel::<()>();
+        let delivery = hook.clone();
+        let pending = spawn(&cancel, &hook, async move {
+            let _ = wait.await;
+            delivery.deliver(|| 7)
+        })?;
+        assert!(release.send(()).is_ok());
+        assert_eq!(pending.wait().await?, Some(7));
+
+        hook.fire();
+        assert_eq!(cancel.state.phase(), Phase::Idle);
+        assert!(!hook.is_cancelled());
+        assert_eq!(cancel.backend.requests.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_delivery_withholds_the_publication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cancel = cancel();
+        let hook = Hook::new(cancel.state.claim()?);
+        let (release, wait) = oneshot::channel::<()>();
+        let (done, published) = oneshot::channel();
+        let delivery = hook.clone();
+        let pending = spawn(&cancel, &hook, async move {
+            let _ = wait.await;
+            let _ = done.send(delivery.deliver(|| 7));
+        })?;
+
+        hook.fire();
+        drop(pending);
+        assert!(release.send(()).is_ok());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), published).await??,
+            None
+        );
         Ok(())
     }
 

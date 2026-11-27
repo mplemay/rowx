@@ -8,7 +8,6 @@ use crate::codec::extract::PyParam;
 use crate::codec::numeric::{self, decimal_class};
 use crate::errors::decode_error;
 
-static LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 fn json_fn<'py>(
@@ -40,7 +39,7 @@ pub fn decode<'py>(py: Python<'py>, ty: &Type, raw: &[u8]) -> PyResult<Bound<'py
     };
     let text = std::str::from_utf8(body)
         .map_err(|e| decode_error(py, &format!("{} is not valid UTF-8: {e}", ty.name())))?;
-    json_fn(py, &LOADS, "loads")?.call1((text,)).map_err(|e| {
+    rowx_py_core::json::loads(py, text).map_err(|e| {
         // only bad input is a decode error; MemoryError, KeyboardInterrupt and the like propagate
         if e.is_instance_of::<PyValueError>(py) || e.is_instance_of::<PyRecursionError>(py) {
             decode_error(py, &format!("{} is not valid JSON: {e}", ty.name()))

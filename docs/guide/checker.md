@@ -44,10 +44,12 @@ statement_timeout = "10s"         # integer + unit: ms|s|min
 
 `--database-url sqlite:///app.db` checks against a SQLite file, opened read-only, and `sqlite::memory:` builds the
 database from your migrations first (it implies `--scratch`). The checker proves less than on PostgreSQL: a column is
-NOT NULL only for plain tables, so a view, a subquery, an outer join or an expression reads
-`nullability not proven, assumed nullable`. A column with no declared type, such as `count(*)`, is untyped and accepts
-any annotation, and parameters are untyped, so there is no `param-type-mismatch`. A SQL error carries `code`, such as
-`SQLITE_ERROR`, in the JSON output. A runnable example is [SQLite](sqlite.md#check), and the contract is the
+NOT NULL when it is a `NOT NULL` column of a plain table or the statement's bytecode proves it (`count(*)`,
+`coalesce(b, 'z')`), and any other view, subquery, outer join or expression column reads
+`nullability not proven, assumed nullable`. An expression is typed by the storage class the bytecode proves, and a
+column with none, such as `max(a)`, is untyped and accepts any annotation, and parameters are untyped, so there is no
+`param-type-mismatch`. A SQL error carries `code`, such as `SQLITE_ERROR`, in the JSON output. A runnable example is
+[SQLite](sqlite.md#check), and the contract is the
 [checker reference](../reference/checker.md#sqlite).
 
 The database URL comes from `--database-url`, else from the environment variable named by `database_url_env`

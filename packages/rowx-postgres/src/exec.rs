@@ -36,6 +36,10 @@ pub struct FetchArgs {
 // bit 1 of the per-column flags: an `interval` is read as `rowx_postgres.Interval`
 const SPAN: u8 = BACKEND;
 
+// tries of the statement that undoes a transaction or savepoint whose caller was cancelled: a cancel request
+// resent while the task still runs can abort one of them
+const UNDO_ATTEMPTS: usize = 3;
+
 /// What only the PostgreSQL binding does with an [`Access`].
 pub trait AccessExt {
     /// `fail`, and a stale cached plan also bumps the pool's schema epoch.
@@ -312,10 +316,11 @@ pub fn simple<'py>(
     Ok(future)
 }
 
-/// What a successful transaction statement does to the helper depth.
-#[derive(Debug, Clone, Copy)]
+/// What a successful transaction statement does to the helper depth. A new transaction or savepoint
+/// carries the statement that undoes it.
+#[derive(Debug, Clone)]
 pub enum Depth {
-    Enter,
+    Enter(String),
     Leave,
     Keep,
 }
@@ -345,20 +350,54 @@ pub fn txn_step<'py>(
             .await
             .map_err(PgError::from)?;
         let inner = Arc::clone(&cancel.backend.conn);
+        let state = Arc::clone(&cancel.state);
+        let delivery = hook.clone();
+        // the depth follows the session, so it moves inside the operation, which runs to its end even
+        // when nobody awaits it any more
         let pending = cancel::spawn(&cancel, &hook, async move {
-            inner.lock().await.simple(&sql).await
+            let conn = inner.lock().await;
+            let stepped = conn.simple(&sql).await;
+            let undo = match (stepped, depth) {
+                (Err(err), _) => {
+                    drop(conn);
+                    return Err(err);
+                }
+                (Ok(()), Depth::Enter(undo)) => undo,
+                (Ok(()), Depth::Leave) => {
+                    drop(conn);
+                    return Ok(state.leave_txn());
+                }
+                (Ok(()), Depth::Keep) => {
+                    drop(conn);
+                    return Ok(state.txn_depth());
+                }
+            };
+            if let Some(depth) = delivery.deliver(|| state.enter_txn()) {
+                drop(conn);
+                return Ok(depth);
+            }
+            // the caller was cancelled before it could learn of the transaction or savepoint, so
+            // nobody would end it; a session that keeps it is broken
+            let mut undone = false;
+            for _ in 0..UNDO_ATTEMPTS {
+                if conn.simple(&undo).await.is_ok() {
+                    undone = true;
+                    break;
+                }
+            }
+            if !undone {
+                state.mark_broken();
+            }
+            drop(conn);
+            Err(Error::Core(CoreError::Closed))
         })
         .map_err(|e| PgError(e.into()))?;
-        pending
+        let depth = pending
             .wait()
             .await
             .map_err(|e| PgError(e.into()))?
             .map_err(|e| access.fail(&cancel.state, e))?;
-        Ok(match depth {
-            Depth::Enter => cancel.state.enter_txn(),
-            Depth::Leave => cancel.state.leave_txn(),
-            Depth::Keep => cancel.state.txn_depth(),
-        })
+        Ok(depth)
     })?;
     watch(&future, watched)?;
     Ok(future)

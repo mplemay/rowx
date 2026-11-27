@@ -1,4 +1,6 @@
 import asyncio
+import time
+from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -443,3 +445,46 @@ def test_a_pool_transaction_cannot_be_entered_twice(schema: str) -> None:
             return await query[int](t"SELECT 1").one(pool)
 
     assert asyncio.run(body()) == 1
+
+
+# blocks the event loop until the native side has handed the new transaction or savepoint over (its depth rose), so the
+# awaiting `__aenter__` cannot resume before the cancel lands: the window where the result is delivered but never seen
+def block_until_handed_over(conn: Connection, depth: int) -> None:
+    deadline = time.monotonic() + 5
+    while conn._impl._txn_depth < depth:
+        assert time.monotonic() < deadline, "the transaction was never handed over"
+
+
+async def cancel_after_hand_over(conn: Connection, enter: Awaitable[object], depth: int) -> None:
+    task = asyncio.ensure_future(enter)
+    # one turn of the loop, so the task calls the native begin
+    await asyncio.sleep(0)
+    block_until_handed_over(conn, depth)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.server(needs="sessions")
+def test_a_begin_cancelled_after_it_was_handed_over_rolls_back(schema: str) -> None:
+    async def body(conn: Connection, observer: Connection) -> tuple[int, str, int]:
+        await cancel_after_hand_over(conn, AsyncExitStack().enter_async_context(conn.transaction()), 1)
+        depth = conn._impl._txn_depth
+        state = await wait_for_state(observer, await backend_pid(conn), "idle")
+        await query(t"INSERT INTO users (name) VALUES ('after')").execute(conn)
+        return depth, state, await count_users(observer, "after")
+
+    assert run_with_two(schema, body) == (0, "idle", 1)
+
+
+@pytest.mark.server(needs="sessions")
+def test_a_savepoint_cancelled_after_it_was_handed_over_is_released(schema: str) -> None:
+    async def body(conn: Connection, observer: Connection) -> tuple[int, int]:
+        async with conn.transaction() as outer:
+            await cancel_after_hand_over(conn, AsyncExitStack().enter_async_context(outer.transaction()), 2)
+            depth = conn._impl._txn_depth
+            async with outer.transaction() as inner:
+                await query(t"INSERT INTO users (name) VALUES ('inner')").execute(inner)
+        return depth, await count_users(observer, "inner")
+
+    assert run_with_two(schema, body) == (1, 1)

@@ -33,10 +33,11 @@ pub(crate) struct FetchArgs {
     pub shape: Option<Py<RowShape>>,
 }
 
-/// What a successful transaction statement does to the helper depth.
-#[derive(Debug, Clone, Copy)]
+/// What a successful transaction statement does to the helper depth. A new savepoint carries the
+/// statement that undoes it.
+#[derive(Debug, Clone)]
 pub(crate) enum Depth {
-    Enter,
+    Enter(String),
     Leave,
     Keep,
 }
@@ -393,7 +394,9 @@ async fn restore_query_only(core: &Core, conn: &SqliteConnection) {
 /// Opens the outermost transaction; resolves to the depth.
 ///
 /// A `BEGIN` that waits for the write lock is not woken by an interrupt, so it can finish after the
-/// caller was cancelled. It then rolls itself back, because nobody is left to end the transaction.
+/// caller was cancelled. Whether the caller owns the transaction is decided under the hook's lock: a
+/// cancellation that comes first leaves nobody to end it, so it rolls itself back; one that comes later
+/// finds the depth already raised, which is how the caller learns it has a transaction to end.
 ///
 /// # Errors
 /// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed, or the statement's error.
@@ -408,32 +411,48 @@ pub(crate) fn begin<'py>(
         if read_only {
             set_query_only(&core, &conn).await?;
         }
-        let began = conn.simple(sql).await;
-        let abandoned = began.is_ok() && hook.is_cancelled();
+        if let Err(err) = conn.simple(sql).await {
+            restore_query_only(&core, &conn).await;
+            drop(conn);
+            return Err(Failure::from(err));
+        }
+        if let Some(depth) = hook.deliver(|| core.enter()) {
+            drop(conn);
+            return Ok(depth);
+        }
         // the cancel flag is still set, so the rollback must not look at it; a connection that stays
         // inside the transaction is marked broken
-        let rolled_back = if abandoned {
-            conn.rollback_abandoned().await
-        } else {
-            Ok(())
-        };
-        if began.is_err() || (abandoned && rolled_back.is_ok()) {
+        let rolled_back = conn.rollback_abandoned().await;
+        if rolled_back.is_ok() {
             restore_query_only(&core, &conn).await;
         }
         drop(conn);
-        if let Err(err) = rolled_back {
-            return Err(Failure::from(err));
-        }
-        match began {
-            Err(err) => Err(Failure::from(err)),
-            Ok(()) if abandoned => Err(Failure::from(interrupted())),
-            Ok(()) => Ok(core.enter()),
-        }
+        rolled_back.map_err(Failure::from)?;
+        Err(Failure::from(interrupted()))
     })
+}
+
+// an interrupt resent while the abandoned operation settles can break a statement, so it is tried again
+const RELEASE_ATTEMPTS: usize = 3;
+
+// a savepoint the caller never learned of holds nothing yet, so releasing it undoes it; a connection
+// that keeps it is broken, because the savepoint names would no longer follow the depth
+async fn release_abandoned(core: &Core, conn: &SqliteConnection, sql: &str) -> Failure {
+    for _ in 0..RELEASE_ATTEMPTS {
+        if conn.simple_uncancelled(sql).await.is_ok() {
+            return Failure::from(interrupted());
+        }
+    }
+    core.cancel.state.mark_broken();
+    Failure::from(Error::Core(CoreError::Broken))
 }
 
 /// Runs one savepoint statement and then adjusts the depth, which it returns. After SQLite ended the
 /// transaction itself, a release or rollback has nothing left to do and a new savepoint is refused.
+///
+/// A new savepoint reaches the caller the way `begin`'s transaction does: one whose caller was
+/// cancelled first is released again. A release or rollback moves the depth whether or not anyone
+/// awaits it, because the depth follows the session.
 ///
 /// # Errors
 /// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed, or the statement's error.
@@ -443,23 +462,38 @@ pub(crate) fn txn_step<'py>(
     sql: String,
     depth: Depth,
 ) -> PyResult<Bound<'py, PyAny>> {
-    run(py, core, move |core, _| async move {
+    run(py, core, move |core, hook| async move {
         if core.aborted() {
             return match depth {
-                Depth::Enter => Err(Failure::Aborted),
+                Depth::Enter(_) => Err(Failure::Aborted),
                 Depth::Leave => Ok(core.leave()),
                 Depth::Keep => Ok(core.depth()),
             };
         }
         let conn = core.conn.lock().await;
         let stepped = conn.simple(&sql).await;
+        let undo = match (stepped, depth) {
+            (Err(err), _) => {
+                drop(conn);
+                return Err(Failure::at(err, &sql));
+            }
+            (Ok(()), Depth::Enter(undo)) => undo,
+            (Ok(()), Depth::Leave) => {
+                drop(conn);
+                return Ok(core.leave());
+            }
+            (Ok(()), Depth::Keep) => {
+                drop(conn);
+                return Ok(core.depth());
+            }
+        };
+        if let Some(depth) = hook.deliver(|| core.enter()) {
+            drop(conn);
+            return Ok(depth);
+        }
+        let failure = release_abandoned(&core, &conn, &undo).await;
         drop(conn);
-        stepped.map_err(|err| Failure::at(err, &sql))?;
-        Ok(match depth {
-            Depth::Enter => core.enter(),
-            Depth::Leave => core.leave(),
-            Depth::Keep => core.depth(),
-        })
+        Err(failure)
     })
 }
 
@@ -502,7 +536,8 @@ async fn finish_transaction(
 ///
 /// The statement runs in a task of its own, so dropping the caller neither stops it nor interrupts it. A
 /// caller that goes away while a `COMMIT` is in flight cannot know the outcome, so the connection is marked
-/// broken.
+/// broken. Closing the connection does not interrupt a `COMMIT` that is running; it waits for it, so the
+/// caller sees it succeed or fail. One that has not started yet is refused and reported as closed.
 ///
 /// # Errors
 /// `ConnectionBusyError`/`InterfaceError` when the connection cannot be claimed, or the statement's error.
@@ -526,7 +561,12 @@ pub(crate) fn end_transaction<'py>(
                 .await
                 .map_err(Failure::from)?;
             let conn = core.conn.lock().await;
+            // an interrupt from `close` could roll a COMMIT back while the caller is told only that the
+            // connection closed; closing waits for it instead, so the caller learns the outcome. A COMMIT
+            // that has not started when `close` comes is refused, which is just as clear
+            let spared = commit.then(|| core.cancel.backend.spare());
             let result = finish_transaction(&core, &conn, commit).await;
+            drop(spared);
             drop(conn);
             drop(claim);
             result

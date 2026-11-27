@@ -233,30 +233,43 @@ by the lexer in `packages/rowx-sqlite/src/rowx_sqlite/_compiler.py`. Column-name
 2. the column resolves to a base column that is declared `NOT NULL`, or is an `INTEGER PRIMARY KEY` rowid alias, or is
    `rowid`, `oid` or `_rowid_` of a rowid table. A rowid alias is non-null although SQLite's own flag is clear.
 
-Any other column is nullable. When condition 1 fails it is `Unproven`, and when condition 1 holds but the column has no
-`NOT NULL` it is `NullableColumn`. `Unproven` is a `NullReason` for a column that nothing disproves and nothing proves:
-SQLite can say whether a base column is declared `NOT NULL`, but not what an outer join, a view or an expression does
-to it. Until the proof is extended
-([#350](https://github.com/mplemay/rowx/issues/350)), every such column is nullable, and `"col!"` narrows it.
+When condition 1 holds but the column has no `NOT NULL`, it is `NullableColumn`. Any other column the rule cannot
+prove, because condition 1 fails or the column is an expression, goes to the bytecode analysis below. A column that
+analysis does not prove either is `Unproven`: a `NullReason` for a column that nothing disproves and nothing proves.
+It is nullable, and `"col!"` narrows it.
+
+**Bytecode analysis.** `crates/rowx-sqlite/src/bytecode.rs` reads the statement's `EXPLAIN` program, which is never
+run, and follows every path to each result row. It proves a column non-null when no path leaves it NULL, and it names
+the one storage class every value has when that is certain. It models literals, `CAST`, `coalesce`, `ifnull`, `CASE`,
+`||`, `+`, `-` and `*`, `typeof`, `length`, `upper`, `lower`, `abs`, `round` and a few other documented scalar
+functions, the aggregates `count`, `total`, `avg`, `sum` and `group_concat`, outer join null rows, subqueries, CTEs,
+views, every arm of a compound select and `RETURNING`. So `count(*)` is a non-null `INTEGER`, `coalesce(b, 'z')` is
+non-null, `'x'` is a non-null `TEXT`, and the right side of a `LEFT JOIN` stays nullable. `max(a)`, `sum(a)`, `a / b`
+and any function it does not list may be NULL and stay `Unproven`. A statement with an opcode it does not model (a
+window function, a virtual table, a trigger, a foreign key action) is analysed not at all, and its unproven columns
+stay `Unproven` and untyped. The analysis is consulted only for a column the rule leaves unproven, a column with no
+declared type, and a column whose declared type may hide other values ([Type mapping](type-mapping.md#lookup)).
 
 | Reason | Meaning |
 |---|---|
-| `NotNullColumn` | Proven by the rule. |
+| `NotNullColumn` | Proven by the rule, or a plain read of one `NOT NULL` base column that the bytecode shows is never null-extended. |
+| `ComputedExpr` | An expression, or a column read from more than one base column, that the bytecode proves is never NULL. |
 | `NullableColumn` | A column of an ordinary table with no `NOT NULL`, in a statement the rule can read. |
-| `Unproven` | Condition 1 failed, or the column is an expression. Nullable. |
+| `Unproven` | Neither the rule nor the bytecode proves it. Nullable. |
 | `OverrideBang`, `OverrideQuestion` | The `"col!"` and `"col?"` suffixes, applied last ([Overrides](#overrides)). |
 
 `ViewColumn`, `ForeignOrView`, `Computed` and the other PostgreSQL reasons stay in the type for PostgreSQL and are never
-produced for SQLite. `ComputedExpr` keeps its PostgreSQL meaning. The cause behind an `Unproven` column is recorded in
-the described column (`common table expression`, `subquery`, `compound select`, `outer join`, `aggregate`,
-`view <name>`, `source <name> is not a table`, or `expression`), and the checker's output reads
+produced for SQLite. The cause behind an `Unproven` column is recorded in the described column
+(`common table expression`, `subquery`, `compound select`, `outer join`, `aggregate`, `view <name>`,
+`source <name> is not a table`, or `expression`), and the checker's output reads
 `nullability not proven, assumed nullable` for all of them.
 
 **Origin.** SQLite reports each result column's base database, table and column through
 `sqlite3_column_{database,table,origin}_name`. They see through views, CTEs and subqueries to the base column, and a
-compound select takes them from its leftmost arm. rowx reads them for the column's declared type and for the rule, but
-the rule then requires condition 1, so origin alone never proves a column. An expression has no origin, and neither
-does `count(*)`: it is untyped and `Unproven` ([Checker](checker.md#sqlite)).
+compound select takes them from its leftmost arm. rowx reads them for the rule, but the rule then requires condition 1,
+so origin alone never proves a column. A compound select is non-null only when every arm is: the bytecode joins the
+values of all arms. An expression has no origin; `count(*)` is `ComputedExpr` by the bytecode
+([Checker](checker.md#sqlite)).
 
 Notes on single constructs. `test_each_construct_has_its_nullability` in the package tests pins the table of them:
 

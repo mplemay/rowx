@@ -161,16 +161,64 @@ async def test_drop_removes_orphaned_side_files_when_the_main_file_is_missing(tm
         held.commit()
         assert present(tmp_path / "a.db-wal")
         remove(path)
+        # SQLite never wrote this one (no hot-journal header), so it is not removed
         (tmp_path / "a.db-journal").write_bytes(b"x")
         admin = SqliteAdmin(url_of(path))
         await admin.drop()
-        assert listing(tmp_path) == []
+        assert listing(tmp_path) == ["a.db-journal"]
         await admin.create()
         async with await connect(ConnectOptions(path=str(path), mode="rw")) as connection:
             await connection.ping()
         assert fetch(path, "SELECT count(*) FROM sqlite_master") == [(0,)]
     finally:
         held.close()
+
+
+@pytest.mark.asyncio
+async def test_drop_keeps_side_named_files_sqlite_did_not_write_and_empty_files(tmp_path: Path) -> None:
+    (tmp_path / "cfg-journal").write_text("important", encoding="utf-8")
+    (tmp_path / "cfg-wal").write_text("data", encoding="utf-8")
+    await SqliteAdmin(url_of(tmp_path / "cfg")).drop()
+    assert listing(tmp_path) == ["cfg-journal", "cfg-wal"]
+    empty = tmp_path / "notes.txt"
+    empty.write_bytes(b"")
+    with pytest.raises(DatabaseError, match="not a SQLite database") as error:
+        await SqliteAdmin(url_of(empty)).drop()
+    assert error.value.sqlstate == "XX002"
+    assert present(empty)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symbolic link needs a privilege on Windows")
+@pytest.mark.asyncio
+async def test_drop_refuses_a_symlink_and_keeps_the_database_it_points_to(tmp_path: Path) -> None:
+    real = tmp_path / "real.db"
+    seed(real, wal=True).close()
+    link = tmp_path / "link.db"
+    link.symlink_to(real)
+    with pytest.raises(DatabaseError, match="symbolic link") as error:
+        await SqliteAdmin(url_of(link)).drop()
+    assert error.value.sqlstate == "XX002"
+    assert link.is_symlink()
+    assert fetch(real, "SELECT count(*) FROM t") == [(3,)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows refuses on its own, with or without force")
+@pytest.mark.asyncio
+async def test_dropping_a_database_a_connection_holds_open_is_in_use_unless_forced(tmp_path: Path) -> None:
+    path = tmp_path / "a.db"
+    admin = SqliteAdmin(url_of(path))
+    await admin.create()
+    async with await connect(ConnectOptions(path=str(path), mode="rw")) as connection:
+        await connection.ping()
+        with pytest.raises(DatabaseError, match="open connections") as error:
+            await admin.drop()
+        assert error.value.sqlstate == "55006"
+        assert present(path)
+        await admin.drop(force=True)
+        assert not present(path)
+    await admin.create()
+    await admin.drop()
+    assert listing(tmp_path) == []
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="only Windows refuses to remove an open file")
@@ -226,7 +274,9 @@ async def test_ready_opens_an_existing_file_and_rejects_one_that_is_not_a_databa
 @pytest.mark.asyncio
 async def test_list_names_files_with_the_prefix_beside_the_url_and_leaves_out_side_files(tmp_path: Path) -> None:
     seed(tmp_path / "rowx_b.db").close()
-    (tmp_path / "rowx_a.db").write_bytes(b"")
+    seed(tmp_path / "rowx_a.db").close()
+    # an empty file shows nothing that makes it a database
+    (tmp_path / "rowx_empty.db").write_bytes(b"")
     (tmp_path / "rowx_a.db-wal").write_bytes(b"x")
     (tmp_path / "rowx_a.db-shm").write_bytes(b"x")
     (tmp_path / "rowx_text.db").write_bytes(b"not sqlite")

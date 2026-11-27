@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 # `_end_transaction(commit)`, `_release_savepoint(n)` and `_rollback_to_savepoint(n)` claim the connection when called,
 # raising `ConnectionBusyError` synchronously if it is busy, and return an awaitable that settles once the statement ran
 # `_savepoint()` returns the savepoint number
+# `_txn_depth` counts the open transaction and savepoints. A `_begin` or `_savepoint` raises it exactly when it hands the
+# new one to its caller, so a caller whose await was cancelled can tell from it whether one opened
 class NativeConnection[S](Protocol):
     async def _fetch(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         self,
@@ -51,6 +53,8 @@ class NativeConnection[S](Protocol):
     def _end_transaction(self, commit: bool) -> Awaitable[None]: ...  # ruff: ignore[boolean-type-hint-positional-argument]
     @property
     def closed(self) -> bool: ...
+    @property
+    def _txn_depth(self) -> int: ...
 
 
 # What a pooled connection gives itself back to
