@@ -3088,9 +3088,15 @@ class _Resolver:
         prefix = f"\0slot:{parent}:"
         positions = {key.removeprefix(prefix).removesuffix(":known") for key in state if key.startswith(prefix)}
         length = len({position for position in positions if position.isdigit()})
-        if index < 0 and f"\0wide:{parent}" not in state and -length <= index:
+        signed = f"\0child:{parent}:{index}:"
+        if (
+            index < 0
+            and not any(key.startswith(signed) for key in state)
+            and f"\0wide:{parent}" not in state
+            and -length <= index
+        ):
             index += length
-        if index < 0:
+        if index < 0 and not any(key.startswith(signed) for key in state):
             index = -1
         children = {key.split(":", 3)[3] for key in state if key.startswith(f"\0child:{parent}:{index}:")}
         if (
@@ -3121,7 +3127,12 @@ class _Resolver:
                 for key in state
                 if key.startswith(prefix) and key.removeprefix(prefix).removesuffix(":known").isdigit()
             })
-            position = index + length if index < 0 and f"\0wide:{parent}" not in state else index
+            signed = f"\0child:{parent}:{index}:"
+            position = (
+                index + length
+                if index < 0 and not any(key.startswith(signed) for key in state) and f"\0wide:{parent}" not in state
+                else index
+            )
             edge = f"\0child:{parent}:{position}:"
             children.update(key.removeprefix(edge) for key in state if key.startswith(edge))
             if (
@@ -3305,6 +3316,17 @@ class _Resolver:
         return result
 
     @staticmethod
+    def _attrs_check_conditional_depth(expr: ast.IfExp) -> None:
+        pending: list[tuple[ast.AST, int]] = [(expr, 0)]
+        while pending:
+            item, depth = pending.pop()
+            depth += isinstance(item, ast.IfExp)
+            if depth > MAX_HOPS:
+                msg = f"attrs conditional metadata is deeper than {MAX_HOPS} expressions"
+                raise _invalid(msg)
+            pending.extend((child, depth) for child in ast.iter_child_nodes(item))
+
+    @staticmethod
     def _attrs_capture_ordered_child(  # ruff: ignore[complex-structure]
         expr: ast.expr,
         state: dict[str, bool | _Module] | set[str],
@@ -3313,6 +3335,9 @@ class _Resolver:
         context: tuple[Callable[[ast.Name], str], str, Callable[[], None]],
     ) -> tuple[bool, set[str], bool]:
         name, namespace, record = context
+
+        if isinstance(expr, ast.IfExp):
+            _Resolver._attrs_check_conditional_depth(expr)
 
         def capture_values(values: list[ast.expr]) -> list[tuple[bool, set[str], bool]]:
             root = f"\0capture{id(expr)}"
@@ -3469,6 +3494,8 @@ class _Resolver:
                     if nested is not None and index < len(nested):
                         for source in nested[index]:
                             _Resolver._attrs_store_fact(state, f"\0child:{child}:{index}:{source}", value=True)
+                        for source in nested[-index - 1]:
+                            _Resolver._attrs_store_fact(state, f"\0child:{child}:{-index - 1}:{source}", value=True)
         else:
             _Resolver._attrs_store_fact(state, f"\0wide:{child}", value=True)
             _Resolver._attrs_copy_wildcard_children(child, children, state)
@@ -3502,7 +3529,9 @@ class _Resolver:
         binding = False
         for branch in branches:
             _Resolver._attrs_replace_state(state, before)
-            if isinstance(branch, ast.Tuple | ast.List | ast.NamedExpr | ast.IfExp):
+            if not isinstance(branch, ast.Name | ast.Subscript) or (
+                isinstance(branch, ast.Subscript) and _Resolver._attrs_literal_slot(branch) is not None
+            ):
                 branch_binding, branch_children, branch_found = _Resolver._attrs_capture_ordered_child(
                     branch, state, value, scan, context
                 )
@@ -5688,6 +5717,26 @@ class _Resolver:
                 bound = loop_bindings(item.target, item.iter, aliases)
                 scan(item.iter, aliases)
                 local = aliases.copy()
+                if (
+                    isinstance(item, ast.For)
+                    and isinstance(item.iter, ast.Tuple | ast.List)
+                    and len(item.iter.elts) == 1
+                    and not isinstance(item.iter.elts[0], ast.Starred)
+                    and not any(
+                        isinstance(part, ast.Break | ast.Continue) for stmt in item.body for part in ast.walk(stmt)
+                    )
+                ):
+                    local.difference_update(
+                        _mangle(class_name, target.id)
+                        for target in ast.walk(item.target)
+                        if isinstance(target, ast.Name)
+                    )
+                    local.update(bound)
+                    body(item.body, local)
+                    body(item.orelse, local)
+                    aliases.clear()
+                    aliases.update(local)
+                    return
                 while True:
                     previous = local.copy()
                     iteration = local.copy()

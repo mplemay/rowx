@@ -2086,6 +2086,46 @@ def test_attrs_conditional_test_effects_before_branch_capture(
     test_attrs_captured_nested_carrier_identity(tmp_path, body, shared=shared, reject=reject)
 
 
+@pytest.mark.parametrize("shared", [True, False])
+@pytest.mark.parametrize(
+    ("body", "reject"),
+    [
+        ("a = [[attrs.field()], [attrs.field()]] if flag else [[FIELD]]\na[-1][0].default(lambda self: 42)", True),
+        ("a = [[FIELD], [attrs.field()]] if flag else [[attrs.field()]]\na[-1][0].default(lambda self: 42)", False),
+        (
+            "source = [[FIELD]]\na = ((source[0], (source := [[attrs.field()]]))[0] if flag else []) if flag else []\na[0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "source = [[attrs.field()]]\na = ((source[0], (source := [[FIELD]]))[0] if flag else []) if flag else []\na[0].default(lambda self: 42)",
+            False,
+        ),
+    ],
+)
+def test_attrs_conditional_order_and_signed_children(tmp_path: Path, body: str, *, shared: bool, reject: bool) -> None:
+    test_attrs_captured_nested_carrier_identity(tmp_path, "flag = bool(1)\n" + body, shared=shared, reject=reject)
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_attrs_deep_conditional_metadata_is_rejected(tmp_path: Path, *, shared: bool) -> None:
+    path = tmp_path / "case.py"
+    chain = "[FIELD]" + " if flag else [FIELD]" * 400
+    body = f"flag = bool(1)\na = {chain}\na[0].default(lambda self: 42)\n"
+    if shared:
+        source = "spec = attrs.field()\n" + body.replace("FIELD", "spec")
+        source += "@attrs.define\nclass Row:\n    value: int = spec\n"
+    else:
+        source = "@attrs.define\nclass Row:\n    value: int = attrs.field()\n    "
+        source += body.replace("FIELD", "value").replace("\n", "\n    ") + "pass\n"
+    path.write_text(f'import attrs\nfrom rowx import query\n{source}query[Row](t"select 1")\n')
+    [call] = discover_file(path).calls
+    result = resolve_row_type(ModuleGraph(), call, (tmp_path,))
+    assert result.diagnostic is not None
+    assert "attrs conditional metadata" in result.diagnostic.message or "untraceable attrs collection" in (
+        result.diagnostic.message
+    )
+
+
 @pytest.mark.parametrize("dictionary", [True, False])
 def test_attrs_possible_alias_traversal_is_bounded(*, dictionary: bool) -> None:
     facts = {f"\0mayalias:n{index}:n{index + 1}" for index in range(100)}
