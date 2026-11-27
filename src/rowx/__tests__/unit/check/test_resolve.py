@@ -2054,6 +2054,30 @@ def test_attrs_transitive_and_nested_possible_aliases(tmp_path: Path, body: str,
     test_attrs_captured_nested_carrier_identity(tmp_path, "flag = bool(1)\n" + body, shared=shared, reject=True)
 
 
+@pytest.mark.parametrize("shared", [True, False])
+@pytest.mark.parametrize(
+    ("body", "reject"),
+    [
+        (
+            "source = [[attrs.field()]]\na = source[0] if (source := [[FIELD]]) else []\na[0].default(lambda self: 42)",
+            True,
+        ),
+        (
+            "source = [[FIELD]]\na = source[0] if (source := [[attrs.field()]]) else []\na[0].default(lambda self: 42)",
+            False,
+        ),
+        (
+            "source = [[attrs.field()]]\na = source[0] if (source[0].append(FIELD) or True) else []\na[-1].default(lambda self: 42)",
+            True,
+        ),
+    ],
+)
+def test_attrs_conditional_test_effects_before_branch_capture(
+    tmp_path: Path, body: str, *, shared: bool, reject: bool
+) -> None:
+    test_attrs_captured_nested_carrier_identity(tmp_path, body, shared=shared, reject=reject)
+
+
 @pytest.mark.parametrize("dictionary", [True, False])
 def test_attrs_possible_alias_traversal_is_bounded(*, dictionary: bool) -> None:
     facts = {f"\0mayalias:n{index}:n{index + 1}" for index in range(100)}
@@ -2061,7 +2085,9 @@ def test_attrs_possible_alias_traversal_is_bounded(*, dictionary: bool) -> None:
     state: dict[str, bool | _Module] | set[str] = dict.fromkeys(facts, True) if dictionary else facts
     branches = _Resolver._attrs_possible_alias_states(ast.Name(id="n0", ctx=ast.Load()), state, lambda item: item.id)
     assert len(branches) == 100
-    assert any("\0alias:n99:n100" in branch for branch in branches)
+    components = [_Resolver._attrs_carrier_related("n0", branch) for branch in branches]
+    assert all("n0" in component for component in components)
+    assert set().union(*components) == {f"n{index}" for index in range(101)}
 
 
 def test_attrs_module_captured_nodes_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3439,7 +3439,6 @@ class _Resolver:
         scan: Callable[[ast.expr], bool],
         context: tuple[Callable[[ast.Name], str], str, Callable[[], None]],
     ) -> tuple[bool, set[str], bool]:
-        name, namespace, _ = context
         branches = _Resolver._attrs_expression_branches(expr)
         if len(branches) == 1:
             found = scan(expr.test)
@@ -3447,26 +3446,12 @@ class _Resolver:
                 branches[0], state, value, scan, context
             )
             return binding, children, found or branch_found
-        indexed = {
-            id(branch): _Resolver._attrs_carrier_paths(branch, name, state)
-            for branch in branches
-            if isinstance(branch, ast.Subscript)
-        }
-        found = scan(expr)
-        children: set[str] = set()
-        for branch in branches:
-            if isinstance(branch, ast.Tuple | ast.List) and not any(
-                isinstance(part, ast.NamedExpr) for part in ast.walk(branch)
-            ):
-                _, branch_children, _ = _Resolver._attrs_capture_ordered_child(
-                    branch, state, value, lambda _: False, context
-                )
-            else:
-                branch_children = indexed.get(id(branch)) or _Resolver._attrs_capture_possible_branch(
-                    branch, state, value, name, namespace
-                )
-            children.update(branch_children)
-        binding = value(expr)
+        found = scan(expr.test)
+        binding, children, branch_found = _Resolver._attrs_capture_conditional_branches(
+            branches, state, value, scan, context
+        )
+        found |= branch_found
+        namespace = context[1]
         if not children:
             return binding, children, found
         child = f"\0node{namespace}_{expr.lineno}_{expr.col_offset}_conditional"
@@ -3478,6 +3463,8 @@ class _Resolver:
             for index in range(size):
                 possible = any(slots is not None and index < len(slots) and slots[index] for slots, _ in layouts)
                 _Resolver._attrs_store_slot(state, f"\0slot:{child}:{index}", value=possible)
+                negative = any(slots is not None and index < len(slots) and slots[-index - 1] for slots, _ in layouts)
+                _Resolver._attrs_store_slot(state, f"\0slot:{child}:{-index - 1}", value=negative)
                 for _, nested in layouts:
                     if nested is not None and index < len(nested):
                         for source in nested[index]:
@@ -3487,6 +3474,58 @@ class _Resolver:
             _Resolver._attrs_copy_wildcard_children(child, children, state)
         _Resolver._attrs_store_fact(state, f"\0carrier:{child}", value=True)
         return binding, {child}, found
+
+    @staticmethod
+    def _attrs_replace_state(
+        state: dict[str, bool | _Module] | set[str], source: dict[str, bool | _Module] | set[str]
+    ) -> None:
+        state.clear()
+        if isinstance(state, dict) and isinstance(source, dict):
+            state.update(source)
+            return
+        if isinstance(state, set) and isinstance(source, set):
+            state.update(source)
+
+    @staticmethod
+    def _attrs_capture_conditional_branches(
+        branches: list[ast.expr],
+        state: dict[str, bool | _Module] | set[str],
+        value: Callable[[ast.expr], bool],
+        scan: Callable[[ast.expr], bool],
+        context: tuple[Callable[[ast.Name], str], str, Callable[[], None]],
+    ) -> tuple[bool, set[str], bool]:
+        name, namespace, _ = context
+        found = False
+        before = state.copy()
+        states = []
+        children: set[str] = set()
+        binding = False
+        for branch in branches:
+            _Resolver._attrs_replace_state(state, before)
+            if isinstance(branch, ast.Tuple | ast.List | ast.NamedExpr):
+                branch_binding, branch_children, branch_found = _Resolver._attrs_capture_ordered_child(
+                    branch, state, value, scan, context
+                )
+            else:
+                indexed = (
+                    _Resolver._attrs_carrier_paths(branch, name, state) if isinstance(branch, ast.Subscript) else set()
+                )
+                branch_binding = value(branch)
+                branch_children = indexed or _Resolver._attrs_capture_possible_branch(
+                    branch, state, value, name, namespace
+                )
+                branch_found = scan(branch)
+            binding |= branch_binding
+            found |= branch_found
+            children.update(branch_children)
+            states.append(state.copy())
+        _Resolver._attrs_replace_state(state, states[0])
+        for branch_state in states[1:]:
+            if isinstance(state, dict) and isinstance(branch_state, dict):
+                _Resolver._attrs_join_scope(state, branch_state)
+            elif isinstance(state, set) and isinstance(branch_state, set):
+                state.update(branch_state)
+        return binding, children, found
 
     @staticmethod
     def _attrs_copy_wildcard_children(
