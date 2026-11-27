@@ -282,7 +282,8 @@ def test_redact_is_linear_in_a_long_dsn() -> None:
     dsn = "host=h password='" + "\\'" * 10**6
     start = perf_counter()
     assert redact("x", dsn) == "x"
-    assert perf_counter() - start < 1
+    # slow windows runners need about a second; a quadratic scan of this dsn would take far longer than five
+    assert perf_counter() - start < 5
 
 
 def test_redact_masks_userinfo_and_password_tokens_by_syntax() -> None:
