@@ -2,6 +2,35 @@
 
 Each release lists features, fixes, performance work, and breaking changes.
 
+## [0.5.0](https://github.com/mplemay/rowx/compare/v0.4.2...v0.5.0) - 2026-11-27
+
+### Features
+
+- Infer sqlite nested statement nullability and type from bytecode ([#394](https://github.com/mplemay/rowx/pull/394))
+- Infer sqlite computed column nullability and type from bytecode ([#393](https://github.com/mplemay/rowx/pull/393))
+- Add the sqlite provisioner for rowx.testing ([#389](https://github.com/mplemay/rowx/pull/389))
+- Add sqlite database administration and scratch checks ([#385](https://github.com/mplemay/rowx/pull/385))
+- Add the sqlite checker backend ([#384](https://github.com/mplemay/rowx/pull/384))
+- Add sqlite migrations ([#381](https://github.com/mplemay/rowx/pull/381))
+- Add the sqlite pool ([#379](https://github.com/mplemay/rowx/pull/379))
+- Add the sqlite describe and checker connection ([#377](https://github.com/mplemay/rowx/pull/377))
+- Add the sqlite connection, transaction and stream bindings ([#376](https://github.com/mplemay/rowx/pull/376))
+- Add the sqlite connection worker, execution, cancellation and statement timeout
+  ([#369](https://github.com/mplemay/rowx/pull/369))
+- Add the sqlite compiler and lexer ([#368](https://github.com/mplemay/rowx/pull/368))
+- Add sqlite dsn, error mapping, type table and value codecs ([#367](https://github.com/mplemay/rowx/pull/367))
+- Scaffold the rowx-sqlite crate and package ([#366](https://github.com/mplemay/rowx/pull/366))
+
+### Bug fixes
+
+- Wrap the release changelog with the project rumdl config ([#403](https://github.com/mplemay/rowx/pull/403))
+- Undo a transaction whose begin was cancelled after it opened ([#398](https://github.com/mplemay/rowx/pull/398))
+- Pin relative sqlite paths, cap parameters and harden codecs ([#397](https://github.com/mplemay/rowx/pull/397))
+- Harden sqlite migrations, wal switch and database drop ([#396](https://github.com/mplemay/rowx/pull/396))
+- Type sqlite compound selects by every arm and document bytecode inference
+  ([#395](https://github.com/mplemay/rowx/pull/395))
+- Accept the factored embedded extra marker ([#359](https://github.com/mplemay/rowx/pull/359))
+
 ## [0.4.2](https://github.com/mplemay/rowx/compare/v0.3.0...v0.4.2) - 2026-11-16
 
 ### Features
