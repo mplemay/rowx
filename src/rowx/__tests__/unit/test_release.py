@@ -273,6 +273,15 @@ def test_render_changelog_wraps_long_entries_like_the_lint_hook(tmp_path: Path) 
     assert max(len(line) for line in lines if "long" in line) <= 120
 
 
+def test_publish_jobs_attest_the_files_they_upload() -> None:
+    workflow = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    # the attest action does not look inside a bare directory, so each path must be the glob uv publish uploads
+    attested = [line.split("paths: ")[1] for line in workflow.splitlines() if line.strip().startswith("paths: dist/")]
+    published = [line.split('"')[1] for line in workflow.splitlines() if "run: uv publish " in line]
+    assert attested == published
+    assert len(published) == 5
+
+
 def _git_executable() -> str:
     executable = which("git")
     if executable is None:

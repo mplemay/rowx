@@ -609,7 +609,7 @@ jobs:
       - name: Attest rowx-core distributions
         uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
         with:
-          paths: dist/rowx-core
+          paths: dist/rowx-core/*
 
       - name: Publish rowx-core
         run: uv publish --trusted-publishing always "dist/rowx-core/*"
@@ -674,7 +674,7 @@ jobs:
       - name: Attest rowx-postgres distributions
         uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
         with:
-          paths: dist/rowx-postgres
+          paths: dist/rowx-postgres/*
 
       - name: Publish rowx-postgres
         run: uv publish --trusted-publishing always "dist/rowx-postgres/*"
@@ -739,7 +739,7 @@ jobs:
       - name: Attest rowx-sqlite distributions
         uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
         with:
-          paths: dist/rowx-sqlite
+          paths: dist/rowx-sqlite/*
 
       - name: Publish rowx-sqlite
         run: uv publish --trusted-publishing always "dist/rowx-sqlite/*"
@@ -772,7 +772,7 @@ jobs:
       - name: Attest rowx-embedded distributions
         uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
         with:
-          paths: dist/rowx-embedded
+          paths: dist/rowx-embedded/*
 
       - name: Publish rowx-embedded
         run: uv publish --trusted-publishing always "dist/rowx-embedded/*"
@@ -833,7 +833,7 @@ jobs:
       - name: Attest rowx distributions
         uses: astral-sh/attest-action@39b6ce43875c196a579e31635b11aa2a2036384a # v0.0.7
         with:
-          paths: dist/rowx
+          paths: dist/rowx/*
 
       - name: Publish rowx
         run: uv publish --trusted-publishing always "dist/rowx/*"
