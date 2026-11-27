@@ -4,6 +4,7 @@ from os import environ
 from pathlib import Path
 from shutil import copy2, which
 from subprocess import run  # ruff: ignore[suspicious-subprocess-import]
+from tomllib import loads as load_toml
 from typing import Final, Protocol, cast
 
 import pytest
@@ -11,7 +12,11 @@ import pytest
 REPO: Final[Path] = Path(__file__).resolve().parents[4]
 SCRIPT: Final[Path] = REPO / "scripts" / "release.py"
 RELEASE_MODULE: Final[str] = "rowx_test_release"
-NEW_VERSION: Final[str] = "0.4.3"
+# the bump tests copy the real tree, so their versions follow its current one
+CURRENT_VERSION: Final[str] = str(
+    load_toml((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+)
+NEW_VERSION: Final[str] = f"{CURRENT_VERSION.rpartition('.')[0]}.{int(CURRENT_VERSION.rpartition('.')[2]) + 1}"
 HEAD_SHA: Final[str] = "abc123"
 OTHER_SHA: Final[str] = "def456"
 RELEASE_DAY: Final[str] = "2026-01-03"
@@ -99,26 +104,26 @@ def test_bump_updates_lockstep_versions(monkeypatch: pytest.MonkeyPatch, tmp_pat
     _copy_tree(tmp_path)
     RELEASE.bump(tmp_path, NEW_VERSION)
     project = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.4.3"' in project
-    assert "rowx-core==0.4.3" in project
-    assert "rowx-postgres==0.4.2" not in project
-    assert "rowx-embedded==0.4.2" not in project
-    assert "rowx-sqlite==0.4.2" not in project
-    assert project.count("rowx-sqlite==0.4.3") == 2
+    assert f'version = "{NEW_VERSION}"' in project
+    assert f"rowx-core=={NEW_VERSION}" in project
+    assert f"rowx-postgres=={CURRENT_VERSION}" not in project
+    assert f"rowx-embedded=={CURRENT_VERSION}" not in project
+    assert f"rowx-sqlite=={CURRENT_VERSION}" not in project
+    assert project.count(f"rowx-sqlite=={NEW_VERSION}") == 2
     for package in ("rowx-core", "rowx-postgres", "rowx-embedded", "rowx-sqlite"):
         text = (tmp_path / "packages" / package / "pyproject.toml").read_text(encoding="utf-8")
-        assert 'version = "0.4.3"' in text
-        assert "==0.4.2" not in text
+        assert f'version = "{NEW_VERSION}"' in text
+        assert f"=={CURRENT_VERSION}" not in text
     sqlite = (tmp_path / "packages/rowx-sqlite/pyproject.toml").read_text(encoding="utf-8")
-    assert "rowx-core==0.4.3" in sqlite
+    assert f"rowx-core=={NEW_VERSION}" in sqlite
     lock = (tmp_path / "uv.lock").read_text(encoding="utf-8")
-    assert 'name = "rowx-sqlite"\nversion = "0.4.3"' in lock
+    assert f'name = "rowx-sqlite"\nversion = "{NEW_VERSION}"' in lock
     cargo_lock = (tmp_path / "Cargo.lock").read_text(encoding="utf-8")
-    assert 'name = "rowx-sqlite"\nversion = "0.4.3"' in cargo_lock
-    assert 'name = "rowx-sqlite-py"\nversion = "0.4.3"' in cargo_lock
+    assert f'name = "rowx-sqlite"\nversion = "{NEW_VERSION}"' in cargo_lock
+    assert f'name = "rowx-sqlite-py"\nversion = "{NEW_VERSION}"' in cargo_lock
     fuzz = (tmp_path / "fuzz/Cargo.lock").read_text(encoding="utf-8")
-    assert 'name = "rowx-core"\nversion = "0.4.3"' in fuzz
-    assert 'name = "rowx-postgres"\nversion = "0.4.3"' in fuzz
+    assert f'name = "rowx-core"\nversion = "{NEW_VERSION}"' in fuzz
+    assert f'name = "rowx-postgres"\nversion = "{NEW_VERSION}"' in fuzz
     monkeypatch.setenv("EVENT_NAME", "pull_request")
     monkeypatch.delenv("TAG_NAME", raising=False)
     validator = REPO / "scripts" / "validate-release-versions.py"
@@ -157,9 +162,9 @@ def test_bump_updates_only_packages_md_anchors(tmp_path: Path) -> None:
     decisions = (tmp_path / "docs/contributing/decisions.md").read_text(encoding="utf-8")
     RELEASE.bump(tmp_path, NEW_VERSION)
     updated = (tmp_path / "docs/packages.md").read_text(encoding="utf-8")
-    assert _without_anchors(updated, NEW_VERSION) == _without_anchors(original, "0.4.2")
-    assert "under one version (0.4.3)" in updated
-    assert "This tree is version 0.4.3." in updated
+    assert _without_anchors(updated, NEW_VERSION) == _without_anchors(original, CURRENT_VERSION)
+    assert f"under one version ({NEW_VERSION})" in updated
+    assert f"This tree is version {NEW_VERSION}." in updated
     assert "0.4.2 added `rowx-embedded`" in updated
     assert (tmp_path / "docs/contributing/decisions.md").read_text(encoding="utf-8") == decisions
 
