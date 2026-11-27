@@ -8,6 +8,7 @@ type Row = tuple[str, Plan | NamedPlan | str, str]
 
 PRELUDE: Final[str] = """\
 import collections
+import attrs
 import datetime
 import decimal
 import ipaddress
@@ -42,13 +43,231 @@ class Cube(ValueClass): ...
 @dataclass(frozen=True)
 class Range[T](ValueClass):
     _rowx_subscripted = True
-from typing import Annotated, Any, ClassVar, Literal, NamedTuple, NotRequired, Optional, Protocol, ReadOnly, Required, TypeVar, TypedDict, Union
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple, NotRequired, Optional, Protocol, ReadOnly, Required, TypeVar, TypedDict, Union, overload
 """
 
 NONE: Final[Plan] = ("none", 0, ())
 
 # (source_text, expected_plan_or_error, expected_checker_verdict); source text assigns `T`.
+ATTRS_ROWS: Final[list[Row]] = [
+    (
+        "@attrs.define\nclass T:\n    value: int = attrs.field(factory=lambda: 1)",
+        ("named", "validator", "by_name", (("value", ("value",), False, False),)),
+        "ok",
+    ),
+    (
+        "@attrs.define\nclass T:\n    visible: int = attrs.field()\n    hidden = attrs.field()",
+        "unresolved",
+        "invalid-row-type",
+    ),
+    (
+        "field_alias = attrs.field\n@attrs.define\nclass T:\n    hidden = field_alias()",
+        "unresolved",
+        "invalid-row-type",
+    ),
+    (
+        "@attrs.define\nclass T:\n    visible: int = attrs.field()\n    hidden = attrs.field(init=False, default=1)",
+        ("named", "validator", "by_name", (("visible", ("visible",), False, True),)),
+        "ok",
+    ),
+    *(
+        (
+            (
+                "async def convert(value: int) -> str: return str(value)\n@attrs.define\n"
+                f"class T:\n    value: str = attrs.field(converter={converter})"
+            ),
+            "unsupported converter",
+            "invalid-row-type",
+        )
+        for converter in ["convert", "attrs.Converter(convert)"]
+    ),
+    (
+        "@attrs.define\nclass T:\n    value: int = attrs.field(factory=None)",
+        ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+        "ok",
+    ),
+    (
+        "@attrs.define\nclass T:\n    a: int = attrs.field(default=1, factory=None)\n    b: int = attrs.field(factory=None, default=2)",
+        ("named", "validator", "by_name", (("a", ("a",), False, False), ("b", ("b",), False, False))),
+        "ok",
+    ),
+    *(
+        (
+            (
+                f"def convert(value: int) -> {output}: return value\n"
+                f"@attrs.define\nclass T:\n    value: {field} = attrs.field(converter=convert)"
+            ),
+            "unsupported converter",
+            "invalid-row-type",
+        )
+        for output, field in [("Any", "object"), ("object", "Any"), ("list[Any]", "list[object]")]
+    ),
+    (
+        (
+            "Alias = list[Any]\ndef convert(value: int) -> Annotated[Alias, 'out']: return []\n"
+            "@attrs.define\nclass T:\n    value: Annotated[list[Any], 'field'] = attrs.field(converter=convert)"
+        ),
+        ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+        "ok",
+    ),
+    (
+        (
+            "type Inner = Annotated[int, 'inner']\ntype Items = list[Inner | None]\n"
+            "def convert(value: int) -> Items: return []\n"
+            "@attrs.define\nclass T:\n    value: list[int | None] = attrs.field(converter=convert)"
+        ),
+        ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+        "ok",
+    ),
+    *(
+        (
+            (
+                "type Alias[T] = list[T]\n"
+                f"def convert(value: int) -> {output}: return []\n"
+                f"@attrs.define\nclass T:\n    value: {field} = attrs.field(converter=convert)"
+            ),
+            ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+            "ok",
+        )
+        for output, field in [
+            ("Alias[int]", "list[int]"),
+            ("list[int]", "Alias[int]"),
+            ("list[Alias[Annotated[int, 'x']]]", "list[list[int]]"),
+            ("list[list[int]]", "list[Alias[Annotated[int, 'x']]]"),
+        ]
+    ),
+    (
+        "import attr\nfield_spec = attr.ib(default=1, alias='external')\n@attrs.define\nclass T:\n    value: int = field_spec",
+        ("named", "validator", "by_name", (("value", ("external",), False, False),)),
+        "ok",
+    ),
+    (
+        "spec = attrs.field(init=False, default=1)\n@attrs.define\nclass T:\n    visible: int = attrs.field()\n    hidden = spec",
+        ("named", "validator", "by_name", (("visible", ("visible",), False, True),)),
+        "ok",
+    ),
+    (
+        "@attrs.define\nclass T:\n    value: Annotated[int, 'metadata']",
+        ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+        "ok",
+    ),
+    (
+        (
+            "def convert(value: int) -> str: return str(value)\n"
+            "@attrs.define\nclass T:\n    value: str = attrs.field(converter=attrs.Converter(convert))"
+        ),
+        ("named", "validator", "by_name", (("value", ("value",), False, True),)),
+        "ok",
+    ),
+    (
+        (
+            "type Recursive = list[Recursive]\ndef convert(value: Recursive) -> str: return ''\n"
+            "@attrs.define\nclass T:\n    value: str = attrs.field(converter=convert)"
+        ),
+        "deeper than",
+        "unresolved-row-type",
+    ),
+    (
+        (
+            "def convert(value: list[Any]) -> str: return str(value)\n"
+            "@attrs.define\nclass T:\n    value: str = attrs.field(converter=convert)"
+        ),
+        "unsupported converter",
+        "invalid-row-type",
+    ),
+    (
+        (
+            "def convert(value: int) -> str: return str(value)\n"
+            "@attrs.define\nclass T:\n    value: str = attrs.field(converter=attrs.converters.pipe(convert))"
+        ),
+        "unsupported converter",
+        "invalid-row-type",
+    ),
+    (
+        (
+            "@overload\ndef convert(value: int) -> str: ...\n"
+            "@overload\ndef convert(value: str) -> str: ...\n"
+            "def convert(value: int) -> str: return str(value)\n"
+            "@attrs.define\nclass T:\n    value: str = attrs.field(converter=convert)"
+        ),
+        "unsupported converter",
+        "invalid-row-type",
+    ),
+    (
+        (
+            "@attrs.define(slots=False)\nclass Base:\n    first: int\n    second: int\n"
+            "@attrs.define\nclass Child(Base):\n    first: int\n    third: int\nT = Child"
+        ),
+        (
+            "named",
+            "validator",
+            "by_name",
+            (
+                ("second", ("second",), False, True),
+                ("first", ("first",), False, True),
+                ("third", ("third",), False, True),
+            ),
+        ),
+        "ok",
+    ),
+    (
+        (
+            "@attrs.define(slots=False)\nclass Left:\n    a: int\n"
+            "@attrs.define(slots=False)\nclass Right:\n    b: int\n"
+            "@attrs.define(slots=False)\nclass Child(Left, Right):\n    c: int\nT = Child"
+        ),
+        (
+            "named",
+            "validator",
+            "by_name",
+            (("b", ("b",), False, True), ("a", ("a",), False, True), ("c", ("c",), False, True)),
+        ),
+        "ok",
+    ),
+    (
+        "@attrs.define\nclass T:\n    _id: int\n    label: str = attrs.field(alias='name', default='x')",
+        ("named", "validator", "by_name", (("_id", ("id",), False, True), ("label", ("name",), False, False))),
+        "ok",
+    ),
+    (
+        (
+            "def convert(value: int | None) -> str:\n    return str(value)\n"
+            "@attrs.frozen\nclass T:\n    value: str = attrs.field(converter=convert)"
+        ),
+        ("named", "validator", "by_name", (("value", ("value",), True, True),)),
+        "ok",
+    ),
+    (
+        (
+            "@attrs.define\nclass Base[T]:\n    value: T\n"
+            "@attrs.define(kw_only=True)\nclass Child(Base[int]):\n"
+            "    ignored: int = attrs.field(init=False, default=1)\n    tag: str = attrs.field(factory=str)\nT = Child"
+        ),
+        ("named", "validator", "by_name", (("value", ("value",), False, True), ("tag", ("tag",), False, False))),
+        "ok",
+    ),
+    (
+        "@attrs.define\nclass T:\n    x: int = attrs.NOTHING\n    y: int = attrs.field(default=attrs.NOTHING)",
+        ("named", "validator", "by_name", (("x", ("x",), False, True), ("y", ("y",), False, True))),
+        "ok",
+    ),
+    (
+        "@attrs.define\nclass T:\n    _id: int = attrs.field(alias=None)",
+        ("named", "validator", "by_name", (("_id", ("id",), False, True),)),
+        "ok",
+    ),
+    (
+        (
+            "@attrs.define\nclass T:\n    x: int = attrs.Factory(int)\n    y: int = attrs.field()\n"
+            "    @y.default\n    def make_y(self) -> int: return 1"
+        ),
+        ("named", "validator", "by_name", (("x", ("x",), False, False), ("y", ("y",), False, False))),
+        "ok",
+    ),
+]
+
 ROWS: Final[list[Row]] = [
+    *ATTRS_ROWS,
     ("T = None", NONE, "ok"),
     ("T = int", ("scalar", 1, (False,)), "ok"),
     ("T = int | None", ("scalar", 1, (True,)), "ok"),

@@ -1,5 +1,7 @@
 from typing import Final
 
+from rowx_core.__tests__.support.row_types import ATTRS_ROWS
+
 type FieldRow = tuple[str, tuple[str, ...] | None, bool, bool]
 type Plan = tuple[str, int, tuple[bool, ...]]
 # a named plan is `named`, the form, the matching, then one `(key, names, nullable, required)` per field
@@ -8,6 +10,7 @@ type Row = tuple[str, Plan | NamedPlan | str, str]
 
 PRELUDE: Final[str] = """\
 import collections
+import attrs
 import datetime
 import decimal
 import ipaddress
@@ -18,13 +21,14 @@ import uuid
 from dataclasses import KW_ONLY, InitVar, dataclass, field
 from pydantic import AliasChoices, BaseModel, ConfigDict, AnyUrl, Field, PositiveInt, RootModel, SecretStr, model_validator
 from rowx_postgres import Box, Circle, Cube, Interval, Line, LineSegment, Money, Path, Point, Polygon, Range
-from typing import Annotated, Any, ClassVar, Literal, NamedTuple, NotRequired, Optional, Protocol, ReadOnly, Required, TypeVar, TypedDict, Union
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple, NotRequired, Optional, Protocol, ReadOnly, Required, TypeVar, TypedDict, Union, overload
 """
 
 NONE: Final[Plan] = ("none", 0, ())
 
 # (source_text, expected_plan_or_error, expected_checker_verdict); source text assigns `T`.
 ROWS: Final[list[Row]] = [
+    *ATTRS_ROWS,
     ("T = None", NONE, "ok"),
     ("T = int", ("scalar", 1, (False,)), "ok"),
     ("T = int | None", ("scalar", 1, (True,)), "ok"),
