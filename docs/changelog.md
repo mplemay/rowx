@@ -2,6 +2,12 @@
 
 Each release lists features, fixes, performance work, and breaking changes.
 
+## [0.5.1](https://github.com/mplemay/rowx/compare/v0.5.0...v0.5.1) - 2026-11-27
+
+### Bug fixes
+
+- Attest the distribution files before publishing ([#406](https://github.com/mplemay/rowx/pull/406))
+
 ## [0.5.0](https://github.com/mplemay/rowx/compare/v0.4.2...v0.5.0) - 2026-11-27
 
 ### Features

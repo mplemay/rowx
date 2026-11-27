@@ -1,6 +1,6 @@
 [project]
 name = "rowx-sqlite"
-version = "0.5.0"
+version = "0.5.1"
 description = "SQLite backend for rowx"
 readme = "README.md"
 authors = [
@@ -20,7 +20,7 @@ classifiers = [
     "Framework :: AsyncIO",
 ]
 keywords = ["sql", "sqlite", "typed", "async", "t-string"]
-dependencies = ["rowx-core==0.5.0"]
+dependencies = ["rowx-core==0.5.1"]
 
 [project.urls]
 Documentation = "https://mplemay.github.io/rowx/"
